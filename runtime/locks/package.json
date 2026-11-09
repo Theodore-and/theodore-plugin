@@ -1,0 +1,30 @@
+{
+  "name": "theodore-presentations",
+  "private": true,
+  "scripts": {
+    "test": "python3 -m pytest -q",
+    "quality": "./scripts/run_quality_gates.sh"
+  },
+  "dependencies": {
+    "acorn": "^8.16.0",
+    "acorn-walk": "^8.3.5",
+    "pptx-automizer": "^0.9.4",
+    "pptxgenjs": "^4.0.1",
+    "sharp": "^0.35.5"
+  },
+  "optionalDependencies": {
+    "fontkit": "^2.0.4",
+    "linebreak": "^1.1.0",
+    "mathjax-full": "^3.2.2",
+    "prismjs": "^1.29.0",
+    "skia-canvas": "^3.0.8"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "npm@11.6.2",
+  "overrides": {
+    "@xmldom/xmldom": "^0.9.9",
+    "follow-redirects": "^1.16.0"
+  }
+}

@@ -1,0 +1,106 @@
+# Builds and smoke-tests the runtime bundle for the five platforms from the public lock files in runtime/locks/.
+#
+# No secrets and no publishing step: the bundles and the combined index are uploaded as workflow artifacts only.
+# Publishing them to R2 and registering the runtime with the backend is the lead's manual step.
+# The engine is private and never enters this repository or its CI: the smoke test runs without --engine.
+name: runtime
+
+on:
+  push:
+    paths:
+      - "runtime/locks/**"
+      - "runtime/build/**"
+      - ".github/workflows/runtime.yml"
+  pull_request:
+    paths:
+      - "runtime/locks/**"
+      - "runtime/build/**"
+      - ".github/workflows/runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 and macos-13 are retired; macos-15-intel is the standard (free) Intel runner.
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: win32-x64, runner: windows-latest }
+          - { platform: linux-x64, runner: ubuntu-22.04 }
+          - { platform: linux-arm64, runner: ubuntu-22.04-arm }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # The host Python only runs the recipe; the bundle carries its own.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build the bundle
+        run: python runtime/build/build_bundle.py --platform ${{ matrix.platform }} --out out --work "$RUNNER_TEMP/runtime-work"
+      - name: Smoke-test the bundle
+        env:
+          # The unpacked trees go under a short path (matters on Windows).
+          TMPDIR: ${{ runner.temp }}
+        run: python runtime/build/smoke_test.py --bundle out --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-${{ matrix.platform }}
+          path: out/
+          if-no-files-found: error
+          compression-level: 0
+
+  index:
+    name: combined index
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: runtime-*
+          path: bundles
+      - name: Write runtime-<id>.json
+        shell: python
+        run: |
+          import hashlib, json, pathlib
+
+          expected = {"darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64"}
+          manifests = sorted(pathlib.Path("bundles").glob("*/*.manifest.json"))
+          index, common = {}, set()
+          for path in manifests:
+              manifest = json.loads(path.read_text(encoding="utf-8"))
+              for part in manifest["parts"]:
+                  data = (path.parent / part["file"]).read_bytes()
+                  assert len(data) == part["size"], f"size mismatch: {part['file']}"
+                  assert hashlib.sha256(data).hexdigest() == part["sha256"], f"sha256 mismatch: {part['file']}"
+              index[f"{manifest['platform']}-{manifest['arch']}"] = {
+                  "built_at": manifest["built_at"], "parts": manifest["parts"]}
+              common.add((manifest["schema"], manifest["runtime_id"], manifest["recipe_version"],
+                          manifest["python_version"], manifest["node_version"]))
+          assert set(index) == expected, f"platforms built: {sorted(index)}"
+          assert len(common) == 1, f"the platforms disagree: {sorted(common)}"
+          _, runtime_id, recipe_version, python_version, node_version = common.pop()
+          combined = {"schema": "theodore-runtime-index-v1", "runtime_id": runtime_id,
+                      "recipe_version": recipe_version, "python_version": python_version,
+                      "node_version": node_version, "platforms": dict(sorted(index.items()))}
+          out = pathlib.Path(f"runtime-{runtime_id}.json")
+          out.write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
+          print(out.read_text(encoding="utf-8"))
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-index
+          path: runtime-*.json
+          if-no-files-found: error
