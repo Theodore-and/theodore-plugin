@@ -80,6 +80,14 @@ def runtime_id() -> str:
     return digest.hexdigest()[:16]
 
 
+def lock_sha256() -> str:
+    """The engine release command's name for "these two lockfiles": it finds the bundles of a release by this value."""
+    digest = hashlib.sha256()
+    for name in ("requirements.txt", "package-lock.json"):
+        digest.update(name.encode("ascii") + b"\0" + (LOCKS / name).read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
 def host_platform() -> str:
     osname = {"darwin": "darwin", "win32": "win32", "linux": "linux"}.get(sys.platform, sys.platform)
     arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(platform.machine().lower())
@@ -457,7 +465,7 @@ def build(platform_key: str, out: Path, work: Path, cache: Path) -> None:
         printed = subprocess.run([sys.executable, str(build_client), "--out", str(out)], check=True,
                                  capture_output=True, text=True).stdout.strip().splitlines()[-1]
         parts.append(record("client", Path(printed), *tar_gz_stats(Path(printed))))
-    manifest = {"schema": SCHEMA, "runtime_id": rid, "platform": platform_key.split("-")[0],
+    manifest = {"schema": SCHEMA, "runtime_id": rid, "lock_sha256": lock_sha256(), "platform": platform_key.split("-")[0],
                 "arch": platform_key.split("-")[1], "recipe_version": versions["recipe_version"],
                 "python_version": py_pin["version"], "node_version": node_pin["version"], "parts": parts,
                 "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}

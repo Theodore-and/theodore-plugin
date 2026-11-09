@@ -10,7 +10,7 @@ the public lock files in `runtime/locks/`.
 | File | What it pins |
 | --- | --- |
 | `requirements.txt` | The engine's Python packages, exact versions with sha256 of every released file |
-| `runtime-extra.txt` | What the bundle adds: `pypdfium2`, `truststore` (same format) |
+| `runtime-extra.txt` | What the bundle adds: `pypdfium2`, `truststore` and, on Windows, `comtypes` (same format) |
 | `package.json`, `package-lock.json` | The engine's npm packages |
 | `versions.json` | CPython version and python-build-standalone release, Node version, sha256 and size of both downloads for the five platforms, sha256 of the licence texts taken from python-build-standalone, the oldest system the wheels must support (`wheel_floor`), and `recipe_version` |
 
@@ -73,6 +73,16 @@ deck build from an unpacked engine payload; the engine is private, so that optio
 The first 16 hexadecimal characters of the sha256 over the bytes of, in this order: `requirements.txt`,
 `package-lock.json`, `package.json`, `runtime-extra.txt`, `versions.json`. It is the same on every platform.
 Any change to a lock, a pin or `recipe_version` gives a new id.
+
+The bundle manifest also carries `lock_sha256`: sha256 over `"requirements.txt" NUL <bytes> NUL
+"package-lock.json" NUL <bytes> NUL`. The engine's release command computes the same value from its own
+lockfiles and uses it to find the bundles a release needs, so it does not have to know the pins or the recipe.
+
+The client is the fifth part (`client-<version>.tar`, built by `build_client.py`, the same file for every
+platform). It has its own version and changes far more often than the locks. The runtime id above names the
+four heavy parts only. If the backend registers a client-only update under a new runtime id, nothing is
+downloaded twice: the installed client compares the four parts' checksums and links the new id to the folder
+it already has.
 
 ## Changing a pin
 

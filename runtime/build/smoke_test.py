@@ -28,7 +28,7 @@ from pathlib import Path
 LOCKS = Path(__file__).resolve().parent.parent / "locks"
 WINDOWS = os.name == "nt"
 PY_MODULES = ["pptx", "lxml.etree", "PIL.Image", "numpy", "fontTools", "requests", "defusedxml", "xlsxwriter",
-              "pypdfium2", "truststore"]
+              "pypdfium2", "truststore"] + (["comtypes"] if sys.platform == "win32" else [])
 STDLIB_MODULES = ["ssl", "lzma", "sqlite3", "ctypes", "venv"]
 # Optional npm dependencies whose native binary comes from an install script. The recipe runs no install scripts,
 # so these do not load; the engine treats them as absent.

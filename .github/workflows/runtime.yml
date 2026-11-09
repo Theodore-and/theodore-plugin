@@ -52,6 +52,12 @@ jobs:
           # The unpacked trees go under a short path (matters on Windows).
           TMPDIR: ${{ runner.temp }}
         run: python runtime/build/smoke_test.py --bundle out --platform ${{ matrix.platform }}
+      # The launcher and the installer bootstrap this very bundle from the local fake API (stage 1 with the system
+      # tar and curl, stage 2 with the bundle's own Python), in a clean home whose path has a space.
+      - name: Launcher and installer against the bundle
+        env:
+          THEODORE_TEST_BUNDLE: ${{ github.workspace }}/out
+        run: python -m unittest -v tests.test_launcher tests.test_installer
       - uses: actions/upload-artifact@v7
         with:
           name: runtime-${{ matrix.platform }}
