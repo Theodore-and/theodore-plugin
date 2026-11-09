@@ -13,7 +13,8 @@ import time
 import unittest
 from pathlib import Path
 
-from support import ClientCase, Sandbox, engine_zip, pack_zip, status_lines
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
+from support import RUNTIME_ID, ClientCase, Sandbox, engine_zip, pack_zip, status_lines
 
 DAY = 86400
 
@@ -50,7 +51,7 @@ class SignIn(ClientCase):
     def test_browser_approval_start_pending_finish(self):
         result = self.client("login", "--start")
         _first, nxt, tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
-        self.assertRegex(nxt, r"https://theodoreand\.ai/device\?code=WXYZ-[0-9A-F]{4}")
+        self.assertRegex(nxt, r"https://theodoreand\.ai/device\?code=WXYZ-[0-9A-HJKMNP-TV-Z]{4}")
         self.assertIn("login --finish --wait 90", nxt)
         self.assertIn("https://theodoreand.ai/device?code=", tell)
         again = self.client("login", "--start")          # the pending approval is reused, not replaced
@@ -78,7 +79,7 @@ class SignIn(ClientCase):
         import urllib.request
         req = urllib.request.Request(self.api.base + "/v1/device/activate", method="POST", headers={"Content-Type": "application/json"},
                                      data=json.dumps({"code": "ABCD-1234", "device_name": "t", "platform": "darwin", "arch": "arm64",
-                                                      "host": "installer", "client_version": "0"}).encode())
+                                                      "host": "installer", "client_version": "0.1.0"}).encode())
         answer = urllib.request.urlopen(req).read()
         pending = self.box.home / "state" / "activation.pending"
         pending.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +294,7 @@ class Engine(ClientCase):
     def test_engine_layout_matches_the_design(self):
         self.ready()
         engine = self.box.home / "engines" / self.ENGINE_VERSION
-        runtime = self.box.home / "runtime" / "rt-test-1"
+        runtime = self.box.home / "runtime" / RUNTIME_ID
         self.assertEqual((engine / "node_modules").resolve(), (runtime / "node_modules").resolve())
         self.assertEqual((engine / ".runtime" / "bin").resolve(), (runtime / "bin").resolve())
         self.assertEqual(os.readlink(engine / "skills" / "pptx-asset-packs"), "../../../packs")
@@ -316,6 +317,19 @@ class Engine(ClientCase):
         self.assertEqual(out.splitlines()[0], "=== THEODORE pptx 1.0.1 (beta), part 1/1 ===")
         self.assertEqual(self.state("engines/current.json"), {"version": "1.0.1", "previous": self.ENGINE_VERSION})
         self.assertEqual(self.client("pptx", "version").stdout.strip(), "1.0.1")
+
+    def test_slow_download_applies_at_the_next_guide_not_in_between(self):
+        self.ready()
+        self.api.publish_engine("1.0.1", engine_zip("1.0.1"))
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600), "THEODORE_TEST_UPDATE_WAIT": "0"}
+        first = self.client("guide", "pptx", env=later)             # the download is not awaited: still the old engine
+        self.assertIn(f"pptx {self.ENGINE_VERSION} ", first.stdout.splitlines()[0])
+        self.box.wait_jobs()
+        self.assertTrue((self.box.home / "engines" / "1.0.1").is_dir(), "the new engine was staged in the background")
+        self.assertEqual(self.client("pptx", "version", env=later).stdout.strip(), self.ENGINE_VERSION, "a build never switches version")
+        second = self.client("guide", "pptx", env=later)            # inside the six-hour window: no check, but the staged engine applies
+        self.assertIn("pptx 1.0.1 ", second.stdout.splitlines()[0])
+        self.assertEqual(self.client("pptx", "version", env=later).stdout.strip(), "1.0.1")
 
     def test_workspace_stays_on_the_engine_that_started_it(self):
         self.ready()
@@ -456,13 +470,109 @@ class Engine(ClientCase):
         self.assertEqual(result.returncode, 68)
         job = self.state("state/jobs/setup.json")
         self.assertEqual(job["failed"]["cause"], "HASH_MISMATCH")
-        self.assertFalse((self.box.home / "runtime" / "rt-test-1" / ".ready").exists())
+        self.assertFalse((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists())
         first, _n, _t = self.assertStatus(self.client("guide", "pptx"), "SETUP_FAILED", 68)
         self.assertIn("cause HASH_MISMATCH", first)
 
+    def test_compiled_and_source_artifacts_install_the_same_way(self):
+        self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION), kind="engine-source")
+        self.ready()
+        record = self.state(f"engines/{self.ENGINE_VERSION}/.theodore-engine.json")
+        self.assertEqual(record["kind"], "engine-source")
+        source_sha = record["sha256"]
+        engine_requests = [r for r in self.api.requests if r["path"].endswith("/engine")]
+        self.assertTrue(all(set(r["query"]) == {"platform", "arch"} for r in engine_requests), "the client asks for its own platform's artifact")
+        # the compiled build of the same version passes parity later: same version, another archive, swapped in place
+        compiled = engine_zip(self.ENGINE_VERSION, skill_text="---\nname: pptx\n---\n\n# PPTX Skill\n\nCompiled build.\n")
+        self.api.publish_engine(self.ENGINE_VERSION, compiled, kind="engine-native")
+        out = self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}).stdout
+        self.assertIn("Compiled build.", out)
+        record = self.state(f"engines/{self.ENGINE_VERSION}/.theodore-engine.json")
+        self.assertEqual(record["kind"], "engine-native")
+        self.assertNotEqual(record["sha256"], source_sha)
+        self.assertEqual(self.state("engines/current.json"), {"version": self.ENGINE_VERSION, "previous": None})
+        self.assertEqual(sorted(p.name for p in (self.box.home / "engines").iterdir()), [self.ENGINE_VERSION, "current.json"])
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
+        self.assertIn("(engine-native)", self.client("doctor").stdout)
+
+    def test_a_manifest_without_an_installable_artifact_is_update_required(self):
+        self.ready()
+        self.api.publish_engine("1.0.1", engine_zip("1.0.1"), kind="engine-wasm")
+        self.assertStatus(self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}), "UPDATE_REQUIRED", 72)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION, "the installed engine keeps working")
+
+    def test_update_channel_is_the_accounts(self):
+        self.ready()
+        first, nxt, _t = self.assertStatus(self.client("update", "--channel", "stable"), "USAGE", 64)
+        self.assertIn("belongs to the account", first)
+        self.assertNotIn("channel", "".join(sorted(json.dumps(r["query"]) for r in self.api.requests if r["path"] == "/v1/releases/manifest")))
+
+    def test_a_runtime_manifest_cannot_stand_in_for_a_channel_manifest(self):
+        self.ready()
+        self.api._channel_manifest = lambda platform, arch: self.api._runtime_manifest(self.api.runtime, platform, arch)
+        first, _n, _t = self.assertStatus(self.client("update", "--check"), "SETUP_FAILED", 68)
+        self.assertIn("cause HASH_MISMATCH", first)
+        self.assertIn("not the document asked for", first)
+
+    def test_a_new_runtime_id_with_the_same_parts_downloads_nothing(self):
+        self.ready()
+        self.api.publish_runtime("rt-client-only-2", self.runtime_parts)              # the same four parts under a new id
+        self.api.publish_engine("1.0.1", engine_zip("1.0.1"), runtime_id="rt-client-only-2")
+        self.api.requests.clear()
+        self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "1.0.1")
+        self.assertEqual([r["path"] for r in self.api.requests if r["path"].startswith("/dl/runtime/")], [], "no part is downloaded twice")
+        linked = self.box.home / "runtime" / "rt-client-only-2"
+        self.assertTrue(linked.is_symlink())
+        self.assertEqual(linked.resolve(), (self.box.home / "runtime" / RUNTIME_ID).resolve())
+        self.assertEqual((self.box.home / "runtime" / "current.txt").read_text().strip(), "rt-client-only-2")
+        for minor in range(2, 8):                                                      # garbage collection keeps the shared folder
+            self.api.publish_engine(f"1.0.{minor}", engine_zip(f"1.0.{minor}"), runtime_id="rt-client-only-2")
+            self.api.clock_offset = minor * 7 * 3600
+            self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(minor * 7 * 3600)}), "OK", 0)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists())
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "1.0.7")
+
+    def test_client_update_comes_from_the_runtime_manifest_and_applies_at_the_next_start(self):
+        import io, tarfile
+        self.ready()
+        source = self.box.tmp / "dist" / "client-0.1.0.tar"
+        raw = io.BytesIO()
+        with tarfile.open(source) as old, tarfile.open(fileobj=raw, mode="w") as new:   # the same client, relabelled 0.1.1
+            for member in old.getmembers():
+                data = old.extractfile(member).read()
+                member.name = "0.1.1/" + member.name.split("/", 1)[1]
+                new.addfile(member, io.BytesIO(data))
+        self.api.publish_client("0.1.1", raw.getvalue())
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
+        self.box.wait_jobs()
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.1")
+        self.assertTrue((self.box.home / "client" / "0.1.1" / "theodore_client" / "cli.py").exists())
+        self.assertEqual(self.state("state/jobs/client-update.json").get("done"), True)
+
+    def test_engine_licence_refusals_become_statuses(self):
+        self.ready()
+        marker = self.box.home / "engines" / self.ENGINE_VERSION / "REFUSE"
+        marker.write_text("entitlement_clock_rollback")
+        first, nxt, tell = self.assertStatus(self.client("pptx", "apply", "x"), "NO_ENTITLEMENT", 70)
+        self.assertIn("date and time", nxt)
+        marker.write_text("entitlement_untrusted")
+        self.assertStatus(self.client("pptx", "apply", "x"), "NO_ENTITLEMENT", 70)
+        marker.write_text("entitlement_expired")
+        _f, nxt, _t = self.assertStatus(self.client("pptx", "apply", "x"), "RETRY", 75)
+        self.assertEqual(self.api.refreshes, 1)
+        self.assertIn("run the same command again", nxt)
+        self.api.down = True
+        self.assertStatus(self.client("pptx", "apply", "x"), "OFFLINE", 71)
+        self.api.down = False
+        marker.write_text("entitlement_missing")
+        self.assertStatus(self.client("pptx", "apply", "x"), "SIGN_IN_REQUIRED", 65)
+        marker.unlink()
+        self.assertEqual(self.client("pptx", "exit", "1").returncode, 1, "a plain engine failure with code 1 still passes through")
+
     def test_engine_before_guide_says_what_to_run(self):
         self.sign_in()
-        self.client("setup", "--job", env={"THEODORE_CREDENTIAL_STORE": "file"})
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
         (self.box.home / "engines" / "current.json").unlink()
         _f, nxt, _t = self.assertStatus(self.client("pptx", "start", "x"), "SETUP_IN_PROGRESS", 67)
         self.assertIn("guide pptx", nxt)
@@ -543,14 +653,14 @@ class ReportsAndPreferences(ClientCase):
         self.assertEqual(payload["origin"], "automatic")
         self.assertEqual(payload["details"]["verb"], "apply")
         self.assertEqual(payload["details"]["error_code"], "E_RENDER")
-        self.assertEqual(sorted(payload["environment"]), ["arch", "client_version", "engine_version", "host", "os", "platform", "plugin_version", "runtime_id"])
+        self.assertEqual(sorted(payload["environment"]), ["arch", "client_version", "engine_version", "host", "os", "plugin_version"])
         self.assertEqual(payload["environment"]["engine_version"], self.ENGINE_VERSION)
 
     def test_report_is_filed_and_shown_with_its_reference(self):
         self.ready()
         result = self.client("report", "--kind", "bug", "--title", "render failed", "--details", "soffice exited 77", "--verb", "render")
         first, _n, tell = self.assertStatus(result, "OK", 0)
-        self.assertIn("R-0001", first)
+        self.assertRegex(first, r"report filed as TR-\d{6}\.")
         self.assertIn("no deck content", tell)
         self.assertEqual(self.api.reports[0]["title"], "render failed")
         self.assertEqual(self.api.reports[0]["origin"], "automatic")
@@ -558,7 +668,7 @@ class ReportsAndPreferences(ClientCase):
     def test_automatic_reports_switched_off_asks_the_user(self):
         self.ready()
         self.api.auto_reports = False
-        args = ("report", "--kind", "bug", "--title", "t", "--details", "d")
+        args = ("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
         _f, nxt, tell = self.assertStatus(self.client(*args), "BLOCKED_BY_POLICY", 73)
         self.assertIn("--origin user_requested", nxt)
         self.assertIn("Shall I send", tell)
@@ -567,30 +677,33 @@ class ReportsAndPreferences(ClientCase):
 
     def test_report_needs_kind_title_details(self):
         self.assertStatus(self.client("report", "--kind", "bug"), "USAGE", 64)
-        self.assertStatus(self.client("report", "--kind", "praise", "--title", "t", "--details", "d"), "USAGE", 64)
+        self.assertStatus(self.client("report", "--kind", "praise", "--title", "render failed", "--details", "exit code 77"), "USAGE", 64)
+        self.assertStatus(self.client("report", "--kind", "bug", "--title", "x", "--details", "d", "--dry-run"), "USAGE", 64)
 
     def test_workspace_flag_sends_only_the_pinned_version(self):
         self.ready()
         workspace = self.box.tmp / "Acme Confidential"
         workspace.mkdir()
         self.client("pptx", "start", str(workspace))
-        out = self.client("report", "--kind", "bug", "--title", "t", "--details", "d", "--workspace", str(workspace), "--dry-run").stdout
-        self.assertEqual(json.loads(out)["details"]["workspace_engine_version"], self.ENGINE_VERSION)
+        out = self.client("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77", "--workspace", str(workspace), "--dry-run").stdout
+        self.assertEqual(json.loads(out)["environment"]["engine_version"], self.ENGINE_VERSION)
         self.assertNotIn("Acme", out)
 
     def test_preferences_add_list_remove_and_show_up_in_the_next_guide(self):
         self.sign_in()
         first, _n, _t = self.assertStatus(self.client("prefs", "add", "Always  use\nBritish spelling"), "OK", 0)
-        pref_id = re.search(r"id (p[0-9a-f]+)", first).group(1)
+        pref_id = re.search(r"id ([0-9a-f-]{36})", first).group(1)
         self.assertEqual(self.api.preferences[0]["text"], "Always use British spelling")
         self.assertEqual(self.api.preferences[0]["source"], "agent")
+        self.assertEqual(self.api.preferences[0]["scope"], "all")
         listing = self.client("prefs", "list")
         self.assertIn(f"{pref_id}\tAlways use British spelling", listing.stdout)
         self.assertStatus(listing, "OK", 0)
         self.assertIn("Always use British spelling", self.client("guide", "deck-design").stdout)
         self.assertStatus(self.client("prefs", "remove", pref_id), "OK", 0)
         self.assertEqual(self.api.preferences, [])
-        self.assertStatus(self.client("prefs", "remove", "p-missing"), "USAGE", 64)
+        self.assertStatus(self.client("prefs", "remove", pref_id), "USAGE", 64)             # already gone: not_found
+        self.assertStatus(self.client("prefs", "remove", "not-an-id"), "USAGE", 64)
         self.assertStatus(self.client("prefs", "add", "x" * 281), "USAGE", 64)
         self.assertStatus(self.client("prefs", "add"), "USAGE", 64)
 
@@ -618,6 +731,18 @@ class StatusDoctorUninstall(ClientCase):
         self.assertIn(waited.returncode, (0, 67))
         self.assertStatus(self.client("status"), "OK", 0)
         self.assertEqual(self.client("version").returncode, 0)
+
+    def test_uninstall_removes_only_theodores_own_folders(self):
+        foreign = self.box.home / "memory" / "notes.txt"            # the folder existed before Theodore, with someone else's data
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("not Theodore's")
+        (self.box.home / "loose-file.txt").write_text("also not Theodore's")
+        self.ready()
+        self.assertEqual(foreign.read_text(), "not Theodore's")
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("left alone", first)
+        self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["loose-file.txt", "memory"])
+        self.assertEqual(foreign.read_text(), "not Theodore's")
 
     def test_uninstall_leaves_nothing_behind(self):
         self.ready()
@@ -674,7 +799,10 @@ class Hosts(ClientCase):
         original = {"permissions": {"allow": ["Bash(git status)"]}, "model": "opus"}
         settings.write_text(json.dumps(original))
         offer = self.client("hosts", "settings")
-        self.assertIn("hosts settings --apply", offer.stdout)
+        _f, nxt, tell = self.assertStatus(offer, "OK", 0)
+        self.assertIn("only if they agree run", nxt)
+        self.assertIn("hosts settings --apply", nxt)
+        self.assertTrue(tell.startswith("TELL THE USER: Would you like"))
         self.assertEqual(json.loads(settings.read_text()), original, "nothing changes without consent")
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         applied = json.loads(settings.read_text())
@@ -706,14 +834,17 @@ class LibreOffice(ClientCase):
         subprocess.run(["/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", str(self.box.tmp / "dmg-src"), "-volname", "LibreOffice",
                         "-format", "UDZO", str(dmg)], check=True, capture_output=True)
         data = dmg.read_bytes()
-        self.api.files["tools/LibreOffice_fake.dmg"] = data
-        pin = {"version": "0.0.1", "url": f"{self.api.base}/dl/tools/LibreOffice_fake.dmg", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        # the mirror on the download host does not have it (404): the second source, the publisher's own URL, does
+        self.api.files["upstream/LibreOffice_fake.dmg"] = data
+        pin = {"version": "0.0.1", "url": f"{self.api.base}/dl/upstream/LibreOffice_fake.dmg", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
         state_path = self.box.home / "state" / "update.json"
         state = json.loads(state_path.read_text())
         state["tools"] = {"libreoffice": {"darwin-arm64": pin, "darwin-x64": pin}}
         state_path.write_text(json.dumps(state))
         result = self.client("tools", "install", "libreoffice", "--job")
         self.assertStatus(result, "OK", 0)
+        tried = [r["path"] for r in self.api.requests if "LibreOffice_fake.dmg" in r["path"]]
+        self.assertEqual(tried, ["/dl/tools/LibreOffice_fake.dmg", "/dl/upstream/LibreOffice_fake.dmg"], "mirror first, publisher second")
         binary = self.box.home / "tools" / "libreoffice" / "LibreOffice.app" / "Contents" / "MacOS" / "soffice"
         self.assertTrue(os.access(binary, os.X_OK))
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
@@ -763,6 +894,17 @@ class Internals(unittest.TestCase):
         text = scrub(r"failed at C:\Users\omar\Decks\Acme Q3.pptx and /home/omar/x.py, mail omar@example.com")
         for leaked in ("omar", "Q3.pptx", "example.com"):
             self.assertNotIn(leaked, text)
+
+    def test_canonical_json_matches_the_contract_vector(self):
+        from fake_api import canonical_json
+        manifest = {"schema": "theodore-runtime-manifest@1", "runtime_id": "rt-0001", "platform": "darwin", "arch": "arm64",
+                    "parts": [{"part": "python", "version": None, "url": "https://dl.theodoreand.ai/runtime/rt-0001/darwin-arm64/python.tar.gz", "sha256": "a" * 64, "size": 123},
+                              {"part": "client", "version": "0.1.0", "url": "https://dl.theodoreand.ai/runtime/rt-0001/any/client.tar.xz", "sha256": "b" * 64, "size": 45}],
+                    "server_time": "2026-11-09T19:00:00.000Z"}
+        self.assertEqual(canonical_json(manifest),
+                         '{"arch":"arm64","parts":[{"part":"python","sha256":"' + "a" * 64 + '","size":123,"url":"https://dl.theodoreand.ai/runtime/rt-0001/darwin-arm64/python.tar.gz","version":null},'
+                         '{"part":"client","sha256":"' + "b" * 64 + '","size":45,"url":"https://dl.theodoreand.ai/runtime/rt-0001/any/client.tar.xz","version":"0.1.0"}],'
+                         '"platform":"darwin","runtime_id":"rt-0001","schema":"theodore-runtime-manifest@1","server_time":"2026-11-09T19:00:00.000Z"}')
 
     def test_exit_codes_are_the_frozen_ones(self):
         from theodore_client.contract import EXIT

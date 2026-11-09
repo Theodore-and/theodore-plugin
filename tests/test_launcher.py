@@ -11,7 +11,8 @@ import sys
 import unittest
 from pathlib import Path
 
-from support import IS_WINDOWS, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
+from support import RUNTIME_ID, IS_WINDOWS, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
 
 
 def closed_port() -> int:
@@ -24,7 +25,7 @@ class LauncherCase(unittest.TestCase):
     def setUp(self):
         self.api = FakeApi().start()
         self.addCleanup(self.api.stop)
-        self.api.publish_runtime("rt-test-1", fake_runtime_parts())
+        self.api.publish_runtime(RUNTIME_ID, fake_runtime_parts())
         self.api.publish_engine("1.0.0-rc.3", engine_zip("1.0.0-rc.3"))
         for pack in ("icons", "flags", "backgrounds", "maps"):
             self.api.publish_pack(pack, "1.0.0", pack_zip(pack, "1.0.0"))
@@ -59,10 +60,10 @@ class FirstRun(LauncherCase):
             self.assertEqual((stable / name).read_bytes(), (source / name).read_bytes(), name)
         if not IS_WINDOWS:
             self.assertTrue(os.access(stable / "theodore", os.X_OK))
-        self.assertEqual((self.box.home / "runtime" / "current.txt").read_text().strip(), "rt-test-1")
+        self.assertEqual((self.box.home / "runtime" / "current.txt").read_text().strip(), RUNTIME_ID)
         self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.0")
         self.box.wait_jobs()
-        self.assertTrue((self.box.home / "runtime" / "rt-test-1" / ".ready").exists(), "stage 2 ran in the background")
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "stage 2 ran in the background")
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
         self.assertFalse((self.box.home / "state" / "bootstrap" / "pid").exists())
 
@@ -85,13 +86,22 @@ class FirstRun(LauncherCase):
         self.assertStatus(self.run_launcher("nonsense"), "USAGE", 64)
 
     def test_slow_bootstrap_reports_progress_and_next_step(self):
-        result = self.run_launcher("guide", "pptx", env={"THEODORE_BOOTSTRAP_WAIT": "0"})
+        self.api.dl_delay = 4.0                                  # a slow connection: the download outlasts the wait
+        result = self.run_launcher("guide", "pptx", env={"THEODORE_BOOTSTRAP_WAIT": "1"})
         first, nxt, tell = self.assertStatus(result, "SETUP_IN_PROGRESS", 67)
         self.assertRegex(first, r"the first part is at \d+% \(")
         self.assertEqual(nxt, "NEXT: run the same command again in 20 seconds. Do not use another slide tool meanwhile.")
         self.assertIn("first time", tell)
+        again = self.run_launcher("guide", "pptx", env={"THEODORE_BOOTSTRAP_WAIT": "1"})      # the job is still running: no second one
+        self.assertStatus(again, "SETUP_IN_PROGRESS", 67)
+        self.assertEqual((self.box.home / "logs" / "bootstrap.log").read_text().count("\n"), 0, "one quiet job")
+        self.assertEqual(len([r for r in self.api.requests if r["path"].startswith("/dl/runtime/")]), 1, "one download, not two")
+        self.api.dl_delay = 0
+        self.box.wait_jobs()
+        self.assertEqual(self.run_launcher("version").returncode, 0)
         self.box.wait_jobs()
 
+    @unittest.skipIf(IS_WINDOWS, "on Windows a running job is known by its open lock file; the slow-bootstrap test covers it")
     def test_a_running_job_is_not_started_twice_and_shows_percent(self):
         boot = self.box.home / "state" / "bootstrap"
         boot.mkdir(parents=True)
@@ -118,13 +128,48 @@ class FirstRun(LauncherCase):
         self.assertEqual(json.loads(out.stdout)["args"], ["two words", "it's", 'say "hi"' if not IS_WINDOWS else "plain", "a&b"])
 
 
+@unittest.skipUnless(IS_WINDOWS, "Windows shells")
+class WindowsShells(LauncherCase):
+    def _run(self, command):
+        import subprocess
+        return subprocess.run(command, env=self.box.env, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.run_launcher("version").returncode, 0)            # bootstrap once through cmd
+        self.box.wait_jobs(600)
+        self.cmd_path = str(self.box.launcher)
+
+    def test_powershell_call_operator_and_exit_code(self):
+        for policy in ("Bypass", "AllSigned"):                                  # a .cmd is not subject to the execution policy
+            done = self._run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", policy, "-Command",
+                              f"& '{self.cmd_path}' frobnicate; exit $LASTEXITCODE"])
+            self.assertEqual(done.returncode, 64, f"{policy}: {done.stdout}{done.stderr}")
+            self.assertIn("THEODORE USAGE: ", done.stdout)
+
+    def test_git_bash_through_the_sh_launcher(self):
+        import shutil
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("Git Bash is not installed")
+        sh_path = str(self.box.launcher.with_name("theodore")).replace("\\", "/")
+        done = self._run([bash, "-c", f'sh "{sh_path}" frobnicate "two words"'])
+        self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
+        self.assertIn("THEODORE USAGE: ", done.stdout)
+
+    def test_inbox_tools_are_present(self):
+        import shutil
+        for tool in ("curl.exe", "tar.exe", "certutil.exe", "findstr.exe"):
+            self.assertIsNotNone(shutil.which(tool), tool)
+
+
 class Failures(LauncherCase):
     def test_wrong_checksum_is_hash_mismatch_and_clears_for_a_retry(self):
         self.box.write_launcher_json(**{self.python_key() + "_sha256": "0" * 64})
         first, nxt, _t = self.assertStatus(self.run_launcher("guide", "pptx"), "SETUP_FAILED", 68)
         self.assertIn("cause HASH_MISMATCH", first)
         self.assertIn("support@theodoreand.ai", nxt)
-        self.assertFalse((self.box.home / "runtime" / "rt-test-1" / "python").exists())
+        self.assertFalse((self.box.home / "runtime" / RUNTIME_ID / "python").exists())
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [], "the bad download is deleted")
         self.box.write_launcher_json()
         for name in ("launcher.json",):                       # the stable copy holds the bad pin: same generation, so refresh it
@@ -154,7 +199,8 @@ class Failures(LauncherCase):
         self.assertIn("root certificate", nxt)
 
     def test_proxy_authentication_is_proxy_auth(self):
-        key = next(k for k in self.api.files if k.endswith("python.tar.gz"))
+        python = next(p for p in self.api.runtime["parts"] if p["part"] == "python")
+        key = python["url"].split("/dl/", 1)[1]
         self.api.dl_status[key] = 407
         first, nxt, _t = self.assertStatus(self.run_launcher("guide", "pptx"), "SETUP_FAILED", 68)
         self.assertIn("cause PROXY_AUTH", first)
@@ -206,6 +252,80 @@ class Failures(LauncherCase):
         result = self.run_launcher("uninstall")
         self.assertStatus(result, "OK", 0)
         self.assertFalse(self.box.home.exists())
+
+    def test_a_folder_that_already_holds_other_things_is_shared_politely(self):
+        foreign = self.box.home / "memory" / "notes.txt"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("not Theodore's")
+        self.assertEqual(self.run_launcher("version").returncode, 0)            # bootstraps beside the foreign folder
+        self.box.wait_jobs()
+        owned = {"bin", "client", "runtime", "engines", "packs", "tools", "state", "logs", "staging", "plugin"}
+        self.assertLessEqual({p.name for p in self.box.home.iterdir()} - {"memory"}, owned, "only the named subfolders are created")
+        (self.box.home / "client" / "current.txt").unlink()                    # make it "not installed" again: the launcher's own uninstall
+        self.assertStatus(self.run_launcher("uninstall"), "OK", 0)
+        self.assertEqual([p.name for p in self.box.home.iterdir()], ["memory"])
+        self.assertEqual(foreign.read_text(), "not Theodore's")
+
+
+class CorporateNetwork(unittest.TestCase):
+    """A network that inspects TLS, and a proxy that wants a sign-in. The trusted-certificate and proxy cases need a
+    certificate in the system store and a running proxy, so they run in CI (shim.yml, job network)."""
+
+    def _world(self, tls):
+        api = FakeApi(tls=tls).start()
+        self.addCleanup(api.stop)
+        api.publish_runtime(RUNTIME_ID, fake_runtime_parts())
+        api.publish_engine("1.0.0-rc.3", engine_zip("1.0.0-rc.3"))
+        box = Sandbox(api)
+        self.addCleanup(box.close)
+        return api, box
+
+    @unittest.skipIf(IS_WINDOWS, "POSIX launcher")
+    def test_untrusted_certificate_is_tls_intercept_in_the_launcher_and_in_the_client(self):
+        import tempfile
+        from support import make_certificate
+        folder = Path(tempfile.mkdtemp(prefix="theodore-cert-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        api, box = self._world(make_certificate(folder))
+        result = box.run_launcher("guide", "pptx")
+        first, nxt, _tell = status_lines(result.stdout)
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        self.assertIn("cause TLS_INTERCEPT", first)
+        self.assertIn("root certificate", nxt)
+        box.install_client_directly()
+        api.issue_activation_code("ABCD-1234")
+        client = box.run_client("login", "--code", "ABCD-1234")
+        first, nxt, _tell = status_lines(client.stdout)
+        self.assertEqual(client.returncode, 71, client.stdout + client.stderr)
+        self.assertIn("cause TLS_INTERCEPT", first)
+        self.assertIn("root certificate", nxt)
+        self.assertEqual([r for r in api.requests if r["path"].startswith("/v1/")], [], "nothing was sent over the untrusted connection")
+
+    @unittest.skipUnless(os.environ.get("THEODORE_TEST_TRUSTED_CERT"), "needs a test certificate installed in the system store (CI)")
+    def test_certificate_in_the_system_store_is_trusted_end_to_end(self):
+        cert, key = os.environ["THEODORE_TEST_TRUSTED_CERT"].split(os.pathsep)
+        api, box = self._world((cert, key))
+        api.issue_activation_code("ABCD-1234")
+        login = box.run_launcher("login", "--code", "ABCD-1234")
+        self.assertEqual(login.returncode, 0, login.stdout + login.stderr)        # curl (stage 1) and the client both trust it
+        box.wait_jobs(600)
+        guide = box.run_launcher("guide", "deck-design")
+        self.assertEqual(guide.returncode, 0, guide.stdout + guide.stderr)
+
+    @unittest.skipUnless(os.environ.get("THEODORE_TEST_AUTH_PROXY"), "needs an authenticating proxy (CI)")
+    def test_proxy_that_wants_a_sign_in_then_with_credentials(self):
+        proxy = os.environ["THEODORE_TEST_AUTH_PROXY"]                           # for example http://127.0.0.1:8888
+        creds = os.environ["THEODORE_TEST_AUTH_PROXY_CREDENTIALS"]               # user:password
+        api, box = self._world(None)
+        base = {"no_proxy": "", "NO_PROXY": ""}
+        refused = box.run_launcher("version", env={**base, "http_proxy": proxy, "HTTP_PROXY": proxy})
+        self.assertEqual(refused.returncode, 68, refused.stdout + refused.stderr)
+        self.assertIn("cause PROXY_AUTH", status_lines(refused.stdout)[0])
+        with_creds = proxy.replace("://", f"://{creds}@")
+        allowed = box.run_launcher("version", env={**base, "http_proxy": with_creds, "HTTP_PROXY": with_creds})
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+        box.wait_jobs(600)
+        self.assertTrue((box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the client downloaded the rest through the proxy")
 
 
 class Generations(LauncherCase):

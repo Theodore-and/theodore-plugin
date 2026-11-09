@@ -1,0 +1,425 @@
+{
+  "codes": {
+    "activation_max_live": 3,
+    "activation_ttl_seconds": 600,
+    "alphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+    "device_client_id": "theodore-client",
+    "device_code_ttl_seconds": 900,
+    "device_poll_interval_seconds": 5,
+    "pattern": "^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$"
+  },
+  "contract_version": "1.0.0",
+  "device_errors": {
+    "codes": [
+      "access_denied",
+      "authorization_pending",
+      "expired_token",
+      "invalid_grant",
+      "invalid_request",
+      "slow_down"
+    ],
+    "status": 400
+  },
+  "entitlement": {
+    "alg": "EdDSA",
+    "aud": "theodore-engine",
+    "env_var": "THEODORE_ENTITLEMENT",
+    "iss": "https://theodoreand.ai",
+    "refresh_after_seconds": 43200,
+    "typ": "theodore-ent+jwt"
+  },
+  "error_codes": {
+    "account_suspended": 403,
+    "auto_reports_disabled": 403,
+    "conflict": 409,
+    "entitlement_inactive": 403,
+    "forbidden": 403,
+    "installation_revoked": 401,
+    "internal_error": 500,
+    "invalid_code": 401,
+    "invalid_credentials": 401,
+    "not_found": 404,
+    "payload_too_large": 413,
+    "rate_limited": 429,
+    "service_disabled": 503,
+    "session_not_fresh": 403,
+    "unauthenticated": 401,
+    "update_required": 426,
+    "validation_failed": 422
+  },
+  "guide_headers": [
+    "cache-control",
+    "etag",
+    "x-theodore-guide-version",
+    "x-theodore-part",
+    "x-theodore-parts"
+  ],
+  "known": {
+    "hosts": [
+      "claude-code",
+      "codex",
+      "claude-desktop",
+      "claude-web",
+      "cowork",
+      "chatgpt",
+      "other"
+    ],
+    "skills": [
+      "pptx",
+      "deck-design"
+    ]
+  },
+  "launcher": {
+    "client_commands": [
+      "guide",
+      "pptx",
+      "python",
+      "login",
+      "logout",
+      "whoami",
+      "status",
+      "doctor",
+      "version",
+      "update",
+      "report",
+      "prefs",
+      "tools",
+      "packs",
+      "activate",
+      "uninstall"
+    ],
+    "data_dir": {
+      "envOverride": "THEODORE_HOME",
+      "posix": "~/.theodore",
+      "windows": "%LOCALAPPDATA%\\Theodore"
+    },
+    "engine_exit_code_max": 63,
+    "exit_codes": {
+      "BLOCKED_BY_POLICY": 73,
+      "CONNECTOR_REQUIRED": 74,
+      "INTERNAL": 78,
+      "NO_ENTITLEMENT": 70,
+      "OFFLINE": 71,
+      "RETRY": 75,
+      "SETUP_FAILED": 68,
+      "SETUP_IN_PROGRESS": 67,
+      "SIGN_IN_PENDING": 66,
+      "SIGN_IN_REQUIRED": 65,
+      "UNSUPPORTED_PLATFORM": 69,
+      "UPDATE_REQUIRED": 72,
+      "USAGE": 64
+    },
+    "guide_part_max_chars": 24000,
+    "message_pattern": "^THEODORE ([A-Z_]+): (.+)\\nNEXT: (.+)\\nTELL THE USER: (.+)$",
+    "setup_failed_causes": [
+      "NETWORK",
+      "TLS_INTERCEPT",
+      "PROXY_AUTH",
+      "DISK",
+      "HASH_MISMATCH"
+    ],
+    "update_check_interval_seconds": 21600
+  },
+  "limits": {
+    "instruction_section_max_bytes": 262144,
+    "preference_max_count": 30,
+    "preference_max_length": 280,
+    "report_body_max_bytes": 65536,
+    "upload_through_worker_max_bytes": 99614720
+  },
+  "manifests": {
+    "channel": "theodore-channel-manifest@1",
+    "runtime": "theodore-runtime-manifest@1"
+  },
+  "openapi_sha256": "fdf677807aa13ee0e51172787888d4cf0235d204f2f1bbb3e25ab664f2bcd221",
+  "origins": {
+    "production": {
+      "api": "https://api.theodoreand.ai",
+      "dl": "https://dl.theodoreand.ai",
+      "mcp": "https://mcp.theodoreand.ai",
+      "public": "https://theodoreand.ai"
+    },
+    "staging": {
+      "api": "https://staging-api.theodoreand.ai",
+      "dl": "https://staging-dl.theodoreand.ai",
+      "mcp": "https://staging-mcp.theodoreand.ai",
+      "public": "https://staging.theodoreand.ai"
+    }
+  },
+  "routes": {
+    "v1.device.activate": {
+      "auth": "public",
+      "method": "POST",
+      "path": "/v1/device/activate",
+      "responses": [
+        "200",
+        "400",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.device.code": {
+      "auth": "public",
+      "method": "POST",
+      "path": "/v1/device/code",
+      "responses": [
+        "200",
+        "400",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.device.token": {
+      "auth": "public",
+      "method": "POST",
+      "path": "/v1/device/token",
+      "responses": [
+        "200",
+        "400",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.guide.section": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/guide/{skill}/{section}",
+      "responses": [
+        "200",
+        "304",
+        "401",
+        "403",
+        "404",
+        "422",
+        "426",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.guide.skill": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/guide/{skill}",
+      "responses": [
+        "200",
+        "304",
+        "401",
+        "403",
+        "404",
+        "422",
+        "426",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.heartbeat": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/heartbeat",
+      "responses": [
+        "204",
+        "401",
+        "403",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.installation.rotate": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/installation/rotate",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.keys": {
+      "auth": "public",
+      "method": "GET",
+      "path": "/v1/keys",
+      "responses": [
+        "200",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.licence.key": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/licence/key",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.licence.refresh": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/licence/refresh",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.packs.download": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/packs/{id}/{version}",
+      "responses": [
+        "200",
+        "302",
+        "401",
+        "403",
+        "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.packs.manifest": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/packs/manifest",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.preferences.add": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/preferences",
+      "responses": [
+        "201",
+        "401",
+        "403",
+        "409",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.preferences.delete": {
+      "auth": "installation",
+      "method": "DELETE",
+      "path": "/v1/preferences/{id}",
+      "responses": [
+        "204",
+        "401",
+        "403",
+        "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.preferences.list": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/preferences",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.releases.engine": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/releases/{version}/engine",
+      "responses": [
+        "200",
+        "302",
+        "401",
+        "403",
+        "404",
+        "422",
+        "426",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.releases.manifest": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/releases/manifest",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "422",
+        "426",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.reports.create": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/reports",
+      "responses": [
+        "201",
+        "401",
+        "403",
+        "413",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.runtime.manifest": {
+      "auth": "public",
+      "method": "GET",
+      "path": "/v1/runtime/manifest",
+      "responses": [
+        "200",
+        "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    }
+  }
+}

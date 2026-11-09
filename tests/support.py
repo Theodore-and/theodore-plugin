@@ -41,6 +41,8 @@ HERE = Path(__file__).resolve()
 ROOT = HERE.parents[3]
 VERSION = (ROOT / "VERSION").read_text().strip()
 args = sys.argv[1:]
+if (ROOT / "REFUSE").exists():          # stands in for the real engine's licence check: one JSON object, exit code 1
+    print(json.dumps({"ok": False, "error": "refused for the test", "code": (ROOT / "REFUSE").read_text().strip()})); sys.exit(1)
 if "--help" in args or not args:
     if (ROOT / "BROKEN").exists():
         print("engine is broken", file=sys.stderr); sys.exit(3)
@@ -92,7 +94,7 @@ def zip_bytes(files: dict[str, bytes], prefix: str = "") -> bytes:
 def engine_zip(version: str, skill_text: str | None = None, broken: bool = False, prefix: str = "") -> bytes:
     files = {
         "VERSION": version.encode(),
-        "package.json": json.dumps({"name": "fake-engine", "dependencies": {"fakedep": "1.0.0"}}).encode(),
+        "package.json": json.dumps({"name": "fake-engine", "dependencies": {ENGINE_DEPENDENCY: "*"}}).encode(),
         "requirements.txt": b"# none\n",
         "skills/pptx/SKILL.md": (skill_text if skill_text is not None else f"---\nname: pptx\n---\n\n# PPTX Skill\n\nFake manual for engine {version}.\n").encode("utf-8"),
         "skills/pptx/pptxgenjs.md": b"# build API (fake)\n",
@@ -108,10 +110,23 @@ def pack_zip(pack_id: str, version: str, prefix: str = "") -> bytes:
                       "catalog.json": b"{}", "data/one.txt": b"1"}, prefix)
 
 
-def fake_runtime_parts(runtime_id: str = "rt-test-1") -> dict[str, tuple[str, bytes]]:
+# THEODORE_TEST_BUNDLE=<output folder of runtime/build/build_bundle.py> makes the tests install the real runtime
+# bundle instead of the tiny stand-in. CI sets it on Windows, where a shell-script "python" cannot stand in.
+REAL_BUNDLE = os.environ.get("THEODORE_TEST_BUNDLE")
+RUNTIME_ID = "rt-test-1"
+ENGINE_DEPENDENCY = "fakedep"
+if REAL_BUNDLE:
+    _manifest = json.loads(next(Path(REAL_BUNDLE).glob("*.manifest.json")).read_text(encoding="utf-8"))
+    RUNTIME_ID = _manifest["runtime_id"]
+    ENGINE_DEPENDENCY = "pptxgenjs"
+
+
+def fake_runtime_parts() -> dict[str, tuple[str, bytes | Path]]:
     """A runtime small enough for tests: `python` is a wrapper around the interpreter running the tests."""
+    if REAL_BUNDLE:
+        return {p["part"]: (p["file"], Path(REAL_BUNDLE) / p["file"]) for p in _manifest["parts"] if p["part"] != "client"}
     if IS_WINDOWS:
-        raise unittest.SkipTest("the fake runtime is POSIX-only; Windows runs the launcher tests in CI with the real bundle")
+        raise unittest.SkipTest("on Windows the tests need the real runtime bundle: set THEODORE_TEST_BUNDLE")
     wrapper = f'#!/bin/sh\nexec "{sys.executable}" "$@"\n'.encode()
     node = shutil.which("node")
     node_script = (f'#!/bin/sh\nexec "{node}" "$@"\n' if node else '#!/bin/sh\necho v24.0.0-fake\n').encode()
@@ -122,6 +137,19 @@ def fake_runtime_parts(runtime_id: str = "rt-test-1") -> dict[str, tuple[str, by
         "node_modules": ("node_modules.tar.xz", tar_bytes({"node_modules/fakedep/package.json": b'{"name":"fakedep","version":"1.0.0"}',
                                                             "node_modules/fakedep/index.js": b"module.exports = 1;\n"}, "w:xz")),
     }
+
+
+def make_certificate(folder: Path) -> tuple[str, str]:
+    """A throwaway self-signed certificate for 127.0.0.1 that no certificate store trusts."""
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise unittest.SkipTest("openssl is not installed")
+    cert, key = folder / "test-cert.pem", folder / "test-key.pem"
+    done = subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(cert), "-days", "2",
+                           "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost"], capture_output=True, text=True)
+    if done.returncode != 0:
+        raise unittest.SkipTest(f"openssl could not make a certificate: {done.stderr.strip()[-200:]}")
+    return str(cert), str(key)
 
 
 class Sandbox:
@@ -163,11 +191,10 @@ class Sandbox:
         client_tar = build_client.build(self.tmp / "dist")
         client_bytes = client_tar.read_bytes()
         version = build_client.client_version()
-        api.files[f"client/client-{version}.tar"] = client_bytes
-        api.client = {"version": version, "sha256": sha256_hex(client_bytes)}
+        api.publish_client(version, client_bytes)
         config = {"launcher_generation": generation, "shim_version": "0.1.0", "api_base": api.base, "dl_base": f"{api.base}/dl",
                   "marketplace_url": f"{api.base}/marketplace.json", "manifest_key_1_kid": api.MANIFEST_KID,
-                  "manifest_key_1_x": api.manifest_public_key(), "stage1_runtime_id": (api.runtime or {}).get("runtime_id", "rt-test-1"),
+                  "manifest_key_1_x": api.manifest_public_key(), "stage1_runtime_id": (api.runtime or {}).get("runtime_id", RUNTIME_ID),
                   "stage1_client_version": version, "stage1_client_url": f"{api.base}/dl/client/client-{version}.tar",
                   "stage1_client_sha256": sha256_hex(client_bytes), "stage1_client_size": len(client_bytes)}
         python = next((p for p in (api.runtime or {}).get("parts", []) if p["part"] == "python"), None)
@@ -235,6 +262,12 @@ class Sandbox:
                     busy = busy or _alive(int(pid_file.read_text().strip() or 0))
                 except (OSError, ValueError):
                     pass
+            lock_file = self.home / "state" / "bootstrap" / "job.lock"       # Windows: the running job keeps it open
+            if IS_WINDOWS and lock_file.exists():
+                try:
+                    open(lock_file, "a").close()
+                except OSError:
+                    busy = True
             if not busy:
                 return
             time.sleep(0.2)
@@ -256,7 +289,14 @@ def _alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if IS_WINDOWS:
-        return False
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return code.value == 259
     try:
         os.kill(pid, 0)
         return True
@@ -283,7 +323,10 @@ class ClientCase(unittest.TestCase):
     def setUp(self):
         self.api = FakeApi().start()
         self.addCleanup(self.api.stop)
-        self.api.publish_runtime("rt-test-1", fake_runtime_parts())
+        if IS_WINDOWS:
+            raise unittest.SkipTest("the client suite is platform-independent Python and runs on macOS and Linux; Windows runs the launcher suite")
+        self.runtime_parts = fake_runtime_parts()
+        self.api.publish_runtime(RUNTIME_ID, self.runtime_parts)
         self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION))
         for pack in ("icons", "flags", "backgrounds", "maps"):
             self.api.publish_pack(pack, "1.0.0", pack_zip(pack, "1.0.0"))

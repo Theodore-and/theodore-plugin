@@ -4,21 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import socket
 import unittest
 from pathlib import Path
 
-from support import IS_WINDOWS, ROOT, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
+from support import RUNTIME_ID, IS_WINDOWS, ROOT, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
 
-INSTALLER = ROOT / "install" / "install.sh"
+INSTALLER = ROOT / "install" / ("install.cmd" if IS_WINDOWS else "install.sh")
+STABLE = "theodore.cmd" if IS_WINDOWS else "theodore"
 
 
-@unittest.skipIf(IS_WINDOWS, "install.sh is the POSIX installer; install.cmd runs in the Windows CI job")
 class Installer(unittest.TestCase):
     def setUp(self):
         self.api = FakeApi().start()
         self.addCleanup(self.api.stop)
-        self.api.publish_runtime("rt-test-1", fake_runtime_parts())
+        self.api.publish_runtime(RUNTIME_ID, fake_runtime_parts())
         self.api.publish_engine("1.0.0-rc.3", engine_zip("1.0.0-rc.3"))
         for pack in ("icons", "flags", "backgrounds", "maps"):
             self.api.publish_pack(pack, "1.0.0", pack_zip(pack, "1.0.0"))
@@ -29,15 +31,19 @@ class Installer(unittest.TestCase):
         fake.mkdir()
         self.calls = self.box.tmp / "host-calls.log"
         for name in ("claude", "codex"):
-            (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.calls}"\ncase "$*" in "plugin list --json") echo "[]";; esac\nexit 0\n')
-            (fake / name).chmod(0o755)
+            if IS_WINDOWS:
+                (fake / f"{name}.cmd").write_text(f'@echo off\r\n>>"{self.calls}" echo {name} %*\r\nif "%*"=="plugin list --json" echo []\r\nexit /b 0\r\n')
+            else:
+                (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.calls}"\ncase "$*" in "plugin list --json") echo "[]";; esac\nexit 0\n')
+                (fake / name).chmod(0o755)
         self.box.env["PATH"] = f"{fake}{os.pathsep}{self.box.env['PATH']}"
         self.box.env["THEODORE_DL_BASE"] = f"{self.api.base}/dl"
 
     def install(self, *args, env=None):
         import subprocess
-        return subprocess.run(["/bin/sh", str(INSTALLER), *args], env={**self.box.env, **(env or {})}, capture_output=True, text=True,
-                              timeout=300, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+        command = ["cmd", "/d", "/c", str(INSTALLER), *args] if IS_WINDOWS else ["/bin/sh", str(INSTALLER), *args]
+        return subprocess.run(command, env={**self.box.env, **(env or {})}, capture_output=True, text=True,
+                              timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
 
     def test_install_with_a_code_then_again_then_uninstall(self):
         self.api.issue_activation_code("ABCD-1234")
@@ -50,7 +56,7 @@ class Installer(unittest.TestCase):
         self.assertTrue(first.startswith("THEODORE OK: Theodore is ready: engine 1.0.0-rc.3"), first)
         self.assertEqual(out.strip().splitlines()[-1], tell)
         home = self.box.home
-        self.assertIn(f"the stable launcher is {home / 'bin' / 'theodore'}", out)
+        self.assertIn(f"the stable launcher is {home / 'bin' / STABLE}", out)
         # the code is redeemed before any large download
         paths = [r["path"] for r in self.api.requests]
         self.assertLess(paths.index("/v1/device/activate"), min(i for i, p in enumerate(paths) if p.startswith("/dl/runtime/")))
@@ -78,20 +84,27 @@ class Installer(unittest.TestCase):
 
         removed = self.install("--uninstall")
         self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        if IS_WINDOWS:
+            import time
+            for _ in range(60):
+                if not home.exists():
+                    break
+                time.sleep(0.5)
         self.assertFalse(home.exists())
         calls = self.calls.read_text().splitlines()
         for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
                          "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
             self.assertIn(expected, calls)
         self.assertEqual(json.loads((self.box.user_home / ".claude" / "settings.json").read_text()), {"permissions": {"allow": []}, "extraKnownMarketplaces": {}})
-        self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
+        if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
+            self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
 
     def test_without_a_code_it_starts_the_browser_sign_in_and_still_sets_up(self):
         result = self.install()
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
         self.assertIn("THEODORE SIGN_IN_REQUIRED", result.stdout)
         self.assertIn("https://theodoreand.ai/device?code=", result.stdout)
-        self.assertTrue((self.box.home / "runtime" / "rt-test-1" / ".ready").exists(), "the runtime is installed while the user approves")
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the runtime is installed while the user approves")
         self.assertNotIn("/v1/device/activate", [r["path"] for r in self.api.requests])
 
     def test_bad_arguments(self):

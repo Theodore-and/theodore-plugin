@@ -1,9 +1,11 @@
 """A local stand-in for the Theodore API and download host, for tests. Standard library only.
 
-It implements the routes of the frozen design (backend design section 5.4): device and activation flow, licence
-refresh, guide, signed release and runtime manifests, engine and pack downloads, reports, preferences,
-heartbeat and keys, plus plain file serving under /dl/ for the runtime parts, the client and the plugin.
-State lives on the FakeApi object, so a test changes the server by assigning to it.
+It implements the /v1 routes of the frozen contract (contract version 1.0.0; a snapshot of what the client
+depends on is in tests/fixtures/contract-v1.json): device and activation flow, licence refresh, guide, signed
+channel and runtime manifests, engine and pack downloads, reports, preferences, heartbeat and keys, plus plain
+file serving under /dl/ for the runtime parts, the client and the plugin. Request bodies are checked the way the
+contract's schemas check them (and unknown members are refused, which is stricter), so a client that drifts
+from the contract fails here first. State lives on the FakeApi object: a test changes the server by assigning.
 
 Run it by hand:  python3 tests/fake_api.py --port 8787   (prints its base URL and test public key)
 """
@@ -14,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -58,11 +61,58 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def canonical_json(value) -> str:
+    """The contract's canonical JSON: keys sorted at every depth, no whitespace, JSON.stringify scalars."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def iso(seconds: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds)) + ".000Z"
+
+
+SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$")
+SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def normalize_code(raw: str) -> str | None:
+    """One-time codes as typed: any case, optional hyphen or spaces; I and L read as 1, O as 0."""
+    compact = "".join(ch for ch in str(raw).upper() if ch not in "- ").translate(str.maketrans("ILO", "110"))
+    if len(compact) != 8 or any(ch not in CODE_ALPHABET for ch in compact):
+        return None
+    return compact[:4] + "-" + compact[4:]
+
+
+def _check(body: dict, required: dict, optional: dict | None = None) -> str | None:
+    """None when `body` fits: every required member present and valid, optional ones valid, nothing else."""
+    optional = optional or {}
+    if not isinstance(body, dict):
+        return "the body is not an object"
+    for key in body:
+        if key not in required and key not in optional:
+            return f"unknown member {key}"
+    for key, rule in required.items():
+        if key not in body or not rule(body[key]):
+            return f"member {key} is missing or not valid"
+    for key, rule in optional.items():
+        if key in body and not rule(body[key]):
+            return f"member {key} is not valid"
+    return None
+
+
+_semver = lambda v: isinstance(v, str) and len(v) <= 64 and bool(SEMVER.match(v))
+_slug = lambda v: isinstance(v, str) and bool(SLUG.match(v))
+_text = lambda low, high: (lambda v: isinstance(v, str) and low <= len(v.strip()) <= high)
+DEVICE_METADATA = {"device_name": _text(1, 80), "platform": lambda v: v in ("darwin", "win32", "linux"), "arch": lambda v: v in ("arm64", "x64"),
+                   "host": _slug, "client_version": _semver}
+
+
 class FakeApi:
     MANIFEST_KID = "manifest-test-1"
     ENTITLEMENT_KID = "ent-test-1"
 
-    def __init__(self, port: int = 0):
+    def __init__(self, port: int = 0, tls: tuple[str, str] | None = None):
+        """`tls` = (certificate file, key file) serves HTTPS, to stand in for a network that inspects TLS."""
         self.manifest_seed = hashlib.sha256(b"theodore test manifest key").digest()
         self.entitlement_seed = hashlib.sha256(b"theodore test entitlement key").digest()
         self.lock = threading.RLock()
@@ -72,6 +122,7 @@ class FakeApi:
         self.requests: list[dict] = []    # {method, path, auth} of every request, for assertions
         self.files: dict[str, bytes | Path] = {}      # /dl/<key> -> content
         self.dl_status: dict[str, int] = {}           # /dl/<key> -> forced HTTP status (for example 407)
+        self.dl_delay = 0.0                           # seconds to stall every /dl/ download (a slow connection)
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
         self.devices: dict[str, dict] = {}            # device_code -> {user_code, status}
         self.installations: dict[str, dict] = {}      # id -> {secret, revoked, gen}
@@ -83,11 +134,12 @@ class FakeApi:
         self.engine_files: dict[str, bytes] = {}
         self.engine_redirect = False      # True: answer the engine route with a 302 to /dl/private/...
         self.client = {"version": "0.1.0", "sha256": ""}
-        self.shim_min = "0.1.0"
+        self.shim_min: str | None = "0.1.0"
         self.min_version = None
         self.kill, self.kill_message = False, ""
-        self.tools: dict = {}
-        self.runtime: dict | None = None  # {runtime_id, parts: [{part, file, sha256, size}]} (urls are filled in)
+        self.runtime: dict | None = None  # the current release's runtime: {runtime_id, parts: [{part, version, url, sha256, size}]}
+        self.runtimes: dict[str, dict] = {}   # every published runtime by id
+        self.prefs_rev = 0
         self.packs: list[dict] = []       # {id, version, sha256, size_bytes}
         self.pack_files: dict[tuple[str, str], bytes] = {}
         self.pack_delay = 0.0             # seconds to stall each pack download (to test waiting)
@@ -122,6 +174,12 @@ class FakeApi:
         self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.server.daemon_threads = True
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        if tls:
+            import ssl
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(*tls)
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
+            self.base = f"https://127.0.0.1:{self.server.server_address[1]}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     # --- lifecycle -----------------------------------------------------------------------------------------------
@@ -138,7 +196,7 @@ class FakeApi:
 
     # --- test controls -----------------------------------------------------------------------------------------------
     def issue_activation_code(self, code: str = "ABCD-1234") -> str:
-        self.activation_codes[code] = {"used": False}
+        self.activation_codes[normalize_code(code)] = {"used": False}
         return code
 
     def approve_device(self, deny: bool = False) -> None:
@@ -169,14 +227,20 @@ class FakeApi:
             self.files[key] = content
             raw_sha = sha256_hex(content) if isinstance(content, bytes) else _sha_file(content)
             size = len(content) if isinstance(content, bytes) else content.stat().st_size
-            listed.append({"part": part, "url": f"{self.base}/dl/{key}", "sha256": raw_sha, "size": size})
+            listed.append({"part": part, "version": None, "url": f"{self.base}/dl/{key}", "sha256": raw_sha, "size": size})
         self.runtime = {"runtime_id": runtime_id, "parts": listed}
+        self.runtimes[runtime_id] = self.runtime
+
+    def publish_client(self, version: str, data: bytes) -> None:
+        """A client build: served under /dl/client/ and named by the channel manifest and by every runtime manifest."""
+        self.files[f"client/client-{version}.tar"] = data
+        self.client = {"version": version, "sha256": sha256_hex(data), "size": len(data)}
 
     def mint_entitlement(self, installation_id: str, **overrides) -> str:
         now = int(self.now())
-        claims = {"iss": "https://theodoreand.ai", "aud": "theodore-engine", "sub": "user-test-1", "iid": installation_id,
+        claims = {"iss": "https://theodoreand.ai", "aud": "theodore-engine", "sub": "11111111-1111-4111-8111-111111111111", "iid": installation_id,
                   "gen": self.installations.get(installation_id, {}).get("gen", 1), "plan": self.plan, "feat": list(self.features),
-                  "chan": self.channel_name, "min_ver": self.min_version or "0.0.0", "iat": now, "nbf": now - 60,
+                  "chan": self.channel_name, "min_ver": self.min_version, "iat": now, "nbf": now - 60,
                   "rfa": now + 12 * 3600, "exp": now + self.grace_seconds, "jti": uuid.uuid4().hex}
         claims.update(overrides)
         header = {"alg": "EdDSA", "typ": "theodore-ent+jwt", "kid": self.ENTITLEMENT_KID}
@@ -184,7 +248,7 @@ class FakeApi:
         return signing_input + "." + b64u(sign(self.entitlement_seed, signing_input.encode("ascii")))
 
     def signed(self, manifest: dict) -> dict:
-        text = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        text = canonical_json(manifest)       # the signature covers these exact bytes; the client parses them afterwards
         return {"manifest": text, "signature": b64u(sign(self.manifest_seed, text.encode("utf-8"))), "kid": self.MANIFEST_KID}
 
     def manifest_public_key(self) -> str:
@@ -210,7 +274,7 @@ class FakeApi:
         self._send(h, 400, {"error": code, "error_description": code.replace("_", " ")})
 
     def _bundle(self, meta: dict) -> dict:
-        installation_id = "inst-" + uuid.uuid4().hex[:12]
+        installation_id = str(uuid.uuid4())
         secret = "sec-" + uuid.uuid4().hex + uuid.uuid4().hex
         self.installations[installation_id] = {"secret": secret, "revoked": False, "gen": 1, "meta": meta}
         return {"installation_id": installation_id, "installation_secret": secret, "entitlement_token": self.mint_entitlement(installation_id)}
@@ -236,11 +300,20 @@ class FakeApi:
         self._error(h, 401, "unauthenticated")
         return None
 
-    def _channel_manifest(self) -> dict:
-        return {"channel": self.channel_name, "engine": self.engine, "client": self.client, "shim_min": self.shim_min,
+    def _channel_manifest(self, platform: str, arch: str) -> dict:
+        return {"schema": "theodore-channel-manifest@1", "channel": self.channel_name, "platform": platform, "arch": arch,
+                "engine": self.engine, "client": {k: self.client[k] for k in ("version", "sha256")}, "shim_min": self.shim_min,
                 "guides": {"deck-design": self.guide_version}, "packs": [{k: p[k] for k in ("id", "version", "sha256")} | {"size": p["size_bytes"]} for p in self.packs],
-                "kill": self.kill, "kill_message": self.kill_message, "min_version": self.min_version, "tools": self.tools,
-                "server_time": int(self.now())}
+                "kill": self.kill, "kill_message": self.kill_message or None, "min_version": self.min_version,
+                "server_time": iso(self.now())}
+
+    def _runtime_manifest(self, runtime: dict, platform: str, arch: str) -> dict:
+        parts = list(runtime["parts"])
+        if self.client.get("sha256"):
+            parts.append({"part": "client", "version": self.client["version"], "url": f"{self.base}/dl/client/client-{self.client['version']}.tar",
+                          "sha256": self.client["sha256"], "size": self.client.get("size", 1)})
+        return {"schema": "theodore-runtime-manifest@1", "runtime_id": runtime["runtime_id"], "platform": platform, "arch": arch,
+                "parts": parts, "server_time": iso(self.now())}
 
     def _handle(self, h, method: str) -> None:
         url = urlparse(h.path)
@@ -270,6 +343,12 @@ class FakeApi:
             content = self.files.get(key)
             if key in self.dl_status:
                 return self._send(h, self.dl_status[key], b"refused", content_type="text/plain")
+            if self.dl_delay:
+                self.lock.release()
+                try:
+                    time.sleep(self.dl_delay)
+                finally:
+                    self.lock.acquire()
             if content is None:
                 return self._send(h, 404, b"not found", content_type="text/plain")
             data = content if isinstance(content, bytes) else Path(content).read_bytes()
@@ -279,15 +358,22 @@ class FakeApi:
         route = seg[1:]
         if route == ["keys"]:
             return self._send(h, 200, {"keys": [
-                {"kty": "OKP", "crv": "Ed25519", "kid": self.ENTITLEMENT_KID, "use": "entitlement", "x": b64u(public_key(self.entitlement_seed))},
-                {"kty": "OKP", "crv": "Ed25519", "kid": self.MANIFEST_KID, "use": "manifest", "x": self.manifest_public_key()}]})
+                {"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": self.ENTITLEMENT_KID, "use": "sig", "purpose": "entitlement", "x": b64u(public_key(self.entitlement_seed))},
+                {"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": self.MANIFEST_KID, "use": "sig", "purpose": "manifest", "x": self.manifest_public_key()}]})
         if route == ["runtime", "manifest"] and method == "GET":
-            if not self.runtime:
-                return self._error(h, 503, "service_disabled")
-            return self._send(h, 200, self.signed({**self.runtime, "platform": query.get("platform"), "arch": query.get("arch"),
-                                                   "server_time": int(self.now())}))
+            runtime = self.runtimes.get(query["runtime_id"]) if query.get("runtime_id") else self.runtime
+            if not runtime or query.get("platform") not in ("darwin", "win32", "linux") or query.get("arch") not in ("arm64", "x64"):
+                return self._error(h, 404, "not_found")
+            return self._send(h, 200, self.signed(self._runtime_manifest(runtime, query["platform"], query["arch"])))
+        if route[:1] == ["device"] and method == "POST":
+            problem = {"code": _check(body, {**DEVICE_METADATA, "client_id": lambda v: v == "theodore-client"}, {"engine_version": _semver}),
+                       "token": _check(body, {"device_code": _text(32, 128)}),
+                       "activate": _check(body, {**DEVICE_METADATA, "code": _text(8, 16)}, {"engine_version": _semver})}.get(route[-1], "no such route")
+            if problem:
+                return self._send(h, 400, {"error": "invalid_request", "error_description": problem})
         if route == ["device", "code"] and method == "POST":
-            device_code, user_code = "dc-" + uuid.uuid4().hex, "WXYZ-" + uuid.uuid4().hex[:4].upper()
+            device_code = "dc-" + uuid.uuid4().hex
+            user_code = "WXYZ-" + "".join(CODE_ALPHABET[b % 32] for b in os.urandom(4))
             self.devices[device_code] = {"user_code": user_code, "status": "pending", "meta": body}
             return self._send(h, 200, {"device_code": device_code, "user_code": user_code, "verification_uri": "https://theodoreand.ai/device",
                                        "verification_uri_complete": f"https://theodoreand.ai/device?code={user_code}", "expires_in": 900, "interval": 5})
@@ -304,7 +390,7 @@ class FakeApi:
             device["status"] = "consumed"
             return self._send(h, 200, self._bundle(device["meta"]))
         if route == ["device", "activate"] and method == "POST":
-            entry = self.activation_codes.get(body.get("code"))
+            entry = self.activation_codes.get(normalize_code(body.get("code")))
             if not entry or entry["used"]:
                 return self._device_error(h, "invalid_grant")
             entry["used"] = True
@@ -314,11 +400,15 @@ class FakeApi:
         if installation_id is None:
             return None
         if route == ["licence", "refresh"] and method == "POST":
+            problem = _check(body, {}, {"engine_version": _semver, "client_version": _semver, "plugin_version": _semver, "host": _slug})
+            if problem:
+                return self._error(h, 422, "validation_failed", problem)
             self.refreshes += 1
             latest = (self.engine or {}).get("version")
-            return self._send(h, 200, {"entitlement_token": self.mint_entitlement(installation_id), "server_time": int(self.now()),
+            withdrawn = body.get("engine_version") in ((self.engine or {}).get("revoked") or [])
+            return self._send(h, 200, {"entitlement_token": self.mint_entitlement(installation_id), "server_time": iso(self.now()),
                                        "release": {"channel": self.channel_name, "latest_version": latest, "min_version": self.min_version,
-                                                   "update_required": False, "kill": self.kill}})
+                                                   "update_required": withdrawn, "kill": self.kill, "kill_message": self.kill_message or None}})
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):
             skill, section = route[1], route[2] if len(route) == 3 else ""
             if skill not in self.features:
@@ -338,39 +428,58 @@ class FakeApi:
             etag = '"' + sha256_hex((text + str(index)).encode("utf-8"))[:16] + '"'
             if h.headers.get("If-None-Match") == etag:
                 return self._send(h, 304, None, {"ETag": etag})
-            return self._send(h, 200, parts[index - 1].encode("utf-8"), {"ETag": etag, "X-Theodore-Parts": str(len(parts)),
-                                                                          "X-Theodore-Guide-Version": self.guide_version},
+            return self._send(h, 200, parts[index - 1].encode("utf-8"), {"etag": etag, "x-theodore-parts": str(len(parts)), "x-theodore-part": str(index),
+                                                                          "x-theodore-guide-version": self.guide_version},
                               content_type="text/markdown; charset=utf-8")
         if route == ["reports"] and method == "POST":
+            problem = _check(body, {"client_report_id": lambda v: isinstance(v, str) and bool(re.match(r"^[A-Za-z0-9._:-]{8,64}$", v)),
+                                    "kind": lambda v: v in ("bug", "feedback"), "origin": lambda v: v in ("automatic", "user_requested"),
+                                    "title": _text(3, 160), "summary": _text(1, 4000),
+                                    "environment": lambda v: _check(v, {"os": _text(1, 64)}, {"arch": lambda a: a in ("arm64", "x64"), "host": _slug,
+                                                                         "engine_version": _semver, "client_version": _semver, "plugin_version": _semver}) is None},
+                             {"details": lambda v: _check(v, {}, {"verb": _text(0, 64), "error_code": _text(0, 64), "message": _text(0, 4000),
+                                                                   "steps": lambda x: isinstance(x, list) and len(x) <= 20}) is None})
+            if problem:
+                return self._error(h, 422, "validation_failed", problem)
             if body.get("origin") == "automatic" and not self.auto_reports:
                 return self._error(h, 403, "auto_reports_disabled")
             for existing in self.reports:
                 if existing["client_report_id"] == body.get("client_report_id"):
                     return self._send(h, 201, {"id": existing["id"], "ref": existing["ref"], "status": "new"})
-            record = {**body, "id": uuid.uuid4().hex, "ref": f"R-{len(self.reports) + 1:04d}", "installation_id": installation_id}
+            record = {**body, "id": str(uuid.uuid4()), "ref": "TR-" + f"{len(self.reports) + 1:06d}".translate(str.maketrans("", "")), "installation_id": installation_id}
             self.reports.append(record)
             return self._send(h, 201, {"id": record["id"], "ref": record["ref"], "status": "new"})
         if route == ["preferences"] and method == "GET":
-            return self._send(h, 200, {"preferences": self.preferences})
+            return self._send(h, 200, {"preferences": self.preferences, "rev": self.prefs_rev})
         if route == ["preferences"] and method == "POST":
-            text = str(body.get("text") or "")
-            if not text or len(text) > 280 or "\n" in text:
-                return self._error(h, 422, "validation_failed", "a preference is one line of at most 280 characters")
+            problem = _check(body, {"text": lambda v: isinstance(v, str) and 1 <= len(v.strip()) <= 280 and not re.search(r"[\x00-\x1f\x7f]", v)}, {"scope": _slug})
+            if problem:
+                return self._error(h, 422, "validation_failed", problem)
             if len(self.preferences) >= 30:
                 return self._error(h, 409, "conflict", "at most 30 preferences")
-            record = {"id": "p" + uuid.uuid4().hex[:8], "text": text, "source": body.get("source", "agent"), "created_at": int(self.now() * 1000)}
+            stamp = iso(self.now())
+            record = {"id": str(uuid.uuid4()), "text": body["text"].strip(), "scope": body.get("scope", "all"), "source": "agent",
+                      "created_at": stamp, "updated_at": stamp}
             self.preferences.append(record)
-            return self._send(h, 201, record)
+            self.prefs_rev += 1
+            return self._send(h, 201, {"preference": record, "rev": self.prefs_rev})
         if route[:1] == ["preferences"] and method == "DELETE" and len(route) == 2:
+            if not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", route[1]):
+                return self._error(h, 422, "validation_failed", "the id is not a UUID")
             before = len(self.preferences)
             self.preferences = [p for p in self.preferences if p["id"] != route[1]]
+            self.prefs_rev += 1
             return self._error(h, 404, "not_found") if len(self.preferences) == before else self._send(h, 204)
         if route == ["releases", "manifest"] and method == "GET":
             if not self.engine:
-                return self._error(h, 503, "service_disabled")
-            return self._send(h, 200, self.signed(self._channel_manifest()))
+                return self._error(h, 404, "not_found")
+            if set(query) != {"platform", "arch"}:
+                return self._error(h, 422, "validation_failed", "the query takes platform and arch only")
+            return self._send(h, 200, self.signed(self._channel_manifest(query["platform"], query["arch"])))
         if route[:1] == ["releases"] and len(route) == 3 and route[2] == "engine" and method == "GET":
             data = self.engine_files.get(route[1])
+            if query.get("platform") not in ("darwin", "win32", "linux") or query.get("arch") not in ("arm64", "x64"):
+                return self._error(h, 422, "validation_failed", "platform and arch are required")
             if data is None:
                 return self._error(h, 404, "not_found")
             if self.engine_redirect:
@@ -392,6 +501,9 @@ class FakeApi:
                     self.lock.acquire()
             return self._send(h, 200, data, content_type="application/zip")
         if route == ["heartbeat"] and method == "POST":
+            problem = _check(body, {"engine_version": _semver, "plugin_version": _semver, "client_version": _semver, "host": _slug})
+            if problem:
+                return self._error(h, 422, "validation_failed", problem)
             self.heartbeats.append(body)
             return self._send(h, 204)
         return self._error(h, 404, "not_found")

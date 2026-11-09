@@ -1,0 +1,120 @@
+# Tests the plugin, the launcher, the client and the installer, and builds the plugin archives.
+#
+# No secrets and no publishing step. The archives (theodore-<version>.zip for the hosted marketplace.json,
+# theodore-plugin-<version>.tar.gz and latest.txt for the installer, client-<version>.tar for the launcher's
+# stage 1) are uploaded as workflow artifacts; putting them on the download host is the lead's manual step.
+# Everything runs against tests/fake_api.py: no Theodore service is contacted, and no account is needed.
+name: shim
+
+on:
+  push:
+    paths-ignore:
+      - "runtime/locks/**"
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "runtime/locks/**"
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: tests (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Generated files are in step
+        run: python tools/sync_launchers.py --check
+      # The fake runtime of the tests is a wrapper around this Python, so no bundle is needed here.
+      - name: Every suite
+        run: python -m unittest discover -s tests -v
+
+  windows:
+    name: tests (windows, real runtime bundle, cmd + PowerShell + Git Bash)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # A batch launcher cannot be given a shell script as its Python, so Windows tests install the real bundle.
+      - uses: actions/cache@v5
+        id: bundle
+        with:
+          path: out
+          key: runtime-win32-x64-${{ hashFiles('runtime/locks/**', 'runtime/build/build_bundle.py') }}
+      - name: Build the runtime bundle
+        if: steps.bundle.outputs.cache-hit != 'true'
+        run: python runtime/build/build_bundle.py --platform win32-x64 --out out --work "$RUNNER_TEMP/runtime-work"
+      - name: Inbox tools
+        shell: cmd
+        run: |
+          where curl.exe tar.exe certutil.exe findstr.exe
+          ver
+      - name: Every suite (launcher through cmd, PowerShell with AllSigned, Git Bash; a home path with a space)
+        env:
+          THEODORE_TEST_BUNDLE: ${{ github.workspace }}\out
+        run: python -m unittest discover -s tests -v
+
+  network:
+    name: corporate network (TLS inspection, authenticating proxy)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: A test certificate in the system store (what an inspecting proxy's root looks like once IT installs it)
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$RUNNER_TEMP/trusted-key.pem" -out "$RUNNER_TEMP/trusted-cert.pem" \
+            -days 2 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" -addext "basicConstraints=critical,CA:TRUE"
+          sudo cp "$RUNNER_TEMP/trusted-cert.pem" /usr/local/share/ca-certificates/theodore-test.crt
+          sudo update-ca-certificates
+      - name: An authenticating proxy
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tinyproxy
+          printf 'Port 8888\nListen 127.0.0.1\nTimeout 600\nBasicAuth tester secret\nAllow 127.0.0.1\n' > "$RUNNER_TEMP/tinyproxy.conf"
+          tinyproxy -c "$RUNNER_TEMP/tinyproxy.conf"
+          sleep 1
+      - name: Launcher and client behind both
+        env:
+          THEODORE_TEST_TRUSTED_CERT: ${{ runner.temp }}/trusted-cert.pem:${{ runner.temp }}/trusted-key.pem
+          THEODORE_TEST_AUTH_PROXY: http://127.0.0.1:8888
+          THEODORE_TEST_AUTH_PROXY_CREDENTIALS: tester:secret
+        run: python -m unittest -v tests.test_launcher.CorporateNetwork
+
+  archives:
+    name: plugin and client archives
+    runs-on: ubuntu-22.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python tools/build_plugin_archives.py --out dist/plugin
+          python runtime/build/build_client.py --out dist/client
+          sha256sum dist/plugin/* dist/client/* install/install.sh install/install.cmd | tee dist/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-archives
+          path: dist/
+          if-no-files-found: error
