@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import __version__, account, api, core, credentials, install
 from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PREFERENCE_MAX_CHARS,
-                       REPORT_MAX_BYTES, SKILLS)
+                       REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
 
 
@@ -99,7 +99,10 @@ def _guide_pptx(part: int) -> int:
     claims = account.require("pptx")
     install.require_runtime()
     first = install.current_engine() is None
-    install.check_updates(force=first, timeout=20.0 if first else 3.0)
+    wait = 15.0
+    if core.is_loopback_api() and os.environ.get("THEODORE_TEST_UPDATE_WAIT"):
+        wait = float(os.environ["THEODORE_TEST_UPDATE_WAIT"])
+    install.check_updates(force=first, wait=wait, timeout=20.0 if first else 3.0)
     version = install.current_engine()
     if not version:
         state = Job("engine-update").read()
@@ -228,27 +231,30 @@ def _os_name() -> str:
 
 def report(kind: str, title: str, details: str, verb: str | None, code: str | None, workspace: str | None,
            origin: str, dry_run: bool) -> int:
-    system, arch = core.platform_arch()
-    detail_block = {"message": scrub(details)[:8000]}
+    _system, arch = core.platform_arch()
+    detail_block = {"message": scrub(details)[:REPORT_MESSAGE_MAX]}
     if verb:
-        detail_block["verb"] = scrub(verb)[:80]
+        detail_block["verb"] = scrub(verb)[:64]
     if code:
-        detail_block["error_code"] = scrub(code)[:80]
+        detail_block["error_code"] = scrub(code)[:64]
+    engine_version = install.current_engine()
     if workspace:  # only the engine version that workspace is pinned to; never its path or content
-        pinned = core.read_json(Path(workspace) / ".pptx-state" / "theodore-engine.json").get("version")
-        if pinned:
-            detail_block["workspace_engine_version"] = pinned
+        engine_version = core.read_json(Path(workspace) / ".pptx-state" / "theodore-engine.json").get("version") or engine_version
+    title = scrub(title)[:REPORT_TITLE_MAX]
+    if len(title) < 3:
+        raise core.usage("--title needs at least three characters that are not a path, a file name or an address.")
+    environment = {"os": _os_name()[:64], "arch": arch, "host": core.host_name(), "client_version": __version__,
+                   "plugin_version": str(core.config().get("shim_version") or "0.0.0")}
+    if engine_version:
+        environment["engine_version"] = engine_version
     payload = {
         "client_report_id": uuid.uuid4().hex,
         "kind": kind,
         "origin": origin,
-        "title": scrub(title)[:200],
-        "summary": scrub(details)[:500],
+        "title": title,
+        "summary": (scrub(details) or "(no description)")[:500],
         "details": detail_block,
-        "environment": {"os": _os_name(), "arch": arch, "platform": system, "host": core.host_name(),
-                        "engine_version": install.current_engine() or "", "client_version": __version__,
-                        "plugin_version": str(core.config().get("shim_version") or ""),
-                        "runtime_id": core.read_text(core.home().runtime / "current.txt")},
+        "environment": environment,
     }
     if len(json.dumps(payload).encode("utf-8")) > REPORT_MAX_BYTES:
         raise core.usage("the report is larger than 64 KB.", "shorten --details and run the command again.")
@@ -278,8 +284,8 @@ def prefs(action: str, value: str | None) -> int:
         if len(text) > PREFERENCE_MAX_CHARS:
             raise core.usage(f"a preference is one line of at most {PREFERENCE_MAX_CHARS} characters ({len(text)} given).",
                              "shorten it and run the command again.")
-        _status, _headers, raw = _api("preferences_add", "preferences", body={"text": text, "source": "agent"})
-        answer = json.loads(raw.decode("utf-8") or "{}")
+        _status, _headers, raw = _api("preferences_add", "preferences", body={"text": text})
+        answer = json.loads(raw.decode("utf-8") or "{}").get("preference") or {}
         return core.emit(Status("OK", f"preference saved (id {answer.get('id', 'unknown')}).",
                                 "apply it now; it will also be included in later design instructions.",
                                 "I saved that as a lasting Theodore preference. You can edit it at theodoreand.ai/app/preferences."))
@@ -299,7 +305,7 @@ def setup_job() -> int:
         if credentials.load():
             try:
                 manifest = install.fetch_channel_manifest()
-                version = install.stage_engine(manifest["engine"], job)
+                version = install.stage_engine(install.engine_artifact(manifest), job)
                 if not install.current_engine():
                     install.activate_engine(version)
                 install.save_update_state(last_check=int(core.now()), latest=version, guides=manifest.get("guides") or {},
@@ -340,6 +346,7 @@ def _snapshot() -> dict:
         "runtime_ready": install.runtime_ready(rid) if rid else False,
         "setup_job": Job("setup").read(),
         "engine": install.current_engine(),
+        "engine_kind": core.read_json(install.engine_dir(install.current_engine() or "none") / ".theodore-engine.json").get("kind"),
         "engine_previous": engines.get("previous"),
         "engine_pinned": install.pins().get("engine"),
         "signed_in": bool(credentials.load()) or bool(token),
@@ -408,7 +415,7 @@ def doctor(as_json: bool) -> int:
         add("ok" if node_version.startswith("v") else "fail", "runtime", f"{snap['runtime_id']} (Node {node_version})")
     else:
         add("fail", "runtime", "not installed yet")
-    add("ok" if snap["engine"] else "fail", "engine", f"{snap['engine'] or 'not installed'}"
+    add("ok" if snap["engine"] else "fail", "engine", f"{snap['engine'] or 'not installed'}" + (f" ({snap['engine_kind']})" if snap["engine_kind"] else "")
         + (f" (previous {snap['engine_previous']})" if snap["engine_previous"] else "") + (f" (pinned to {snap['engine_pinned']})" if snap["engine_pinned"] else ""))
     if snap["signed_in"]:
         until = time.strftime("%Y-%m-%d", time.gmtime(snap["offline_until"])) if snap["offline_until"] else "unknown"
@@ -445,11 +452,21 @@ def doctor(as_json: bool) -> int:
     blocking = _blocking_status(snap)
     if blocking:
         return core.emit(blocking)
-    warnings = [n for l, n, _d in checks if l == "warn"]
-    note = "" if not warnings else f" Notes: {', '.join(warnings)}."
+    warned = {n for l, n, _d in checks if l == "warn"}
+    notes = []
+    if any(n.startswith("pack ") for n in warned):
+        notes.append("Its icon, flag, map and background libraries are still downloading in the background.")
+    if "renderer" in warned:
+        notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
+                     else "Slide previews need LibreOffice, which is not installed.")
+    if "service" in warned:
+        notes.append("The Theodore service could not be reached just now.")
+    if "rasteriser" in warned or "launcher" in warned:
+        notes.append("See the check list above for details.")
+    note = (" " + " ".join(notes)) if notes else ""
     return core.emit(Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
                             "start a new session if the Theodore skills are not listed yet, then ask for a deck.",
-                            f"Theodore is ready (engine {snap['engine']}).{' ' + note.strip() if note else ''} Start a new session and ask for a deck."))
+                            f"Theodore is ready (engine {snap['engine']}).{note} Start a new session and ask for a deck."))
 
 
 def version() -> int:
@@ -480,15 +497,9 @@ def update(action: str, value: str | None) -> int:
         core.write_json(core.home().state / "pins.json", record)
         return core.emit(Status("OK", "engine pin removed; updates resume at the next guide.", "nothing to do.", "Theodore will update itself again."))
     if action == "channel":
-        record = install.pins()
-        if value in (None, "", "default"):
-            record.pop("channel", None)
-        else:
-            record["channel"] = value
-        core.write_json(core.home().state / "pins.json", record)
-        install.save_update_state(last_check=0)
-        return core.emit(Status("OK", f"channel preference set to {value or 'default'}; it applies at the next guide if the account may use it.",
-                                "nothing to do.", f"Theodore will follow the {value or 'default'} channel."))
+        _token, claims = account.stored_token()
+        raise core.usage(f"the update channel belongs to the account, not to this computer (it is {claims.get('chan', 'unknown')} now).",
+                         "tell the user the channel is changed in their Theodore account at https://theodoreand.ai/app/plan, then continue.")
     account.require("pptx")
     install.require_runtime()
     current = install.current_engine()
@@ -544,11 +555,11 @@ def engine_update_job() -> int:
         return 78
 
 
-def client_update_job(version_: str, sha256: str) -> int:
+def client_update_job(version_: str, sha256: str, runtime_id: str | None = None) -> int:
     job = Job("client-update")
     job.begin("client")
     try:
-        install.update_client(version_, sha256)
+        install.update_client(version_, sha256, runtime_id or None)
         job.finish()
         return 0
     except Exception as exc:
@@ -707,8 +718,11 @@ def hosts(action: str, apply: bool) -> int:
         elif apply:
             lines.append(_claude_settings(remove=False))
         else:
-            lines.append(f"offer: turn on automatic plugin updates for the Theodore marketplace and allow {home.launcher()} without a prompt, "
-                         f"in {_claude_settings_path()}. Ask the user; if they agree run: {quoted_launcher()} hosts settings --apply")
+            return core.emit(Status("OK", f"optional, not applied: Claude Code can update the Theodore plugin by itself and run {home.launcher()} "
+                                          f"without a permission prompt (two entries in {_claude_settings_path()}).",
+                                    f"ask the user whether they want that; only if they agree run: {quoted_launcher()} hosts settings --apply",
+                                    "Would you like Theodore's plugin to update itself and to run without asking permission each time? "
+                                    "That changes two entries in your Claude Code settings; uninstalling Theodore takes them back."))
     else:
         raise core.usage(f"unknown hosts action '{action}'.")
     for line in lines:
@@ -796,12 +810,23 @@ def uninstall(keep_hosts: bool) -> int:
     for cache in _render_cache_dirs():
         core.remove_tree(cache)
     root = home.root
+    # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
-        subprocess.Popen(["cmd", "/d", "/c", f'ping -n 3 127.0.0.1 >nul & rmdir /s /q "{root}"'],
+        removals = " & ".join(f'rmdir /s /q "{root / name}"' for name in core.OWNED)
+        subprocess.Popen(["cmd", "/d", "/c", f'ping -n 3 127.0.0.1 >nul & {removals} & rmdir "{root}"'],
                          creationflags=0x00000008 | 0x08000000, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        kept = [p.name for p in root.iterdir() if p.name not in core.OWNED] if root.exists() else []
     else:
-        core.remove_tree(root)
-    print(f"THEODORE OK: Theodore was removed from this computer ({root} deleted, sign-in removed).\n"
+        for name in core.OWNED:
+            core.remove_tree(root / name)
+        kept = sorted(p.name for p in root.iterdir()) if root.exists() else []
+        if not kept:
+            try:
+                root.rmdir()
+            except OSError:
+                pass
+    what = f"its folders in {root} were deleted; {len(kept)} other item(s) there were not Theodore's and were left alone" if kept else f"{root} was deleted"
+    print(f"THEODORE OK: Theodore was removed from this computer ({what}; sign-in removed).\n"
           "NEXT: nothing to do. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
           "TELL THE USER: Theodore is uninstalled. Your decks and workspaces were not touched.", flush=True)
     return 0

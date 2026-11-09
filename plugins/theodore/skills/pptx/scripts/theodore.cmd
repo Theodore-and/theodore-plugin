@@ -390,9 +390,9 @@ echo TELL THE USER: A Theodore download arrived damaged. I am trying again.
 exit /b 68
 
 :uninstall_bare
-echo THEODORE OK: Theodore was not fully installed; its folder was removed.
+echo THEODORE OK: Theodore was not fully installed; its folders were removed.
 echo NEXT: nothing to do.
 echo TELL THE USER: Theodore is uninstalled.
-if exist "%HOME_DIR%\bin\launcher.json" rmdir /s /q "%HOME_DIR%" >nul 2>&1 & exit /b 0
-if exist "%HOME_DIR%\state" rmdir /s /q "%HOME_DIR%" >nul 2>&1 & exit /b 0
-exit /b 0
+rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this
+rem file may be inside one of them.
+(for %%D in (client runtime engines packs tools state logs staging plugin bin) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & exit /b 0

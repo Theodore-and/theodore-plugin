@@ -11,15 +11,19 @@ import sys
 import time
 
 from . import __version__, api, core, credentials, ed25519
-from .contract import (ACTIVATION_CODE_PATTERN, DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, ENTITLEMENT_AUD,
+from .contract import (ACTIVATION_CODE_PATTERN, DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, DEVICE_CLIENT_ID, ENTITLEMENT_AUD,
                        ENTITLEMENT_ENV, ENTITLEMENT_FILE_KEY)
 from .core import Status, quoted_launcher
 
 
 # --- signed documents --------------------------------------------------------------------------------------------------
 
-def verify_signed(envelope: dict, what: str) -> dict:
-    """Check {manifest, signature, kid} against the manifest keys pinned in launcher.json; return the manifest."""
+def verify_signed(envelope: dict, what: str, schema: str | None = None) -> dict:
+    """Check {manifest, signature, kid} against the manifest keys pinned in launcher.json; return the manifest.
+
+    The signature covers the bytes of the `manifest` string exactly as received; it is parsed only afterwards.
+    `schema` pins the kind of manifest, so one signed for another purpose cannot stand in for it.
+    """
     manifest, signature, kid = envelope.get("manifest"), envelope.get("signature"), envelope.get("kid")
     keys = core.manifest_keys()
     if manifest is None or not signature or kid not in keys:
@@ -40,6 +44,11 @@ def verify_signed(envelope: dict, what: str) -> dict:
             parsed = json.loads(manifest)
         except ValueError:
             raise api.setup_failed("HASH_MISMATCH", f"the {what} is not valid JSON") from None
+    if schema:
+        system, arch = core.platform_arch()
+        if not isinstance(parsed, dict) or parsed.get("schema") != schema or \
+                (parsed.get("platform"), parsed.get("arch")) != (system, arch):
+            raise api.setup_failed("HASH_MISMATCH", f"the {what} is signed but is not the document asked for")
     return parsed
 
 
@@ -113,8 +122,12 @@ def refresh(timeout: float = 20.0) -> dict:
     cred = credentials.load()
     if not cred:
         raise api.sign_in_required()
+    engine = core.read_json(core.home().engines / "current.json").get("version")
+    body = {"client_version": __version__, "plugin_version": str(core.config().get("shim_version") or "0.0.0"), "host": core.host_name()}
+    if engine:
+        body["engine_version"] = engine
     try:
-        answer = api.call_json("licence_refresh", bearer=cred["installation_secret"], body={}, timeout=timeout)
+        answer = api.call_json("licence_refresh", bearer=cred["installation_secret"], body=body, timeout=timeout)
     except api.ApiError as error:
         if error.code in DELETE_TOKEN_ON or error.http_status in (401, 403):
             delete_token()
@@ -124,7 +137,14 @@ def refresh(timeout: float = 20.0) -> dict:
     token = answer.get("entitlement_token")
     if not token:
         raise core.internal("the licence refresh answer has no entitlement token.")
-    save_token(token, answer.get("release"))
+    release = answer.get("release") or {}
+    save_token(token, release)
+    if release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine):
+        # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
+        update_path = core.home().state / "update.json"
+        state = core.read_json(update_path)
+        state["last_check"] = 0
+        core.write_json(update_path, state)
     return answer
 
 
@@ -195,7 +215,7 @@ def login_start(reason: str = "this computer is not signed in to Theodore.") -> 
     pending = core.read_json(pending_path)
     fresh = False
     if not pending.get("device_code") or core.now() >= float(pending.get("expires_at") or 0):
-        body = {"client_id": "theodore-client", **device_metadata()}
+        body = {"client_id": DEVICE_CLIENT_ID, **device_metadata()}
         try:
             answer = api.call_json("device_code", body=body)
         except api.NetworkError as error:

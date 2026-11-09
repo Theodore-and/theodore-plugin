@@ -64,17 +64,23 @@ def platform_arch() -> tuple[str, str]:
 
 def host_name() -> str:
     """The assistant that called us, as far as the environment says (sent as `host`)."""
-    explicit = os.environ.get("THEODORE_HOST")
+    import re
+    explicit = re.sub(r"[^a-z0-9-]", "", (os.environ.get("THEODORE_HOST") or "").lower())[:32].lstrip("-")
     if explicit:
-        return explicit[:40]
+        return explicit
     if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
         return "claude-code"
     if os.environ.get("CODEX_HOME") or os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_MANAGED_BY_NPM"):
         return "codex"
-    return "unknown"
+    return "other"
 
 
 # --- data directory ------------------------------------------------------------------------------------------------------
+
+# The only things Theodore creates, manages or removes inside its data directory. The directory itself may exist
+# before Theodore and may hold other folders: those are never read, changed or deleted.
+OWNED = ("bin", "client", "runtime", "engines", "packs", "tools", "state", "logs", "staging", "plugin")
+
 
 class Home:
     def __init__(self, root: Path | None = None):

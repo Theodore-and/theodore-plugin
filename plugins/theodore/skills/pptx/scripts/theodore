@@ -193,8 +193,10 @@ fi
 # --- not installed yet ----------------------------------------------------------------------------------------------
 if [ "${1:-}" = "uninstall" ]; then
   [ -f "$B/pid" ] && kill "$(cat "$B/pid" 2>/dev/null)" 2>/dev/null
-  if [ -f "$HOME_DIR/bin/launcher.json" ] || [ -d "$HOME_DIR/state" ]; then rm -rf "$HOME_DIR"; fi
-  status OK 0 "Theodore was not fully installed; its folder $HOME_DIR was removed." "nothing to do." "Theodore is uninstalled."
+  # Only Theodore's own subfolders: the folder may hold things that are not Theodore's.
+  for d in bin client runtime engines packs tools state logs staging plugin; do rm -rf "${HOME_DIR:?}/$d"; done
+  rmdir "$HOME_DIR" 2>/dev/null
+  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR were removed." "nothing to do." "Theodore is uninstalled."
 fi
 
 if [ -z "$PLAT" ] || [ -z "$ARCH" ]; then
@@ -258,7 +260,12 @@ if [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data
 fi
 
 mkdir -p "$HOME_DIR/logs" 2>/dev/null
+# This process stands in as "the job" until the job has written its own id, so a second call made in that
+# instant sees a running job instead of starting another.
+echo $$ > "$B/pid"
 ( nohup sh "$LAUNCHER" __bootstrap >>"$HOME_DIR/logs/bootstrap.log" 2>&1 </dev/null & ) 2>/dev/null
+n=0
+while [ "$(cat "$B/pid" 2>/dev/null)" = "$$" ] && [ "$n" -lt 3 ]; do sleep 1; n=$((n + 1)); done
 
 waited=0
 limit=$(num "${THEODORE_BOOTSTRAP_WAIT:-}" 20)

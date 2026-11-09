@@ -57,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--pin")
     mode.add_argument("--unpin", action="store_true")
     mode.add_argument("--engine-job", action="store_true")
-    mode.add_argument("--client-job", nargs=2)
+    mode.add_argument("--client-job", nargs=3)
     rp = sub.add_parser("report", add_help=False)
     rp.add_argument("--kind", choices=("bug", "feedback"), required=True)
     rp.add_argument("--title", required=True)

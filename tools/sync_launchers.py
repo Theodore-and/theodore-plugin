@@ -7,6 +7,16 @@
    (hosts copy single skill folders, so each skill carries its own launcher).
 
 `--check` changes nothing and exits 1 when something is out of step (tests and CI use it).
+
+At deploy, one command points a checkout at an environment and stamps the manifest keys:
+
+    python3 tools/sync_launchers.py --env staging|production --keys <jwks.json>
+
+`--env` writes api_base, dl_base and marketplace_url for that environment (and with them the stage-1 URLs).
+`--keys` takes the key set as GET /v1/keys serves it ({"keys": [{"kid", "x", "purpose", ...}]}) and writes every
+key whose purpose is "manifest" as manifest_key_<n>_kid / manifest_key_<n>_x; a file with no manifest key is
+refused. The repository itself carries the production addresses and a placeholder key: stamp a staging build
+in a scratch checkout, then build the archives from it (tools/build_plugin_archives.py).
 """
 
 from __future__ import annotations
@@ -35,10 +45,43 @@ def runtime_id() -> str:
     return digest.hexdigest()[:16]
 
 
-def stamped_launcher_json() -> str:
+ORIGINS = {     # the contract's origins (x-theodore.origins in the backend's openapi.json)
+    "production": {"public": "https://theodoreand.ai", "api": "https://api.theodoreand.ai", "dl": "https://dl.theodoreand.ai"},
+    "staging": {"public": "https://staging.theodoreand.ai", "api": "https://staging-api.theodoreand.ai", "dl": "https://staging-dl.theodoreand.ai"},
+}
+
+
+def apply_env(data: dict, env: str) -> dict:
+    origins = ORIGINS[env]
+    data["api_base"], data["dl_base"] = origins["api"], origins["dl"]
+    data["marketplace_url"] = origins["public"] + "/marketplace.json"
+    return data
+
+
+def apply_keys(data: dict, jwks: dict) -> dict:
+    keys = [k for k in jwks.get("keys", []) if k.get("purpose") == "manifest" and k.get("kid") and k.get("x")]
+    if not keys:
+        raise SystemExit("the key file holds no key with purpose \"manifest\"")
+    for name in [k for k in data if k.startswith("manifest_key_")]:
+        del data[name]
+    for index, key in enumerate(keys, 1):
+        if len(key["x"]) != 43:
+            raise SystemExit(f"key {key['kid']}: x is not a 32-byte Ed25519 public key in base64url")
+        data[f"manifest_key_{index}_kid"] = key["kid"]
+        data[f"manifest_key_{index}_x"] = key["x"]
+    return data
+
+
+def stamped_launcher_json(env: str | None = None, jwks: dict | None = None) -> str:
     """launcher.json stays flat (one "key": value per line) because sh and cmd read it with sed and findstr."""
     path = SOURCE / "launcher.json"
     data = json.loads(path.read_text(encoding="utf-8"))
+    if env:
+        apply_env(data, env)
+    if jwks:
+        apply_keys(data, jwks)
+    for name in [k for k in data if k.startswith("stage1_")]:      # rebuilt below, in one place at the end
+        del data[name]
     with tempfile.TemporaryDirectory() as tmp:
         archive = build_client.build(Path(tmp))
         sha, size = hashlib.sha256(archive.read_bytes()).hexdigest(), archive.stat().st_size
@@ -61,9 +104,16 @@ def stamped_launcher_json() -> str:
 
 
 def main() -> int:
-    check = "--check" in sys.argv[1:]
+    import argparse
+    parser = argparse.ArgumentParser(description="Stamp launcher.json and refresh the generated launcher copies.")
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--env", choices=sorted(ORIGINS))
+    parser.add_argument("--keys", help="key set as GET /v1/keys serves it")
+    args = parser.parse_args()
+    check = args.check
     problems = []
-    wanted = stamped_launcher_json()
+    jwks = json.loads(Path(args.keys).read_text(encoding="utf-8")) if args.keys else None
+    wanted = stamped_launcher_json(args.env, jwks)
     target = SOURCE / "launcher.json"
     if target.read_text(encoding="utf-8") != wanted:
         problems.append("launcher.json pins are stale")

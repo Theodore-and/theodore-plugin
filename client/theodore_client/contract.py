@@ -35,6 +35,7 @@ ROUTES = {
     "device_token": ("POST", "/v1/device/token", False),
     "device_activate": ("POST", "/v1/device/activate", False),
     "licence_refresh": ("POST", "/v1/licence/refresh", True),
+    "installation_rotate": ("POST", "/v1/installation/rotate", True),
     "guide": ("GET", "/v1/guide/{skill}", True),
     "guide_section": ("GET", "/v1/guide/{skill}/{section}", True),
     "reports": ("POST", "/v1/reports", True),
@@ -65,6 +66,7 @@ API_ERRORS = {
     "validation_failed": (422, "USAGE"),
     "update_required": (426, "UPDATE_REQUIRED"),
     "rate_limited": (429, "RETRY"),
+    "internal_error": (500, "RETRY"),
     "service_disabled": (503, "RETRY"),
 }
 # Codes after which the stored entitlement token is deleted (backend section 6: "a 401 or 403 deletes it").
@@ -73,7 +75,8 @@ DELETE_TOKEN_ON = ("unauthenticated", "installation_revoked", "forbidden", "acco
 DELETE_CREDENTIAL_ON = ("unauthenticated", "installation_revoked")
 
 # Device endpoints answer in RFC 6749 form: {"error": ..., "error_description": ...}.
-DEVICE_ERRORS = ("authorization_pending", "slow_down", "access_denied", "expired_token", "invalid_grant")
+DEVICE_ERRORS = ("authorization_pending", "slow_down", "access_denied", "expired_token", "invalid_grant", "invalid_request")
+DEVICE_CLIENT_ID = "theodore-client"
 
 # --- entitlement token (backend design section 6) --------------------------------------------------------------------
 ENTITLEMENT_TYP = "theodore-ent+jwt"
@@ -91,7 +94,9 @@ UPDATE_CHECK_TIMEOUT_S = 3
 PREFERENCE_MAX_CHARS = 280
 PREFERENCE_MAX_COUNT = 30
 REPORT_MAX_BYTES = 64 * 1024
-ACTIVATION_CODE_PATTERN = r"^[A-Z0-9]{4}-[A-Z0-9]{4}$"
+# A one-time code as typed: the display form is XXXX-XXXX from the alphabet 0123456789ABCDEFGHJKMNPQRSTVWXYZ; the
+# server accepts any case and an optional hyphen, so the client only checks the rough shape before sending.
+ACTIVATION_CODE_PATTERN = r"^[0-9A-Za-z]{4}[- ]?[0-9A-Za-z]{4}$"
 PACK_ORDER = ("icons", "flags", "backgrounds", "maps")
 ENGINE_KEEP_MAX = 4
 ENGINE_KEEP_USED_DAYS = 14
@@ -102,5 +107,26 @@ PLATFORMS = ("darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm6
 RUNTIME_PARTS = ("python", "wheels", "node", "node_modules")
 
 # Response headers of the guide route.
-HEADER_GUIDE_PARTS = "X-Theodore-Parts"
-HEADER_GUIDE_VERSION = "X-Theodore-Guide-Version"
+HEADER_GUIDE_PARTS = "x-theodore-parts"
+HEADER_GUIDE_PART = "x-theodore-part"
+HEADER_GUIDE_VERSION = "x-theodore-guide-version"
+
+# Signed manifests: `manifest` is canonical JSON text; the signature covers its UTF-8 bytes.
+CHANNEL_MANIFEST_SCHEMA = "theodore-channel-manifest@1"
+RUNTIME_MANIFEST_SCHEMA = "theodore-runtime-manifest@1"
+KNOWN_HOSTS = ("claude-code", "codex", "claude-desktop", "claude-web", "cowork", "chatgpt", "other")
+SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
+REPORT_TITLE_MAX, REPORT_SUMMARY_MAX, REPORT_MESSAGE_MAX = 160, 4000, 4000
+
+# What the engine prints (one JSON object, exit code 1) when its own licence check refuses, and the status each
+# becomes. The engine checks offline; the client turns the refusal into something the assistant can act on.
+ENGINE_REFUSALS = {
+    "entitlement_missing": "SIGN_IN_REQUIRED",
+    "entitlement_malformed": "NO_ENTITLEMENT",
+    "entitlement_untrusted": "NO_ENTITLEMENT",
+    "entitlement_wrong_audience": "NO_ENTITLEMENT",
+    "entitlement_feature_missing": "NO_ENTITLEMENT",
+    "entitlement_expired": "OFFLINE",
+    "entitlement_not_yet_valid": "NO_ENTITLEMENT",
+    "entitlement_clock_rollback": "NO_ENTITLEMENT",
+}
