@@ -627,6 +627,49 @@ class Packs(ClientCase):
         self.api.pack_delay = 0
         self.box.wait_jobs(90)
 
+    def test_each_pack_is_waited_for_by_its_documented_helper_and_doubt_waits_for_all(self):
+        self.sign_in()
+        self.api.pack_delay = 6.0                                   # nothing has arrived while the checks below run
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        quick = {"THEODORE_TEST_PACK_WAIT": "0.2"}
+        documented = {"icon": "await safeIcon('rocket')", "flag": "const png = await flagToBase64Png('ae', 64);",
+                      "map": "slide.addMap({ country: 'AE' });", "background": "const bg = backgroundToBase64('paper');"}
+        for index, (noun, line) in enumerate(documented.items()):
+            workspace = self.box.tmp / f"ws {noun}"
+            workspace.mkdir()
+            self.client("pptx", "start", str(workspace))
+            (workspace / "deck.js").write_text(f"deck.slide(async (slide) => {{ {line} }});\n")
+            first, _n, _t = self.assertStatus(self.client("pptx", "apply", str(workspace), env=quick), "SETUP_IN_PROGRESS", 67)
+            self.assertIn(f"the {noun} pack is still downloading", first)
+        plain = self.box.tmp / "ws plain"                           # a deck that calls no pack helper builds at once
+        plain.mkdir()
+        self.client("pptx", "start", str(plain))
+        (plain / "deck.js").write_text("const rows = data.map((r) => r.total); deck.slide((s) => { s.background = { color: 'FFFFFF' }; });\n")
+        self.assertEqual(self.client("pptx", "apply", str(plain), env=quick).returncode, 0)
+        unknown = self.box.tmp / "ws unknown"                       # no deck.js to read: the client cannot tell, so it waits for all
+        unknown.mkdir()
+        self.client("pptx", "start", str(unknown))
+        first, _n, _t = self.assertStatus(self.client("pptx", "apply", str(unknown), env=quick), "SETUP_IN_PROGRESS", 67)
+        self.assertIn("the icon pack is still downloading", first)
+        split = self.box.tmp / "ws split"                           # the helper call sits in a second script beside deck.js
+        split.mkdir()
+        self.client("pptx", "start", str(split))
+        (split / "deck.js").write_text("require('./slides.js');\n")
+        (split / "slides.js").write_text("module.exports = () => listBackgrounds();\n")
+        first, _n, _t = self.assertStatus(self.client("pptx", "apply", str(split), env=quick), "SETUP_IN_PROGRESS", 67)
+        self.assertIn("the background pack is still downloading", first)
+        sections = self.box.tmp / "ws sections"                     # a deck built in sections: one deck.js per section folder
+        sections.mkdir()
+        self.client("pptx", "start", str(sections))
+        (sections / "sections" / "market").mkdir(parents=True)
+        (sections / "sections" / "market" / "deck.js").write_text("deck.slide((s) => { s.addMap({ country: 'SA' }); });\n")
+        first, _n, _t = self.assertStatus(self.client("pptx", "apply", str(sections), env=quick), "SETUP_IN_PROGRESS", 67)
+        self.assertIn("the map pack is still downloading", first)
+        self.assertEqual(self.client("pptx", "version", env=quick).returncode, 0, "a call that is no build never waits")
+        self.api.pack_delay = 0
+        self.box.wait_jobs(120)
+        self.assertEqual(self.client("pptx", "apply", str(unknown), env=quick).returncode, 0)
+
     def test_single_pack_install_and_unknown_pack(self):
         self.sign_in()
         self.client("setup", "--job")
@@ -875,6 +918,24 @@ class Internals(unittest.TestCase):
             self.assertFalse(ed25519.verify(pub_b, msg_b + b"x", sig_b))
             self.assertFalse(ed25519.verify(pub_b, msg_b, sig_b[:-1] + bytes([sig_b[-1] ^ 1])))
         self.assertFalse(ed25519.verify(b"\x00" * 31, b"", b"\x00" * 64))
+
+    def test_pack_detection_for_every_documented_helper(self):
+        from theodore_client.install import PACK_HELPERS, packs_in_script
+        self.assertEqual(sorted(PACK_HELPERS), ["backgrounds", "flags", "icons", "maps"])
+        for name in ("safeIcon", "iconToBase64Png", "getIconMeta", "resolveIconId", "getCatalog"):
+            self.assertIn("icons", packs_in_script(f"const x = await {name}('rocket');"), name)
+        for name in ("flagToBase64Png", "getFlagMeta", "getFlagCatalog"):
+            self.assertEqual(packs_in_script(f"const x = await {name}('ae');"), {"flags"}, name)
+        self.assertEqual(packs_in_script("slide.addMap({ country: 'AE' });"), {"maps"})
+        for name in ("backgroundToBase64", "getBackgroundMeta", "listBackgrounds"):
+            self.assertEqual(packs_in_script(f"const x = {name} ('paper');"), {"backgrounds"}, name)
+        # a helper the list does not know yet still counts when its name carries the pack's word
+        self.assertEqual(packs_in_script("const x = flagStrip(['ae', 'sa']);"), {"flags"})
+        self.assertEqual(packs_in_script("icons.renderIconGrid(slide);"), {"icons"})
+        # ordinary JavaScript is not a pack call
+        for plain in ("rows.map((r) => r.total)", "const seen = new Map();", "slide.background = { color: 'FFFFFF' };",
+                      "const flags = { draft: true }; if (flags.draft) {}", "const iconName = 'rocket';"):
+            self.assertEqual(packs_in_script(plain), set(), plain)
 
     def test_split_parts_gives_the_text_back(self):
         from theodore_client.commands import split_parts

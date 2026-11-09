@@ -783,24 +783,61 @@ def start_packs_job(manifest_packs: list[dict] | None = None) -> bool:
     return True
 
 
-# What a deck script must mention for a pack to count as "needed by this build" (a heuristic, on purpose loose).
-_PACK_HINTS = {"icons": r"[iI]con\(", "flags": r"[fF]lag\(", "maps": r"[A-Za-z]Map\(", "backgrounds": r"[A-Za-z]Background\(|backgrounds/"}
+# Which asset packs a build reaches for. The engine's documented helpers are named exactly; any other call whose
+# name carries the pack's word counts too, so a helper added later is still caught. Waiting once too often costs
+# seconds; a build that fails on a missing asset costs the user's trust, so every doubt resolves to "wait".
+PACK_HELPERS = {
+    "icons": ("safeIcon", "iconToBase64Png", "getIconMeta", "resolveIconId", "getCatalog"),
+    "flags": ("flagToBase64Png", "getFlagMeta", "getFlagCatalog"),
+    "maps": ("addMap",),
+    "backgrounds": ("backgroundToBase64", "getBackgroundMeta", "listBackgrounds"),
+}
+_PACK_LOOSE = {"icons": r"\w*[iI]con\w*\(", "flags": r"\w*[fF]lag\w*\(", "maps": r"\b[a-z]\w*Map\w*\(", "backgrounds": r"\w*[bB]ackground\w*\("}
+
+
+def packs_in_script(text: str) -> set[str]:
+    """The packs a deck script calls into, judged from the helper names in its text."""
+    found = set()
+    for pack, names in PACK_HELPERS.items():
+        if re.search(r"\b(?:" + "|".join(names) + r")\s*\(", text) or re.search(_PACK_LOOSE[pack], text):
+            found.add(pack)
+    return found
+
+
+def packs_needed(args: list[str]) -> set[str] | None:
+    """The packs this engine call needs, or None when it is no build at all.
+
+    A build is a call that names an existing workspace. Its scripts are read for helper names: every script at the
+    top of the workspace, and every deck.js up to three folders down (a deck built in sections keeps one per
+    section). When no deck.js can be read the client cannot tell, and answers with every pack.
+    """
+    needed: set[str] = set()
+    if args and args[0] in PACK_HELPERS:        # a pack named as the verb, for example a catalogue search
+        needed.add(args[0])
+    spaces = _workspaces(args)
+    if not spaces:
+        return needed or None
+    for workspace in spaces:
+        try:
+            scripts = {p for p in workspace.iterdir() if p.is_file() and p.suffix in (".js", ".mjs", ".cjs")}
+            for pattern in ("deck.js", "*/deck.js", "*/*/deck.js", "*/*/*/deck.js"):
+                scripts |= {p for p in workspace.glob(pattern)
+                            if p.is_file() and not any(part.startswith(".") or part == "node_modules" for part in p.relative_to(workspace).parts)}
+            if not any(p.name == "deck.js" for p in scripts):
+                return set(PACK_ORDER)
+            for script in scripts:
+                needed |= packs_in_script(script.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            return set(PACK_ORDER)
+    return needed
 
 
 def wait_for_packs(args: list[str], wait: float = 25.0) -> None:
     """If this build reaches for a pack that is still arriving, wait for it; past `wait` seconds say so (67)."""
-    import re
-    needed = set()
-    if args and args[0] in _PACK_HINTS:
-        needed.add(args[0])
-    for workspace in _workspaces(args):
-        script = workspace / "deck.js"
-        try:
-            text = script.read_text(encoding="utf-8", errors="ignore") if script.is_file() else ""
-        except OSError:
-            text = ""
-        needed.update(pack for pack, pattern in _PACK_HINTS.items() if re.search(pattern, text))
-    needed = {p for p in needed if not pack_ready(p)}
+    wanted = packs_needed(args)
+    if not wanted:
+        return
+    needed = [p for p in PACK_ORDER if p in wanted and not pack_ready(p)]
     if not needed:
         return
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_PACK_WAIT"):
@@ -808,11 +845,11 @@ def wait_for_packs(args: list[str], wait: float = 25.0) -> None:
     start_packs_job()
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
-        needed = {p for p in needed if not pack_ready(p)}
+        needed = [p for p in needed if not pack_ready(p)]
         if not needed or not Job("packs").alive():
             break
         time.sleep(0.5)
-    needed = sorted(p for p in needed if not pack_ready(p))
+    needed = [p for p in needed if not pack_ready(p)]
     if needed:
         pack = needed[0]
         percent = int(packs_state().get(pack, {}).get("percent") or 0)
