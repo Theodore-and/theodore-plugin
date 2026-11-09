@@ -1,0 +1,145 @@
+"""Where the installation credential lives (design section 9).
+
+macOS: the login keychain through /usr/bin/security (no prompt when the Python path changes).
+Windows: a file protected with DPAPI for the current user.
+Elsewhere, and when the keychain cannot be used (for example over SSH): a 0600 file under state/.
+
+The credential is {"installation_id", "installation_secret"}. It is never printed or logged.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from . import core
+
+SERVICE = "ai.theodoreand.theodore"
+SECURITY = "/usr/bin/security"
+
+
+def _account() -> str:
+    # One item per data directory, so a second data directory (a test home) never collides with the real one.
+    return "installation-" + hashlib.sha256(str(core.home().root).encode("utf-8")).hexdigest()[:12]
+
+
+def _file() -> Path:
+    return core.home().state / "credentials"
+
+
+def _keychain_args() -> list[str]:
+    # Test seam: a keychain file of the test's own, honoured only when the API base is a loopback address.
+    path = os.environ.get("THEODORE_TEST_KEYCHAIN")
+    return [path] if path and core.is_loopback_api() else []
+
+
+def backend() -> str:
+    choice = os.environ.get("THEODORE_CREDENTIAL_STORE", "").lower()
+    if choice in ("file", "keychain", "dpapi"):
+        return choice
+    if sys.platform == "darwin" and os.path.exists(SECURITY):
+        return "keychain"
+    if core.IS_WINDOWS:
+        return "dpapi"
+    return "file"
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    source = Blob(len(data), ctypes.cast(ctypes.create_string_buffer(data, len(data)), ctypes.POINTER(ctypes.c_char)))
+    target = Blob()
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    func = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    if not func(ctypes.byref(source), None, None, None, None, 0x01, ctypes.byref(target)):  # CRYPTPROTECT_UI_FORBIDDEN
+        raise OSError("DPAPI call failed")
+    try:
+        return ctypes.string_at(target.pbData, target.cbData)
+    finally:
+        kernel32.LocalFree(target.pbData)
+
+
+def _keychain_store(secret: str) -> bool:
+    # The command goes through stdin (`security -i`), so the secret never appears in a process argument list.
+    # The value is base64url text, so it needs no quoting inside the command line.
+    encoded = base64.urlsafe_b64encode(secret.encode("utf-8")).decode("ascii")
+    command = f'add-generic-password -a "{_account()}" -s "{SERVICE}" -l "Theodore" -w "{encoded}" -U'
+    for extra in _keychain_args():
+        command += f' "{extra}"'
+    done = subprocess.run([SECURITY, "-i"], input=command + "\n", text=True, capture_output=True)
+    return done.returncode == 0 and "error" not in (done.stderr or "").lower()
+
+
+def _keychain_load() -> str | None:
+    done = subprocess.run([SECURITY, "find-generic-password", "-a", _account(), "-s", SERVICE, "-w", *_keychain_args()],
+                          text=True, capture_output=True)
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+    try:
+        return base64.urlsafe_b64decode(done.stdout.strip()).decode("utf-8")
+    except ValueError:
+        return None
+
+
+def _keychain_delete() -> None:
+    subprocess.run([SECURITY, "delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()],
+                   text=True, capture_output=True)
+
+
+def store(installation_id: str, installation_secret: str) -> str:
+    """Save the credential. Returns the backend that holds it."""
+    payload = json.dumps({"installation_id": installation_id, "installation_secret": installation_secret}, separators=(",", ":"))
+    kind = backend()
+    if kind == "keychain":
+        if _keychain_store(payload):
+            core.remove_tree(_file())
+            return "keychain"
+        kind = "file"  # locked or unavailable keychain (for example an SSH session): fall back to the 0600 file
+    if kind == "dpapi":
+        core.write_atomic(_file(), b"DPAPI1" + _dpapi(payload.encode("utf-8"), True), 0o600)
+        return "dpapi"
+    core.write_atomic(_file(), payload, 0o600)
+    return "file"
+
+
+def load() -> dict | None:
+    raw: str | None = None
+    if backend() == "keychain":
+        raw = _keychain_load()
+    if raw is None and _file().exists():
+        try:
+            data = _file().read_bytes()
+            raw = _dpapi(data[6:], False).decode("utf-8") if data.startswith(b"DPAPI1") else data.decode("utf-8")
+        except (OSError, ValueError):
+            raw = None
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if isinstance(value, dict) and value.get("installation_id") and value.get("installation_secret"):
+        return value
+    return None
+
+
+def delete() -> None:
+    if backend() == "keychain":
+        _keychain_delete()
+    core.remove_tree(_file())
+
+
+def describe() -> str:
+    kind = backend()
+    if kind == "keychain" and _file().exists():
+        return "file (0600; the keychain was not available)"
+    return {"keychain": "macOS keychain", "dpapi": "DPAPI-protected file", "file": "file (0600)"}[kind]

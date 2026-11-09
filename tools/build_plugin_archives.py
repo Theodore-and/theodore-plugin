@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Build what the download host serves for the plugin itself, reproducibly.
+
+  theodore-<version>.zip             plugins/theodore at the archive root: the `archive` source of the hosted
+                                     marketplace.json (Claude Code)
+  theodore-plugin-<version>.tar.gz   the marketplace tree (.claude-plugin/, .agents/, plugins/theodore/): what the
+                                     installer unpacks into <home>/plugin and Codex adds as a local marketplace
+  latest.txt                         "<version> <sha256 of the tar.gz>": what the installer reads first
+  plugin-build.json                  version, file names, sizes and sha256 (what the lead registers)
+
+Usage: python3 tools/build_plugin_archives.py --out <dir> [--root <marketplace tree>]
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import io
+import json
+import tarfile
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+EPOCH = (2024, 1, 1, 0, 0, 0)
+EXECUTABLE = {"theodore"}
+
+
+def tree_files(root: Path) -> list[Path]:
+    keep = [root / ".claude-plugin" / "marketplace.json", root / ".agents" / "plugins" / "marketplace.json"]
+    keep += sorted(p for p in (root / "plugins" / "theodore").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store")
+    return keep
+
+
+def build(out: Path, root: Path = ROOT) -> dict:
+    plugin = root / "plugins" / "theodore"
+    version = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+    out.mkdir(parents=True, exist_ok=True)
+    files = tree_files(root)
+
+    zip_path = out / f"theodore-{version}.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
+        for path in files:
+            if plugin not in path.parents:
+                continue
+            info = zipfile.ZipInfo(path.relative_to(plugin).as_posix(), EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o755 if path.name in EXECUTABLE else 0o644) << 16
+            bundle.writestr(info, path.read_bytes())
+
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for path in files:
+            data = path.read_bytes()
+            info = tarfile.TarInfo(path.relative_to(root).as_posix())
+            info.size, info.mtime, info.mode = len(data), 0, 0o755 if path.name in EXECUTABLE else 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tar.addfile(info, io.BytesIO(data))
+    tar_path = out / f"theodore-plugin-{version}.tar.gz"
+    with open(tar_path, "wb") as handle, gzip.GzipFile(filename="", mode="wb", fileobj=handle, mtime=0, compresslevel=9) as zipped:
+        zipped.write(raw.getvalue())
+
+    def describe(path: Path) -> dict:
+        return {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
+
+    record = {"version": version, "zip": describe(zip_path), "tar": describe(tar_path), "files": len(files)}
+    (out / "latest.txt").write_text(f"{version} {record['tar']['sha256']}\n", encoding="utf-8")
+    (out / "plugin-build.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return record
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--root", default=str(ROOT))
+    print(json.dumps(build(Path(parser.parse_args().out), Path(parser.parse_args().root)), indent=2))

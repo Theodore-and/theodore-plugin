@@ -1,0 +1,255 @@
+"""The one module that talks HTTP. Every route comes from contract.ROUTES; every failure becomes a Status."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import socket
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+from . import core
+from .contract import API_ERRORS, ROUTES
+from .core import Status, quoted_launcher
+
+
+class ApiError(Exception):
+    """The server answered with an error body: {"error": {"code", "message", ...}} or the RFC 6749 device form."""
+
+    def __init__(self, http_status: int, code: str, message: str = "", retry_after: str | None = None):
+        super().__init__(f"{http_status} {code}")
+        self.http_status, self.code, self.message, self.retry_after = http_status, code, message, retry_after
+
+
+class NetworkError(Exception):
+    """No answer from the server: DNS, connection, timeout, TLS or proxy."""
+
+    def __init__(self, detail: str, cause: str = "NETWORK"):
+        super().__init__(detail)
+        self.detail, self.cause = detail, cause
+
+
+def _ssl_context() -> ssl.SSLContext:
+    try:  # the operating system's certificate store, so TLS-inspecting proxies with an installed root work
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        return ssl.create_default_context()
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects (engine and pack downloads may answer 302 to a short-lived URL) without leaking the bearer."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlparse(newurl).netloc != urllib.parse.urlparse(req.full_url).netloc:
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+_OPENER = None
+
+
+def _opener():
+    global _OPENER
+    if _OPENER is None:
+        _OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _Redirects())
+    return _OPENER
+
+
+def _network_error(exc: Exception) -> NetworkError:
+    reason = getattr(exc, "reason", exc)
+    text = str(reason) or reason.__class__.__name__
+    if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in text or "certificate" in text.lower():
+        return NetworkError(text, "TLS_INTERCEPT")
+    if "407" in text or "Proxy Authentication" in text:
+        return NetworkError(text, "PROXY_AUTH")
+    return NetworkError(text, "NETWORK")
+
+
+def request(method: str, url: str, *, bearer: str | None = None, body=None, headers: dict | None = None,
+            timeout: float = 20.0):
+    """One HTTP exchange. Returns (status, headers, bytes) for 2xx and 304; raises ApiError or NetworkError."""
+    data = None
+    hdrs = {"User-Agent": core.user_agent(), "Accept": "application/json, text/markdown;q=0.9, */*;q=0.1"}
+    if body is not None:
+        data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+    if bearer:
+        hdrs["Authorization"] = f"Bearer {bearer}"
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+    try:
+        with _opener().open(req, timeout=timeout) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return 304, exc.headers, b""
+        if exc.code == 407:
+            raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
+        raw = exc.read() or b""
+        code, message = f"http_{exc.code}", ""
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+            err = parsed.get("error")
+            if isinstance(err, dict):
+                code, message = str(err.get("code") or code), str(err.get("message") or "")
+            elif isinstance(err, str):
+                code, message = err, str(parsed.get("error_description") or "")
+        except (ValueError, AttributeError):
+            pass
+        raise ApiError(exc.code, code, message, exc.headers.get("Retry-After")) from None
+    except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as exc:
+        raise _network_error(exc) from None
+
+
+def url_for(route: str, query: dict | None = None, **params) -> str:
+    _method, template, _auth = ROUTES[route]
+    path = template.format(**{k: urllib.parse.quote(str(v), safe="") for k, v in params.items()})
+    url = core.config()["api_base"].rstrip("/") + path
+    if query:
+        url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+    return url
+
+
+def call(route: str, *, bearer: str | None = None, body=None, query: dict | None = None, headers: dict | None = None,
+         timeout: float = 20.0, **params):
+    method, _template, needs_auth = ROUTES[route]
+    if needs_auth and not bearer:
+        raise sign_in_required()
+    return request(method, url_for(route, query, **params), bearer=bearer if needs_auth else None, body=body,
+                   headers=headers, timeout=timeout)
+
+
+def call_json(route: str, **kwargs):
+    status, headers, raw = call(route, **kwargs)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise core.internal(f"the Theodore API answered {route} with something that is not JSON (HTTP {status}).") from None
+
+
+def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, size: int | None = None,
+             progress=None, timeout: float = 60.0) -> Path:
+    """Stream `url` to `dest` and check its sha256. A mismatch deletes the file and raises SETUP_FAILED."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    hdrs = {"User-Agent": core.user_agent()}
+    if bearer:
+        hdrs["Authorization"] = f"Bearer {bearer}"
+    req = urllib.request.Request(url, headers=hdrs)
+    digest, done = hashlib.sha256(), 0
+    try:
+        with _opener().open(req, timeout=timeout) as resp, open(part, "wb") as out:
+            total = size or int(resp.headers.get("Content-Length") or 0)
+            while True:
+                block = resp.read(1 << 18)
+                if not block:
+                    break
+                out.write(block)
+                digest.update(block)
+                done += len(block)
+                if progress and total:
+                    progress(done * 100.0 / total)
+    except urllib.error.HTTPError as exc:
+        _unlink(part)
+        if exc.code == 407:
+            raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
+        raw = exc.read() or b""
+        code = f"http_{exc.code}"
+        try:
+            err = json.loads(raw.decode("utf-8")).get("error")
+            code = err.get("code", code) if isinstance(err, dict) else (err or code)
+        except (ValueError, AttributeError):
+            pass
+        raise ApiError(exc.code, str(code), "", exc.headers.get("Retry-After")) from None
+    except OSError as exc:
+        _unlink(part)
+        if isinstance(exc, (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError)):
+            raise _network_error(exc) from None
+        raise setup_failed("DISK", f"could not write {dest.name}: {exc}") from None
+    if digest.hexdigest() != sha256.lower():
+        _unlink(part)
+        raise setup_failed("HASH_MISMATCH", f"{dest.name} did not match its published checksum")
+    os.replace(part, dest)
+    return dest
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+# --- failures as statuses ------------------------------------------------------------------------------------------------
+
+def sign_in_required(detail: str = "this computer is not signed in to Theodore.") -> Status:
+    return Status("SIGN_IN_REQUIRED", detail,
+                  f"run {quoted_launcher()} login --start and follow what it prints.",
+                  "Theodore needs a one-time sign-in on this computer. I am starting it.")
+
+
+def setup_failed(cause: str, detail: str) -> Status:
+    nexts = {
+        "NETWORK": "check the internet connection, then run the same command again.",
+        "TLS_INTERCEPT": "this network inspects HTTPS with a certificate this computer does not trust. Ask the user to have "
+                         "their IT team install the company root certificate, or to try another network; then run the same command again.",
+        "PROXY_AUTH": "the network proxy asks for a sign-in. Ask the user to sign in to the proxy (opening any website in a "
+                      "browser usually does it), then run the same command again.",
+        "DISK": f"free disk space or make {core.home().root} writable, then run the same command again.",
+        "HASH_MISMATCH": "run the same command again. If it fails twice, stop and tell the user to write to support@theodoreand.ai.",
+    }
+    tells = {
+        "NETWORK": "Theodore could not download its files. Please check the internet connection.",
+        "TLS_INTERCEPT": "This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate.",
+        "PROXY_AUTH": "The network proxy needs you to sign in before Theodore can download its files.",
+        "DISK": "Theodore could not write its files. The disk may be full or the folder protected.",
+        "HASH_MISMATCH": "A Theodore download arrived damaged. I am trying again.",
+    }
+    return Status("SETUP_FAILED", f"cause {cause}: {detail}", nexts[cause], tells[cause])
+
+
+def offline(error: NetworkError, what: str) -> Status:
+    if error.cause in ("TLS_INTERCEPT", "PROXY_AUTH"):
+        failed = setup_failed(error.cause, f"{what}: {error.detail}")
+        return Status("OFFLINE", failed.summary, failed.next_step, failed.tell_user)
+    return Status("OFFLINE", f"{what}: the Theodore service could not be reached ({error.detail}).",
+                  "check the internet connection, then run the same command again.",
+                  "Theodore could not reach its service. Please check the internet connection.")
+
+
+def status_from(error: ApiError, what: str) -> Status:
+    """Map an API error code to the status the assistant acts on (contract.API_ERRORS)."""
+    name = API_ERRORS.get(error.code, (0, None))[1]
+    if name is None:
+        name = "RETRY" if error.http_status >= 500 else "INTERNAL"
+    launcher = quoted_launcher()
+    detail = f"{what}: {error.message or error.code}"
+    if name == "SIGN_IN_REQUIRED":
+        reason = "this device was signed out from the Theodore portal." if error.code == "installation_revoked" \
+            else "this computer's sign-in is no longer valid."
+        return sign_in_required(reason)
+    if name == "NO_ENTITLEMENT":
+        return Status(name, detail, "do not retry. Tell the user; they can check their plan at https://theodoreand.ai/app/plan.",
+                      "Your Theodore account does not currently include this skill. You can check your plan at theodoreand.ai.")
+    if name == "BLOCKED_BY_POLICY":
+        return Status(name, detail, f"ask the user whether to send this report; if they agree, run the same command with --origin user_requested.",
+                      "Automatic bug reports are switched off in your Theodore settings. Shall I send this one?")
+    if name == "UPDATE_REQUIRED":
+        return Status(name, detail, f"run {launcher} update --apply, then run the same command again.",
+                      "Theodore needs an update before it can continue. I am installing it.")
+    if name == "RETRY":
+        wait = error.retry_after or "60"
+        return Status(name, detail, f"wait {wait} seconds, then run the same command again (at most three times).",
+                      "Theodore's service is busy. I will try again in a moment.")
+    if name == "USAGE":
+        return core.usage(detail)
+    return core.internal(f"{detail} (HTTP {error.http_status}).")
