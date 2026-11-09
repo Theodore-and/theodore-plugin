@@ -1,0 +1,12 @@
+{
+  "name": "theodore",
+  "interface": { "displayName": "Theodore" },
+  "plugins": [
+    {
+      "name": "theodore",
+      "source": { "source": "local", "path": "./plugins/theodore" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

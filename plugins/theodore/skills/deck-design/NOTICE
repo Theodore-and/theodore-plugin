@@ -1,0 +1,17 @@
+Theodore deck-design
+
+The deck-design guidance that this skill loads from Theodore's service is a
+derivative of Impeccable by Paul Bakaus, https://github.com/pbakaus/impeccable,
+pinned at two commits:
+
+  9a949fb543d44cfb406f61bcab99d95d7f12cf1d (tag skill-v4.0.4)
+  63b04e2530f5c7b41ea83c133daab24f34912456 (tag skill-v4.1.2)
+
+Impeccable is Copyright 2025 Paul Bakaus and licensed under the Apache
+License, Version 2.0. The accompanying LICENSE is the Apache License,
+Version 2.0.
+
+This folder holds only a loader. The full statement of changes travels with
+the guidance the Theodore service delivers; print it with:
+
+  theodore guide deck-design --license

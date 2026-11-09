@@ -1,0 +1,4 @@
+---
+name: deck-design
+description: "Use before creating, restructuring, adapting or visually redesigning a deck, section or slide, and to critique its argument or design. Not for typos, translation, data or file mechanics."
+---

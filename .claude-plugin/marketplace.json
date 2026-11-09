@@ -1,0 +1,13 @@
+{
+  "name": "theodore",
+  "owner": { "name": "Theodore&" },
+  "description": "Theodore: PowerPoint skills for AI assistants.",
+  "plugins": [
+    {
+      "name": "theodore",
+      "displayName": "Theodore",
+      "source": "./plugins/theodore",
+      "description": "Build, edit and translate PowerPoint decks in the assistant you already use, with a consultant's design method."
+    }
+  ]
+}
