@@ -1,0 +1,272 @@
+#!/bin/sh
+# Theodore launcher (POSIX sh). The same file sits in every Theodore skill folder and in <home>/bin.
+#
+# What it does, in order:
+#   1. finds Theodore's folder (THEODORE_HOME, default ~/.theodore);
+#   2. hands over to <home>/bin/theodore when that copy is newer, and keeps that copy current otherwise;
+#   3. when Theodore's Python and client are there, runs the client with the same arguments;
+#   4. otherwise downloads them in the background (stage 1: one Python archive and the client, each checked
+#      against a sha256 pinned in launcher.json beside this file) and reports progress.
+#
+# Everything it prints for the assistant is three lines: THEODORE <STATUS>: ... / NEXT: ... / TELL THE USER: ...
+# Exit codes: 0-63 are the engine's; 64-78 are statuses (67 setup in progress, 68 setup failed, 69 unsupported
+# platform, 74 connector required, 78 internal). It needs only sh, curl (or wget), tar and shasum/sha256sum.
+
+set -u
+
+status() { # name code summary next tell
+  printf 'THEODORE %s: %s\nNEXT: %s\nTELL THE USER: %s\n' "$1" "$3" "$4" "$5"
+  exit "$2"
+}
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || SELF_DIR=
+[ -n "$SELF_DIR" ] || status INTERNAL 78 "the launcher could not find its own folder." \
+  "run it by absolute path: sh \"<skill folder>/scripts/theodore\" ..." "Theodore could not start; I am retrying with a full path."
+SELF="$SELF_DIR/theodore"
+
+# Git Bash, MSYS and Cygwin: Windows has its own launcher beside this one.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) exec "$SELF_DIR/theodore.cmd" "$@" ;;
+esac
+
+if [ -n "${THEODORE_HOME:-}" ]; then
+  HOME_DIR=$THEODORE_HOME
+elif [ -n "${HOME:-}" ]; then
+  HOME_DIR=$HOME/.theodore
+else
+  status INTERNAL 78 "neither THEODORE_HOME nor HOME is set." "set HOME to the user's home folder and run the same command again." \
+    "Theodore could not find your home folder."
+fi
+case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd -P)/$HOME_DIR" ;; esac
+STABLE="$HOME_DIR/bin/theodore"
+CONF="$SELF_DIR/launcher.json"
+B="$HOME_DIR/state/bootstrap"
+
+# launcher.json is flat on purpose: one "key": value per line, read here with sed and in theodore.cmd with findstr.
+jget() { # file key
+  sed -n 's/^[[:space:]]*"'"$2"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\)"\{0,1\}[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+num() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
+
+[ -f "$CONF" ] || status INTERNAL 78 "launcher.json is missing beside the launcher ($SELF_DIR)." \
+  "reinstall the Theodore plugin, then run the same command again." "Theodore's plugin files are incomplete; it needs to be reinstalled."
+
+# --- 2. one stable copy in <home>/bin: newer wins --------------------------------------------------------------
+MY_GEN=$(num "$(jget "$CONF" launcher_generation)" 0)
+if [ "$SELF" != "$STABLE" ]; then
+  ST_GEN=-1
+  if [ -f "$STABLE" ] && [ -f "$HOME_DIR/bin/launcher.json" ]; then
+    ST_GEN=$(num "$(jget "$HOME_DIR/bin/launcher.json" launcher_generation)" -1)
+  fi
+  if [ "$ST_GEN" -gt "$MY_GEN" ]; then
+    THEODORE_SKILL_DIR=${THEODORE_SKILL_DIR:-$(dirname -- "$SELF_DIR")} exec sh "$STABLE" "$@"
+  fi
+  if [ "$ST_GEN" -lt "$MY_GEN" ] && mkdir -p "$HOME_DIR/bin" 2>/dev/null; then
+    for f in theodore theodore.cmd launcher.json; do
+      [ -f "$SELF_DIR/$f" ] && cp "$SELF_DIR/$f" "$HOME_DIR/bin/.$f.$$" 2>/dev/null && mv -f "$HOME_DIR/bin/.$f.$$" "$HOME_DIR/bin/$f" 2>/dev/null
+    done
+    chmod 755 "$STABLE" 2>/dev/null
+  fi
+  THEODORE_SKILL_DIR=${THEODORE_SKILL_DIR:-$(dirname -- "$SELF_DIR")}
+  export THEODORE_SKILL_DIR
+fi
+if [ -f "$STABLE" ]; then LAUNCHER=$STABLE; else LAUNCHER=$SELF; fi
+RUN="\"$LAUNCHER\""
+[ $# -gt 0 ] && RUN="the same command"
+
+# --- 3. ready: run the client -----------------------------------------------------------------------------------
+stage1_ready() {
+  RT=$(cat "$HOME_DIR/runtime/current.txt" 2>/dev/null) || return 1
+  CV=$(cat "$HOME_DIR/client/current.txt" 2>/dev/null) || return 1
+  [ -n "$RT" ] && [ -n "$CV" ] || return 1
+  PY="$HOME_DIR/runtime/$RT/python/bin/python3"
+  [ -x "$PY" ] && [ -f "$HOME_DIR/client/$CV/__main__.py" ]
+}
+run_client() {
+  THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER
+  export THEODORE_HOME THEODORE_LAUNCHER
+  exec "$PY" -I "$HOME_DIR/client/$CV" "$@"
+}
+
+# --- platform ---------------------------------------------------------------------------------------------------------
+OS=$(uname -s 2>/dev/null || echo unknown)
+MACHINE=$(uname -m 2>/dev/null || echo unknown)
+case "$OS" in Darwin) PLAT=darwin ;; Linux) PLAT=linux ;; *) PLAT= ;; esac
+case "$MACHINE" in arm64|aarch64) ARCH=arm64 ;; x86_64|amd64) ARCH=x64 ;; *) ARCH= ;; esac
+if [ "$PLAT" = linux ] && (ldd --version 2>&1 | grep -qi musl); then PLAT=; fi
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else openssl dgst -sha256 "$1" | sed 's/^.*= *//'; fi
+}
+
+fetch() { # url dest; on failure sets CAUSE and DETAIL
+  CAUSE=NETWORK
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -sS -L --fail --retry 2 --connect-timeout 20 -o "$2" -w '%{http_code}' "$1" 2>"$B/fetch.err")
+    rc=$?
+    [ $rc -eq 0 ] && return 0
+    DETAIL="curl exit $rc, HTTP $code"
+    case "$rc" in
+      35|51|53|58|59|60|77|83|90|91) CAUSE=TLS_INTERCEPT ;;
+      23) CAUSE=DISK ;;
+      22) [ "$code" = 407 ] && CAUSE=PROXY_AUTH ;;
+      56) grep -q 407 "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH ;;
+    esac
+    return 1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$2" "$1" 2>"$B/fetch.err" && return 0
+    DETAIL="wget exit $?"
+    grep -qi certificate "$B/fetch.err" 2>/dev/null && CAUSE=TLS_INTERCEPT
+    grep -q 407 "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH
+    return 1
+  fi
+  DETAIL="neither curl nor wget is installed"
+  return 1
+}
+
+# --- 4b. the bootstrap job (runs detached; started below) --------------------------------------------------------
+bootstrap_job() {
+  mkdir -p "$B" "$HOME_DIR/staging" "$HOME_DIR/runtime" "$HOME_DIR/client" "$HOME_DIR/logs" || exit 1
+  echo $$ > "$B/pid"
+  rm -f "$B/failed"
+  fail() { printf '%s\n%s\n' "$1" "$2" > "$B/failed"; rm -f "$B/pid" "$B/phase"; exit 1; }
+  P="stage1_python_${PLAT}_${ARCH}"
+  PY_URL=$(jget "$CONF" "${P}_url"); PY_SHA=$(jget "$CONF" "${P}_sha256")
+  RT=$(jget "$CONF" stage1_runtime_id)
+  CV=$(jget "$CONF" stage1_client_version); C_URL=$(jget "$CONF" stage1_client_url); C_SHA=$(jget "$CONF" stage1_client_sha256)
+  [ -n "$PY_URL" ] && [ -n "$PY_SHA" ] && [ -n "$RT" ] && [ -n "$CV" ] && [ -n "$C_URL" ] && [ -n "$C_SHA" ] ||
+    fail INTERNAL "launcher.json has no stage-1 entry for $PLAT-$ARCH"
+  PY="$HOME_DIR/runtime/$RT/python/bin/python3"
+  if [ ! -x "$PY" ]; then
+    echo download > "$B/phase"
+    fetch "$PY_URL" "$HOME_DIR/staging/stage1-python.tar.gz" || fail "$CAUSE" "the Python runtime could not be downloaded ($DETAIL)"
+    echo verify > "$B/phase"
+    [ "$(sha256_of "$HOME_DIR/staging/stage1-python.tar.gz")" = "$PY_SHA" ] || {
+      rm -f "$HOME_DIR/staging/stage1-python.tar.gz"; fail HASH_MISMATCH "the Python runtime did not match its pinned checksum"; }
+    echo unpack > "$B/phase"
+    rm -rf "$HOME_DIR/runtime/$RT.stage1"
+    mkdir -p "$HOME_DIR/runtime/$RT.stage1" "$HOME_DIR/runtime/$RT/.parts" &&
+      tar -xzf "$HOME_DIR/staging/stage1-python.tar.gz" -C "$HOME_DIR/runtime/$RT.stage1" 2>>"$B/fetch.err" &&
+      rm -rf "$HOME_DIR/runtime/$RT/python" &&
+      mv "$HOME_DIR/runtime/$RT.stage1/python" "$HOME_DIR/runtime/$RT/python" ||
+      fail DISK "the Python runtime could not be unpacked into $HOME_DIR/runtime"
+    printf '%s\n' "$PY_SHA" > "$HOME_DIR/runtime/$RT/.parts/python"
+    rm -rf "$HOME_DIR/runtime/$RT.stage1" "$HOME_DIR/staging/stage1-python.tar.gz"
+  fi
+  if [ ! -f "$HOME_DIR/client/$CV/__main__.py" ]; then
+    echo client > "$B/phase"
+    fetch "$C_URL" "$HOME_DIR/staging/stage1-client.tar" || fail "$CAUSE" "the Theodore client could not be downloaded ($DETAIL)"
+    [ "$(sha256_of "$HOME_DIR/staging/stage1-client.tar")" = "$C_SHA" ] || {
+      rm -f "$HOME_DIR/staging/stage1-client.tar"; fail HASH_MISMATCH "the Theodore client did not match its pinned checksum"; }
+    rm -rf "$HOME_DIR/client/$CV.partial"
+    mkdir -p "$HOME_DIR/client/$CV.partial" &&
+      tar -xf "$HOME_DIR/staging/stage1-client.tar" -C "$HOME_DIR/client/$CV.partial" 2>>"$B/fetch.err" &&
+      rm -rf "$HOME_DIR/client/$CV" &&
+      mv "$HOME_DIR/client/$CV.partial/$CV" "$HOME_DIR/client/$CV" ||
+      fail DISK "the Theodore client could not be unpacked into $HOME_DIR/client"
+    rm -rf "$HOME_DIR/client/$CV.partial" "$HOME_DIR/staging/stage1-client.tar"
+  fi
+  [ -s "$HOME_DIR/runtime/current.txt" ] || { printf '%s\n' "$RT" > "$HOME_DIR/runtime/current.txt.$$" && mv -f "$HOME_DIR/runtime/current.txt.$$" "$HOME_DIR/runtime/current.txt"; }
+  [ -s "$HOME_DIR/client/current.txt" ] || { printf '%s\n' "$CV" > "$HOME_DIR/client/current.txt.$$" && mv -f "$HOME_DIR/client/current.txt.$$" "$HOME_DIR/client/current.txt"; }
+  rm -f "$B/pid" "$B/phase" "$B/fetch.err"
+  # Stage 2 (the rest of the runtime, checked against the signed manifest) is the client's job.
+  stage1_ready || exit 1
+  # exec keeps this process id, so the client already sees a running setup job and does not start a second one.
+  mkdir -p "$HOME_DIR/state/jobs" && printf '{"pid": %s, "phase": "starting", "percent": 0}\n' "$$" > "$HOME_DIR/state/jobs/setup.json"
+  THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER
+  export THEODORE_HOME THEODORE_LAUNCHER
+  exec "$PY" -I "$HOME_DIR/client/$CV" setup --job
+}
+
+if [ "${1:-}" = "__bootstrap" ]; then
+  [ -n "$PLAT" ] && [ -n "$ARCH" ] || exit 69
+  bootstrap_job
+  exit $?
+fi
+
+if stage1_ready; then
+  run_client "$@"
+fi
+
+# --- not installed yet ----------------------------------------------------------------------------------------------
+if [ "${1:-}" = "uninstall" ]; then
+  [ -f "$B/pid" ] && kill "$(cat "$B/pid" 2>/dev/null)" 2>/dev/null
+  if [ -f "$HOME_DIR/bin/launcher.json" ] || [ -d "$HOME_DIR/state" ]; then rm -rf "$HOME_DIR"; fi
+  status OK 0 "Theodore was not fully installed; its folder $HOME_DIR was removed." "nothing to do." "Theodore is uninstalled."
+fi
+
+if [ -z "$PLAT" ] || [ -z "$ARCH" ]; then
+  status UNSUPPORTED_PLATFORM 69 "Theodore's engine has no build for $OS $MACHINE." \
+    "do not retry. Use the deck-design skill with the host's own slide tools, or the Theodore connector if one is connected." \
+    "Theodore's PowerPoint engine does not run on this kind of computer yet (it supports macOS, Windows x64 and Linux x64 or arm64 with glibc)."
+fi
+
+failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes it, exits 68
+  cause=$(sed -n 1p "$B/failed"); detail=$(sed -n 2p "$B/failed")
+  rm -f "$B/failed"
+  case "$cause" in
+    NETWORK) next="check the internet connection, then run $RUN again."
+             tell="Theodore could not download its files. Please check the internet connection." ;;
+    TLS_INTERCEPT) next="this network inspects HTTPS with a certificate this computer does not trust. Ask the user to have their IT team install the company root certificate, or to try another network; then run $RUN again."
+             tell="This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate." ;;
+    PROXY_AUTH) next="the network proxy asks for a sign-in. Ask the user to sign in to the proxy (opening any website in a browser usually does it), then run $RUN again."
+             tell="The network proxy needs you to sign in before Theodore can download its files." ;;
+    DISK) next="free disk space or make $HOME_DIR writable, then run $RUN again."
+             tell="Theodore could not write its files. The disk may be full or the folder protected." ;;
+    HASH_MISMATCH) next="run $RUN again. If it fails twice, stop and tell the user to write to support@theodoreand.ai."
+             tell="A Theodore download arrived damaged. I am trying again." ;;
+    *) status INTERNAL 78 "setup failed: $detail" "reinstall the Theodore plugin, then run $RUN again." "Theodore's setup hit an internal error." ;;
+  esac
+  status SETUP_FAILED 68 "cause $cause: $detail." "$next" "$tell"
+}
+
+job_alive() { [ -f "$B/pid" ] && kill -0 "$(cat "$B/pid" 2>/dev/null)" 2>/dev/null; }
+
+progress_status() {
+  phase=$(cat "$B/phase" 2>/dev/null || echo starting)
+  total=$(num "$(jget "$CONF" "stage1_python_${PLAT}_${ARCH}_size")" 0)
+  have=0
+  [ -f "$HOME_DIR/staging/stage1-python.tar.gz" ] && have=$(wc -c < "$HOME_DIR/staging/stage1-python.tar.gz" | tr -d ' ')
+  pct=0
+  [ "$total" -gt 0 ] && pct=$((have * 100 / total))
+  [ "$pct" -gt 99 ] && pct=99
+  case "$phase" in verify|unpack|client) pct=99 ;; esac
+  status SETUP_IN_PROGRESS 67 "Theodore is downloading its runtime (first use on this computer, about 120 MB in all); the first part is at $pct% ($phase)." \
+    "run $RUN again in 20 seconds. Do not use another slide tool meanwhile." \
+    "Theodore is setting itself up for the first time. This takes a few minutes; I will continue when it is ready."
+}
+
+[ -f "$B/failed" ] && ! job_alive && failed_status
+job_alive && progress_status
+
+if ! mkdir -p "$B" 2>/dev/null || ! ( : > "$B/.write-test" ) 2>/dev/null; then
+  status SETUP_FAILED 68 "cause DISK: $HOME_DIR is not writable." "make $HOME_DIR writable (or set THEODORE_HOME to a writable folder), then run $RUN again." \
+    "Theodore could not create its folder ($HOME_DIR). It may be protected."
+fi
+rm -f "$B/.write-test"
+
+# A sandbox that loses its files and cannot reach the download host has no use for a bootstrap: say so at once.
+if [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then
+  probe=$(jget "$CONF" stage1_client_url)
+  if ! { command -v curl >/dev/null 2>&1 && curl -sS -I -L --connect-timeout 5 -m 10 -o /dev/null "$probe" 2>/dev/null; }; then
+    status CONNECTOR_REQUIRED 74 "this environment cannot reach Theodore's download host and does not keep files between sessions." \
+      "call the Theodore connector's guide tool instead (skill deck-design). If no Theodore connector is available, say so; do not retry this command here." \
+      "In this environment Theodore works through its connector. You can connect it at Customize > Plugins > Theodore > Connectors."
+  fi
+fi
+
+mkdir -p "$HOME_DIR/logs" 2>/dev/null
+( nohup sh "$LAUNCHER" __bootstrap >>"$HOME_DIR/logs/bootstrap.log" 2>&1 </dev/null & ) 2>/dev/null
+
+waited=0
+limit=$(num "${THEODORE_BOOTSTRAP_WAIT:-}" 20)
+while [ "$waited" -lt "$limit" ]; do
+  sleep 1
+  waited=$((waited + 1))
+  if stage1_ready; then run_client "$@"; fi
+  [ -f "$B/failed" ] && ! job_alive && failed_status
+done
+if stage1_ready; then run_client "$@"; fi
+progress_status
