@@ -81,7 +81,17 @@ if errorlevel 1 goto :connector_required
 
 :start_job
 if not exist "%HOME_DIR%\logs" mkdir "%HOME_DIR%\logs" 2>nul
-start "" /b cmd /d /c ""%LAUNCHER%" __bootstrap >>"%HOME_DIR%\logs\bootstrap.log" 2>&1"
+rem The job must not inherit this command's output: a caller that reads to the end of our output (every assistant
+rem does) would otherwise wait for the whole download. "start /b" passes every inheritable handle on; PowerShell's
+rem Start-Process goes through ShellExecute, which passes none. "start /b" stays as the fallback.
+set "THEODORE_JOB_LAUNCHER=%LAUNCHER%"
+set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PWSH%" goto :start_plain
+"%PWSH%" -NoProfile -NonInteractive -Command "Start-Process -WindowStyle Hidden -FilePath $env:THEODORE_JOB_LAUNCHER -ArgumentList __bootstrap" <nul >nul 2>&1
+if not errorlevel 1 goto :started
+:start_plain
+start "" /b cmd /d /c ""%LAUNCHER%" __bootstrap" <nul >nul 2>&1
+:started
 set /a WAITED=0
 set /a LIMIT=20
 if defined THEODORE_BOOTSTRAP_WAIT set /a LIMIT=THEODORE_BOOTSTRAP_WAIT
@@ -177,13 +187,37 @@ if "%HTTP%"=="407" set "CAUSE=PROXY_AUTH"
 rem Second try: Windows' own HTTP stack with the signed-in user's proxy credentials.
 set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%PWSH%" goto :fetch_bits
-"%PWSH%" -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -ProxyUseDefaultCredentials -Uri $env:THEODORE_FETCH_URL -OutFile $env:THEODORE_FETCH_OUT; exit 0 } catch { exit 1 }" >nul 2>&1
+"%PWSH%" -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -ProxyUseDefaultCredentials -Uri $env:THEODORE_FETCH_URL -OutFile $env:THEODORE_FETCH_OUT; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 if exist "%~2" exit /b 0
+exit /b 1
 :fetch_bits
-rem Third try: the Background Intelligent Transfer Service.
+rem Only where PowerShell is missing: the Background Intelligent Transfer Service. BITS retries a transient error
+rem for days, so the job gets 60 seconds without progress and 30 minutes in all, then is cancelled.
 if not exist "%SYS32%\bitsadmin.exe" exit /b 1
-"%SYS32%\bitsadmin.exe" /transfer theodore-setup /download /priority FOREGROUND "%~1" "%~2" >nul 2>&1
-if not errorlevel 1 if exist "%~2" exit /b 0
+set "BJ=theodore-setup-%RANDOM%%RANDOM%"
+"%SYS32%\bitsadmin.exe" /create /download %BJ% >nul 2>&1 || exit /b 1
+"%SYS32%\bitsadmin.exe" /addfile %BJ% "%~1" "%~2" >nul 2>&1
+"%SYS32%\bitsadmin.exe" /setnoprogresstimeout %BJ% 60 >nul 2>&1
+"%SYS32%\bitsadmin.exe" /setpriority %BJ% FOREGROUND >nul 2>&1
+"%SYS32%\bitsadmin.exe" /resume %BJ% >nul 2>&1
+set /a BITS_LEFT=1800
+:bits_wait
+set "BSTATE="
+for /f "delims=" %%S in ('%SYS32%\bitsadmin.exe /rawreturn /getstate %BJ% 2^>nul') do set "BSTATE=%%S"
+if /i "%BSTATE%"=="TRANSFERRED" goto :bits_done
+if /i "%BSTATE%"=="ERROR" goto :bits_cancel
+if /i "%BSTATE%"=="CANCELLED" goto :bits_cancel
+if not defined BSTATE goto :bits_cancel
+set /a BITS_LEFT-=1
+if %BITS_LEFT% LEQ 0 goto :bits_cancel
+"%SYS32%\ping.exe" -n 2 127.0.0.1 >nul 2>&1
+goto :bits_wait
+:bits_done
+"%SYS32%\bitsadmin.exe" /complete %BJ% >nul 2>&1
+if exist "%~2" exit /b 0
+exit /b 1
+:bits_cancel
+"%SYS32%\bitsadmin.exe" /cancel %BJ% >nul 2>&1
 exit /b 1
 
 :fail
@@ -196,6 +230,11 @@ exit /b 1
 :bootstrap_entry
 if not exist "%B%" mkdir "%B%" 2>nul
 if not exist "%B%" exit /b 1
+if not exist "%HOME_DIR%\logs" mkdir "%HOME_DIR%\logs" 2>nul
+rem The job writes its own log: it is started with no output of its caller's.
+call :bootstrap_main >>"%HOME_DIR%\logs\bootstrap.log" 2>&1
+exit /b %ERRORLEVEL%
+:bootstrap_main
 set "ARCH=x64"
 call :bootstrap_job 9>"%B%\job.lock"
 if errorlevel 1 exit /b 1
