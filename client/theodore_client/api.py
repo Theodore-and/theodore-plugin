@@ -178,7 +178,7 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
     if digest.hexdigest() != sha256.lower():
         _unlink(part)
         raise setup_failed("HASH_MISMATCH", f"{dest.name} did not match its published checksum")
-    os.replace(part, dest)
+    core.replace(part, dest)
     return dest
 
 

@@ -265,7 +265,22 @@ def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None
         handle.write(data.encode("utf-8") if isinstance(data, str) else data)
     if mode is not None and not IS_WINDOWS:
         os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    replace(tmp, path)
+
+
+def replace(src: Path, dest: Path) -> None:
+    """os.replace, patient on Windows: there a file another process has open (a status reader polling a job's state)
+    cannot be replaced, and the call fails with "Access is denied" for as long as that reader holds it, which is
+    milliseconds. Retried for up to five seconds before the error is let through."""
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            os.replace(src, dest)
+            return
+        except PermissionError:
+            if not IS_WINDOWS or time.monotonic() > deadline:
+                raise
+            time.sleep(0.02)
 
 
 def write_json(path: Path, value, mode: int | None = 0o644) -> None:

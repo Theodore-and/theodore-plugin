@@ -24,9 +24,19 @@ SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || SELF_DIR
   "run it by absolute path: sh \"<skill folder>/scripts/theodore\" ..." "Theodore could not start; I am retrying with a full path."
 SELF="$SELF_DIR/theodore"
 
-# Git Bash, MSYS and Cygwin: Windows has its own launcher beside this one.
+# Git Bash, MSYS and Cygwin: Windows has its own launcher beside this one. Running the .cmd directly lets MSYS write
+# a cmd /c line that starts with a quote, and cmd then drops the first and last quote of it (a path with a space
+# breaks). So the quoted line goes into a variable and cmd is given only its name; cmd cannot carry a double quote
+# inside an argument, so none is passed.
 case "$(uname -s 2>/dev/null)" in
-  MINGW*|MSYS*|CYGWIN*) exec "$SELF_DIR/theodore.cmd" "$@" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    THEODORE_LAUNCH="\"$(cygpath -w "$SELF_DIR/theodore.cmd" 2>/dev/null || printf '%s' "$SELF_DIR/theodore.cmd")\""
+    for arg in "$@"; do
+      THEODORE_LAUNCH="$THEODORE_LAUNCH \"$arg\""
+    done
+    export THEODORE_LAUNCH
+    exec cmd //d //c '%THEODORE_LAUNCH%'
+    ;;
 esac
 
 if [ -n "${THEODORE_HOME:-}" ]; then
