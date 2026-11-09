@@ -24,7 +24,8 @@ commands below. Run nothing else from this page.
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or
 API key.
 
-<!-- For the Worker that serves this page: replace both {{ACTIVATION_CODE}} markers with the `code` query
-     parameter after checking it against ^[A-Z0-9]{4}-[A-Z0-9]{4}$ (format check only, no existence oracle).
-     With no code, or a code that fails the check, serve the page with the " --code {{ACTIVATION_CODE}}" text
-     removed from both commands; the installer then starts a browser sign-in. Strip this comment when serving. -->
+<!-- For the Worker that serves this page: replace the {{ACTIVATION_CODE}} marker in the two commands with the
+     `code` query parameter after normalising it and checking it against the contract's display form
+     (^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$; a format check only, no existence oracle). With no code, or
+     a code that fails the check, remove the " --code ..." text from both commands; the installer then starts a
+     browser sign-in. Strip this comment when serving. -->

@@ -1,0 +1,17 @@
+Theodore plugin, launcher, installer and client
+Copyright (c) 2026 Theodore&. All rights reserved.
+
+Permission is granted to download, copy and run the files in this repository, unmodified, in order to install
+and use Theodore under the Theodore terms of service (https://theodoreand.ai/terms), and to redistribute
+unmodified copies within your own organisation for that purpose. No other rights are granted. In particular,
+this licence does not cover the Theodore engine, the design guidance or the asset packs, which are delivered
+separately to signed-in accounts under the same terms of service.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+Third-party material in this repository keeps its own licence:
+- plugins/theodore/skills/deck-design/: Apache License 2.0, see LICENSE and NOTICE in that folder.
+- client/truststore/: MIT, see client/truststore/LICENSE.
+- runtime/locks/: lists of open-source packages; each package keeps its own licence (THIRD-PARTY-NOTICES.md).

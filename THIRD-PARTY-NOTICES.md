@@ -1,10 +1,22 @@
 # Third-party notices
 
+## In this repository
+
+| Component | Where | Licence |
+| --- | --- | --- |
+| truststore 0.10.5, by Seth Michael Larson | `client/truststore/` (unmodified copy of the PyPI wheel's package; shipped inside the client archive) | MIT, text in `client/truststore/LICENSE` |
+| deck-design stub skill | `plugins/theodore/skills/deck-design/` | The guidance this skill loads is a derivative of Impeccable by Paul Bakaus (https://github.com/pbakaus/impeccable), Apache-2.0; `LICENSE` and `NOTICE` are in that folder |
+| Ed25519 verification | `client/theodore_client/ed25519.py` | Written for this project after the algorithm description in RFC 8032 (section 5.1); no third-party code |
+
+Fetched on request and never redistributed by Theodore: LibreOffice (MPL-2.0), downloaded unmodified from The
+Document Foundation with a pinned SHA-256 when a computer has no LibreOffice. Poppler (GPL) is never bundled or
+fetched.
+
 ## Runtime bundle
 
 The runtime bundle is the Python, the Node and the open-source packages that Theodore downloads into
 `<home>/runtime/<runtime-id>/` so the engine can run. Every component is shipped unmodified, as its project
-published it. This section was written from the darwin-arm64 build of runtime `b0ea99c9d34b7f36` (recipe in
+published it. This section was written from the darwin-arm64 build of runtime `f0c496e365236046` (recipe in
 `runtime/build/`, pins in `runtime/locks/`). The other four platforms carry the same packages at the same
 versions with that platform's binaries.
 
@@ -83,7 +95,7 @@ Installed from `runtime/locks/requirements.txt` and `runtime/locks/runtime-extra
 | lxml | 6.1.3 | BSD-3-Clause | libxml2, libxslt and libexslt (MIT), zlib (Zlib), GNU libiconv (LGPL-2.1) |
 | numpy | 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | OpenBLAS (BSD-3-Clause), LAPACK (BSD-3-Clause-Open-MPI), libgfortran and libgcc (GPL-3.0-or-later WITH GCC-exception-3.1), libquadmath (LGPL-2.1-or-later); on Windows OpenBLAS and Microsoft's `msvcp140.dll` |
 | pillow | 13.0.0 | MIT-CMU | libjpeg-turbo, libpng, libtiff, libwebp, libavif with aom, dav1d and libyuv, FreeType, HarfBuzz, Raqm, Little CMS, OpenJPEG, Brotli, zlib-ng, xz, zstd, libxcb, libXau and others; all permissive, texts in the wheel's `LICENSE` |
-| pypdfium2 | 5.15.0 | BSD-3-Clause OR Apache-2.0 | PDFium (BSD-3-Clause, Apache-2.0) and its third-party libraries (Abseil, AGG, FreeType, ICU, Little CMS, libjpeg-turbo, OpenJPEG, libpng, libtiff, zlib and others); texts under `BUILD_LICENSES/` |
+| pypdfium2 | 5.14.0 | BSD-3-Clause OR Apache-2.0 | PDFium (BSD-3-Clause, Apache-2.0) and its third-party libraries (Abseil, AGG, FreeType, ICU, Little CMS, libjpeg-turbo, OpenJPEG, libpng, libtiff, zlib and others); texts under `BUILD_LICENSES/` |
 | python-pptx | 1.0.2 | MIT | |
 | requests | 2.34.2 | Apache-2.0 | `NOTICE` included |
 | truststore | 0.10.5 | MIT | |
