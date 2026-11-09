@@ -13,6 +13,13 @@ rem Python runtime and engine (about 120 MB); registers the plugin in Claude Cod
 rem installed; starts the asset packs (about 95 MB) in the background; ends with "theodore doctor".
 rem Running it again is safe. Lines starting with THEODORE are statuses for the assistant: follow the NEXT line.
 setlocal EnableExtensions DisableDelayedExpansion
+rem Before any SHIFT: SHIFT moves %0 too.
+set "SELF=%~f0"
+rem The inbox tools by full path: a Git or MSYS tar.exe or curl.exe earlier on PATH behaves differently (GNU tar
+rem reads C:\... as a remote host name).
+set "SYS32=%SystemRoot%\System32"
+set "CURL=%SYS32%\curl.exe"
+set "TAR=%SYS32%\tar.exe"
 
 set "DL_BASE=https://dl.theodoreand.ai"
 if defined THEODORE_DL_BASE set "DL_BASE=%THEODORE_DL_BASE%"
@@ -41,7 +48,7 @@ goto :parse
 :parsed
 
 set "HASH="
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%~f0" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
+for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%SELF%" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
 if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with https://theodoreand.ai/install)
 
 if not defined UNINSTALL goto :install
@@ -53,10 +60,10 @@ exit /b 0
 
 :install
 if not defined CODE goto :code_ok
-echo %CODE%| findstr /r /i "^[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]-[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$" >nul || goto :bad_code
+echo %CODE%| %SYS32%\findstr.exe /r /i "^[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]-[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$" >nul || goto :bad_code
 :code_ok
-where curl.exe >nul 2>&1 || goto :no_curl
-where tar.exe >nul 2>&1 || goto :no_curl
+if not exist "%CURL%" goto :no_curl
+if not exist "%TAR%" goto :no_curl
 if not exist "%HOME_DIR%\staging" mkdir "%HOME_DIR%\staging" 2>nul
 if not exist "%HOME_DIR%\state" mkdir "%HOME_DIR%\state" 2>nul
 if not exist "%HOME_DIR%\staging" goto :not_writable
@@ -64,22 +71,22 @@ if not exist "%HOME_DIR%\staging" goto :not_writable
 rem --- 1. the plugin (stub skills and launcher: small text files) ------------------------------------------------
 echo theodore-install: downloading the Theodore plugin
 set "WHAT=the plugin version"
-curl.exe -fsSL --retry 2 --connect-timeout 20 -o "%HOME_DIR%\staging\latest.txt" "%DL_BASE%/plugin/latest.txt" 2>nul
+"%CURL%" -fsSL --retry 2 --connect-timeout 20 -o "%HOME_DIR%\staging\latest.txt" "%DL_BASE%/plugin/latest.txt" 2>nul
 if errorlevel 1 goto :download_failed
 set "P_VERSION="
 set "P_SHA="
 for /f "usebackq tokens=1,2" %%A in ("%HOME_DIR%\staging\latest.txt") do if not defined P_VERSION set "P_VERSION=%%A" & set "P_SHA=%%B"
 if not defined P_SHA goto :hash_failed
 set "WHAT=the plugin"
-curl.exe -fsSL --retry 2 --connect-timeout 20 -o "%HOME_DIR%\staging\plugin.tar.gz" "%DL_BASE%/plugin/theodore-plugin-%P_VERSION%.tar.gz" 2>nul
+"%CURL%" -fsSL --retry 2 --connect-timeout 20 -o "%HOME_DIR%\staging\plugin.tar.gz" "%DL_BASE%/plugin/theodore-plugin-%P_VERSION%.tar.gz" 2>nul
 if errorlevel 1 goto :download_failed
 set "HASH="
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%HOME_DIR%\staging\plugin.tar.gz" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
+for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%HOME_DIR%\staging\plugin.tar.gz" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
 if defined HASH set "HASH=%HASH: =%"
 if /i not "%HASH%"=="%P_SHA%" goto :hash_failed
 if exist "%HOME_DIR%\plugin.partial" rmdir /s /q "%HOME_DIR%\plugin.partial" >nul 2>&1
 mkdir "%HOME_DIR%\plugin.partial" 2>nul
-tar.exe -xzf "%HOME_DIR%\staging\plugin.tar.gz" -C "%HOME_DIR%\plugin.partial" 2>nul
+"%TAR%" -xzf "%HOME_DIR%\staging\plugin.tar.gz" -C "%HOME_DIR%\plugin.partial"
 if errorlevel 1 goto :not_writable
 if exist "%HOME_DIR%\plugin" rmdir /s /q "%HOME_DIR%\plugin" >nul 2>&1
 move /y "%HOME_DIR%\plugin.partial" "%HOME_DIR%\plugin" >nul 2>&1
@@ -98,7 +105,7 @@ set "C_VERSION=%JV%"
 set "BODY=%HOME_DIR%\staging\activate.json"
 >"%BODY%" echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%C_VERSION%"}
 set "HTTP=000"
-curl.exe -sS --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary "@%BODY%" "%API_BASE%/v1/device/activate" >"%HOME_DIR%\staging\http.txt" 2>nul
+"%CURL%" -sS --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary "@%BODY%" "%API_BASE%/v1/device/activate" >"%HOME_DIR%\staging\http.txt" 2>nul
 set /p HTTP=<"%HOME_DIR%\staging\http.txt"
 del /q "%BODY%" "%HOME_DIR%\staging\http.txt" >nul 2>&1
 if "%HTTP%"=="200" echo theodore-install: this computer is signed in (the one-time code was accepted)
@@ -144,7 +151,7 @@ exit /b %ERRORLEVEL%
 
 :jget
 set "JV="
-for /f "usebackq tokens=1,* delims=:" %%A in (`findstr /c:"\"%~1\"" "%SCRIPTS%\launcher.json" 2^>nul`) do if not defined JV set "JV=%%B"
+for /f "usebackq tokens=1,* delims=:" %%A in (`%SYS32%\findstr.exe /c:"\"%~1\"" "%SCRIPTS%\launcher.json" 2^>nul`) do if not defined JV set "JV=%%B"
 if not defined JV exit /b 0
 set "JV=%JV:"=%"
 if "%JV:~-1%"=="," set "JV=%JV:~0,-1%"

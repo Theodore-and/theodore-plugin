@@ -29,7 +29,9 @@ def client_version() -> str:
 def client_files() -> list[Path]:
     files = [CLIENT / "__main__.py"]
     for folder in ("theodore_client", "truststore"):
-        files += [p for p in sorted((CLIENT / folder).rglob("*")) if p.is_file() and "__pycache__" not in p.parts]
+        found = [p for p in (CLIENT / folder).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+        # By name parts, case-sensitive: sorting Path objects ignores case on Windows and gives other bytes there.
+        files += sorted(found, key=lambda p: p.relative_to(CLIENT).parts)
     return files
 
 

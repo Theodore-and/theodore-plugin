@@ -1,0 +1,6 @@
+# False positive: tests/fixtures/contract-v1.json line 134 is "openapi_sha256", the sha256 of the backend's public
+# openapi.json that the contract snapshot was cut from (tools/snapshot_contract.py). It is a checksum, not a key.
+# First line: `gitleaks git` (the commit that added the line). Second line: `gitleaks dir` (the working tree).
+# When the snapshot is regenerated the value and the commit change: add the new fingerprint here in that commit.
+085fbc9d5e100af3b07b980051737797a7df7914:tests/fixtures/contract-v1.json:generic-api-key:134
+tests/fixtures/contract-v1.json:generic-api-key:134

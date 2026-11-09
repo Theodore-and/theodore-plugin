@@ -178,7 +178,9 @@ class Sandbox:
             "LANG": "en_US.UTF-8",
         }
         if IS_WINDOWS:
-            for key in ("SYSTEMROOT", "COMSPEC", "PATHEXT", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA"):
+            # The processor variables are how a batch file learns the architecture; every real session has them.
+            for key in ("SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA",
+                        "COMPUTERNAME", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "NUMBER_OF_PROCESSORS"):
                 if key in os.environ:
                     self.env[key] = os.environ[key]
         (self.tmp / "tmp").mkdir()
@@ -232,7 +234,7 @@ class Sandbox:
     # --- runners ---------------------------------------------------------------------------------------------------------
     def run_launcher(self, *args: str, env: dict | None = None, timeout: float = 180, launcher: Path | None = None):
         target = str(launcher or self.launcher)
-        command = ["cmd", "/d", "/c", target, *args] if IS_WINDOWS else ["/bin/sh", target, *args]
+        command = cmd_command(target, *args) if IS_WINDOWS else ["/bin/sh", target, *args]
         return subprocess.run(command, env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=timeout,
                               stdin=subprocess.DEVNULL, cwd=str(self.tmp))
 
@@ -283,6 +285,17 @@ class Sandbox:
                 pass
 
         shutil.rmtree(self.tmp, onerror=onerror)
+
+
+def cmd_command(script: str, *args: str) -> str:
+    """The command line a shell gives cmd.exe for `script args...`: `cmd /d /s /c ""script" "arg" ..."`.
+
+    /s makes cmd strip exactly the outer pair of quotes (without it, a line with more than two quotes loses its first
+    and last quote and a path with a space breaks). An argument with a space or a character cmd treats specially is
+    quoted, as PowerShell and Git Bash do; cmd cannot carry a literal double quote inside an argument."""
+    def quote(arg: str) -> str:
+        return f'"{arg}"' if not arg or any(c in arg for c in ' \t&|<>^()%!,;=') else arg
+    return 'cmd /d /s /c "' + " ".join([f'"{script}"', *map(quote, args)]) + '"'
 
 
 def _alive(pid: int) -> bool:

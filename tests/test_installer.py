@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
-from support import RUNTIME_ID, IS_WINDOWS, ROOT, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
+from support import RUNTIME_ID, IS_WINDOWS, ROOT, FakeApi, Sandbox, cmd_command, engine_zip, fake_runtime_parts, pack_zip, status_lines
 
 INSTALLER = ROOT / "install" / ("install.cmd" if IS_WINDOWS else "install.sh")
 STABLE = "theodore.cmd" if IS_WINDOWS else "theodore"
@@ -41,7 +41,7 @@ class Installer(unittest.TestCase):
 
     def install(self, *args, env=None):
         import subprocess
-        command = ["cmd", "/d", "/c", str(INSTALLER), *args] if IS_WINDOWS else ["/bin/sh", str(INSTALLER), *args]
+        command = cmd_command(str(INSTALLER), *args) if IS_WINDOWS else ["/bin/sh", str(INSTALLER), *args]
         return subprocess.run(command, env={**self.box.env, **(env or {})}, capture_output=True, text=True,
                               timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
 

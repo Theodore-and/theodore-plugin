@@ -14,6 +14,9 @@ rem platform, 74 connector required, 78 internal). It uses only tools that ship 
 rem curl.exe, tar.exe, certutil, findstr; PowerShell's Invoke-WebRequest and BITS are download fallbacks.
 rem No PowerShell script file is involved, so the execution policy does not matter.
 setlocal EnableExtensions DisableDelayedExpansion
+rem The inbox tools by full path: a Git or MSYS tar.exe or curl.exe earlier on PATH behaves differently (GNU tar
+rem reads C:\... as a remote host name).
+set "SYS32=%SystemRoot%\System32"
 
 set "SELF_DIR=%~dp0"
 if "%SELF_DIR:~-1%"=="\" set "SELF_DIR=%SELF_DIR:~0,-1%"
@@ -58,8 +61,8 @@ rem Windows on ARM runs the x64 build through the system's emulation (a native b
 if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=x64"
 if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" set "ARCH=x64"
 if not defined ARCH goto :unsupported
-where tar.exe >nul 2>&1 || goto :unsupported
-where certutil.exe >nul 2>&1 || goto :unsupported
+if not exist "%SYS32%\tar.exe" goto :unsupported
+if not exist "%SYS32%\certutil.exe" goto :unsupported
 
 call :job_alive
 if errorlevel 1 if exist "%B%\failed" goto :failed_status
@@ -73,7 +76,7 @@ del /q "%B%\.write-test" >nul 2>&1
 
 if not defined THEODORE_EPHEMERAL goto :start_job
 call :jget stage1_client_url "%CONF%"
-curl.exe -sS -I -L --connect-timeout 5 -m 10 -o nul "%JV%" >nul 2>&1
+"%SYS32%\curl.exe" -sS -I -L --connect-timeout 5 -m 10 -o nul "%JV%" >nul 2>&1
 if errorlevel 1 goto :connector_required
 
 :start_job
@@ -84,7 +87,7 @@ set /a LIMIT=20
 if defined THEODORE_BOOTSTRAP_WAIT set /a LIMIT=THEODORE_BOOTSTRAP_WAIT
 :wait_loop
 if %WAITED% GEQ %LIMIT% goto :wait_done
-ping -n 2 127.0.0.1 >nul 2>&1
+"%SYS32%\ping.exe" -n 2 127.0.0.1 >nul 2>&1
 set /a WAITED+=1
 call :check_ready
 if defined READY goto :run_client
@@ -112,7 +115,7 @@ rem ============================================================================
 :jget
 rem %1 key, %2 file. launcher.json is flat on purpose: one "key": value per line. Result in JV.
 set "JV="
-for /f "usebackq tokens=1,* delims=:" %%A in (`findstr /c:"\"%~1\"" "%~2" 2^>nul`) do if not defined JV set "JV=%%B"
+for /f "usebackq tokens=1,* delims=:" %%A in (`%SYS32%\findstr.exe /c:"\"%~1\"" "%~2" 2^>nul`) do if not defined JV set "JV=%%B"
 if not defined JV exit /b 0
 set "JV=%JV:"=%"
 if "%JV:~-1%"=="," set "JV=%JV:~0,-1%"
@@ -150,7 +153,7 @@ exit /b 0
 :sha256
 rem %1 file. Result in HASH (lower or upper case, no spaces).
 set "HASH="
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%~1" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
+for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%~1" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
 if defined HASH set "HASH=%HASH: =%"
 exit /b 0
 
@@ -159,8 +162,8 @@ rem %1 url, %2 destination. Errorlevel 0 on success; otherwise CAUSE and DETAIL 
 set "CAUSE=NETWORK"
 set "DETAIL=no download tool worked"
 set "HTTP=000"
-where curl.exe >nul 2>&1 || goto :fetch_powershell
-curl.exe -sS -L --fail --retry 2 --connect-timeout 20 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
+if not exist "%SYS32%\curl.exe" goto :fetch_powershell
+"%SYS32%\curl.exe" -sS -L --fail --retry 2 --connect-timeout 20 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
 set "RC=%ERRORLEVEL%"
 set /p HTTP=<"%B%\http.txt"
 if "%RC%"=="0" exit /b 0
@@ -169,16 +172,17 @@ if "%RC%"=="23" set "CAUSE=DISK"
 if "%RC%"=="23" exit /b 1
 for %%C in (35 51 53 58 59 60 77 83 90 91) do if "%RC%"=="%%C" set "CAUSE=TLS_INTERCEPT"
 if "%HTTP%"=="407" set "CAUSE=PROXY_AUTH"
-findstr /c:"407" "%B%\fetch.err" >nul 2>&1 && set "CAUSE=PROXY_AUTH"
+"%SYS32%\findstr.exe" /c:"407" "%B%\fetch.err" >nul 2>&1 && set "CAUSE=PROXY_AUTH"
 :fetch_powershell
 rem Second try: Windows' own HTTP stack with the signed-in user's proxy credentials.
-where powershell.exe >nul 2>&1 || goto :fetch_bits
-powershell.exe -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -ProxyUseDefaultCredentials -Uri $env:THEODORE_FETCH_URL -OutFile $env:THEODORE_FETCH_OUT; exit 0 } catch { exit 1 }" >nul 2>&1
+set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PWSH%" goto :fetch_bits
+"%PWSH%" -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -ProxyUseDefaultCredentials -Uri $env:THEODORE_FETCH_URL -OutFile $env:THEODORE_FETCH_OUT; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 if exist "%~2" exit /b 0
 :fetch_bits
 rem Third try: the Background Intelligent Transfer Service.
-where bitsadmin.exe >nul 2>&1 || exit /b 1
-bitsadmin.exe /transfer theodore-setup /download /priority FOREGROUND "%~1" "%~2" >nul 2>&1
+if not exist "%SYS32%\bitsadmin.exe" exit /b 1
+"%SYS32%\bitsadmin.exe" /transfer theodore-setup /download /priority FOREGROUND "%~1" "%~2" >nul 2>&1
 if not errorlevel 1 if exist "%~2" exit /b 0
 exit /b 1
 
@@ -245,7 +249,7 @@ if exist "%RT_DIR%.stage1" rmdir /s /q "%RT_DIR%.stage1" >nul 2>&1
 mkdir "%RT_DIR%.stage1" 2>nul
 if not exist "%RT_DIR%\.parts" mkdir "%RT_DIR%\.parts" 2>nul
 set "DETAIL=the Python runtime could not be unpacked into the runtime folder"
-tar.exe -xzf "%PY_TAR%" -C "%RT_DIR%.stage1" 2>>"%B%\fetch.err"
+"%SYS32%\tar.exe" -xzf "%PY_TAR%" -C "%RT_DIR%.stage1" 2>>"%B%\fetch.err"
 if errorlevel 1 goto :job_disk
 if exist "%RT_DIR%\python" rmdir /s /q "%RT_DIR%\python" >nul 2>&1
 move /y "%RT_DIR%.stage1\python" "%RT_DIR%\python" >nul 2>&1
@@ -268,7 +272,7 @@ if /i not "%HASH%"=="%C_SHA%" goto :job_hash
 if exist "%HOME_DIR%\client\%S_CV%.partial" rmdir /s /q "%HOME_DIR%\client\%S_CV%.partial" >nul 2>&1
 mkdir "%HOME_DIR%\client\%S_CV%.partial" 2>nul
 set "DETAIL=the Theodore client could not be unpacked into the client folder"
-tar.exe -xf "%C_TAR%" -C "%HOME_DIR%\client\%S_CV%.partial" 2>>"%B%\fetch.err"
+"%SYS32%\tar.exe" -xf "%C_TAR%" -C "%HOME_DIR%\client\%S_CV%.partial" 2>>"%B%\fetch.err"
 if errorlevel 1 goto :job_disk
 if exist "%HOME_DIR%\client\%S_CV%" rmdir /s /q "%HOME_DIR%\client\%S_CV%" >nul 2>&1
 move /y "%HOME_DIR%\client\%S_CV%.partial\%S_CV%" "%HOME_DIR%\client\%S_CV%" >nul 2>&1

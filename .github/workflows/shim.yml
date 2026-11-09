@@ -2,7 +2,7 @@
 #
 # No secrets and no publishing step. The archives (theodore-<version>.zip for the hosted marketplace.json,
 # theodore-plugin-<version>.tar.gz and latest.txt for the installer, client-<version>.tar for the launcher's
-# stage 1) are uploaded as workflow artifacts; putting them on the download host is the lead's manual step.
+# stage 1, and install/ with install.md, install.sh and install.cmd for the releases bucket) are uploaded as workflow artifacts; putting them on the download host is the lead's manual step.
 # Everything runs against tests/fake_api.py: no Theodore service is contacted, and no account is needed.
 name: shim
 
@@ -53,14 +53,15 @@ jobs:
         with:
           python-version: "3.12"
       # A batch launcher cannot be given a shell script as its Python, so Windows tests install the real bundle.
+      # The bundle goes outside the checkout: the repository checks walk every file in it.
       - uses: actions/cache@v5
         id: bundle
         with:
-          path: out
+          path: ${{ runner.temp }}/bundle
           key: runtime-win32-x64-${{ hashFiles('runtime/locks/**', 'runtime/build/build_bundle.py') }}
       - name: Build the runtime bundle
         if: steps.bundle.outputs.cache-hit != 'true'
-        run: python runtime/build/build_bundle.py --platform win32-x64 --out out --work "$RUNNER_TEMP/runtime-work"
+        run: python runtime/build/build_bundle.py --platform win32-x64 --out "$RUNNER_TEMP/bundle" --work "$RUNNER_TEMP/runtime-work"
       - name: Inbox tools
         shell: cmd
         run: |
@@ -68,8 +69,24 @@ jobs:
           ver
       - name: Every suite (launcher through cmd, PowerShell with AllSigned, Git Bash; a home path with a space)
         env:
-          THEODORE_TEST_BUNDLE: ${{ github.workspace }}\out
+          THEODORE_TEST_BUNDLE: ${{ runner.temp }}\bundle
         run: python -m unittest discover -s tests -v
+
+  checks:
+    name: repository checks (secret scan)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # gitleaks 8.30.1, the release archive checked against its sha256; known false positives are in .gitleaksignore.
+      - name: Secret scan of every commit
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . --no-banner --redact --exit-code 1
 
   network:
     name: corporate network (TLS inspection, authenticating proxy)
@@ -86,16 +103,22 @@ jobs:
             -days 2 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" -addext "basicConstraints=critical,CA:TRUE"
           sudo cp "$RUNNER_TEMP/trusted-cert.pem" /usr/local/share/ca-certificates/theodore-test.crt
           sudo update-ca-certificates
+      # The package starts its own open proxy on 8888; stop it and run ours on another port, then prove that ours
+      # refuses a request without credentials, so the test cannot pass through an open proxy.
       - name: An authenticating proxy
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq tinyproxy
-          printf 'Port 8888\nListen 127.0.0.1\nTimeout 600\nBasicAuth tester secret\nAllow 127.0.0.1\n' > "$RUNNER_TEMP/tinyproxy.conf"
+          sudo systemctl stop tinyproxy || true
+          printf 'Port 18888\nListen 127.0.0.1\nTimeout 600\nBasicAuth tester secret\nAllow 127.0.0.1\n' > "$RUNNER_TEMP/tinyproxy.conf"
           tinyproxy -c "$RUNNER_TEMP/tinyproxy.conf"
           sleep 1
+          code=$(curl -s -o /dev/null -w '%{http_code}' -x http://127.0.0.1:18888 http://example.com/ || true)
+          echo "proxy without credentials answers $code"
+          test "$code" = 407
       - name: Launcher and client behind both
         env:
           THEODORE_TEST_TRUSTED_CERT: ${{ runner.temp }}/trusted-cert.pem:${{ runner.temp }}/trusted-key.pem
-          THEODORE_TEST_AUTH_PROXY: http://127.0.0.1:8888
+          THEODORE_TEST_AUTH_PROXY: http://127.0.0.1:18888
           THEODORE_TEST_AUTH_PROXY_CREDENTIALS: tester:secret
         run: python -m unittest -v tests.test_launcher.CorporateNetwork
 
@@ -112,7 +135,8 @@ jobs:
         run: |
           python tools/build_plugin_archives.py --out dist/plugin
           python runtime/build/build_client.py --out dist/client
-          sha256sum dist/plugin/* dist/client/* install/install.sh install/install.cmd | tee dist/SHA256SUMS
+          mkdir -p dist/install && cp install/install.md install/install.sh install/install.cmd dist/install/
+          sha256sum dist/plugin/* dist/client/* dist/install/* | tee dist/SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
           name: plugin-archives
