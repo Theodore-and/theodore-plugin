@@ -123,7 +123,7 @@ def refresh(timeout: float = 20.0) -> dict:
     if not cred:
         raise api.sign_in_required()
     engine = core.read_json(core.home().engines / "current.json").get("version")
-    body = {"client_version": __version__, "plugin_version": str(core.config().get("shim_version") or "0.0.0"), "host": core.host_name()}
+    body = {"client_version": __version__, "plugin_version": core.plugin_version(), "host": core.host_name()}
     if engine:
         body["engine_version"] = engine
     try:

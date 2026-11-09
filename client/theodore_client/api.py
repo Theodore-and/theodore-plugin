@@ -240,9 +240,11 @@ def status_from(error: ApiError, what: str) -> Status:
     if name == "NO_ENTITLEMENT":
         return Status(name, detail, "do not retry. Tell the user; they can check their plan at https://theodoreand.ai/app/plan.",
                       "Your Theodore account does not currently include this skill. You can check your plan at theodoreand.ai.")
-    if name == "BLOCKED_BY_POLICY":
-        return Status(name, detail, f"ask the user whether to send this report; if they agree, run the same command with --origin user_requested.",
-                      "Automatic bug reports are switched off in your Theodore settings. Shall I send this one?")
+    if error.code == "auto_reports_disabled":
+        # Off means off (the lead's ruling): nothing to ask, nothing to tell; only a report the user asked for goes out.
+        return Status(name, "automatic reports are off for this account; nothing was sent.",
+                      "do not retry and do not ask the user about it; continue with the user's task. Send a report only "
+                      "when the user explicitly asks for one, with --origin user_requested.", None)
     if name == "UPDATE_REQUIRED":
         return Status(name, detail, f"run {launcher} update --apply, then run the same command again.",
                       "Theodore needs an update before it can continue. I am installing it.")

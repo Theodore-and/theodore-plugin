@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import platform as _platform
 import subprocess
 import sys
@@ -22,9 +23,12 @@ IS_WINDOWS = os.name == "nt"
 # --- statuses ---------------------------------------------------------------------------------------------------------
 
 class Status(Exception):
-    """A three-line message for the assistant and the exit code that goes with it."""
+    """A three-line message for the assistant and the exit code that goes with it.
 
-    def __init__(self, name: str, summary: str, next_step: str, tell_user: str):
+    tell_user is None only for automatic problem reports, which are silent by the owner's decision: the assistant
+    still gets the first two lines, and there is nothing for it to say to the user."""
+
+    def __init__(self, name: str, summary: str, next_step: str, tell_user: str | None):
         super().__init__(summary)
         self.name, self.summary, self.next_step, self.tell_user = name, summary, next_step, tell_user
 
@@ -34,7 +38,8 @@ class Status(Exception):
 
     def render(self) -> str:
         one = lambda text: " ".join(str(text).split())
-        return f"THEODORE {self.name}: {one(self.summary)}\nNEXT: {one(self.next_step)}\nTELL THE USER: {one(self.tell_user)}"
+        lines = f"THEODORE {self.name}: {one(self.summary)}\nNEXT: {one(self.next_step)}"
+        return lines if self.tell_user is None else f"{lines}\nTELL THE USER: {one(self.tell_user)}"
 
 
 def emit(status: Status) -> int:
@@ -60,6 +65,27 @@ def platform_arch() -> tuple[str, str]:
     machine = _platform.machine().lower()
     arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(machine, machine)
     return system, arch
+
+
+def windows_on_arm() -> bool:
+    """True when this (x64) process runs under emulation on Windows on ARM. IsWow64Process2 names the computer's own
+    processor even for an emulated x64 process. Test seam: THEODORE_TEST_NATIVE_MACHINE (for example "arm64") is
+    honoured only when the API base is loopback, and only to say "Windows on ARM"."""
+    seam = os.environ.get("THEODORE_TEST_NATIVE_MACHINE")
+    if seam and is_loopback_api():
+        return seam.lower() == "arm64"
+    if not IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        process, native = ctypes.c_ushort(), ctypes.c_ushort()
+        if not kernel32.IsWow64Process2(ctypes.c_void_p(kernel32.GetCurrentProcess()), ctypes.byref(process), ctypes.byref(native)):
+            return False
+        return native.value == 0xAA64                           # IMAGE_FILE_MACHINE_ARM64
+    except (AttributeError, OSError):                           # Windows before 10 1709 has no IsWow64Process2
+        return False
 
 
 def host_name() -> str:
@@ -144,6 +170,30 @@ def quoted_launcher() -> str:
 # --- configuration (launcher.json beside the stable launcher) ---------------------------------------------------------
 
 _CONFIG: dict | None = None
+
+
+_SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+
+
+def plugin_version() -> str:
+    """The version of the installed Theodore plugin, as the API wants it (a semantic version, never empty).
+
+    Read from the plugin manifest of the skill folder that called us (THEODORE_SKILL_DIR is <plugin>/skills/<skill>),
+    then from the installer's unpacked copy in <home>/plugin (what Codex runs), then from launcher.json, else 0.0.0."""
+    roots = []
+    if os.environ.get("THEODORE_SKILL_DIR"):
+        roots.append(Path(os.environ["THEODORE_SKILL_DIR"]).parent.parent)
+    roots.append(home().root / "plugin" / "plugins" / "theodore")
+    for root in roots:
+        for manifest in (root / ".claude-plugin" / "plugin.json", root / "plugin.json"):
+            try:
+                version = str(json.loads(manifest.read_text(encoding="utf-8")).get("version") or "")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if _SEMVER.match(version):
+                return version
+    version = str(config().get("shim_version") or "")
+    return version if _SEMVER.match(version) else "0.0.0"
 
 
 def config() -> dict:

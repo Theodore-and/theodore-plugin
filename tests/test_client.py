@@ -701,22 +701,39 @@ class ReportsAndPreferences(ClientCase):
 
     def test_report_is_filed_and_shown_with_its_reference(self):
         self.ready()
-        result = self.client("report", "--kind", "bug", "--title", "render failed", "--details", "soffice exited 77", "--verb", "render")
+        result = self.client("report", "--kind", "bug", "--title", "render failed", "--details", "soffice exited 77", "--verb", "render",
+                             "--origin", "user_requested")
         first, _n, tell = self.assertStatus(result, "OK", 0)
         self.assertRegex(first, r"report filed as TR-\d{6}\.")
         self.assertIn("no deck content", tell)
         self.assertEqual(self.api.reports[0]["title"], "render failed")
-        self.assertEqual(self.api.reports[0]["origin"], "automatic")
+        self.assertEqual(self.api.reports[0]["origin"], "user_requested")
+        self.assertEqual(self.api.reports[0]["environment"]["plugin_version"], "0.1.0")
 
-    def test_automatic_reports_switched_off_asks_the_user(self):
+    def test_automatic_reports_switched_off_means_off_and_nothing_is_asked(self):
         self.ready()
         self.api.auto_reports = False
         args = ("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
-        _f, nxt, tell = self.assertStatus(self.client(*args), "BLOCKED_BY_POLICY", 73)
-        self.assertIn("--origin user_requested", nxt)
-        self.assertIn("Shall I send", tell)
+        refused = self.client(*args)
+        self.assertEqual(refused.returncode, 73, refused.stdout + refused.stderr)
+        self.assertEqual(refused.stdout.strip().splitlines(), [
+            "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; nothing was sent.",
+            "NEXT: do not retry and do not ask the user about it; continue with the user's task. Send a report only when "
+            "the user explicitly asks for one, with --origin user_requested."])
+        self.assertNotIn("TELL THE USER", refused.stdout)
+        self.assertEqual(self.api.reports, [], "nothing was sent")
         self.assertTrue((self.box.home / "state" / "entitlement.json").exists(), "this 403 must not sign the device out")
-        self.assertStatus(self.client(*args, "--origin", "user_requested"), "OK", 0)
+        _f, _n, tell = self.assertStatus(self.client(*args, "--origin", "user_requested"), "OK", 0)
+        self.assertIn("no deck content", tell, "a report the user asked for is confirmed to the user")
+        self.assertEqual([r["origin"] for r in self.api.reports], ["user_requested"])
+
+    def test_an_automatic_report_is_silent(self):
+        self.ready()
+        result = self.client("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertRegex(lines[0], r"^THEODORE OK: automatic report filed as TR-\d{6}\.$")
+        self.assertEqual(lines[1:], ["NEXT: continue with the user's task; do not mention the report unless the user asks."])
 
     def test_report_needs_kind_title_details(self):
         self.assertStatus(self.client("report", "--kind", "bug"), "USAGE", 64)
@@ -760,6 +777,36 @@ class StatusDoctorUninstall(ClientCase):
         self.assertIn(f"engine {self.ENGINE_VERSION}", tell)
         report = json.loads(self.client("doctor", "--json").stdout)
         self.assertEqual({c["name"] for c in report["checks"] if c["level"] == "fail"}, set())
+
+    def test_doctor_says_plainly_when_windows_on_arm_runs_the_x64_build(self):
+        self.ready()
+        self.box.env["THEODORE_TEST_NATIVE_MACHINE"] = "arm64"         # what IsWow64Process2 reports on Windows on ARM
+        result = self.client("doctor")
+        _first, _next, tell = self.assertStatus(result, "OK", 0)
+        self.assertIn("WARN  processor: Windows on ARM: Theodore runs its Windows x64 build through Windows' x64 emulation", result.stdout)
+        self.assertIn("Windows on ARM, so Theodore uses its x64 build through Windows' emulation", tell)
+        self.box.env["THEODORE_TEST_NATIVE_MACHINE"] = "x64"
+        self.assertNotIn("processor", self.client("doctor").stdout)
+
+    def test_heartbeat_sends_the_plugin_manifest_version(self):
+        self.ready()
+        # A launcher.json without shim_version: the old client sent "" and the API refused the heartbeat (422).
+        self.box.write_launcher_json(into=self.box.home / "bin", shim_version="")
+        manifest = self.box.plugin / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text())
+        data["version"] = "0.3.1"
+        manifest.write_text(json.dumps(data))
+        skill = {"THEODORE_SKILL_DIR": str(self.box.plugin / "skills" / "pptx")}
+        before = len(self.api.heartbeats)
+        self.assertEqual(self.client("guide", "pptx", env={**skill, "THEODORE_TEST_CLOCK_OFFSET": "7200"}).returncode, 0)
+        self.assertEqual(len(self.api.heartbeats), before + 1, "the heartbeat was accepted")
+        self.assertEqual(self.api.heartbeats[-1]["plugin_version"], "0.3.1", "from the manifest beside the calling skill")
+        # Codex runs the installer's unpacked copy in <home>/plugin: its manifest is the source when no skill folder is named.
+        codex = self.box.home / "plugin" / "plugins" / "theodore"
+        codex.mkdir(parents=True)
+        (codex / "plugin.json").write_text(json.dumps({"name": "theodore", "version": "0.3.2"}))
+        self.assertEqual(self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": "14400"}).returncode, 0)
+        self.assertEqual(self.api.heartbeats[-1]["plugin_version"], "0.3.2")
 
     def test_doctor_before_sign_in(self):
         self.client("setup", "--job")
@@ -977,6 +1024,8 @@ class Internals(unittest.TestCase):
         from theodore_client.core import Status
         text = Status("RETRY", "a\nb", "c\r\nd", "e\tf").render()
         self.assertEqual(text.splitlines(), ["THEODORE RETRY: a b", "NEXT: c d", "TELL THE USER: e f"])
+        # The one exception (automatic reports, which are silent): the first two lines, nothing for the user.
+        self.assertEqual(Status("OK", "a", "b", None).render().splitlines(), ["THEODORE OK: a", "NEXT: b"])
 
 
 if __name__ == "__main__":
