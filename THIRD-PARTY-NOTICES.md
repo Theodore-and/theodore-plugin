@@ -16,7 +16,8 @@ fetched.
 
 The runtime bundle is the Python, the Node and the open-source packages that Theodore downloads into
 `<home>/runtime/<runtime-id>/` so the engine can run. Every component is shipped unmodified, as its project
-published it. This section was written from the darwin-arm64 build of runtime `f0c496e365236046` (recipe in
+published it. This section was written from the darwin-arm64 build of runtime `f0c496e365236046` and updated for
+`43be74ecf52f9321`, which adds skia-canvas's native binary and nothing else (recipe in
 `runtime/build/`, pins in `runtime/locks/`). The other four platforms carry the same packages at the same
 versions with that platform's binaries.
 
@@ -29,6 +30,7 @@ The licence texts travel with the bundle, in `<home>/runtime/<runtime-id>/licens
 | `licenses/python-packages/<name>-<version>/` | Licence files of each PyPI package, copied from its wheel |
 | `licenses/node/LICENSE` | Node.js licence, which includes the licences of V8, ICU, OpenSSL, libuv and its other bundled components |
 | `licenses/npm-packages.txt` | Name, version and licence of every npm package; each package keeps its own licence file in `node_modules/` |
+| `licenses/skia/LICENSE` | Skia's licence, for the Skia code inside skia-canvas's native binary |
 
 ### Licences that are not plain permissive
 
@@ -137,6 +139,12 @@ versions (150 names) on darwin-arm64.
 | linebreak | 1.1.0 | MIT | |
 | prismjs | 1.30.0 | MIT | |
 | acorn, acorn-walk | 8.16.0, 8.3.5 | MIT | |
-| skia-canvas | 3.0.8 | MIT | JavaScript files only. Its native Skia binary is fetched by an install script that the build does not run, so no Skia code is in the bundle |
+| skia-canvas | 3.0.8 | MIT | With its prebuilt native binary `lib/skia.node`, taken unmodified from the project's GitHub release `v3.0.8` and checked against the sha256 the package itself lists (see below) |
+
+`skia-canvas`'s `lib/skia.node` statically links Google's Skia (BSD-3-Clause; text in `licenses/skia/LICENSE`, taken
+from the Skia repository at commit `563b559a`), Rust crates, and libraries Skia builds in: HarfBuzz, expat and
+libjpeg-turbo on every platform, and on Linux also FreeType (used under the FreeType Licence, which asks for credit:
+"Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.") and
+Fontconfig. The binary's own list of embedded licences is not yet reproduced in the bundle beyond Skia's.
 
 The full list for a given bundle is its `licenses/npm-packages.txt`.

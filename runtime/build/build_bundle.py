@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
 import json
 import lzma
@@ -42,6 +43,8 @@ PLATFORMS = ("darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm6
 PBS_URL = "https://github.com/astral-sh/python-build-standalone/releases/download/{release}/{file}"
 PBS_RAW_URL = "https://raw.githubusercontent.com/astral-sh/python-build-standalone/{release}/{file}"
 NODE_URL = "https://nodejs.org/dist/v{version}/{file}"
+SKIA_URL = "https://github.com/samizdatco/skia-canvas/releases/download/v{version}/{file}"
+SKIA_LICENSE_URL = "https://raw.githubusercontent.com/google/skia/{commit}/LICENSE"
 
 LICENCE_NAME = re.compile(r"licen[cs]e|copying|notice|copyright|authors|patents|third.?party", re.I)
 LICENCE_TEXT = re.compile(r"licen[cs]|copyright|permission is hereby granted", re.I)
@@ -370,7 +373,28 @@ def npm_licence_list(node_modules: Path, dest: Path) -> None:
     dest.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
-def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, platform_key: str) -> Path:
+def install_skia_binary(node_modules: Path, pin: dict, archive: Path) -> None:
+    """What skia-canvas's install script would do (`lib/prebuild.mjs download`), without running it: put the pinned
+    prebuilt binary, gunzipped, at node_modules/skia-canvas/lib/skia.node. The archive was already checked against
+    versions.json; the package's own `prebuild` table (inside the npm tarball, itself checked by npm against the
+    lockfile) must name the same sha256, so the two pins cannot drift apart silently."""
+    package_dir = node_modules / "skia-canvas"
+    if not (package_dir / "package.json").is_file():
+        die("skia-canvas is pinned in versions.json but npm did not install it; remove the pin or fix the lock")
+    package = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
+    if package.get("version") != pin["version"]:
+        die(f"skia-canvas {package.get('version')} is in the lock but versions.json pins {pin['version']}")
+    listed = (package.get("prebuild") or {}).get(archive.name)
+    if listed != f"sha256:{sha256_file(archive)}":
+        die(f"skia-canvas {pin['version']} lists {listed} for {archive.name}, not the sha256 pinned in versions.json")
+    target = package_dir / "lib" / "skia.node"
+    with gzip.open(archive, "rb") as source, open(target, "wb") as handle:
+        shutil.copyfileobj(source, handle, 1 << 20)
+    log(f"skia-canvas {pin['version']}: lib/skia.node from {archive.name} ({target.stat().st_size} bytes)")
+
+
+def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, platform_key: str,
+                       skia_pin: dict, skia_archive: Path) -> Path:
     scratch.mkdir(parents=True)
     for name in ("package.json", "package-lock.json"):
         shutil.copyfile(LOCKS / name, scratch / name)
@@ -383,10 +407,11 @@ def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, pl
            "npm_config_userconfig": str(npmrc["user"]),
            "npm_config_globalconfig": str(npmrc["global"]),
            "npm_config_update_notifier": "false"}
-    # --ignore-scripts: nothing from a package runs at build time. skia-canvas (optional) therefore has no native
-    # binary; see README.md.
+    # --ignore-scripts: nothing from a package runs at build time. The one native binary an install script would
+    # have fetched (skia-canvas) is placed by install_skia_binary below instead; see README.md.
     run([node, npm_cli, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=scratch, env=env)
     node_modules = scratch / "node_modules"
+    install_skia_binary(node_modules, skia_pin, skia_archive)
     removed = prune_node_modules(node_modules, platform_key)
     log("pruned node_modules: " + ", ".join(f"{count} {kind}" for kind, count in removed.items()))
     return node_modules
@@ -420,6 +445,15 @@ def build(platform_key: str, out: Path, work: Path, cache: Path) -> None:
           py_archive, py_asset["sha256"], py_asset["size"])
     fetch(NODE_URL.format(version=node_pin["version"], file=node_asset["file"]),
           node_archive, node_asset["sha256"], node_asset["size"])
+    skia_pin = versions["skia_canvas"]
+    skia_asset = skia_pin["assets"][platform_key]
+    # One cache folder per version: the archive names (darwin-arm64.gz) carry no version.
+    skia_archive = cache / f"skia-canvas-{skia_pin['version']}" / skia_asset["file"]
+    fetch(SKIA_URL.format(version=skia_pin["version"], file=skia_asset["file"]),
+          skia_archive, skia_asset["sha256"], skia_asset["size"])
+    skia_licence = cache / f"skia-{skia_pin['skia_license']['commit']}-LICENSE"
+    fetch(SKIA_LICENSE_URL.format(commit=skia_pin["skia_license"]["commit"]), skia_licence,
+          skia_pin["skia_license"]["sha256"])
     licence_dir = cache / f"python-build-standalone-{py_pin['pbs_release']}-licences"
     for name, digest in sorted(py_pin["license_texts"].items()):
         fetch(PBS_RAW_URL.format(release=py_pin["pbs_release"], file=name), licence_dir / name, digest)
@@ -441,10 +475,11 @@ def build(platform_key: str, out: Path, work: Path, cache: Path) -> None:
     npm_cli = node_top / ("node_modules" if windows else "lib/node_modules") / "npm" / "bin" / "npm-cli.js"
     node_entries = [("node/node.exe" if windows else "node/bin/node", node),
                     ("licenses/node/LICENSE", node_top / "LICENSE")]
-    node_modules = build_node_modules(node, npm_cli, build_dir / "npm", cache, platform_key)
+    node_modules = build_node_modules(node, npm_cli, build_dir / "npm", cache, platform_key, skia_pin, skia_archive)
     npm_list = build_dir / "licenses" / "npm-packages.txt"
     npm_licence_list(node_modules, npm_list)
-    module_entries = tree_entries(node_modules, "node_modules") + [("licenses/npm-packages.txt", npm_list)]
+    module_entries = tree_entries(node_modules, "node_modules") + [("licenses/npm-packages.txt", npm_list),
+                                                                   ("licenses/skia/LICENSE", skia_licence)]
 
     stem = f"runtime-{rid}-{platform_key}"
     shutil.copyfile(py_archive, out / py_asset["file"])

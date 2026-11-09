@@ -30,9 +30,6 @@ WINDOWS = os.name == "nt"
 PY_MODULES = ["pptx", "lxml.etree", "PIL.Image", "numpy", "fontTools", "requests", "defusedxml", "xlsxwriter",
               "pypdfium2", "truststore"] + (["comtypes"] if sys.platform == "win32" else [])
 STDLIB_MODULES = ["ssl", "lzma", "sqlite3", "ctypes", "venv"]
-# Optional npm dependencies whose native binary comes from an install script. The recipe runs no install scripts,
-# so these do not load; the engine treats them as absent.
-NO_BINARY = {"skia-canvas"}
 # Packages whose published `main` does not load (mathjax-full's needs a component build that npm does not ship);
 # the entry point its users require instead.
 ENTRY = {"mathjax-full": "mathjax-full/js/mathjax.js"}
@@ -86,6 +83,16 @@ for (const name of JSON.parse(process.argv[1])) {
     out.modules[name] = {error: String(error && error.message).split("\n")[0]};
   }
 }
+try {
+  // What the engine's text measurer does: a 2x2 canvas, a CSS font, measureText. A width of 0 means no font.
+  const {Canvas, FontLibrary} = require("skia-canvas");
+  const ctx = new Canvas(2, 2).getContext("2d");
+  ctx.font = "normal normal 32px sans-serif";
+  out.skia = {width: ctx.measureText("The quick brown fox jumps over 13 lazy dogs.").width,
+              families: FontLibrary.families.length};
+} catch (error) {
+  out.skiaError = String(error && error.message).split("\n")[0];
+}
 (async () => {
   try {
     const sharp = require("sharp");
@@ -98,6 +105,28 @@ for (const name of JSON.parse(process.argv[1])) {
   }
   console.log(JSON.stringify(out));
 })();
+"""
+
+# A one-page PDF with a blue square from (10, 10) to (60, 60) on a 200 x 100 point page, rendered at 72 dpi with
+# PDFium: the square's centre must be blue and the far corner white. That is the engine's PDF-to-image step when
+# pdftoppm is absent.
+CHECK_PDFIUM = r"""
+import json, pypdfium2
+objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+           b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>"]
+stream = b"0 0 1 rg 10 10 50 50 re f"
+objects.append(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
+pdf, offsets = b"%PDF-1.4\n", []
+for number, body in enumerate(objects, 1):
+    offsets.append(len(pdf))
+    pdf += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+xref = len(pdf)
+pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+pdf += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+image = pypdfium2.PdfDocument(pdf)[0].render(scale=1).to_pil().convert("RGB")
+print(json.dumps({"size": image.size, "square": image.getpixel((35, 65)), "corner": image.getpixel((190, 5)),
+                  "pdfium": pypdfium2.PDFIUM_INFO.version if hasattr(pypdfium2, "PDFIUM_INFO") else ""}))
 """
 
 RESULTS: list[str] = []
@@ -261,11 +290,12 @@ def check_node(runtime: Path, env: dict, label: str, version: str) -> None:
         kind = "optional" if name in optional else "required"
         if "error" not in info:
             expect(inside(info["file"], runtime), f"{label} require {name} ({kind})", info["version"])
-        elif name in NO_BINARY:
-            report("SKIP", f"{label} require {name} (optional, no native binary without its install script)",
-                   info["error"])
         else:
             report("FAIL", f"{label} require {name} ({kind})", info["error"])
+    skia = data.get("skia") or {}
+    expect(skia.get("width", 0) > 0, f"{label} skia-canvas text measurement",
+           f"{skia['width']:.2f} px for a 44-character line at 32 px, {skia['families']} font families"
+           if skia else data.get("skiaError", ""))
     expect("vips" in data, f"{label} sharp libvips", data.get("vips") or data.get("sharpError", ""))
     png = data.get("png") or {}
     expect(png.get("signature") == "89504e470d0a1a0a", f"{label} sharp one-pixel PNG encode",
@@ -282,6 +312,15 @@ def check_runtime(runtime: Path, scratch: Path, label: str, manifest: dict) -> N
     if expect(proc.returncode == 0, f"{label} venv create",
               f"{seconds:.2f} s" if proc.returncode == 0 else last_line(proc)):
         check_python(venv_python(venv), runtime, env, f"{label} venv", version, in_venv=True)
+        proc, _ = timed([venv_python(venv), "-c", CHECK_PDFIUM], env=env)
+        try:
+            data = json.loads(proc.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError):
+            data = None
+        expect(bool(data) and data["size"] == [200, 100] and data["square"] == [0, 0, 255]
+               and data["corner"] == [255, 255, 255], f"{label} PDFium rasterises a PDF page",
+               f"{data['size'][0]}x{data['size'][1]} px, square {data['square']}, corner {data['corner']}, "
+               f"PDFium {data['pdfium']}" if data else last_line(proc))
     check_node(runtime, env, label, manifest["node_version"])
 
 
@@ -344,7 +383,7 @@ def check_engine(runtime: Path, payload: Path, home: Path, scratch: Path, label:
         package = json.loads((LOCKS / "package.json").read_text(encoding="utf-8"))
         # The engine's doctor requires each package by its bare name, so it reports the ENTRY packages as absent
         # on every install; check_node has already loaded them through their real entry point.
-        npm = (set(package.get("dependencies", {})) | set(package.get("optionalDependencies", {}))) - NO_BINARY
+        npm = set(package.get("dependencies", {})) | set(package.get("optionalDependencies", {}))
         npm -= set(ENTRY)
         bundled = {f"python:{name.split('.')[0]}" for name in PY_MODULES} | {f"npm:{name}" for name in npm}
         bundled |= {"python", "node"}
@@ -408,7 +447,10 @@ def main() -> int:
                     check_engine(runtime, args.engine.resolve(), home, scratch, label,
                                  [path.resolve() for path in args.extra_path])
             if not args.engine:
-                report("SKIP", "engine blank build", "no --engine payload given")
+                report("SKIP", "REDUCED SMOKE TEST (no engine payload)",
+                       "NOT covered here: the engine's doctor, a blank deck build (start, apply), the engine's own "
+                       "use of the text measurer and of PDFium. Covered: checksums, unpack, relocation, venv, every "
+                       "wheel and npm package, sharp, skia-canvas text measurement, PDFium rasterisation")
     finally:
         if args.keep:
             print(f"kept: {scratch}")

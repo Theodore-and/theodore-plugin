@@ -87,5 +87,39 @@
       "macos": "13.0"
     }
   },
-  "recipe_version": 1
+  "recipe_version": 2,
+  "skia_canvas": {
+    "assets": {
+      "darwin-arm64": {
+        "file": "darwin-arm64.gz",
+        "sha256": "df5f6aec9b92a83861473dff8cf1ed3aea16b89af6f66a9cfbc25ff7fc7460a9",
+        "size": 10001340
+      },
+      "darwin-x64": {
+        "file": "darwin-x64.gz",
+        "sha256": "3301d9241b661f30dcaf73c413b91549d020d7c2faff4b13905007b93ff66736",
+        "size": 10294025
+      },
+      "linux-arm64": {
+        "file": "linux-arm64-glibc.gz",
+        "sha256": "0665d07a60c05d912a2fd1459aeb37714eb0445c2f7848407638546c3d2e1a70",
+        "size": 12587404
+      },
+      "linux-x64": {
+        "file": "linux-x64-glibc.gz",
+        "sha256": "f45925290599d4b7cb5211c123fadee27bc899d7556696e2e333d0efac6937b2",
+        "size": 12505166
+      },
+      "win32-x64": {
+        "file": "win32-x64.gz",
+        "sha256": "bdf56f8b0e0473ec414f510b5b7068d33a76b3488fd608f49ca92d5bfb77b428",
+        "size": 10752533
+      }
+    },
+    "skia_license": {
+      "commit": "563b559ae37890748d2a2e4322342ff3f11416c7",
+      "sha256": "5f787c1dee3c56547f09ccc2906ab5f5293c4d8dd6c8654e573216c38e908dbd"
+    },
+    "version": "3.0.8"
+  }
 }

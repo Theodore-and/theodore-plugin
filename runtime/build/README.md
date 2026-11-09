@@ -12,7 +12,7 @@ the public lock files in `runtime/locks/`.
 | `requirements.txt` | The engine's Python packages, exact versions with sha256 of every released file |
 | `runtime-extra.txt` | What the bundle adds: `pypdfium2`, `truststore` and, on Windows, `comtypes` (same format) |
 | `package.json`, `package-lock.json` | The engine's npm packages |
-| `versions.json` | CPython version and python-build-standalone release, Node version, sha256 and size of both downloads for the five platforms, sha256 of the licence texts taken from python-build-standalone, the oldest system the wheels must support (`wheel_floor`), and `recipe_version` |
+| `versions.json` | CPython version and python-build-standalone release, Node version, sha256 and size of both downloads for the five platforms, the skia-canvas prebuilt binary per platform, sha256 of the licence texts taken from python-build-standalone, the oldest system the wheels must support (`wheel_floor`), and `recipe_version` |
 
 ## Outputs (`--out`)
 
@@ -21,7 +21,7 @@ the public lock files in `runtime/locks/`.
 | python | `cpython-<version>+<release>-<triple>-install_only_stripped.tar.gz` | The upstream python-build-standalone asset, byte for byte: `python/` |
 | wheels | `runtime-<id>-<platform>-<arch>-wheels.tar.xz` | What pip added to `python/lib/python3.12/site-packages/` (Windows: `python/Lib/site-packages/`), `licenses/python-packages/<dist>/`, `licenses/python-build-standalone/` |
 | node | `runtime-<id>-<platform>-<arch>-node.tar.xz` | `node/bin/node` (Windows: `node/node.exe`), `licenses/node/LICENSE` |
-| node_modules | `runtime-<id>-<platform>-<arch>-node_modules.tar.xz` | `node_modules/`, `licenses/npm-packages.txt` |
+| node_modules | `runtime-<id>-<platform>-<arch>-node_modules.tar.xz` | `node_modules/` (with skia-canvas's `lib/skia.node`), `licenses/npm-packages.txt`, `licenses/skia/LICENSE` |
 | | `runtime-<id>-<platform>-<arch>.manifest.json` | Schema `theodore-runtime-bundle-v1`: one entry per part with file, sha256, size, unpacked size and file count |
 
 Unpacking every part into one directory gives `python/`, `node/`, `node_modules/` and `licenses/`. The python
@@ -58,15 +58,17 @@ What the recipe does, in order:
    outside `site-packages` (console scripts in `python/bin`, one man page) are not shipped, because the upstream
    tarball must stay untouched and a console script embeds the build directory.
 5. Takes the `node` binary and `LICENSE` from the Node archive, and runs
-   `npm ci --omit=dev --ignore-scripts` with the npm inside that archive on a copy of the two npm files.
+   `npm ci --omit=dev --ignore-scripts` with the npm inside that archive on a copy of the two npm files, then puts
+   skia-canvas's pinned prebuilt binary in place (see "skia-canvas" below).
 6. Prunes `node_modules` (below), lists every package with its licence, and writes the archives and the
    manifest.
 
 The smoke test verifies each part against the manifest, unpacks into a fresh directory whose path contains a
 space, imports every wheel from the bundled Python and from a venv created over it
 (`python -m venv --system-site-packages --without-pip`), requires every npm dependency and encodes a PNG with
-sharp. Then it moves the runtime directory to a second path and repeats. `--engine <payload dir>` adds a blank
-deck build from an unpacked engine payload; the engine is private, so that option is for local runs only.
+sharp, measures text with skia-canvas and rasterises a one-page PDF with PDFium. Then it moves the runtime directory to a second path and repeats. `--engine <payload dir>` adds a blank
+deck build from an unpacked engine payload; the engine is private, so that option is for local runs only, and a run
+without it ends with a `SKIP  REDUCED SMOKE TEST (no engine payload)` line naming what it did not cover.
 
 ## Runtime id
 
@@ -124,6 +126,17 @@ sources and declarations are left alone.
 
 ## skia-canvas
 
-`skia-canvas` is an optional dependency whose native binary is downloaded by an install script. The recipe runs
-no install scripts, so the bundle has the package without its binary and `require('skia-canvas')` fails with
-`MODULE_NOT_FOUND`. The engine treats that as the package being absent. The smoke test reports it as `SKIP`.
+`skia-canvas` is the engine's text measurer (automatic font size, text box size, overflow detection). Its native
+binary is normally downloaded by its install script, which the recipe does not run. The recipe does the same
+download itself: `versions.json` (`skia_canvas`) pins the version and, per platform, the release asset
+(`<platform>-<arch>.gz`, `linux-<arch>-glibc.gz` on Linux), its size and sha256. After `npm ci` the recipe checks
+that npm installed that version, that the package's own `prebuild` table lists the same sha256 for that asset,
+and writes the gunzipped binary to `node_modules/skia-canvas/lib/skia.node`, which is where the install script
+puts it. No code from the package runs at build time. Skia's licence text (pinned by commit and sha256) goes to
+`licenses/skia/LICENSE`. The Linux binaries need glibc 2.28, the macOS binaries macOS 11 (arm64) and 10.14 (x64),
+all inside the bundle's floors.
+
+When the engine's lock moves skia-canvas to another version, update the pin from the new release's assets
+(`gh release view v<version> -R samizdatco/skia-canvas --json assets`); the build stops until the two agree.
+
+The smoke test measures a line of text with skia-canvas the way the engine does and requires a width above zero.
