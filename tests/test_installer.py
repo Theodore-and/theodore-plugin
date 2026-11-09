@@ -39,6 +39,11 @@ class Installer(unittest.TestCase):
         self.box.env["PATH"] = f"{fake}{os.pathsep}{self.box.env['PATH']}"
         self.box.env["THEODORE_DL_BASE"] = f"{self.api.base}/dl"
 
+    def host_calls(self) -> list[str]:
+        # The fake .cmd logs %*, which keeps the quotes cmd needed around a path with a space; compare without them.
+        lines = self.calls.read_text().splitlines()
+        return [line.replace('"', "") for line in lines] if IS_WINDOWS else lines
+
     def install(self, *args, env=None):
         import subprocess
         command = cmd_command(str(INSTALLER), *args) if IS_WINDOWS else ["/bin/sh", str(INSTALLER), *args]
@@ -65,7 +70,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(json.loads((home / "engines" / "current.json").read_text())["version"], "1.0.0-rc.3")
         self.assertTrue((home / "plugin" / ".agents" / "plugins" / "marketplace.json").exists())
         self.assertTrue((home / "plugin" / "plugins" / "theodore" / "skills" / "deck-design" / "SKILL.md").exists())
-        calls = self.calls.read_text().splitlines()
+        calls = self.host_calls()
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
         self.assertIn(f"codex plugin marketplace add {home / 'plugin'}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
@@ -91,7 +96,7 @@ class Installer(unittest.TestCase):
                     break
                 time.sleep(0.5)
         self.assertFalse(home.exists())
-        calls = self.calls.read_text().splitlines()
+        calls = self.host_calls()
         for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
                          "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
             self.assertIn(expected, calls)
