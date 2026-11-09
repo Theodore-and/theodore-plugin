@@ -250,10 +250,19 @@ def read_text(path: Path) -> str:
 
 
 def read_json(path: Path, default=None):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {} if default is None else default
+    # On Windows a read that meets a writer's replace is refused for a moment (PermissionError); retried, so that a
+    # job's state file is never mistaken for a missing one (which reads as "the job died").
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            if IS_WINDOWS and time.monotonic() < deadline:
+                time.sleep(0.02)
+                continue
+            return {} if default is None else default
+        except (OSError, ValueError):
+            return {} if default is None else default
 
 
 def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None:

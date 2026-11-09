@@ -820,9 +820,12 @@ def uninstall(keep_hosts: bool) -> int:
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
+        # One string, not a list: Python would escape the inner quotes as \" and cmd does not read that escape (a
+        # path with a space was never removed). /s makes cmd strip exactly the outer pair of quotes.
         removals = " & ".join(f'rmdir /s /q "{root / name}"' for name in core.OWNED)
-        subprocess.Popen(["cmd", "/d", "/c", f'ping -n 3 127.0.0.1 >nul & {removals} & rmdir "{root}"'],
-                         creationflags=0x00000008 | 0x08000000, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        line = f'ping -n 6 127.0.0.1 >nul & {removals} & rmdir "{root}"'
+        subprocess.Popen(f'cmd /d /s /c "{line}"', creationflags=0x00000008 | 0x08000000,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         kept = [p.name for p in root.iterdir() if p.name not in core.OWNED] if root.exists() else []
     else:
         for name in core.OWNED:
