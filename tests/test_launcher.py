@@ -96,7 +96,13 @@ class FirstRun(LauncherCase):
         again = self.run_launcher("guide", "pptx", env={"THEODORE_BOOTSTRAP_WAIT": "1"})      # the job is still running: no second one
         self.assertStatus(again, "SETUP_IN_PROGRESS", 67)
         self.assertEqual((self.box.home / "logs" / "bootstrap.log").read_text().count("\n"), 0, "one quiet job")
-        self.assertEqual(len([r for r in self.api.requests if r["path"].startswith("/dl/runtime/")]), 1, "one download, not two")
+        import time
+        downloads = lambda: len([r for r in self.api.requests if r["path"].startswith("/dl/runtime/")])
+        deadline = time.monotonic() + 90                  # a loaded machine may start the job's download late
+        while downloads() == 0 and time.monotonic() < deadline:
+            time.sleep(0.5)
+        time.sleep(2)
+        self.assertEqual(downloads(), 1, "one download, not two")
         self.api.dl_delay = 0
         self.box.wait_jobs()
         self.assertEqual(self.run_launcher("version").returncode, 0)
