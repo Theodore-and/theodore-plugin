@@ -38,6 +38,7 @@ ROUTES = {
     "installation_rotate": ("POST", "/v1/installation/rotate", True),
     "guide": ("GET", "/v1/guide/{skill}", True),
     "guide_section": ("GET", "/v1/guide/{skill}/{section}", True),
+    "guide_specimen": ("GET", "/v1/guide/specimens/{file}", True),       # ?skill=deck-design; image/jpeg, X-Theodore-Sha256
     "reports": ("POST", "/v1/reports", True),
     "preferences_list": ("GET", "/v1/preferences", True),
     "preferences_add": ("POST", "/v1/preferences", True),

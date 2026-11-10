@@ -150,6 +150,10 @@ class FakeApi:
         self.guides = {"deck-design": {"": "# Deck design\n\nFake design guidance.\n", "license": "Apache License 2.0 (fake)\n"},
                        "pptx": {"": ""}}
         self.guide_version = "g1"
+        self.specimens: dict[str, bytes] = {}         # file name -> JPEG bytes, GET /v1/guide/specimens/<file>?skill=deck-design
+        self.specimen_sha: str | None = None          # a wrong X-Theodore-Sha256 to answer with
+        self.specimen_type = "image/jpeg"
+        self.specimen_redirect: str | None = None     # Location of a 302
         self.guide_fetches = 0
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
@@ -416,6 +420,17 @@ class FakeApi:
             return self._send(h, 200, {**extra, "entitlement_token": self.mint_entitlement(installation_id), "server_time": iso(self.now()),
                                        "release": {"channel": self.channel_name, "latest_version": latest, "min_version": self.min_version,
                                                    "update_required": withdrawn, "kill": self.kill, "kill_message": self.kill_message or None}})
+        if route[:2] == ["guide", "specimens"] and method == "GET" and len(route) == 3:
+            if "deck-design" not in self.features:
+                return self._error(h, 403, "entitlement_inactive")
+            if query.get("skill") != "deck-design":
+                return self._error(h, 422, "validation_failed", "skill")
+            if self.specimen_redirect:
+                return self._send(h, 302, b"", {"Location": self.specimen_redirect}, content_type="text/plain")
+            data = self.specimens.get(route[2])
+            if data is None or not re.match(r"^[A-Za-z0-9._-]{1,80}\.jpg$", route[2]):
+                return self._error(h, 404, "not_found", "no such specimen sheet")
+            return self._send(h, 200, data, {"X-Theodore-Sha256": self.specimen_sha or sha256_hex(data)}, content_type=self.specimen_type)
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):
             skill, section = route[1], route[2] if len(route) == 3 else ""
             if skill not in self.features:

@@ -21,6 +21,7 @@ installer's are in `install/`.
 | Licence refresh | Renews the signed licence | at most once per 12 hours, when you use Theodore |
 | Update check | Asks which engine, client and asset-pack versions are current | at most once per 6 hours, when the pptx instructions are loaded |
 | Design guidance | Each time the deck-design skill is used; it is never stored on disk | each use |
+| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand, held in a private temporary folder for at most an hour, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
 | `theodore report` | A bug report or feedback, see below | when filed |

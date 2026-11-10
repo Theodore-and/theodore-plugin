@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install
+from . import __version__, account, api, core, credentials, install, specimens
 from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -168,8 +168,46 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
     elif part > total:
         raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     name = section or "SKILL.md"
+    if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
+        body = specimens.guide_links(body, quoted_launcher())
     next_command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''} --part {part + 1}"
     _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], next_command)
+    return 0
+
+
+def specimen(files: list[str]) -> int:
+    """Fetch deck-design specimen sheets into a private temporary folder of this run and print one path per line.
+    All or nothing: a sheet that is refused leaves no folder and no path."""
+    if not 1 <= len(files) <= specimens.MAX_FILES:
+        raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
+    if not all(specimens.valid_name(name) for name in files):
+        raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
+    account.require("deck-design")
+    folder = specimens.make_folder()
+    try:
+        paths: dict[str, Path] = {}
+        for name in files:
+            if name in paths:
+                continue
+            what = f"specimen {name}"
+            try:
+                _status, headers, raw = _api("guide_specimen", what, file=name, query={"skill": "deck-design"},
+                                             headers={"Accept": "image/jpeg, application/json;q=0.9"}, redirects=False,
+                                             limit=specimens.MAX_BYTES)
+            except api.TooLarge:
+                raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
+            if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
+                raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
+            if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
+                raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
+                             "run the same command again once. If it fails again, continue without the sheet.",
+                             "A design specimen arrived damaged. I am trying once more.")
+            paths[name] = specimens.write(folder, name, raw)
+    except BaseException:
+        core.remove_tree(folder)
+        raise
+    for name in files:
+        print(paths[name].resolve().as_posix(), flush=True)
     return 0
 
 
@@ -980,6 +1018,8 @@ def uninstall(keep_hosts: bool) -> int:
         core.remove_tree(cache)
         if cache.exists():
             left.append(f"the render cache {cache}")
+    for folder in specimens.sweep(everything=True):
+        left.append(f"the specimen folder {folder}")
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends

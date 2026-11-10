@@ -25,6 +25,14 @@ class ApiError(Exception):
         self.http_status, self.code, self.message, self.retry_after = http_status, code, message, retry_after
 
 
+class TooLarge(Exception):
+    """An answer longer than the caller accepts; it was not read past that length."""
+
+    def __init__(self, limit: int):
+        super().__init__(f"the answer is longer than {limit} bytes")
+        self.limit = limit
+
+
 class NetworkError(Exception):
     """No answer from the server: DNS, connection, timeout, TLS or proxy."""
 
@@ -101,8 +109,9 @@ def _network_error(exc: Exception) -> NetworkError:
 
 
 def request(method: str, url: str, *, bearer: str | None = None, body=None, headers: dict | None = None,
-            timeout: float = 20.0, redirects: bool = True):
-    """One HTTP exchange. Returns (status, headers, bytes) for 2xx and 304; raises ApiError or NetworkError."""
+            timeout: float = 20.0, redirects: bool = True, limit: int | None = None):
+    """One HTTP exchange. Returns (status, headers, bytes) for 2xx and 304; raises ApiError or NetworkError.
+    With `limit`, a body longer than that many bytes raises TooLarge and is not read further."""
     data = None
     hdrs = {"User-Agent": core.user_agent(), "Accept": "application/json, text/markdown;q=0.9, */*;q=0.1"}
     if body is not None:
@@ -114,7 +123,15 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
         with _opener(redirects).open(req, timeout=timeout) as resp:
-            return resp.status, resp.headers, resp.read()
+            if limit is None:
+                return resp.status, resp.headers, resp.read()
+            declared = str(resp.headers.get("Content-Length") or "")
+            if declared.isdigit() and int(declared) > limit:
+                raise TooLarge(limit)
+            raw = resp.read(limit + 1)
+            if len(raw) > limit:
+                raise TooLarge(limit)
+            return resp.status, resp.headers, raw
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return 304, exc.headers, b""
@@ -146,12 +163,12 @@ def url_for(route: str, query: dict | None = None, **params) -> str:
 
 
 def call(route: str, *, bearer: str | None = None, body=None, query: dict | None = None, headers: dict | None = None,
-         timeout: float = 20.0, **params):
+         timeout: float = 20.0, redirects: bool = True, limit: int | None = None, **params):
     method, _template, needs_auth = ROUTES[route]
     if needs_auth and not bearer:
         raise sign_in_required()
     return request(method, url_for(route, query, **params), bearer=bearer if needs_auth else None, body=body,
-                   headers=headers, timeout=timeout)
+                   headers=headers, timeout=timeout, redirects=redirects, limit=limit)
 
 
 def call_json(route: str, **kwargs):

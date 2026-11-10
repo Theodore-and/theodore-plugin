@@ -106,6 +106,8 @@ If the launcher is gone, deleting those subfolders and the keychain item by hand
    Python and the client (stage 1), each checked against a SHA-256 pinned in `launcher.json`, then hands over.
 3. The client downloads the rest of the runtime against a signed manifest, signs the computer in (activation
    code or browser approval), installs the engine and prints the skill's instructions.
+   The deck-design text is fetched at each use and never stored. Its specimen images are not shipped either:
+   `theodore specimen <file>` fetches one into a private temporary folder that is removed within the hour.
 4. Every status is three lines the assistant can act on:
 
 ```

@@ -399,3 +399,154 @@ class Round6(unittest.TestCase):
             record["auto_reports"]["at"] += 86400          # cached while the clock was a day fast, then corrected
             (home / "state" / "entitlement.json").write_text(json.dumps(record))
             self.assertEqual(account.automatic_reports(), (False, "unknown"))
+
+
+class Specimens(unittest.TestCase):
+    """Deck-design specimen sheets: fetched on demand into a private temporary folder, never into Theodore's folder.
+    In process, so it also runs on Windows (the client suite against the fake server runs on macOS and Linux)."""
+
+    JPEG = b"\xff\xd8\xff\xe0 sheet \xff\xd9"
+
+    @contextlib.contextmanager
+    def temp(self):
+        from theodore_client import specimens
+        root = Path(tempfile.mkdtemp(prefix="theodore-hardening-tmp-")).resolve()
+        try:
+            with mock.patch.object(specimens, "roots", return_value=[root]):
+                yield root
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def answer(self, body: bytes, sha: str | None = None, kind: str = "image/jpeg"):
+        import email.message
+        headers = email.message.Message()
+        headers["Content-Type"] = kind
+        headers["X-Theodore-Sha256"] = sha or hashlib.sha256(body).hexdigest()
+        return 200, headers, body
+
+    def test_the_folder_and_the_files_are_the_current_users_alone(self):
+        from theodore_client import commands, specimens
+        with client_home() as home, self.temp() as root:
+            core.home().ensure()
+            calls = []
+
+            def fake(route, what, **kwargs):
+                calls.append((route, kwargs))
+                return self.answer(self.JPEG)
+            out = []
+            with mock.patch.object(account, "require", return_value={"plan": "beta"}), mock.patch.object(commands, "_api", side_effect=fake), \
+                    mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
+                self.assertEqual(commands.specimen(["cover-01.jpg", "cover-01.jpg", "b.jpg"]), 0)
+            self.assertEqual([c[0] for c in calls], ["guide_specimen", "guide_specimen"], "a name given twice is fetched once")
+            for _route, kwargs in calls:
+                self.assertEqual((kwargs["query"], kwargs["redirects"], kwargs["limit"]), ({"skill": "deck-design"}, False, 1 << 20))
+            self.assertEqual(len(out), 3)
+            self.assertEqual(out[0], out[1])
+            self.assertNotIn("\\", out[0], "forward slashes on every system")
+            path = Path(out[0])
+            self.assertTrue(path.is_absolute() and path.read_bytes() == self.JPEG)
+            self.assertEqual(path.parent.parent, root)
+            self.assertTrue(path.parent.name.startswith("theodore-specimens-"))
+            self.assertNotIn(home.resolve(), path.resolve().parents)
+            if sys.platform == "win32":
+                import subprocess
+                for target in (path.parent, path):
+                    acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True).stdout
+                    for other in ("BUILTIN\\Users", "Everyone", "Authenticated Users", "BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"):
+                        self.assertNotIn(other, acl, acl)
+                self.assertNotIn("(I)", subprocess.run(["icacls", str(path.parent)], capture_output=True, text=True).stdout)
+            else:
+                import stat
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(specimens.sweep(everything=True), [])
+            self.assertFalse(path.parent.exists(), "uninstall removes them all")
+
+    def test_a_folder_that_cannot_be_made_private_is_not_used(self):
+        from theodore_client import specimens
+        with client_home(), self.temp() as root:
+            core.home().ensure()
+            with mock.patch.object(specimens, "_make_private", side_effect=OSError("icacls failed")):
+                with self.assertRaises(core.Status) as raised:
+                    specimens.make_folder()
+            self.assertEqual(raised.exception.name, "INTERNAL")
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_a_refused_sheet_leaves_nothing(self):
+        from theodore_client import commands
+        for answer, status in ((lambda: self.answer(self.JPEG, sha="1" * 64), "RETRY"), (lambda: self.answer(self.JPEG, kind="text/html"), "INTERNAL"),
+                               (lambda: (_ for _ in ()).throw(api.TooLarge(1 << 20)), "INTERNAL")):
+            with client_home(), self.temp() as root:
+                core.home().ensure()
+                with mock.patch.object(account, "require", return_value={}), mock.patch.object(commands, "_api", side_effect=lambda *a, **k: answer()):
+                    with self.assertRaises(core.Status) as raised:
+                        commands.specimen(["a.jpg"])
+                self.assertEqual(raised.exception.name, status)
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_a_response_is_read_up_to_its_limit_and_no_further(self):
+        import io
+
+        class Response(io.BytesIO):
+            status, headers = 200, {}
+            asked = []
+
+            def read(self, n=-1):
+                self.asked.append(n)
+                return super().read(n)
+
+        class Opener:
+            def __init__(self, body, headers):
+                self.body, self.headers = body, headers
+
+            def open(self, req, timeout=0):
+                response = Response(self.body)
+                response.headers = self.headers
+                return response
+        with client_home():
+            for body, headers, fits in ((b"x" * 100, {}, True), (b"x" * 101, {}, False), (b"", {"Content-Length": "101"}, False)):
+                Response.asked = []
+                with mock.patch.object(api, "_opener", return_value=Opener(body, headers)):
+                    if fits:
+                        self.assertEqual(api.request("GET", "https://api.example.test/v1/x", limit=100)[2], body)
+                    else:
+                        with self.assertRaises(api.TooLarge):
+                            api.request("GET", "https://api.example.test/v1/x", limit=100)
+                self.assertTrue(all(0 <= n <= 101 for n in Response.asked), Response.asked)
+
+    def test_names(self):
+        from theodore_client import specimens
+        for good in ("cover-01.jpg", "Grid_2.b.jpg", "x" * 80 + ".jpg", "..jpg"):
+            self.assertTrue(specimens.valid_name(good), good)
+        for bad in ("", ".jpg", "a.png", "a.JPG", "../a.jpg", "a/b.jpg", "a\\b.jpg", "a b.jpg", "x" * 81 + ".jpg", "a.jpg\n", "NUL.jpg", "con.jpg",
+                    "COM1.a.jpg", "lpt9.jpg", "a:b.jpg", "é.jpg", "a.jpg.exe"):
+            self.assertFalse(specimens.valid_name(bad), bad)
+
+    def test_guide_links_name_the_file_and_one_direction_follows(self):
+        from theodore_client import specimens
+        untouched = ("[up](specimens/../x.jpg) [sub](specimens/a/b.jpg) [png](specimens/a.png) [abs](/specimens/a.jpg) "
+                     "[web](https://x.test/specimens/a.jpg) [long](specimens/" + "x" * 81 + ".jpg) [sp](specimens/a b.jpg) specimens/a.jpg\n")
+        text = "# Covers\n![Cover](specimens/cover-01.jpg) [grid](specimens/Grid_2.b.jpg)\n" + untouched
+        out = specimens.guide_links(text, '"/x y/theodore"')
+        self.assertTrue(out.startswith("# Covers\n![Cover](cover-01.jpg) [grid](Grid_2.b.jpg)\n" + untouched))
+        tail = out[out.index(untouched) + len(untouched):]
+        self.assertEqual(tail.count('"/x y/theodore" specimen <file>'), 1)
+        for word in ("open the path it prints", "only the sheets", "Do not copy"):
+            self.assertIn(word, tail)
+        self.assertEqual(specimens.guide_links(untouched, "theodore"), untouched, "no sheet link: nothing is added")
+        self.assertTrue(specimens.guide_links("no newline ![c](specimens/c.jpg)", "t").startswith("no newline ![c](c.jpg)\n\n---"))
+
+    def test_old_folders_go_and_only_theodores_own(self):
+        from theodore_client import specimens
+        import time
+        with client_home(), self.temp() as root:
+            now = time.time()
+            for name, age in (("theodore-specimens-old", 3601), ("theodore-specimens-new", 3500), ("theodore-specimens-ahead", -3600), ("other-old", 99999)):
+                (root / name).mkdir()
+                (root / name / "f.jpg").write_bytes(b"x")
+                os.utime(root / name, (now - age, now - age))
+            (root / "theodore-specimens-file").write_bytes(b"x")
+            specimens.sweep()
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["other-old", "theodore-specimens-file", "theodore-specimens-new"])
+            self.assertEqual(specimens.sweep(everything=True), [])
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["other-old", "theodore-specimens-file"])

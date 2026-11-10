@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -123,6 +124,199 @@ class SignIn(ClientCase):
         self.assertEqual(self.client("guide", "deck-design", env=env).returncode, 0)
         self.assertStatus(self.client("logout", env=env), "OK", 0)
         self.assertStatus(self.client("whoami", env=env), "SIGN_IN_REQUIRED", 65)
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"specimen sheet " * 40 + b"\xff\xd9"
+
+
+class Specimen(ClientCase):
+    """`theodore specimen <file>...`: a deck-design sheet is fetched on demand into a private temporary folder, kept
+    for at most an hour, and never put in Theodore's folder or in the deck's."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in()
+        self.api.specimens = {"cover-01.jpg": JPEG, "Grid_2.b.jpg": JPEG + b"2"}
+        self.temp = Path(self.box.env["TMPDIR"])
+        self.deck = self.box.tmp / "deck"
+        (self.deck / ".pptx-state").mkdir(parents=True)
+
+    def folders(self, root: Path | None = None) -> list[Path]:
+        return sorted(p for p in (root or self.temp).iterdir() if p.name.startswith("theodore-specimens-"))
+
+    def specimen_requests(self) -> list[dict]:
+        return [r for r in self.api.requests if "/guide/specimens/" in r["path"]]
+
+    def refused(self, result, name: str, code: int):
+        first, nxt, tell = self.assertStatus(result, name, code)
+        self.assertEqual(self.folders(), [], "nothing is kept when a sheet is refused")
+        return first
+
+    def test_sheets_land_in_a_private_folder_outside_theodore_and_the_deck(self):
+        result = self.client("specimen", "cover-01.jpg", "Grid_2.b.jpg", cwd=self.deck)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout)
+        one, two = Path(lines[0]), Path(lines[1])
+        self.assertTrue(one.is_absolute() and two.is_absolute())
+        self.assertEqual((one.name, two.name), ("cover-01.jpg", "Grid_2.b.jpg"))
+        self.assertEqual((one.read_bytes(), two.read_bytes()), (JPEG, JPEG + b"2"))
+        self.assertEqual(one.parent, two.parent, "one folder per run")
+        self.assertEqual(self.folders(), [one.parent])
+        self.assertEqual(stat.S_IMODE(one.parent.stat().st_mode), 0o700)
+        self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in (one, two)}, {0o600})
+        for kept_out in (self.box.home, self.deck):
+            self.assertNotIn(kept_out.resolve(), one.resolve().parents)
+            self.assertEqual([p for p in kept_out.rglob("*") if p.is_file() and b"specimen sheet" in p.read_bytes()], [])
+            self.assertEqual([p for p in kept_out.rglob("*.jpg")], [])
+        asked = self.specimen_requests()
+        self.assertEqual([(r["method"], r["path"], r["auth"], r["query"]) for r in asked],
+                         [("GET", "/v1/guide/specimens/cover-01.jpg", True, {"skill": "deck-design"}),
+                          ("GET", "/v1/guide/specimens/Grid_2.b.jpg", True, {"skill": "deck-design"})])
+        again = self.client("specimen", "cover-01.jpg", cwd=self.deck)
+        self.assertNotEqual(Path(again.stdout.strip()).parent, one.parent, "a folder per run, nothing is reused")
+        self.assertEqual(len(self.specimen_requests()), 3, "nothing is cached: asked again")
+
+    def test_a_temporary_folder_inside_the_deck_or_inside_theodore_is_not_used(self):
+        for inside in (self.deck / "tmp", self.box.home / "tmp"):
+            inside.mkdir(parents=True)
+            result = self.client("specimen", "cover-01.jpg", cwd=self.deck, env={"TMPDIR": str(inside)})
+            if result.returncode == 0:      # another temporary folder of the system was used
+                path = Path(result.stdout.strip())
+                self.addCleanup(shutil.rmtree, path.parent, True)
+                self.assertEqual(path.read_bytes(), JPEG)
+                self.assertNotIn(self.deck.resolve(), path.resolve().parents)
+                self.assertNotIn(self.box.home.resolve(), path.resolve().parents)
+            else:
+                self.assertStatus(result, "INTERNAL", 78)
+            self.assertEqual(self.folders(inside), [])
+            self.assertEqual(list(self.deck.rglob("*.jpg")) + list(self.box.home.rglob("*.jpg")), [])
+
+    def test_a_sheet_whose_sha256_does_not_match_is_refused(self):
+        self.api.specimen_sha = "0" * 64
+        first = self.refused(self.client("specimen", "cover-01.jpg"), "RETRY", 75)
+        self.assertIn("sha256", first)
+        self.api.specimen_sha = None
+        self.api.specimens["second.jpg"] = JPEG
+        real = self.api._send
+
+        def no_header(h, status, body=None, headers=None, content_type="application/json"):
+            headers = {k: v for k, v in (headers or {}).items() if k != "X-Theodore-Sha256"}
+            return real(h, status, body, headers, content_type)
+        self.api._send = no_header
+        self.refused(self.client("specimen", "cover-01.jpg"), "RETRY", 75)
+        self.api._send = real
+        self.assertEqual(self.client("specimen", "cover-01.jpg", "second.jpg").returncode, 0)
+
+    def test_the_first_good_sheet_is_not_kept_when_a_later_one_is_refused(self):
+        result = self.client("specimen", "cover-01.jpg", "absent.jpg")
+        self.refused(result, "USAGE", 64)
+        self.assertNotIn(str(self.temp), result.stdout.split("THEODORE")[0], "no path is printed")
+
+    def test_a_sheet_over_one_mebibyte_or_of_another_type_is_refused(self):
+        self.api.specimens["big.jpg"] = b"\xff\xd8" + b"x" * (1 << 20)
+        first = self.refused(self.client("specimen", "big.jpg"), "INTERNAL", 78)
+        self.assertIn("1 MiB", first)
+        self.api.specimens["edge.jpg"] = b"\xff\xd8" + b"x" * ((1 << 20) - 2)
+        self.assertEqual(self.client("specimen", "edge.jpg").returncode, 0)
+        self.api.specimen_type = "text/html"
+        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.fresh_temp())}), "INTERNAL", 78)
+
+    def fresh_temp(self) -> Path:
+        self.temp = self.box.tmp / "tmp2"
+        self.temp.mkdir(exist_ok=True)
+        return self.temp
+
+    def test_bad_names_and_counts_are_refused_before_any_request(self):
+        before = len(self.api.requests)
+        for names in (["../cover-01.jpg"], ["a/b.jpg"], ["a\\b.jpg"], ["cover-01.png"], ["cover-01.JPG"], ["cover 01.jpg"], [".jpg"],
+                      ["x" * 81 + ".jpg"], ["NUL.jpg"], ["com1.x.jpg"], ["cover-01.jpg", "bad name.jpg"], ["%2e%2e.jpg"], ["é.jpg"],
+                      [f"s{i}.jpg" for i in range(9)], []):
+            self.refused(self.client("specimen", *names), "USAGE", 64)
+        self.assertEqual(len(self.api.requests), before, "no request at all for a bad name")
+        self.api.specimens["x" * 80 + ".jpg"] = JPEG
+        self.assertEqual(self.client("specimen", "x" * 80 + ".jpg").returncode, 0)
+
+    def test_server_refusals_become_the_usual_statuses(self):
+        self.refused(self.client("specimen", "nosuch.jpg"), "USAGE", 64)                         # 404 not_found
+        self.api.fail_with = (429, "rate_limited")
+        _first, nxt, _tell = self.assertStatus(self.client("specimen", "cover-01.jpg"), "RETRY", 75)
+        self.assertIn("wait 7 seconds", nxt)
+        self.api.fail_with = None
+        self.api.features = ["pptx"]                                                              # 403: the plan lost deck-design
+        self.refused(self.client("specimen", "cover-01.jpg"), "NO_ENTITLEMENT", 70)
+        self.api.features = ["pptx", "deck-design"]
+        self.sign_in_again()
+        self.assertEqual(self.client("specimen", "cover-01.jpg").returncode, 0)
+        self.fresh_temp()
+        self.api.account_state = "suspended"
+        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.temp)}), "NO_ENTITLEMENT", 70)
+        self.api.account_state = "active"
+        for inst in self.api.installations.values():
+            inst["revoked"] = True
+        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.temp)}), "SIGN_IN_REQUIRED", 65)    # 401
+
+    def sign_in_again(self):
+        self.client("logout")
+        self.assertStatus(self.client("login", "--code", self.api.issue_activation_code("EFGH-5678")), "OK", 0)
+
+    def test_not_signed_in_and_no_redirect(self):
+        self.api.specimen_redirect = f"{self.api.base}/dl/elsewhere.jpg"
+        self.api.files["elsewhere.jpg"] = JPEG
+        self.refused(self.client("specimen", "cover-01.jpg"), "OFFLINE", 71)
+        self.assertEqual([r for r in self.api.requests if "elsewhere" in r["path"]], [], "the redirect was not followed")
+        self.api.specimen_redirect = None
+        self.client("logout")
+        self.refused(self.client("specimen", "cover-01.jpg"), "SIGN_IN_REQUIRED", 65)
+
+    def test_every_call_removes_specimen_folders_older_than_an_hour(self):
+        now = time.time()
+        old, fresh, ahead = (self.temp / f"theodore-specimens-{n}" for n in ("old", "fresh", "ahead"))
+        for folder, age in ((old, 3601), (fresh, 3300), (ahead, -7200)):
+            folder.mkdir()
+            (folder / "cover-01.jpg").write_bytes(JPEG)
+            os.utime(folder, (now - age, now - age))
+        plain = self.temp / "theodore-specimens-file"
+        plain.write_bytes(b"not a folder")
+        elsewhere = self.box.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "keep.txt").write_text("keep")
+        os.symlink(elsewhere, self.temp / "theodore-specimens-link")
+        other = self.temp / "another-program"
+        other.mkdir()
+        for path in (plain, self.temp / "theodore-specimens-link", other):
+            os.utime(path, (now - 99999, now - 99999), follow_symlinks=False)
+        self.assertEqual(self.client("version").returncode, 0)
+        self.assertFalse(old.exists(), "older than 60 minutes: removed by the next call, whatever the command")
+        self.assertFalse(ahead.exists(), "dated ahead of the clock: not trusted to be recent")
+        self.assertTrue(fresh.exists())
+        self.assertTrue(plain.exists() and other.exists() and (elsewhere / "keep.txt").exists(), "only Theodore's own folders")
+
+    def test_uninstall_removes_every_specimen_folder(self):
+        path = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        self.assertTrue(path.exists())
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(self.folders(), [])
+
+    def test_the_guide_names_the_sheets_and_says_how_to_look_at_one(self):
+        text = "# Covers\n\n![Cover](specimens/cover-01.jpg) and [the grid](specimens/Grid_2.b.jpg)\n\n## Next\n\nMore.\n"
+        self.api.guides["deck-design"]["covers"] = text
+        result = self.client("guide", "deck-design", "covers")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        launcher = f'"{self.box.home / "bin" / "theodore"}"'
+        lines = result.stdout.splitlines()
+        self.assertIn("![Cover](cover-01.jpg) and [the grid](Grid_2.b.jpg)", lines)
+        self.assertNotIn("](specimens/", result.stdout)
+        direction = [line for line in lines if "specimen <file>" in line]
+        self.assertEqual(len(direction), 1, result.stdout)
+        self.assertIn(f"{launcher} specimen <file>", direction[0])
+        self.assertGreater(lines.index(direction[0]), lines.index("More."), "after the section")
+        body = "\n".join(lines[2:-1]) + "\n"
+        self.assertIn(f"({len(body)} chars, sha256 {hashlib.sha256(body.encode()).hexdigest()})", lines[-1], "the end line describes what was printed")
+        plain = self.client("guide", "deck-design")
+        self.assertNotIn("specimen <file>", plain.stdout, "a text without sheet links gets no direction")
+        self.assertEqual(self.folders(), [], "the guide fetches no sheet")
+        self.assertEqual(self.specimen_requests(), [])
 
 
 class Guide(ClientCase):

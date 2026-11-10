@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import account, commands, core
+from . import account, commands, core, specimens
 from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
+  specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --finish --wait S | --code XXXX-XXXX]    logout    whoami
   status [--json] [--wait S]     doctor [--json]         version
@@ -34,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
     g.add_argument("section", nargs="?")
     g.add_argument("--part", type=int, default=1)
     g.add_argument("--license", action="store_true")
+    sp = sub.add_parser("specimen", add_help=False)
+    sp.add_argument("files", nargs="*")
     lg = sub.add_parser("login", add_help=False)
     lg.add_argument("--start", action="store_true")
     lg.add_argument("--finish", action="store_true")
@@ -112,6 +115,8 @@ def _dispatch(argv: list[str]) -> int:
     cmd = args.command
     if cmd == "guide":
         return commands.guide(args.skill, args.section, args.part, args.license)
+    if cmd == "specimen":
+        return commands.specimen(args.files)
     if cmd == "login":
         if args.code:
             return core.emit(account.login_code(args.code))
@@ -160,6 +165,7 @@ def _dispatch(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    specimens.sweep()       # specimen sheets older than an hour go before anything else is done
     try:
         return _dispatch(argv)
     except Status as status:
