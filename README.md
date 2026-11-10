@@ -44,13 +44,13 @@ else, Theodore never reads, changes or deletes it.
 
 In all, about 90 MB is downloaded before the first deck (the runtime and the engine, about 2.3 MB) and about
 95 MB of asset packs follow in the background; a full install takes about 550 MB on disk (runtime, packs, one
-engine), plus LibreOffice where it is fetched. The runtime by platform (measured on runtime `43be74ecf52f9321`):
+engine), plus LibreOffice where it is fetched. The runtime by platform (runtime `b77f7d4ca2d43955`, built by `ci/run.sh`):
 
 | Platform | Download | On disk |
 | --- | --- | --- |
 | macOS, Apple silicon | 88.3 MB (84.2 MiB) | 402.3 MB (383.6 MiB) |
 | macOS, Intel | 93.2 MB (88.9 MiB) | 407.0 MB (388.2 MiB) |
-| Windows x64 | 83.6 MB (79.7 MiB) | 357.3 MB (340.8 MiB) |
+| Windows x64 | 83.8 MB (79.9 MiB) | 358.1 MB (341.5 MiB) |
 | Linux x64 | 111.2 MB (106.0 MiB) | 465.5 MB (444.0 MiB) |
 | Linux arm64 | 100.7 MB (96.0 MiB) | 445.0 MB (424.4 MiB) |
 
