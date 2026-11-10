@@ -12,7 +12,7 @@ the public lock files in `runtime/locks/`.
 | `requirements.txt` | The engine's Python packages, exact versions with sha256 of every released file |
 | `runtime-extra.txt` | What the bundle adds: `pypdfium2`, `truststore` and, on Windows, `comtypes` (same format) |
 | `package.json`, `package-lock.json` | The engine's npm packages |
-| `versions.json` | CPython version and python-build-standalone release, Node version, sha256 and size of both downloads for the five platforms, the skia-canvas prebuilt binary per platform, sha256 of the licence texts taken from python-build-standalone, the oldest system the wheels must support (`wheel_floor`), and `recipe_version` |
+| `versions.json` | CPython version and python-build-standalone release, Node version, sha256 and size of both downloads for the five platforms, the skia-canvas prebuilt binary per platform, Microsoft's Visual C++ redistributable for Windows (installer sha256 and the sha256 of each DLL taken from it; `vc_redist.py` reads the installer), sha256 of the licence texts taken from python-build-standalone, the oldest system the wheels must support (`wheel_floor`), and `recipe_version` |
 
 ## Outputs (`--out`)
 

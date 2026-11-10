@@ -393,6 +393,28 @@ def install_skia_binary(node_modules: Path, pin: dict, archive: Path) -> None:
     log(f"skia-canvas {pin['version']}: lib/skia.node from {archive.name} ({target.stat().st_size} bytes)")
 
 
+sys.path.insert(0, str(HERE))
+
+
+def install_vc_runtime(node_modules: Path, pin: dict, installer: Path, licence_out: Path) -> None:
+    """Windows: Microsoft's VC++ runtime DLLs next to skia.node, from the pinned redistributable (vc_redist.py).
+    Each DLL and the licence text are checked against versions.json."""
+    import vc_redist
+    names = sorted(pin["dlls"])
+    dlls, licence = vc_redist.runtime_files(installer.read_bytes(), names)
+    target = node_modules / pin["next_to"].split("/", 1)[1]
+    for name in names:
+        got = hashlib.sha256(dlls[name]).hexdigest()
+        if got != pin["dlls"][name]:
+            die(f"{name} from {installer.name} has sha256 {got}, not the {pin['dlls'][name]} pinned in versions.json")
+        (target / name).write_bytes(dlls[name])
+    if hashlib.sha256(licence).hexdigest() != pin["license_sha256"]:
+        die(f"the licence text in {installer.name} is not the one pinned in versions.json")
+    licence_out.parent.mkdir(parents=True, exist_ok=True)
+    licence_out.write_bytes(licence)
+    log(f"VC++ runtime {pin['version']}: {', '.join(names)} next to {pin['next_to']}/skia.node")
+
+
 def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, platform_key: str,
                        skia_pin: dict, skia_archive: Path) -> Path:
     scratch.mkdir(parents=True)
@@ -454,6 +476,10 @@ def build(platform_key: str, out: Path, work: Path, cache: Path) -> None:
     skia_licence = cache / f"skia-{skia_pin['skia_license']['commit']}-LICENSE"
     fetch(SKIA_LICENSE_URL.format(commit=skia_pin["skia_license"]["commit"]), skia_licence,
           skia_pin["skia_license"]["sha256"])
+    vc_pin = versions.get("vc_redist") if platform_key in (versions.get("vc_redist") or {}).get("platforms", []) else None
+    if vc_pin:
+        vc_installer = cache / f"vc-redist-{vc_pin['version']}" / vc_pin["file"]
+        fetch(vc_pin["url"], vc_installer, vc_pin["sha256"], vc_pin["size"])
     licence_dir = cache / f"python-build-standalone-{py_pin['pbs_release']}-licences"
     for name, digest in sorted(py_pin["license_texts"].items()):
         fetch(PBS_RAW_URL.format(release=py_pin["pbs_release"], file=name), licence_dir / name, digest)
@@ -478,8 +504,13 @@ def build(platform_key: str, out: Path, work: Path, cache: Path) -> None:
     node_modules = build_node_modules(node, npm_cli, build_dir / "npm", cache, platform_key, skia_pin, skia_archive)
     npm_list = build_dir / "licenses" / "npm-packages.txt"
     npm_licence_list(node_modules, npm_list)
+    extra_licences = []
+    if vc_pin:
+        vc_licence = build_dir / "licenses" / "vc-redist" / "license.rtf"
+        install_vc_runtime(node_modules, vc_pin, vc_installer, vc_licence)
+        extra_licences.append(("licenses/vc-redist/license.rtf", vc_licence))
     module_entries = tree_entries(node_modules, "node_modules") + [("licenses/npm-packages.txt", npm_list),
-                                                                   ("licenses/skia/LICENSE", skia_licence)]
+                                                                   ("licenses/skia/LICENSE", skia_licence)] + extra_licences
 
     stem = f"runtime-{rid}-{platform_key}"
     shutil.copyfile(py_archive, out / py_asset["file"])

@@ -31,10 +31,10 @@ rem --- pins: stamped by tools/sync_launchers.py from launcher.json; do not edit
 set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-set "PIN_RUNTIME_ID=43be74ecf52f9321"
+set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.0"
 set "PIN_CLIENT=client/client-0.2.0.tar 1e721240e507adf55fec829a500f3ae2ca30afbbf9548270584d46c39d38a895"
-set "PIN_PYTHON_win32_x64=runtime/43be74ecf52f9321/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
+set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
 set "API_BASE=%PIN_API_BASE%"

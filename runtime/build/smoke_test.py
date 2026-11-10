@@ -292,6 +292,13 @@ def check_node(runtime: Path, env: dict, label: str, version: str) -> None:
             expect(inside(info["file"], runtime), f"{label} require {name} ({kind})", info["version"])
         else:
             report("FAIL", f"{label} require {name} ({kind})", info["error"])
+    if sys.platform == "win32":     # app-local VC++ runtime: what lets skia.node load on a Windows without the redistributable
+        lib = runtime / "node_modules" / "skia-canvas" / "lib"
+        system = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        expect(all((lib / n).is_file() for n in ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")),
+               f"{label} VC++ runtime beside skia.node",
+               "msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll; the system has "
+               + ("the redistributable too" if (system / "msvcp140.dll").exists() else "no redistributable, so these are what loads"))
     skia = data.get("skia") or {}
     expect(skia.get("width", 0) > 0, f"{label} skia-canvas text measurement",
            f"{skia['width']:.2f} px for a 44-character line at 32 px, {skia['families']} font families"

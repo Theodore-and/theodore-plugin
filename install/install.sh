@@ -26,13 +26,13 @@ set -u
 PIN_API_BASE="https://api.theodoreand.ai"
 PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-PIN_RUNTIME_ID="43be74ecf52f9321"
+PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.0"
 PIN_CLIENT="client/client-0.2.0.tar 1e721240e507adf55fec829a500f3ae2ca30afbbf9548270584d46c39d38a895"
-PIN_PYTHON_darwin_arm64="runtime/43be74ecf52f9321/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
-PIN_PYTHON_darwin_x64="runtime/43be74ecf52f9321/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
-PIN_PYTHON_linux_arm64="runtime/43be74ecf52f9321/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
-PIN_PYTHON_linux_x64="runtime/43be74ecf52f9321/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20"
+PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
+PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
+PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
+PIN_PYTHON_linux_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20"
 # --- end of pins --------------------------------------------------------------------------------------------------
 
 API_BASE=$PIN_API_BASE

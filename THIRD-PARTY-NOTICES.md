@@ -31,6 +31,20 @@ The licence texts travel with the bundle, in `<home>/runtime/<runtime-id>/licens
 | `licenses/node/LICENSE` | Node.js licence, which includes the licences of V8, ICU, OpenSSL, libuv and its other bundled components |
 | `licenses/npm-packages.txt` | Name, version and licence of every npm package; each package keeps its own licence file in `node_modules/` |
 | `licenses/skia/LICENSE` | Skia's licence, for the Skia code inside skia-canvas's native binary |
+| `licenses/vc-redist/license.rtf` (Windows only) | Microsoft's licence terms for the Visual C++ Redistributable, from the installer the DLLs were taken from |
+
+### Microsoft Visual C++ runtime (Windows bundle only, recipe version 3)
+
+`node_modules/skia-canvas/lib/` holds `msvcp140.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`, version
+14.44.35211.0, next to `skia.node`, which imports the first two (the third is imported by `msvcp140.dll`); the
+import lists were read from the binaries, not assumed. They are taken unmodified from Microsoft's
+`VC_redist.x64.exe` (Visual C++ 2015-2022 Redistributable, x64, 14.44.35211.0, 25,635,768 bytes, sha256
+`cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b`, from
+`https://download.visualstudio.microsoft.com/download/pr/990c720a-46ce-4dc7-87b9-c2eb615d34b9/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe`),
+each checked against the sha256 in `runtime/locks/versions.json`. These three files are on Microsoft's list of
+redistributable Visual C++ files, which may be deployed app-local beside the program that uses them; nothing is
+installed system-wide. Microsoft's licence terms are in `licenses/vc-redist/license.rtf` (sha256 pinned too).
+Counsel's read is asked together with the other notice items.
 
 ### Licences that are not plain permissive
 
