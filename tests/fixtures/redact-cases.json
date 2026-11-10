@@ -208,6 +208,38 @@
   "text": "wrote /tmp/out/Acme Board.pdf then stopped"
  },
  {
+  "expected": "Cannot open [file] after the build.",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a file name ending in a part in round brackets",
+  "text": "Cannot open Northwind Pitch (final).pptx after the build."
+ },
+ {
+  "expected": "[file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a file name ending in a part in square brackets",
+  "text": "Acme Budget [2026].xlsx"
+ },
+ {
+  "expected": "cannot open [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a bracketed name that is the whole name",
+  "text": "cannot open (final).pptx"
+ },
+ {
+  "expected": "cannot open [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "an unmatched closing bracket before the extension",
+  "text": "cannot open Acme v2).docx"
+ },
+ {
   "expected": "only .pptx files are supported",
   "kinds": [],
   "name": "an extension mentioned alone is not a name",

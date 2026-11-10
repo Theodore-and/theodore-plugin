@@ -331,10 +331,42 @@ _CLAUSE_BREAK = frozenset(['"', "'", "`", "/", "\\", ":", ",", ";", "(", ")", "[
 _QUOTES = frozenset(['"', "'", "`"])
 
 
+_CLOSING_BRACKET = {")": "(", "]": "[", "}": "{"}
+
+
+def _bracket_group_start(text: str, stem_end: int, floor: int) -> int:
+    """Where the bracketed parts that end a stem begin: `stem_end` itself when the stem does not end in a closing
+    bracket; the matching opening bracket when it does (repeated for "a (1) [2].pptx"); just before the closing
+    bracket when none matches on the line, so that the name is still removed."""
+    at = stem_end
+    while at > floor and _at(text, at - 1) in _CLOSING_BRACKET:
+        close = text[at - 1]
+        opening = _CLOSING_BRACKET[close]
+        depth = 0
+        i = at - 1
+        while i >= floor:
+            ch = text[i]
+            if ch in ("\n", "\r"):
+                i = floor - 1
+                break
+            if ch == close:
+                depth += 1
+            elif ch == opening:
+                depth -= 1
+                if depth == 0:
+                    break
+            i -= 1
+        if i < floor:
+            return at - 1
+        at = i
+    return at
+
+
 def _file_names(text: str) -> List[Replacement]:
     """A file name is everything from the first word of its clause that is not a diagnostic word up to and
     including the extension; diagnostic words before it stay. A quoted name goes with its quotes. A clause starts
-    after a quote, a separator, a colon, a comma, a semicolon, a bracket, a line end or a sentence end."""
+    after a quote, a separator, a colon, a comma, a semicolon, a bracket, a line end or a sentence end, except that
+    bracketed parts at the end of the stem belong to the name."""
     out: List[Replacement] = []
     floor = 0
     pos = 0
@@ -347,11 +379,14 @@ def _file_names(text: str) -> List[Replacement]:
         pos = end
         stem_end = dot
         before = _at(text, stem_end - 1)
-        if stem_end <= floor or _is_space(before) or before in _CLAUSE_BREAK:
+        # A stem that ends in a bracketed part ("Pitch (final).pptx", "Budget [2026].xlsx"): the part belongs to the
+        # name, so the clause is looked for before its opening bracket.
+        group_start = _bracket_group_start(text, stem_end, floor) if stem_end > floor else stem_end
+        if group_start == stem_end and (stem_end <= floor or _is_space(before) or before in _CLAUSE_BREAK):
             # An extension on its own (".pptx files") names nothing.
             floor = max(floor, end)
             continue
-        clause_start = stem_end
+        clause_start = group_start
         while clause_start > floor:
             ch = text[clause_start - 1]
             if ch in _CLAUSE_BREAK:
@@ -373,7 +408,7 @@ def _file_names(text: str) -> List[Replacement]:
             word_end = start
             while word_end < stem_end and not _is_space(text[word_end]):
                 word_end += 1
-            if word_end >= stem_end or not _is_diagnostic_word(text[start:word_end]):
+            if word_end >= stem_end or word_end > group_start or not _is_diagnostic_word(text[start:word_end]):
                 break
             start = word_end
         out.append((start, end, "[file]"))
