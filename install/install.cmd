@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.0"
-set "PIN_CLIENT=client/client-0.2.0.tar dffdef280db96cf34c13a16ab1bbb0f98337968493cf3c3f9609f8f6a498d579"
+set "PIN_CLIENT=client/client-0.2.0.tar 37589a3f3f2bb4107bdbda01b97512003595ea68ffe19c5cedf6dc73f357cf67"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -78,6 +78,13 @@ if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with 
 
 if not defined UNINSTALL goto :install
 if exist "%HOME_DIR%\bin\theodore.cmd" "%HOME_DIR%\bin\theodore.cmd" uninstall
+rem No launcher left (a removal already ran, or was interrupted): remove what is left of Theodore's own folders and
+rem say whether anything remains.
+set "LEFTOVER="
+for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1
+for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=1"
+if exist "%HOME_DIR%" rmdir "%HOME_DIR%" >nul 2>&1
+if defined LEFTOVER goto :uninstall_left
 echo THEODORE OK: Theodore is not installed on this computer.
 echo NEXT: nothing to do.
 echo TELL THE USER: Theodore was not installed on this computer.
@@ -286,6 +293,12 @@ exit /b %RC%
 rem =====================================================================================================================
 rem Statuses (three lines each, then the exit code)
 rem =====================================================================================================================
+
+:uninstall_left
+echo THEODORE RETRY: some of Theodore's folders in %HOME_DIR% could not be deleted (a program may still be using them).
+echo NEXT: close the assistant and any Theodore window, then run the same command again.
+echo TELL THE USER: A few of Theodore's files are still in use; I will remove them once the assistant is closed.
+exit /b 75
 
 :bad_option
 echo THEODORE USAGE: unknown installer option %~1.

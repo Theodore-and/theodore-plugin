@@ -92,7 +92,9 @@ the report, stores nothing, and the client remembers.
   `certutil`), and only then runs them. That Python verifies the signed plugin release document (Ed25519, the
   pinned keys; macOS and Windows have no built-in tool for it), and the plugin archive is checked against the
   SHA-256 and size that document gives; neither request follows a redirect. A plugin older than the one already
-  installed is refused (a replayed document cannot downgrade it). Nothing downloaded runs before it has been checked. A build of the
+  installed is refused (a replayed document cannot downgrade it; versions are compared by semantic-version
+  precedence). Nothing in a release document can ask for a plugin rollback, so going back to an older plugin takes
+  an uninstall. Nothing downloaded runs before it has been checked. A build of the
   installer or the plugin that still carries the placeholder key refuses to run.
 - The launcher's first two downloads (the same Python and client) are checked against SHA-256 values pinned in
   `launcher.json`.
@@ -100,11 +102,16 @@ the report, stores nothing, and the client remembers.
   signed with Ed25519; the public keys are pinned in `launcher.json`. A download that does not match is deleted
   and reported as `SETUP_FAILED` with cause `HASH_MISMATCH`. What a verified manifest forbids (the publisher's
   pause, minimum versions, withdrawn versions) holds until a newer verified manifest says otherwise, from the very
-  first manifest of a new installation. A signed manifest older than one already accepted on this computer is
-  refused, so a replayed document cannot downgrade the engine or the client; a newer one that rolls back is the
-  publisher's decision and is applied.
-- Downloads use HTTPS only and follow no redirect to another host or to plain HTTP (the launchers and installers
-  follow none at all, and ignore a user's `.curlrc` and `.wgetrc`); a transfer that stalls is abandoned, and none
+  first manifest of a new installation. A signed manifest older than the one already applied on this computer is
+  ignored, so a replayed document cannot downgrade the engine or the client; a newer one that rolls back is the
+  publisher's decision and is applied. A manifest dated more than a day ahead of this computer's clock is set aside
+  and not remembered. `theodore update --reset-state` (or signing out and in again) clears what this computer
+  remembers about manifests; the versions installed at that moment stay the floor until a manifest issued after the
+  reset says otherwise.
+- Downloads use HTTPS only and follow no redirect: not the launchers, not the installers (which also ignore a
+  user's `.curlrc` and `.wgetrc`), not the client's runtime, engine, client and asset-pack downloads. The one
+  exception is LibreOffice, fetched from The Document Foundation, whose site redirects to mirrors; that file is
+  pinned by SHA-256 and no credential goes with it. API calls follow a redirect only on the same origin over HTTPS; a transfer that stalls is abandoned, and none
   lasts more than 30 minutes. The installation credential is sent only to the API host over HTTPS, never to the download host.
 - TLS uses the operating system's certificate store, so a company's inspecting proxy works when its root
   certificate is installed on the computer, and fails closed (`TLS_INTERCEPT`) when it is not.

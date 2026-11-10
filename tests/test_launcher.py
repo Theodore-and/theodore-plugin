@@ -400,6 +400,14 @@ class Failures(LauncherCase):
         self.assertNotIn("Theodore is uninstalled", tell)
         self.assertFalse((self.box.home / "plugin.partial").exists(), "an interrupted unpack is Theodore's and goes too")
         if not IS_WINDOWS and os.geteuid() != 0:
+            cache = (self.box.user_home / "Library" / "Caches" / "pptx-runtime") if sys.platform == "darwin" else (self.box.user_home / ".cache" / "pptx-runtime")
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "f").write_text("x")
+            cache.parent.chmod(0o555)                          # the cache's own folder cannot be removed from its parent
+            self.addCleanup(lambda: cache.parent.chmod(0o755))
+            first, _n, _t = self.assertStatus(self.run_launcher("uninstall"), "RETRY", 75)
+            self.assertIn("render cache", first, "a render cache it could not delete is named")
+            cache.parent.chmod(0o755)
             stuck = self.box.home / "state" / "stuck"
             stuck.mkdir(parents=True)
             (stuck / "file").write_text("x")

@@ -94,13 +94,13 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
 
         removed = self.install("--uninstall")
-        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
-        if IS_WINDOWS:
+        if IS_WINDOWS:          # the folders go after the client has exited: scheduled, not confirmed; a second run confirms
+            self.assertEqual(removed.returncode, 75, removed.stdout + removed.stderr)
+            self.assertIn("scheduled but not confirmed", status_lines(removed.stdout)[0])
             import time
-            for _ in range(60):
-                if not home.exists():
-                    break
-                time.sleep(0.5)
+            time.sleep(15)
+            removed = self.install("--uninstall")
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
         self.assertFalse(home.exists())
         calls = self.host_calls()
         for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
@@ -202,12 +202,15 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
         installed = self.box.home / "plugin" / "plugins" / "theodore" / ".claude-plugin" / "plugin.json"
         data = json.loads(installed.read_text())
-        data["version"] = "9.0.0"                                     # the computer already has a newer plugin
-        installed.write_text(json.dumps(data))
-        result = self.install()
-        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
-        self.assertIn("older than the installed plugin 9.0.0", status_lines(result.stdout)[0])
-        self.assertEqual(json.loads(installed.read_text())["version"], "9.0.0", "nothing was replaced")
+        offered = json.loads((self.box.plugin / ".claude-plugin" / "plugin.json").read_text())["version"]
+        major, minor, patch = (int(x) for x in offered.split("-")[0].split("."))
+        for newer in ("9.0.0", f"{major}.{minor}.{patch + 1}+build"):     # build metadata does not hide a newer version
+            data["version"] = newer                                   # the computer already has a newer plugin
+            installed.write_text(json.dumps(data))
+            result = self.install()
+            self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+            self.assertIn(f"older than the installed plugin {newer}", status_lines(result.stdout)[0])
+            self.assertEqual(json.loads(installed.read_text())["version"], newer, "nothing was replaced")
         self.box.wait_jobs()
 
     def test_python_and_client_are_checked_against_the_installers_pins_before_anything_runs(self):
