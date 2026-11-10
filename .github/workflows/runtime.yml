@@ -71,6 +71,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -78,33 +79,8 @@ jobs:
         with:
           pattern: runtime-*
           path: bundles
-      - name: Write runtime-<id>.json
-        shell: python
-        run: |
-          import hashlib, json, pathlib
-
-          expected = {"darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64"}
-          manifests = sorted(pathlib.Path("bundles").glob("*/*.manifest.json"))
-          index, common = {}, set()
-          for path in manifests:
-              manifest = json.loads(path.read_text(encoding="utf-8"))
-              for part in manifest["parts"]:
-                  data = (path.parent / part["file"]).read_bytes()
-                  assert len(data) == part["size"], f"size mismatch: {part['file']}"
-                  assert hashlib.sha256(data).hexdigest() == part["sha256"], f"sha256 mismatch: {part['file']}"
-              index[f"{manifest['platform']}-{manifest['arch']}"] = {
-                  "built_at": manifest["built_at"], "parts": manifest["parts"]}
-              common.add((manifest["schema"], manifest["runtime_id"], manifest["recipe_version"],
-                          manifest["python_version"], manifest["node_version"]))
-          assert set(index) == expected, f"platforms built: {sorted(index)}"
-          assert len(common) == 1, f"the platforms disagree: {sorted(common)}"
-          _, runtime_id, recipe_version, python_version, node_version = common.pop()
-          combined = {"schema": "theodore-runtime-index-v1", "runtime_id": runtime_id,
-                      "recipe_version": recipe_version, "python_version": python_version,
-                      "node_version": node_version, "platforms": dict(sorted(index.items()))}
-          out = pathlib.Path(f"runtime-{runtime_id}.json")
-          out.write_text(json.dumps(combined, indent=2) + "\n", encoding="utf-8")
-          print(out.read_text(encoding="utf-8"))
+      - name: Write runtime-<id>.json (with lock_sha256)
+        run: python tools/runtime_index.py bundles --out .
       - uses: actions/upload-artifact@v7
         with:
           name: runtime-index

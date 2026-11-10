@@ -187,6 +187,35 @@ class GeneratedFiles(unittest.TestCase):
                              json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"])
 
 
+class Workflows(unittest.TestCase):
+    def test_the_secret_scan_runs_for_every_commit(self):
+        text = (ROOT / ".github" / "workflows" / "secrets.yml").read_text()
+        on = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertNotIn("paths", on, "no path filter: a commit touching only Markdown or locks is scanned too")
+        self.assertIn("gitleaks\" git . ", text)
+        self.assertNotIn("gitleaks", (ROOT / ".github" / "workflows" / "shim.yml").read_text())
+
+    def test_the_combined_runtime_index_keeps_lock_sha256(self):
+        import runtime_index
+        with tempfile.TemporaryDirectory() as tmp:
+            for platform in runtime_index.ALL:
+                folder = Path(tmp) / platform
+                folder.mkdir()
+                (folder / "python.tar.gz").write_bytes(platform.encode())
+                system, arch = platform.split("-")
+                (folder / f"runtime-{platform}.manifest.json").write_text(json.dumps({
+                    "schema": "theodore-runtime-bundle-v1", "runtime_id": "rt1", "lock_sha256": "c" * 64, "platform": system, "arch": arch,
+                    "recipe_version": 2, "python_version": "3.12.16", "node_version": "24.0.0", "built_at": "2026-11-10T00:00:00Z",
+                    "parts": [{"part": "python", "file": "python.tar.gz", "size": len(platform), "sha256": hashlib.sha256(platform.encode()).hexdigest()}]}))
+            index = runtime_index.build_index(Path(tmp))
+            self.assertEqual(index["lock_sha256"], "c" * 64)
+            self.assertTrue(all(p["lock_sha256"] == "c" * 64 for p in index["platforms"].values()))
+            (Path(tmp) / "linux-x64" / "python.tar.gz").write_bytes(b"tampered")
+            with self.assertRaises(SystemExit):
+                runtime_index.build_index(Path(tmp))
+        self.assertIn("tools/runtime_index.py", (ROOT / ".github" / "workflows" / "runtime.yml").read_text())
+
+
 class HostLimits(unittest.TestCase):
     def test_no_bin_no_lockfile_no_hooks_at_the_plugin_root(self):
         names = {p.name for p in PLUGIN.iterdir()}
