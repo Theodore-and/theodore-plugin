@@ -72,20 +72,42 @@ def _usable(root: Path) -> bool:
 
 
 def _make_private(folder: Path) -> None:
-    """The current user alone. POSIX: mode 0700. Windows: inheritance cut and one entry, this user with full control,
-    inherited by the files (as the installer does for the activation answer)."""
+    """The current user alone. POSIX: mode 0700. Windows: the folder's access list is replaced by one entry, this
+    user with full control, inherited by the files, and nothing is inherited from the parent (icacls /inheritance:r
+    leaves entries a parent's own list handed down as explicit ones, so the list is set as a whole)."""
     if not core.IS_WINDOWS:
         os.chmod(folder, 0o700)
         return
+    import ctypes
+    from ctypes import wintypes
     system = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
-    flags = {"creationflags": 0x08000000, "stdin": subprocess.DEVNULL, "capture_output": True, "text": True, "timeout": 30}
-    who = subprocess.run([str(system / "whoami.exe"), "/user", "/fo", "csv", "/nh"], **flags)
+    who = subprocess.run([str(system / "whoami.exe"), "/user", "/fo", "csv", "/nh"], creationflags=0x08000000,
+                         stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     sid = who.stdout.strip().rsplit(",", 1)[-1].strip().strip('"') if who.returncode == 0 else ""
     if not re.fullmatch(r"S-1-[0-9-]+", sid):
         raise OSError("the current user's identifier could not be read")
-    done = subprocess.run([str(system / "icacls.exe"), str(folder), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"], **flags)
-    if done.returncode != 0:
-        raise OSError("icacls could not restrict the folder")
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi.GetSecurityDescriptorDacl.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL)]
+    advapi.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi.SetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    advapi.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    descriptor = ctypes.c_void_p()
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(f"D:P(A;OICI;FA;;;{sid})", 1, ctypes.byref(descriptor), None):
+        raise OSError(f"the access list could not be built (error {ctypes.get_last_error()})")
+    try:
+        present, defaulted, dacl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
+        if not advapi.GetSecurityDescriptorDacl(descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)) or not present.value:
+            raise OSError("the access list could not be read back")
+        # SE_FILE_OBJECT; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION: this list, nothing inherited
+        code = advapi.SetNamedSecurityInfoW(str(folder), 1, 0x00000004 | 0x80000000, None, None, dacl, None)
+        if code:
+            raise OSError(f"the access list could not be set (error {code})")
+    finally:
+        kernel.LocalFree(descriptor)
 
 
 def make_folder() -> Path:

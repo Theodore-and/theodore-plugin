@@ -411,11 +411,16 @@ class Specimens(unittest.TestCase):
     def temp(self):
         from theodore_client import specimens
         root = Path(tempfile.mkdtemp(prefix="theodore-hardening-tmp-")).resolve()
+        work = Path(tempfile.mkdtemp(prefix="theodore-hardening-cwd-")).resolve()
+        before = os.getcwd()
+        os.chdir(work)          # the runner's temporary folder may lie inside its working folder, which is never used
         try:
             with mock.patch.object(specimens, "roots", return_value=[root]):
                 yield root
         finally:
+            os.chdir(before)
             shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
     def answer(self, body: bytes, sha: str | None = None, kind: str = "image/jpeg"):
         import email.message
@@ -454,6 +459,7 @@ class Specimens(unittest.TestCase):
                     acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True).stdout
                     for other in ("BUILTIN\\Users", "Everyone", "Authenticated Users", "BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"):
                         self.assertNotIn(other, acl, acl)
+                    self.assertEqual(len([line for line in acl.splitlines() if ":(" in line]), 1, acl)
                 self.assertNotIn("(I)", subprocess.run(["icacls", str(path.parent)], capture_output=True, text=True).stdout)
             else:
                 import stat
