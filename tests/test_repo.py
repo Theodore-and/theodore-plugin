@@ -194,6 +194,18 @@ class GeneratedFiles(unittest.TestCase):
                              json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"])
 
 
+class Installers(unittest.TestCase):
+    def test_stamping_keeps_crlf_in_install_cmd_and_changes_only_the_pins(self):
+        import sync_launchers
+        config = json.loads((SCRIPTS / "launcher.json").read_text())
+        config["api_base"], config["manifest_key_1_kid"] = "https://api.example.test", "k-test"
+        stamped = sync_launchers.stamped_installer("cmd", config)
+        original = (ROOT / "install" / "install.cmd").read_bytes().decode()
+        self.assertNotIn("\n", stamped.replace("\r\n", ""), "CRLF only")
+        self.assertIn('set "PIN_API_BASE=https://api.example.test"', stamped)
+        self.assertEqual(len(stamped.split("\r\n")), len(original.split("\r\n")))
+
+
 class Workflows(unittest.TestCase):
     def test_the_secret_scan_runs_for_every_commit(self):
         text = (ROOT / ".github" / "workflows" / "secrets.yml").read_text()

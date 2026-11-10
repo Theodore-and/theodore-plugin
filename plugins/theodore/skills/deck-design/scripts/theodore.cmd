@@ -226,7 +226,9 @@ if not exist "%PWSH%" goto :fetch_bits
 "%PWSH%" -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $u = [Uri]$env:THEODORE_FETCH_URL; $p = [Net.WebRequest]::GetSystemWebProxy(); $a = @{ UseBasicParsing = $true; TimeoutSec = 120; MaximumRedirection = 0; Uri = $u; OutFile = $env:THEODORE_FETCH_OUT }; if (-not $p.IsBypassed($u)) { $a.Proxy = $p.GetProxy($u); $a.ProxyUseDefaultCredentials = $true }; Invoke-WebRequest @a; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 if exist "%~2" exit /b 0
 del /q "%~2" >nul 2>&1
-rem PowerShell failed too: BITS, which has its own proxy handling, is the last route.
+rem PowerShell failed too. Only a proxy that wants a sign-in is worth BITS (its own proxy handling); for anything
+rem else BITS would add a minute of retries to a failure that is already known.
+if not "%CAUSE%"=="PROXY_AUTH" exit /b 1
 :fetch_bits
 rem The Background Intelligent Transfer Service. BITS retries a transient error for days, so the job gets 60 seconds
 rem without progress and 30 minutes in all, then is cancelled. Redirects are refused (BG_HTTP_REDIRECT_POLICY_DISALLOW).

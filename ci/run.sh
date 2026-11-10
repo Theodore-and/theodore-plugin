@@ -49,7 +49,7 @@ run_mac() { # name platform-key arch-prefix
   name=$1 key=$2 prefix=$3
   dir="$OUT/$name"
   mkdir -p "$dir" "$CACHE"; fresh "$dir/bundle"; fresh "$dir/tmp"; rm -rf "${dir:?}/work"
-  PY=$($prefix "$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") ||
+  PY=$("$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") ||
     { result "$name" shim fail; result "$name" runtime fail; return; }
   say "$name: $($prefix "$PY" -c 'import platform,sys; print(sys.version.split()[0], platform.machine())')"
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
@@ -72,9 +72,10 @@ in_container() { # docker-platform name script
     -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$UBUNTU" sh -c "$script"
 }
 
-# What the old runners had and the jobs use: a Python to bootstrap the pinned one, curl, openssl, xz, git.
+# What the old runners had and the jobs use: a Python to bootstrap the pinned one, curl, openssl, xz, git, and one
+# font with fontconfig (skia-canvas measures text with the system's fonts; a desktop Linux always has some).
 SETUP='set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null
-  apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git >/dev/null
+  apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git fontconfig fonts-dejavu-core >/dev/null
   useradd -m tester'
 
 run_linux() { # name docker-platform platform-key

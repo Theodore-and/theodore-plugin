@@ -132,7 +132,7 @@ def installer_pins(config: dict) -> dict[str, str]:
 
 def stamped_installer(kind: str, config: dict, text: str | None = None) -> str:
     """install.sh or install.cmd with its pins block rewritten from `config` (a launcher.json)."""
-    text = INSTALLERS[kind].read_text(encoding="utf-8") if text is None else text
+    text = INSTALLERS[kind].read_bytes().decode("utf-8") if text is None else text     # bytes: keep install.cmd's CRLF
     eol = "\r\n" if kind == "cmd" else "\n"
     lines = text.split(eol)
     start = next(i for i, line in enumerate(lines) if PIN_BEGIN in line)
