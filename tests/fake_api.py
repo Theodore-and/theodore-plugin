@@ -126,10 +126,11 @@ class FakeApi:
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
         self.devices: dict[str, dict] = {}            # device_code -> {user_code, status}
         self.installations: dict[str, dict] = {}      # id -> {secret, revoked, gen}
-        self.plan, self.features, self.channel_name = "beta", ["pptx", "deck-design"], "beta"
+        self.plan, self.features, self.channel_name = "beta", ["pptx", "deck-design", "agent-reports"], "beta"
         self.grace_seconds = 7 * 86400
         self.account_state = "active"     # or "suspended" / "inactive"
         self.auto_reports = True
+        self.refresh_carries_report_switch = False   # True: the refresh answer also names the user's switch (not yet in the contract)
         self.engine: dict | None = None   # {version, sha256, size, runtime_id, min_client, revoked: [], kind}
         self.engine_files: dict[str, bytes] = {}
         self.engine_redirect = None       # "same": 302 to /dl/private/... on this origin; "other": the same on localhost
@@ -407,7 +408,8 @@ class FakeApi:
             self.refreshes += 1
             latest = (self.engine or {}).get("version")
             withdrawn = body.get("engine_version") in ((self.engine or {}).get("revoked") or [])
-            return self._send(h, 200, {"entitlement_token": self.mint_entitlement(installation_id), "server_time": iso(self.now()),
+            extra = {"auto_report_enabled": self.auto_reports} if self.refresh_carries_report_switch else {}
+            return self._send(h, 200, {**extra, "entitlement_token": self.mint_entitlement(installation_id), "server_time": iso(self.now()),
                                        "release": {"channel": self.channel_name, "latest_version": latest, "min_version": self.min_version,
                                                    "update_required": withdrawn, "kill": self.kill, "kill_message": self.kill_message or None}})
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):

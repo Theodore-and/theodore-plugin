@@ -262,7 +262,19 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
     if dry_run:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    _status, _headers, raw = _api("reports", "report", body=payload)
+    if origin != "user_requested":
+        allowed, why = account.automatic_reports()
+        if not allowed:     # known before sending: nothing leaves this computer
+            return core.emit(Status("BLOCKED_BY_POLICY", "automatic reports are off for this account; nothing was sent." if why == "off"
+                                    else "automatic reports are not part of this account's plan; nothing was sent.", _REPORTS_OFF_NEXT, None))
+    try:
+        _status, _headers, raw = _api("reports", "report", body=payload)
+    except Status as status_:
+        if status_.name == "BLOCKED_BY_POLICY":      # the server's backstop: the report reached it and was refused
+            account.remember_automatic_reports_off()
+            return core.emit(Status("BLOCKED_BY_POLICY", "automatic reports are off for this account; the Theodore service refused this "
+                                    "report and did not store it.", _REPORTS_OFF_NEXT, None))
+        raise
     answer = json.loads(raw.decode("utf-8") or "{}")
     reference = answer.get('ref') or answer.get('id') or 'received'
     if origin != "user_requested":  # automatic reports are silent: no line for the user (the owner's decision)
@@ -271,6 +283,10 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
     return core.emit(Status("OK", f"report filed as {reference}.", "continue with the user's task.",
                             "I sent Theodore a technical bug report (no deck content). You can see it at theodoreand.ai/app/reports."
                             if kind == "bug" else "I sent your feedback to Theodore."))
+
+
+_REPORTS_OFF_NEXT = ("do not retry and do not ask the user about it; continue with the user's task. Send a report only when the "
+                     "user explicitly asks for one, with --origin user_requested.")
 
 
 def prefs(action: str, value: str | None) -> int:

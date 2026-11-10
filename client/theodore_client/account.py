@@ -78,11 +78,45 @@ def stored_token() -> tuple[str | None, dict]:
     return (token, decode_claims(token)) if token else (None, {})
 
 
-def save_token(token: str, release: dict | None = None) -> None:
+def save_token(token: str, release: dict | None = None, auto_reports: bool | None = None) -> None:
+    """Store the token. What is known about automatic reports is kept with it: the server's answer when it gives
+    one, otherwise what was known before."""
+    old = core.read_json(_token_path())
     record = {ENTITLEMENT_FILE_KEY: token, "saved_at": int(time.time())}
     if release:
         record["release"] = release
+    if auto_reports is not None:
+        record["auto_reports"] = {"enabled": bool(auto_reports), "source": "server", "at": int(core.now())}
+    elif isinstance(old.get("auto_reports"), dict):
+        record["auto_reports"] = old["auto_reports"]
     core.write_json(_token_path(), record, 0o600)
+
+
+AGENT_REPORTS_FEATURE = "agent-reports"
+REFUSED_OFF_SECONDS = 86400
+
+
+def automatic_reports() -> tuple[bool, str]:
+    """Whether an automatic report may be sent, decided before anything is sent: (allowed, why not).
+
+    The plan feature `agent-reports` is in the entitlement's feat claim. The user's switch is cached with the
+    entitlement: from the licence refresh answer when the server includes it, or from a 403 auto_reports_disabled
+    (remembered for a day, since that answer cannot say when the user turns reports back on)."""
+    token, claims = stored_token()
+    if token and AGENT_REPORTS_FEATURE not in (claims.get("feat") or []):
+        return False, "plan"
+    known = core.read_json(_token_path()).get("auto_reports") or {}
+    if known.get("enabled") is False and (known.get("source") == "server" or core.now() - float(known.get("at") or 0) < REFUSED_OFF_SECONDS):
+        return False, "off"
+    return True, ""
+
+
+def remember_automatic_reports_off() -> None:
+    path = _token_path()
+    record = core.read_json(path)
+    if record:
+        record["auto_reports"] = {"enabled": False, "source": "refused", "at": int(core.now())}
+        core.write_json(path, record, 0o600)
 
 
 def delete_token() -> None:
@@ -142,7 +176,8 @@ def refresh(timeout: float = 20.0) -> dict:
     if not token:
         raise core.internal("the licence refresh answer has no entitlement token.")
     release = answer.get("release") or {}
-    save_token(token, release)
+    switch = answer.get("auto_report_enabled", release.get("auto_report_enabled"))
+    save_token(token, release, switch if isinstance(switch, bool) else None)
     if release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine):
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
         update_path = core.home().state / "update.json"

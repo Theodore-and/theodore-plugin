@@ -774,18 +774,43 @@ class ReportsAndPreferences(ClientCase):
         self.ready()
         self.api.auto_reports = False
         args = ("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
-        refused = self.client(*args)
+        refused = self.client(*args)       # the switch is not known yet: the server refuses and stores nothing (the backstop)
         self.assertEqual(refused.returncode, 73, refused.stdout + refused.stderr)
         self.assertEqual(refused.stdout.strip().splitlines(), [
-            "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; nothing was sent.",
+            "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; the Theodore service refused this report and did not store it.",
             "NEXT: do not retry and do not ask the user about it; continue with the user's task. Send a report only when "
             "the user explicitly asks for one, with --origin user_requested."])
-        self.assertNotIn("TELL THE USER", refused.stdout)
-        self.assertEqual(self.api.reports, [], "nothing was sent")
+        self.assertEqual(self.api.reports, [], "nothing was stored")
         self.assertTrue((self.box.home / "state" / "entitlement.json").exists(), "this 403 must not sign the device out")
+        posts = lambda: len([r for r in self.api.requests if r["path"] == "/v1/reports"])
+        before = posts()
+        again = self.client(*args)          # now the client knows: nothing is sent at all
+        self.assertEqual(again.returncode, 73, again.stdout)
+        self.assertEqual(again.stdout.strip().splitlines()[0],
+                         "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; nothing was sent.")
+        self.assertEqual(posts(), before, "no request left this computer")
         _f, _n, tell = self.assertStatus(self.client(*args, "--origin", "user_requested"), "OK", 0)
         self.assertIn("no deck content", tell, "a report the user asked for is confirmed to the user")
         self.assertEqual([r["origin"] for r in self.api.reports], ["user_requested"])
+
+    def test_the_switch_and_the_plan_feature_are_known_before_anything_is_sent(self):
+        self.api.refresh_carries_report_switch = True
+        self.api.auto_reports = False
+        self.ready()
+        args = ("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
+        posts = lambda: len([r for r in self.api.requests if r["path"] == "/v1/reports"])
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(13 * 3600)})       # a refresh learns the switch
+        self.assertEqual(self.client(*args).returncode, 73)
+        self.assertEqual(posts(), 0, "the first automatic report is not sent either")
+        self.api.auto_reports = True
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(26 * 3600)})       # switched back on
+        self.assertEqual(self.client(*args, env={"THEODORE_TEST_CLOCK_OFFSET": str(26 * 3600)}).returncode, 0)
+        self.assertEqual(posts(), 1)
+        self.api.features = ["pptx", "deck-design"]                                            # a plan without agent-reports
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(39 * 3600)})
+        first, _n = self.client(*args, env={"THEODORE_TEST_CLOCK_OFFSET": str(39 * 3600)}).stdout.strip().splitlines()
+        self.assertIn("not part of this account's plan", first)
+        self.assertEqual(posts(), 1)
 
     def test_an_automatic_report_is_silent(self):
         self.ready()
