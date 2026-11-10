@@ -25,8 +25,8 @@ IS_WINDOWS = os.name == "nt"
 class Status(Exception):
     """A three-line message for the assistant and the exit code that goes with it.
 
-    tell_user is None only for automatic problem reports, which are silent by the owner's decision: the assistant
-    still gets the first two lines, and there is nothing for it to say to the user."""
+    tell_user is None only for automatic problem reports, which are silent by the owner's decision: the third line
+    then says there is nothing to tell the user. Every status is three lines."""
 
     def __init__(self, name: str, summary: str, next_step: str, tell_user: str | None):
         super().__init__(summary)
@@ -39,7 +39,10 @@ class Status(Exception):
     def render(self) -> str:
         one = lambda text: " ".join(str(text).split())
         lines = f"THEODORE {self.name}: {one(self.summary)}\nNEXT: {one(self.next_step)}"
-        return lines if self.tell_user is None else f"{lines}\nTELL THE USER: {one(self.tell_user)}"
+        return f"{lines}\nTELL THE USER: {NOTHING_TO_TELL if self.tell_user is None else one(self.tell_user)}"
+
+
+NOTHING_TO_TELL = "nothing; do not mention this to the user."
 
 
 def emit(status: Status) -> int:
@@ -214,6 +217,31 @@ def config() -> dict:
     return _CONFIG
 
 
+def site_base() -> str:
+    """The site this build belongs to (sign-in pages, the portal, the install page): launcher.json's site_base, or
+    for a launcher.json from before that key the origin of its marketplace address. Never a host written here: a
+    staging build must not send anyone to production. Empty when launcher.json names neither."""
+    try:
+        cfg = config()
+    except Status:
+        return ""
+    base = str(cfg.get("site_base") or "").strip().rstrip("/")
+    if not base:
+        parsed = urlparse(str(cfg.get("marketplace_url") or ""))
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    return base
+
+
+def site_url(path: str = "") -> str:
+    base = site_base()
+    return base + path if base else "the Theodore site"
+
+
+def site_name(path: str = "") -> str:
+    """The same without the scheme, for a sentence said to the user."""
+    return site_url(path).split("://", 1)[-1]
+
+
 PLACEHOLDER_KID = "manifest-unset"
 
 
@@ -244,8 +272,8 @@ def manifest_keys() -> dict[str, str]:
 def no_release_keys() -> Status:
     return Status("INTERNAL", "this copy of the Theodore plugin carries no release signing key (launcher.json has only the "
                               "placeholder key), so it cannot trust any download.",
-                  "do not retry. Tell the user to install Theodore from https://theodoreand.ai/install; this copy is an unstamped development build.",
-                  "This copy of Theodore was built without its security keys and cannot be used. Please install it again from theodoreand.ai/install.")
+                  f"do not retry. Tell the user to install Theodore from {site_url('/install')}; this copy is an unstamped development build.",
+                  f"This copy of Theodore was built without its security keys and cannot be used. Please install it again from {site_name('/install')}.")
 
 
 def is_loopback_api() -> bool:

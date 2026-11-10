@@ -15,7 +15,10 @@ At deploy, one command points a checkout at an environment and stamps the manife
 
     python3 tools/sync_launchers.py --env staging|production --keys <jwks.json>
 
-`--env` writes api_base, dl_base and marketplace_url for that environment (and with them the stage-1 URLs).
+`--env` writes api_base, dl_base, marketplace_url and site_base for that environment (and with them the stage-1
+URLs), and rewrites the production hosts in every published text (the install page, the installers, the launchers,
+the plugin's own files) to that environment's, so a staging build never sends anyone to production. The client's
+sources are not rewritten: the client reads the site from launcher.json.
 `--keys` takes the key set as GET /v1/keys serves it ({"keys": [{"kid", "x", "purpose", ...}]}) and writes every
 key whose purpose is "manifest" as manifest_key_<n>_kid / manifest_key_<n>_x; a file with no manifest key is
 refused. The repository itself carries the production addresses and a placeholder key: stamp a staging build
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -58,7 +62,23 @@ def apply_env(data: dict, env: str) -> dict:
     origins = ORIGINS[env]
     data["api_base"], data["dl_base"] = origins["api"], origins["dl"]
     data["marketplace_url"] = origins["public"] + "/marketplace.json"
+    data["site_base"] = origins["public"]
     return data
+
+
+_PUBLIC_HOST = re.compile(r"(?<![A-Za-z0-9.@-])" + re.escape(ORIGINS["production"]["public"].split("//")[1]))
+
+
+def stamp_site(text: str, env: str | None) -> str:
+    """The text of a published file for an environment: every address of the production site, API or download host
+    becomes that environment's (with or without https://). The support mail address is the same everywhere. For
+    production, or without an environment, the text is returned as it is; stamping twice changes nothing."""
+    if not env or env == "production":
+        return text
+    here, there = ORIGINS["production"], ORIGINS[env]
+    for kind in ("api", "dl"):
+        text = text.replace(here[kind], there[kind])
+    return _PUBLIC_HOST.sub(there["public"].split("//")[1], text)
 
 
 def apply_keys(data: dict, jwks: dict) -> dict:
@@ -145,6 +165,45 @@ def stamped_installer(kind: str, config: dict, text: str | None = None) -> str:
     return eol.join(lines[:start + 1] + body + lines[end:])
 
 
+PLUGIN = ROOT / "plugins" / "theodore"
+NOT_STAMPED = ("LICENSE", "NOTICE")      # licence text names the terms page as it is
+
+
+def published_files() -> list[Path]:
+    """Every file a build publishes: the install page and installers, the plugin tree, the two marketplace files and
+    the client's own sources (the client archive)."""
+    files = [ROOT / "install" / name for name in ("install.md", "install.sh", "install.cmd")]
+    files += [ROOT / ".claude-plugin" / "marketplace.json", ROOT / ".agents" / "plugins" / "marketplace.json"]
+    files += sorted(p for p in PLUGIN.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store")
+    files += sorted((ROOT / "client" / "theodore_client").glob("*.py"))
+    for folder in COPIES:
+        files += [folder / name for name in FILES if folder / name not in files]
+    return files
+
+
+def stamped_tree(env: str | None = None, jwks: dict | None = None) -> dict[str, bytes]:
+    """Path (relative, with /) -> content of every published file as this run would leave it: launcher.json stamped,
+    the launcher copies identical to their source, the installers' pins rewritten, and, with an environment, that
+    environment's hosts in every text a user or an assistant reads. The client's sources are never rewritten: the
+    client reads the site from launcher.json, so one client archive serves every environment."""
+    launcher_json = stamped_launcher_json(env, jwks)
+    config = json.loads(launcher_json)
+    kinds = {path: kind for kind, path in INSTALLERS.items()}
+    tree: dict[str, bytes] = {}
+    for path in published_files():
+        source = SOURCE / path.name if path.parent in COPIES and path.name in FILES else path
+        if source == SOURCE / "launcher.json":
+            data = launcher_json.encode("utf-8")
+        else:
+            data = source.read_bytes()
+            if ROOT / "client" not in source.parents and source.name not in NOT_STAMPED:
+                data = stamp_site(data.decode("utf-8"), env).encode("utf-8")
+            if source in kinds:
+                data = stamped_installer(kinds[source], config, data.decode("utf-8")).encode("utf-8")
+        tree[path.relative_to(ROOT).as_posix()] = data
+    return tree
+
+
 def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description="Stamp launcher.json and refresh the generated launcher copies.")
@@ -155,29 +214,17 @@ def main() -> int:
     check = args.check
     problems = []
     jwks = json.loads(Path(args.keys).read_text(encoding="utf-8")) if args.keys else None
-    wanted = stamped_launcher_json(args.env, jwks)
-    target = SOURCE / "launcher.json"
-    if target.read_text(encoding="utf-8") != wanted:
-        problems.append("launcher.json pins are stale")
+    for rel, data in stamped_tree(args.env, jwks).items():
+        path = ROOT / rel
+        if path.exists() and path.read_bytes() == data:
+            continue
+        copy_of = SOURCE / path.name if path.parent in COPIES else None
+        problems.append(f"{rel} differs from {copy_of.relative_to(ROOT)}" if copy_of else f"{rel} is stale (pins or addresses)")
         if not check:
-            target.write_text(wanted, encoding="utf-8", newline="\n")
-    for folder in COPIES:
-        for name in FILES:
-            source, copy = SOURCE / name, folder / name
-            if not copy.exists() or copy.read_bytes() != source.read_bytes():
-                problems.append(f"{copy.relative_to(ROOT)} differs from {source.relative_to(ROOT)}")
-                if not check:
-                    folder.mkdir(parents=True, exist_ok=True)
-                    copy.write_bytes(source.read_bytes())
-                    copy.chmod(source.stat().st_mode & 0o777)
-    config = json.loads(wanted)
-    for kind, path in INSTALLERS.items():
-        current = path.read_bytes().decode("utf-8")
-        stamped = stamped_installer(kind, config, current)
-        if stamped != current:
-            problems.append(f"{path.relative_to(ROOT)} pins are stale")
-            if not check:
-                path.write_bytes(stamped.encode("utf-8"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            if copy_of:
+                path.chmod(copy_of.stat().st_mode & 0o777)
     for line in problems:
         print(("stale: " if check else "updated: ") + line)
     return 1 if (check and problems) else 0

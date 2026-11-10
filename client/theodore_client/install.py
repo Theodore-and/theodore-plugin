@@ -520,7 +520,9 @@ def rollback() -> Status:
         state = engines_state()
         current, previous = state.get("version"), state.get("previous")
         if not previous or not engine_installed(previous):
-            return core.usage("there is no previous engine version to go back to.", "nothing to do; keep using the current version.")
+            return Status("OK", f"there is no earlier engine version on this computer to go back to; nothing changed, engine {current or 'none'} stays in use.",
+                          "nothing to do; continue with the current version.",
+                          "There is no earlier Theodore version on this computer to go back to, so nothing changed.")
         core.write_json(core.home().engines / "current.json", {"version": previous, "previous": current})
     save_update_state(held=current)
     return Status("OK", f"engine {previous} is current again; {current} is held back until a newer version is published.",
@@ -659,8 +661,8 @@ def enforce_restrictions(engine_version: str | None = None) -> None:
     if rules.get("kill"):
         message = rules.get("kill_message") or "no reason given"
         raise Status("BLOCKED_BY_POLICY", f"Theodore has paused this channel: {message}",
-                     "do not retry today. Tell the user; status is at https://theodoreand.ai/support.",
-                     f"Theodore is paused by its publisher: {rules.get('kill_message') or 'please check theodoreand.ai for news'}.")
+                     f"do not retry today. Tell the user; status is at {core.site_url('/support')}.",
+                     f"Theodore is paused by its publisher: {rules.get('kill_message') or 'please check ' + core.site_name() + ' for news'}.")
     shim_min = rules.get("shim_min")
     if shim_min and core.version_key(core.plugin_version()) < core.version_key(str(shim_min)):
         raise plugin_too_old(shim_min)
@@ -991,7 +993,25 @@ def checked_packs(entries) -> list[dict]:
 def fetch_packs_manifest(timeout: float = 20.0) -> list[dict]:
     """The packs of the signed channel manifest. The unsigned GET /v1/packs/manifest is not used: a pack's hash and
     address come only from a document the manifest key signed."""
-    return checked_packs(fetch_channel_manifest(timeout=timeout).get("packs"))
+    packs = checked_packs(fetch_channel_manifest(timeout=timeout).get("packs"))
+    remember_published_packs(packs)
+    return packs
+
+
+NO_PACKS = "no asset packs are published for this channel yet"
+
+
+def remember_published_packs(packs) -> None:
+    """Which packs the last verified channel manifest publishes, so no text promises a download that cannot come."""
+    ids = [str(p.get("id")) for p in packs or [] if isinstance(p, dict) and p.get("id")]
+    if update_state().get("published_packs") != ids:
+        save_update_state(published_packs=ids)
+
+
+def published_packs() -> list[str] | None:
+    """The ids of the packs the channel publishes; None while no manifest has been read on this computer."""
+    known = update_state().get("published_packs")
+    return [str(p) for p in known] if isinstance(known, list) else None
 
 
 def _pack_folder(pack_id: str) -> Path:
@@ -1052,6 +1072,7 @@ def start_packs_job(manifest_packs: list[dict] | None = None) -> bool:
     if job.alive():
         return True
     if manifest_packs is not None:
+        remember_published_packs(manifest_packs)
         state = packs_state()
         if all(state.get(p["id"], {}).get("status") == "ready" and state[p["id"]].get("version") == p["version"] for p in manifest_packs):
             return False

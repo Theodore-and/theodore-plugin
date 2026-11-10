@@ -550,3 +550,69 @@ class Specimens(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in root.iterdir()), ["other-old", "theodore-specimens-file", "theodore-specimens-new"])
             self.assertEqual(specimens.sweep(everything=True), [])
             self.assertEqual(sorted(p.name for p in root.iterdir()), ["other-old", "theodore-specimens-file"])
+
+
+class HostTest(unittest.TestCase):
+    """Hand-back H: a keychain that does not answer, statuses of three lines."""
+
+    def test_every_keychain_call_has_a_time_limit_and_falls_back_to_the_file(self):
+        import io
+        import subprocess
+        from theodore_client import credentials
+        calls = []
+
+        def hang(command, **kwargs):
+            calls.append((command, kwargs.get("timeout")))
+            raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), \
+                mock.patch.object(subprocess, "run", side_effect=hang), mock.patch("sys.stderr", new=io.StringIO()) as err:
+            core.home().ensure()
+            self.assertEqual(credentials.store("inst-1", "secret-1"), "file")
+            path = home / "state" / "credentials"
+            self.assertTrue(path.exists())
+            if sys.platform != "win32":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(credentials.load(), {"installation_id": "inst-1", "installation_secret": "secret-1"})
+            self.assertTrue(calls)
+            self.assertEqual({limit for _c, limit in calls}, {10}, calls)
+            note = [line for line in err.getvalue().splitlines() if "keychain" in line]
+            self.assertEqual(len(note), 1, err.getvalue())
+            self.assertIn("10 seconds", note[0])
+            self.assertNotIn("secret-1", err.getvalue())
+            before = len(calls)
+            path.unlink()
+            self.assertIsNone(credentials.load(), "no item, and the keychain is not asked again while it does not answer")
+            self.assertEqual(credentials.store("inst-2", "secret-2"), "file")
+            self.assertEqual(len(calls), before, calls[before:])
+            self.assertTrue(credentials.delete())
+            self.assertFalse(path.exists())
+
+    def test_a_keychain_that_answers_is_still_used(self):
+        import subprocess
+        from theodore_client import credentials
+        seen = []
+
+        def fine(command, **kwargs):
+            seen.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), mock.patch.object(subprocess, "run", side_effect=fine):
+            core.home().ensure()
+            self.assertEqual(credentials.store("inst-1", "secret-1"), "keychain")
+            self.assertFalse((home / "state" / "credentials").exists())
+            self.assertEqual(set(seen), {10})
+
+    def test_every_status_is_three_lines(self):
+        silent = core.Status("OK", "automatic report filed as TR-1.", "continue.", None).render().splitlines()
+        self.assertEqual(len(silent), 3)
+        self.assertTrue(silent[2].startswith("TELL THE USER: nothing"), silent[2])
+        self.assertEqual(len(core.Status("OK", "a", "b", "c").render().splitlines()), 3)
+
+    def test_the_site_named_in_texts_is_the_stamped_one(self):
+        with client_home(site_base="https://staging.example.test/"):
+            self.assertEqual(core.site_url("/app/plan"), "https://staging.example.test/app/plan")
+            self.assertEqual(core.site_name("/install"), "staging.example.test/install")
+        with client_home(marketplace_url="https://older.example.test/marketplace.json"):      # a launcher.json from before site_base
+            self.assertEqual(core.site_url("/app/plan"), "https://older.example.test/app/plan")
+        with client_home():
+            self.assertEqual(core.site_url("/install"), "the Theodore site")
+            self.assertNotIn("theodoreand.ai", core.no_release_keys().render().replace("@theodoreand.ai", ""))

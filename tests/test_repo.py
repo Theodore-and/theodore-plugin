@@ -378,6 +378,9 @@ class Contract(unittest.TestCase):
         published = {(r["method"], r["path"]): r for r in self.snapshot["routes"].values()}
         for name, (method, template, needs_bearer) in self.contract.ROUTES.items():
             path = re.sub(r"\{[a-z_]+\}", lambda m: m.group(0), template)
+            if name in self.contract.PENDING_ROUTES:        # being added by the backend: not in its published contract yet
+                self.assertNotIn((method, path), published, f"{name} is in the contract now: take it out of PENDING_ROUTES")
+                continue
             self.assertIn((method, path), published, f"{name}: {method} {path}")
             self.assertEqual(published[(method, path)]["auth"] == "installation", needs_bearer, f"{name}: bearer or public")
 
@@ -462,6 +465,67 @@ class Documents(unittest.TestCase):
         self.assertNotIn("the assistant then asks you first", text)
         self.assertIn("the assistant does not ask you about\nreports and files one only when you ask it to", text)
         self.assertIn("redact.py", text)
+
+
+class StampedSite(unittest.TestCase):
+    """A build stamped for an environment names that environment's site everywhere it prints or serves a link."""
+
+    PRODUCTION = re.compile(r"(?<![A-Za-z0-9.@-])theodoreand\.ai|https://(?:api|dl|mcp)\.theodoreand\.ai")
+
+    def test_a_staging_stamped_tree_names_no_production_host(self):
+        import sync_launchers
+        tree = sync_launchers.stamped_tree("staging")
+        for rel in ("install/install.md", "install/install.sh", "install/install.cmd", "plugins/theodore/skills/pptx/scripts/theodore",
+                    "plugins/theodore/skills/deck-design/scripts/theodore.cmd", "plugins/theodore/skills/pptx/scripts/launcher.json",
+                    "plugins/theodore/.claude-plugin/plugin.json", "plugins/theodore/skills/pptx/SKILL.md", "client/theodore_client/commands.py"):
+            self.assertIn(rel, tree)
+        self.assertFalse([rel for rel in tree if rel.startswith(("tests/", "tools/", "runtime/", "ci/", "client/truststore/"))])
+        for rel, data in sorted(tree.items()):
+            if rel.rsplit("/", 1)[-1] in ("LICENSE", "NOTICE"):        # licence text names the terms page as it is
+                continue
+            text = data.decode("utf-8")
+            hits = [line.strip()[:160] for line in text.splitlines() if self.PRODUCTION.search(line)]
+            self.assertEqual(hits, [], rel)
+        page = tree["install/install.md"].decode("utf-8")
+        self.assertEqual(page.count("https://staging.theodoreand.ai/install.sh"), 1)
+        self.assertEqual(page.count("https://staging.theodoreand.ai/install.cmd"), 2)
+        self.assertIn("claude plugin install theodore --marketplace https://staging.theodoreand.ai/marketplace.json", page)
+        self.assertIn("the same value is shown on https://staging.theodoreand.ai/install.", page)
+        self.assertEqual(page.count("{{ACTIVATION_CODE}}"), 4)
+        self.assertIn("(compare with https://staging.theodoreand.ai/install)", tree["install/install.sh"].decode("utf-8"))
+        cmd = tree["install/install.cmd"]
+        self.assertIn(b"(compare with https://staging.theodoreand.ai/install)", cmd)
+        self.assertEqual(cmd.count(b"\r\n"), cmd.count(b"\n"), "install.cmd keeps its CRLF line ends")
+        self.assertIn(b"support@theodoreand.ai", tree["install/install.sh"], "the support address is the same everywhere")
+        config = json.loads(tree["plugins/theodore/skills/pptx/scripts/launcher.json"])
+        self.assertEqual(config["site_base"], "https://staging.theodoreand.ai")
+        for name in ("theodore", "theodore.cmd", "launcher.json"):
+            self.assertEqual(tree[f"plugins/theodore/skills/pptx/scripts/{name}"], tree[f"plugins/theodore/skills/deck-design/scripts/{name}"])
+
+    def test_the_repository_itself_is_the_production_build(self):
+        import sync_launchers
+        tree = sync_launchers.stamped_tree(None)
+        for rel, data in tree.items():
+            self.assertEqual(data, (ROOT / rel).read_bytes(), f"{rel}: without --env nothing but the pins changes")
+        self.assertEqual(json.loads((SCRIPTS / "launcher.json").read_text())["site_base"], "https://theodoreand.ai")
+        self.assertEqual(sync_launchers.stamp_site(sync_launchers.stamp_site("see theodoreand.ai/x", "staging"), "staging"), "see staging.theodoreand.ai/x")
+
+    def test_codex_is_documented_by_the_route_that_works_today(self):
+        for path in (ROOT / "install" / "install.md", ROOT / "README.md"):
+            text = path.read_text()
+            github = [line for line in text.splitlines() if "codex plugin marketplace add Theodore-and/theodore-plugin" in line]
+            self.assertTrue(github, path.name)
+            for line in github:
+                self.assertIn("nce the plugin repository is public", line, f"{path.name}: the GitHub form only behind 'once public'")
+            self.assertIn("plugin", text)
+            self.assertRegex(text, r"codex plugin marketplace add [\"~%]", f"{path.name}: the local marketplace the installer keeps")
+
+    def test_readme_sizes_and_residue(self):
+        text = (ROOT / "README.md").read_text()
+        self.assertIn("40 to 45 MB each", text)
+        self.assertNotIn("10 to 20 MB each", text)
+        for word in ("pptx-soffice-profile", "theodore-pptx-locks", "theodore-specimens-"):
+            self.assertIn(word, text)
 
 
 class InstallPage(unittest.TestCase):

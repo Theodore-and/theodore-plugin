@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.1"
-PIN_CLIENT="client/client-0.2.1.tar 2469596bf92f9b59789e9a83289779b523695a6040e6a95fad40dc720043c91e"
+PIN_CLIENT="client/client-0.2.1.tar 686787024c664d84a548bf7bdb43a43bfe0d224749a201749a4b8d707ce16de4"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -202,7 +202,7 @@ HOSTS_RC=$?
 # --- 6. background downloads -----------------------------------------------------------------------------------------------
 if theodore whoami >/dev/null 2>&1; then
   theodore guide pptx >/dev/null 2>&1          # installs the engine if the setup job has not done it yet
-  say "asset packs (icons, flags, maps, backgrounds; about 95 MB) are downloading in the background"
+  say "asset packs (icons, flags, maps, backgrounds; about 95 MB), when published for this channel, download in the background"
   theodore packs install --all --background >/dev/null 2>&1
 fi
 if [ "$(uname -s)" = Darwin ] && ! command -v soffice >/dev/null 2>&1 && [ ! -d /Applications/LibreOffice.app ] && [ ! -d "$HOME_DIR/tools/libreoffice" ]; then

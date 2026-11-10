@@ -319,7 +319,7 @@ if [ "${1:-}" = "uninstall" ]; then
   rmdir "$HOME_DIR" 2>/dev/null
   if [ -n "$left" ]; then
     status RETRY 75 "Theodore was not fully installed, and these could not be removed: ${left#; }." \
-      "tell the user what is left; it can be removed by hand (see 'Remove it' at https://github.com/Theodore-and/theodore-plugin)." \
+      "tell the user what is left (each item above is a folder or a keychain item); it can be removed by hand." \
       "Theodore is mostly removed, but these pieces could not be: ${left#; }. Your decks were not touched."
   fi
   status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed." "nothing to do." "Theodore is uninstalled."

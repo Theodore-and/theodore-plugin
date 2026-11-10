@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from . import __version__, account, api, core, credentials, install, specimens
-from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
+from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
 
@@ -27,12 +28,16 @@ def _bearer() -> str:
     return cred["installation_secret"]
 
 
-def _api(route: str, what: str, **kwargs):
+def _api(route: str, what: str, *, passing: tuple[str, ...] = (), **kwargs):
+    """One authenticated call; every refusal becomes its status, except the error codes in `passing`, which the
+    caller answers itself."""
     try:
         return api.call(route, bearer=_bearer(), **kwargs)
     except api.NetworkError as error:
         raise api.offline(error, what) from None
     except api.ApiError as error:
+        if error.code in passing:
+            raise
         if error.code in ("installation_revoked", "unauthenticated"):
             credentials.delete()
             account.delete_token()
@@ -144,15 +149,63 @@ def _directions(skill: str) -> str:
     try:
         _status, _headers, raw = api.call("guide", bearer=cred["installation_secret"], skill=skill, timeout=3.0)
         return raw.decode("utf-8", errors="replace")
-    except (api.ApiError, api.NetworkError):
+    except api.ApiError as error:
+        if error.code in DELETE_CREDENTIAL_ON:      # the device was revoked: no instructions, and the sign-in is already cleared
+            raise account.login_start("this device was signed out; it needs to sign in again.") from None
+        if error.code in DELETE_TOKEN_ON:           # the account no longer has the skill
+            raise api.status_from(error, f"guide {skill}") from None
         return ""
+    except api.NetworkError:
+        return ""
+
+
+REFERENCE_LINK = re.compile(r"\]\(references/([A-Za-z0-9_-]{1,64})\.md\)")
+SECTION_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _section_name(given: str) -> str:
+    """A section as the text names it: `critique`, `critique.md` and `references/critique.md` are the same section."""
+    name = given.strip()
+    for prefix in ("./", "references/"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return name[:-3] if name.endswith(".md") else name
+
+
+def _no_such_section(skill: str, given: str) -> Status:
+    """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored)."""
+    names: list[str] = []
+    try:
+        _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill)
+        for name in REFERENCE_LINK.findall(raw.decode("utf-8", errors="replace")):
+            if name not in names:
+                names.append(name)
+    except Status as status:
+        if status.name != "USAGE":
+            raise
+    launcher = quoted_launcher()
+    shown = "".join(ch for ch in given if ch.isprintable())[:80]
+    if names:
+        return core.usage(f"guide {skill} has no section '{shown}'. Sections: {', '.join(names)}.",
+                          f"run {launcher} guide {skill} <section> with one of those names.")
+    return core.usage(f"guide {skill} has no section '{shown}'.", f"run {launcher} guide {skill}; its text names the sections it has.")
 
 
 def _guide_remote(skill: str, section: str | None, part: int) -> int:
     claims = account.require(skill)
     query = {"part": part} if part > 1 else None
     what = f"guide {skill}"
-    if section:
+    if section and section != "license":
+        given, section = section, _section_name(section)
+        if not SECTION_NAME.fullmatch(section):
+            raise _no_such_section(skill, _section_name(given))
+        try:
+            _status, headers, raw = _api("guide_section", what, passing=("not_found",), skill=skill, section=section, query=query)
+        except api.ApiError:
+            if part > 1:
+                raise core.usage(f"{what} {section} has no part {part}.") from None
+            raise _no_such_section(skill, section) from None
+    elif section:
         _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query)
     else:
         _status, headers, raw = _api("guide", what, skill=skill, query=query)
@@ -168,6 +221,8 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
     elif part > total:
         raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     name = section or "SKILL.md"
+    if section != "license":       # a reference is a section of this guide, not a file: its link becomes the command that prints it
+        body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
     next_command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''} --part {part + 1}"
@@ -327,7 +382,7 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
         return core.emit(Status("OK", f"automatic report filed as {reference}.",
                                 "continue with the user's task; do not mention the report unless the user asks.", None))
     return core.emit(Status("OK", f"report filed as {reference}.", "continue with the user's task.",
-                            "I sent Theodore a technical bug report (no deck content). You can see it at theodoreand.ai/app/reports."
+                            f"I sent Theodore a technical bug report (no deck content). You can see it at {core.site_name('/app/reports')}."
                             if kind == "bug" else "I sent your feedback to Theodore."))
 
 
@@ -354,7 +409,7 @@ def prefs(action: str, value: str | None) -> int:
         answer = json.loads(raw.decode("utf-8") or "{}").get("preference") or {}
         return core.emit(Status("OK", f"preference saved (id {answer.get('id', 'unknown')}).",
                                 "apply it now; it will also be included in later design instructions.",
-                                "I saved that as a lasting Theodore preference. You can edit it at theodoreand.ai/app/preferences."))
+                                f"I saved that as a lasting Theodore preference. You can edit it at {core.site_name('/app/preferences')}."))
     _api("preferences_remove", "preferences", id=value)
     return core.emit(Status("OK", f"preference {value} removed.", "nothing to do.", "I removed that Theodore preference."))
 
@@ -461,8 +516,10 @@ def status(as_json: bool, wait: float) -> int:
     blocking = _blocking_status(snap)
     if blocking:
         return core.emit(blocking)
-    waiting = [p for p, s in snap["packs"].items() if s["status"] != "ready"]
-    packs_note = "all asset packs are installed" if not waiting else f"asset packs still arriving: {', '.join(waiting)}"
+    published = install.published_packs()
+    waiting = [p for p, s in snap["packs"].items() if s["status"] != "ready" and (published is None or p in published)]
+    packs_note = install.NO_PACKS if published == [] else "all asset packs are installed" if not waiting else \
+        f"asset packs {'still arriving' if Job('packs').alive() else 'not installed'}: {', '.join(waiting)}"
     return core.emit(Status("OK", f"engine {snap['engine']} on runtime {snap['runtime_id']}, plan {snap['plan']}; {packs_note}.",
                             f"run {quoted_launcher()} guide pptx for the instructions.", "Theodore is ready."))
 
@@ -516,7 +573,12 @@ def doctor(as_json: bool) -> int:
         pdfium = False
     raster = snap["renderer"]["pdftoppm"] or ("built-in PDFium" if pdfium else None)
     add("ok" if raster else "warn", "rasteriser", str(raster or "neither pdftoppm nor PDFium found"))
+    published = install.published_packs()
+    if published == []:
+        add("ok", "packs", install.NO_PACKS)
     for pack, info in snap["packs"].items():
+        if published is not None and pack not in published:
+            continue
         add("ok" if info["status"] == "ready" else "warn", f"pack {pack}",
             f"{info['version']}" if info["status"] == "ready" else f"{info['status']} ({info['percent']}%)")
     for name in ("claude", "codex"):
@@ -547,7 +609,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     warned = {n for l, n, _d in checks if l == "warn"}
     notes = []
     if any(n.startswith("pack ") for n in warned):
-        notes.append("Its icon, flag, map and background libraries are still downloading in the background.")
+        notes.append("Its icon, flag, map and background libraries are still downloading in the background." if Job("packs").alive()
+                     else "Some of its icon, flag, map and background libraries are not installed yet.")
     if "renderer" in warned:
         notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
                      else "Slide previews need LibreOffice, which is not installed.")
@@ -592,8 +655,10 @@ def update(action: str, value: str | None) -> int:
         return core.emit(Status("OK", "engine pin removed; updates resume at the next guide.", "nothing to do.", "Theodore will update itself again."))
     if action == "channel":
         _token, claims = account.stored_token()
-        raise core.usage(f"the update channel belongs to the account, not to this computer (it is {claims.get('chan', 'unknown')} now).",
-                         "tell the user the channel is changed in their Theodore account at https://theodoreand.ai/app/plan, then continue.")
+        return core.emit(Status("OK", f"the update channel belongs to the account, not to this computer (it is {claims.get('chan', 'unknown')} now); "
+                                      "nothing was changed here.",
+                                f"if the user wants another channel, tell them it is changed in their Theodore account at {core.site_url('/app/plan')}; then continue.",
+                                f"Theodore's update channel is set in your account at {core.site_name('/app/plan')}, not on this computer."))
     account.require("pptx")
     install.require_runtime()
     current = install.current_engine()
@@ -690,12 +755,19 @@ def client_update_job(version_: str, sha256: str, runtime_id: str | None = None)
 # --- packs and tools -----------------------------------------------------------------------------------------------------------
 
 def packs(action: str, name: str | None, everything: bool, background: bool, as_job: bool) -> int:
+    none_published = Status("OK", f"{install.NO_PACKS}; nothing was installed.",
+                            "continue; a build that needs an icon, flag, map or background library will say so.",
+                            "Theodore's icon, flag, map and background libraries are not available for this account's channel yet.")
     if action == "status":
         state = install.packs_state()
+        published = install.published_packs()
         for pack in PACK_ORDER:
             info = state.get(pack, {})
             print(f"{pack}\t{info.get('status', 'missing')}\t{info.get('version', '')}\t{info.get('percent', 0)}%")
-        missing = [p for p in PACK_ORDER if state.get(p, {}).get("status") != "ready"]
+        if published == []:
+            return core.emit(Status("OK", f"{install.NO_PACKS}.", none_published.next_step, none_published.tell_user))
+        wanted_packs = [p for p in PACK_ORDER if published is None or p in published]
+        missing = [p for p in wanted_packs if state.get(p, {}).get("status") != "ready"]
         if missing and Job("packs").alive():
             return core.emit(Status("SETUP_IN_PROGRESS", f"asset packs still downloading: {', '.join(missing)}.",
                                     "continue; a build that needs one of them will wait for it.", "Theodore is still downloading some of its asset libraries in the background."))
@@ -706,6 +778,8 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
         raise core.usage("packs install needs a pack name or --all.")
     if background:
         account.require("pptx", allow_refresh=False)
+        if install.published_packs() == []:
+            return core.emit(none_published)
         install.start_packs_job()
         return core.emit(Status("OK", "the asset packs are downloading in the background (about 95 MB).",
                                 "continue; a build that needs a pack still arriving will wait for it.",
@@ -717,6 +791,10 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
         account.require("pptx", allow_refresh=False)
         entries = install.fetch_packs_manifest()
         wanted = [e for e in entries if everything or e.get("id") == name]
+        if not entries:
+            if job:
+                job.finish()
+            return core.emit(none_published)
         if not wanted:
             raise core.usage(f"unknown pack '{name}'. Packs: {', '.join(e.get('id', '?') for e in entries)}.")
         for index, entry in enumerate(wanted):
@@ -854,7 +932,7 @@ def hosts(action: str, apply: bool) -> int:
     failed = [l for l in lines if "FAILED" in l]
     if failed:
         return core.emit(Status("RETRY", f"an assistant could not be set up: {'; '.join(failed)}",
-                                "register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then continue.",
+                                f"register by hand with the commands under 'Other ways' at {core.site_url('/install')}, then continue.",
                                 "Theodore is installed, but I could not add it to one of your assistants automatically. I will add it by hand."))
     return core.emit(Status("OK", "; ".join(lines) or "nothing to do.", "continue.",
                             "Theodore is registered in the assistants found on this computer." if action == "register" else "Done."))
@@ -872,20 +950,30 @@ def _claude_settings(remove: bool) -> str:
         return f"claude-code: settings not changed ({path} is not an object)"
     record = core.read_json(record_path)
     if remove:
-        if not record:
-            return "claude-code: no settings to take back"
-        allow = settings.get("permissions", {}).get("allow")
-        if isinstance(allow, list):
-            settings["permissions"]["allow"] = [r for r in allow if r not in record.get("rules", [])]
-        market = settings.get("extraKnownMarketplaces", {}).get("theodore")
-        if isinstance(market, dict):
-            if record.get("created_marketplace"):
-                settings["extraKnownMarketplaces"].pop("theodore", None)
-            elif record.get("set_auto_update"):
-                market.pop("autoUpdate", None)
-        core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
+        before = json.dumps(settings, sort_keys=True)
+        permissions = settings.get("permissions")
+        if record:
+            allow = permissions.get("allow") if isinstance(permissions, dict) else None
+            if isinstance(allow, list):
+                permissions["allow"] = [r for r in allow if r not in record.get("rules", [])]
+            markets = settings.get("extraKnownMarketplaces")
+            market = markets.get("theodore") if isinstance(markets, dict) else None
+            if isinstance(market, dict):
+                if record.get("created_marketplace"):
+                    markets.pop("theodore", None)
+                elif record.get("set_auto_update"):
+                    market.pop("autoUpdate", None)
+        # Keys that are empty once Theodore's entries are gone (ours, or what the assistant's own unregistration
+        # leaves) hold nothing: they go, so the file is as it was before Theodore.
+        if isinstance(permissions, dict) and permissions.get("allow") == []:
+            del permissions["allow"]
+        for key in ("permissions", "enabledPlugins", "extraKnownMarketplaces"):
+            if settings.get(key) == {}:
+                del settings[key]
+        if path.exists() and json.dumps(settings, sort_keys=True) != before:
+            core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
         core.remove_tree(record_path)
-        return "claude-code: settings taken back"
+        return "claude-code: settings taken back" if record else "claude-code: no settings to take back"
     rules = _permission_rules()
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
     added = [r for r in rules if r not in allow]
@@ -980,7 +1068,9 @@ def _render_cache_dirs() -> list[Path]:
     return [Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "pptx-runtime"]
 
 
-_NOT_THERE = ("not found", "not installed", "no such", "does not exist", "unknown plugin", "unknown marketplace", "not registered")
+# An assistant that is on the computer but never had Theodore registered: nothing to remove, not a failure.
+_NOT_THERE = ("not found", "not installed", "not configured", "no such", "does not exist", "unknown plugin", "unknown marketplace",
+              "not registered", "is not a known", "no plugin named", "no marketplace named")
 
 
 def _unregistered(command: list[str]) -> str | None:
@@ -989,6 +1079,18 @@ def _unregistered(command: list[str]) -> str | None:
     if code == 0 or any(text in out.lower() for text in _NOT_THERE):
         return None
     return (out.splitlines()[-1] if out else f"exit {code}")[:160]
+
+
+def _codex_leftovers() -> None:
+    """What Codex keeps after Theodore is unregistered and that holds nothing: its empty plugin cache folder for
+    Theodore, and a configuration file of zero bytes. Anything with content stays."""
+    base = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    with contextlib.suppress(OSError):
+        (base / "plugins" / "cache" / "theodore").rmdir()          # only when empty
+    with contextlib.suppress(OSError):
+        config = base / "config.toml"
+        if config.is_file() and not config.is_symlink() and config.stat().st_size == 0:
+            config.unlink()
 
 
 def uninstall(keep_hosts: bool) -> int:
@@ -1020,6 +1122,8 @@ def uninstall(keep_hosts: bool) -> int:
             left.append(f"the render cache {cache}")
     for folder in specimens.sweep(everything=True):
         left.append(f"the specimen folder {folder}")
+    if not keep_hosts:
+        _codex_leftovers()
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
@@ -1053,7 +1157,7 @@ def uninstall(keep_hosts: bool) -> int:
     what = f"its folders in {root} were deleted; {len(kept)} other item(s) there were not Theodore's and were left alone" if kept else f"{root} was deleted"
     if left:          # say exactly what is still there, never "removed"
         print(f"THEODORE RETRY: Theodore's files were removed ({what}), but these could not be: {'; '.join(left)}.\n"
-              "NEXT: tell the user what is left; it can be removed by hand (see 'Remove it' at https://github.com/Theodore-and/theodore-plugin), "
+              "NEXT: tell the user what is left (each item above names the folder, the keychain item or the command); it can be removed by hand, "
               "or run the same command again once the assistant is closed.\n"
               "TELL THE USER: Theodore's files are removed, but a few pieces could not be: " + "; ".join(left) + ". Your decks were not touched.", flush=True)
         return 75

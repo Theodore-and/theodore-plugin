@@ -10,6 +10,7 @@ The credential is {"installation_id", "installation_secret"}. It is never printe
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -21,6 +22,37 @@ from . import core
 
 SERVICE = "ai.theodoreand.theodore"
 SECURITY = "/usr/bin/security"
+KEYCHAIN_TIMEOUT_S = 10         # a keychain that shows a system dialog never answers: no call may wait for it
+KEYCHAIN_SKIP_S = 86400
+
+
+def _skip_marker() -> Path:
+    return core.home().state / "keychain-unavailable"
+
+
+def _keychain_skipped() -> bool:
+    try:
+        return 0 <= core.now() - _skip_marker().stat().st_mtime <= KEYCHAIN_SKIP_S
+    except OSError:
+        return False
+
+
+def _security(arguments: list[str], command: str | None = None):
+    """One call of /usr/bin/security with a time limit. None when it did not answer: the keychain is then left
+    alone for a day (the 0600 file is used instead) and one line on standard error says so."""
+    if _keychain_skipped():
+        return None
+    try:
+        return subprocess.run([SECURITY, *arguments], input=command, text=True, capture_output=True, timeout=KEYCHAIN_TIMEOUT_S,
+                              **({} if command is not None else {"stdin": subprocess.DEVNULL}))
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            core.write_atomic(_skip_marker(), str(int(core.now())), 0o600)
+        print(f"theodore: the macOS keychain did not answer within {KEYCHAIN_TIMEOUT_S} seconds (a system dialog may be waiting); "
+              "the sign-in is kept in a file only this user can read instead.", file=sys.stderr, flush=True)
+        return None
+    except OSError:
+        return None
 
 
 def _account() -> str:
@@ -75,14 +107,13 @@ def _keychain_store(secret: str) -> bool:
     command = f'add-generic-password -a "{_account()}" -s "{SERVICE}" -l "Theodore" -w "{encoded}" -U'
     for extra in _keychain_args():
         command += f' "{extra}"'
-    done = subprocess.run([SECURITY, "-i"], input=command + "\n", text=True, capture_output=True)
-    return done.returncode == 0 and "error" not in (done.stderr or "").lower()
+    done = _security(["-i"], command + "\n")
+    return done is not None and done.returncode == 0 and "error" not in (done.stderr or "").lower()
 
 
 def _keychain_load() -> str | None:
-    done = subprocess.run([SECURITY, "find-generic-password", "-a", _account(), "-s", SERVICE, "-w", *_keychain_args()],
-                          text=True, capture_output=True)
-    if done.returncode != 0 or not done.stdout.strip():
+    done = _security(["find-generic-password", "-a", _account(), "-s", SERVICE, "-w", *_keychain_args()])
+    if done is None or done.returncode != 0 or not done.stdout.strip():
         return None
     try:
         return base64.urlsafe_b64decode(done.stdout.strip()).decode("utf-8")
@@ -91,10 +122,12 @@ def _keychain_load() -> str | None:
 
 
 def _keychain_delete() -> bool:
-    """True when no item is left: deleted, or there was none (security exits 44 for "not found")."""
-    done = subprocess.run([SECURITY, "delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()],
-                          text=True, capture_output=True)
-    return done.returncode in (0, 44)
+    """True when no item is left: deleted, or there was none (security exits 44 for "not found"). A keychain that
+    did not answer when the credential was saved holds no item of ours: nothing to delete."""
+    if _keychain_skipped():
+        return True
+    done = _security(["delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()])
+    return done is not None and done.returncode in (0, 44)
 
 
 def store(installation_id: str, installation_secret: str) -> str:

@@ -152,6 +152,9 @@ def make_certificate(folder: Path) -> tuple[str, str]:
     return str(cert), str(key)
 
 
+SITE = "https://site.example.test"       # the stamped site base of the test build: texts must name it, never production
+
+
 class Sandbox:
     """One scratch directory holding a clean user home, a Theodore home and a copy of the plugin wired to a fake API."""
 
@@ -195,7 +198,7 @@ class Sandbox:
         version = build_client.client_version()
         api.publish_client(version, client_bytes)
         config = {"launcher_generation": generation, "shim_version": json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"], "api_base": api.base, "dl_base": f"{api.base}/dl",
-                  "marketplace_url": f"{api.base}/marketplace.json", "manifest_key_1_kid": api.MANIFEST_KID,
+                  "marketplace_url": f"{api.base}/marketplace.json", "site_base": SITE, "manifest_key_1_kid": api.MANIFEST_KID,
                   "manifest_key_1_x": api.manifest_public_key(), "stage1_runtime_id": (api.runtime or {}).get("runtime_id", RUNTIME_ID),
                   "stage1_client_version": version, "stage1_client_url": f"{api.base}/dl/client/client-{version}.tar",
                   "stage1_client_sha256": sha256_hex(client_bytes), "stage1_client_size": len(client_bytes)}

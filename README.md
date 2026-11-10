@@ -18,7 +18,7 @@ By hand:
 | Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d` |
 | Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!""` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
-| Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` |
+| Codex only | Run the installer above: it registers Codex from its own copy of the plugin. By hand afterwards: `codex plugin marketplace add ~/.theodore/plugin` (Windows: `codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"`) then `codex plugin add theodore@theodore`. Once the plugin repository is public: `codex plugin marketplace add Theodore-and/theodore-plugin` then the same second command |
 
 No admin rights, no Homebrew, winget, pip or npm. Supported: macOS 13.5 or later (Apple silicon and Intel),
 Windows 10 version 1803 or later (x64), Linux x64 and arm64 with glibc 2.28 or later.
@@ -35,7 +35,7 @@ else, Theodore never reads, changes or deletes it.
 | `bin/theodore`, `bin/theodore.cmd`, `bin/launcher.json` | The launcher, at one stable path | under 100 KB |
 | `client/<version>/` | The client (Python source) | under 1 MB |
 | `runtime/<id>/` | Python 3.12, the engine's Python packages, Node 24 and its modules | about 358 to 466 MB (84 to 111 MB to download; table below) |
-| `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); up to four versions are kept | 10 to 20 MB each |
+| `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); up to four versions are kept | 40 to 45 MB each |
 | `packs/` | Icon, flag, map and background libraries | about 145 MB (about 95 MB to download) |
 | `tools/libreoffice/` | LibreOffice, only on a Mac or Windows PC that has none (it renders slide previews) | about 800 MB (about 300 MB to download) |
 | `plugin/` | A copy of this repository's plugin, which Codex adds as a local marketplace | under 100 KB |
@@ -94,6 +94,13 @@ when nothing else is in it). What is left afterwards:
   Claude Code marks it as orphaned and deletes it itself after 14 days.
 - Nothing of the installer: the install commands above download it into a new private folder and delete that
   folder when it ends.
+- In the system's temporary folder (`$TMPDIR`, `%TEMP%`): the engine's LibreOffice profile (`pptx-soffice-profile/`,
+  `pptx-soffice-profile.warm-seed/`, `pptx-soffice-profile.lock`) and its empty lock files
+  (`theodore-pptx-locks/*.lock`). The system clears that folder itself; they can be deleted at any time. Specimen
+  folders (`theodore-specimens-*`) are removed by the uninstall.
+- In Codex's folder (`~/.codex`): nothing of Theodore's. The uninstall removes Codex's empty plugin cache folder
+  for Theodore and a configuration file of zero bytes; in Claude Code's `settings.json` it removes the keys that
+  are empty once Theodore's entries are gone (`enabledPlugins`, `extraKnownMarketplaces`, `permissions.allow`).
 - Your account at theodoreand.ai. Remove this device, or the account, in the portal.
 
 If the launcher is gone, deleting those subfolders and the keychain item by hand does the same.

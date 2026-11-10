@@ -122,7 +122,7 @@ def _dispatch(argv: list[str]) -> int:
             return core.emit(account.login_code(args.code))
         if args.finish:
             return core.emit(account.login_finish(args.wait))
-        return core.emit(account.login_start())
+        return core.emit(account.login_start(open_browser=True))
     if cmd == "logout":
         return core.emit(account.logout())
     if cmd == "whoami":

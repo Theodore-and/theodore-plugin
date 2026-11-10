@@ -234,8 +234,8 @@ def require(feature: str, *, allow_refresh: bool = True) -> dict:
                      "Theodore needs a connection to confirm your licence.")
     if claims.get("aud") != ENTITLEMENT_AUD or feature not in (claims.get("feat") or []):
         raise Status("NO_ENTITLEMENT", f"this account's plan ({claims.get('plan', 'unknown')}) does not include {feature}.",
-                     "do not retry. Tell the user; they can check their plan at https://theodoreand.ai/app/plan.",
-                     f"Your Theodore plan does not include {feature}. You can check it at theodoreand.ai.")
+                     f"do not retry. Tell the user; they can check their plan at {core.site_url('/app/plan')}.",
+                     f"Your Theodore plan does not include {feature}. You can check it at {core.site_name('/app/plan')}.")
     return claims
 
 
@@ -245,6 +245,10 @@ def _open_browser(url: str) -> bool:
     if os.environ.get("THEODORE_NO_BROWSER"):
         return False
     try:
+        seam = os.environ.get("THEODORE_TEST_BROWSER")      # a test's own program, honoured only against a loopback API
+        if seam and core.is_loopback_api():
+            subprocess.Popen([seam, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
         if sys.platform == "darwin":
             subprocess.Popen(["/usr/bin/open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif core.IS_WINDOWS:
@@ -258,8 +262,9 @@ def _open_browser(url: str) -> bool:
         return False
 
 
-def login_start(reason: str = "this computer is not signed in to Theodore.") -> Status:
-    """Begin browser approval (or reuse the pending one) and return SIGN_IN_REQUIRED carrying the URL."""
+def login_start(reason: str = "this computer is not signed in to Theodore.", open_browser: bool = False) -> Status:
+    """Begin browser approval (or reuse the pending one) and return SIGN_IN_REQUIRED carrying the URL. The browser is
+    opened only for a sign-in command (`login`); any other command that finds the computer signed out prints the link."""
     pending_path = core.home().state / "device.json"
     pending = core.read_json(pending_path)
     fresh = False
@@ -278,7 +283,7 @@ def login_start(reason: str = "this computer is not signed in to Theodore.") -> 
         core.home().ensure()
         core.write_json(pending_path, pending, 0o600)
         fresh = True
-    opened = _open_browser(pending["url"]) if fresh else False
+    opened = _open_browser(pending["url"]) if open_browser else False
     tell = "Theodore needs a one-time sign-in. " + (
         "I opened a browser page; approve it and tell me when done." if opened
         else f"Please open {pending['url']} in your browser, approve, and tell me when done.")
@@ -299,7 +304,7 @@ def login_finish(wait_seconds: float) -> Status:
     if credentials.load() and not pending.get("device_code"):
         return signed_in_status(stored_token()[1])
     if not pending.get("device_code"):
-        return login_start()
+        return login_start(open_browser=True)
     interval = max(1, int(pending.get("interval") or 5))
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_POLL_INTERVAL"):
         interval = float(os.environ["THEODORE_TEST_POLL_INTERVAL"])
@@ -340,7 +345,7 @@ def login_code(code: str) -> Status:
     except api.ApiError as error:
         if error.code == "invalid_grant":
             return Status("SIGN_IN_REQUIRED", "the activation code is not valid any more (codes last 10 minutes and work once).",
-                          f"run {quoted_launcher()} login --start and follow what it prints, or ask the user for a fresh sentence from https://theodoreand.ai/app.",
+                          f"run {quoted_launcher()} login --start and follow what it prints, or ask the user for a fresh sentence from {core.site_url('/app')}.",
                           "The Theodore activation code has expired. I am starting a browser sign-in instead.")
         return api.status_from(error, "activation")
     _adopt(bundle)

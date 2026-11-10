@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 
 from . import core
-from .contract import API_ERRORS, ROUTES
+from .contract import DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, API_ERRORS, ROUTES
 from .core import Status, quoted_launcher
 
 
@@ -148,9 +148,24 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
                 code, message = err, str(parsed.get("error_description") or "")
         except (ValueError, AttributeError):
             pass
+        if "Authorization" in hdrs:
+            _signed_out(exc.code, code)
         raise ApiError(exc.code, code, message, exc.headers.get("Retry-After")) from None
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as exc:
         raise _network_error(exc) from None
+
+
+def _signed_out(http_status: int, code: str) -> None:
+    """The service refused this installation's own credential. Whatever route learned it: a revoked or unknown
+    installation loses the credential and the stored licence now, so no later command works from what is on disk; an
+    account that is refused (403) loses the stored licence. Automatic reports being off is not a refusal of the account."""
+    from . import account, credentials
+    if code in DELETE_CREDENTIAL_ON:
+        credentials.delete()
+        account.delete_token()
+        core.log(f"signed out by the service ({code}): credential and licence deleted")
+    elif code in DELETE_TOKEN_ON or (http_status == 403 and code != "auto_reports_disabled"):
+        account.delete_token()
 
 
 def url_for(route: str, query: dict | None = None, **params) -> str:
@@ -214,6 +229,8 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
             code = err.get("code", code) if isinstance(err, dict) else (err or code)
         except (ValueError, AttributeError):
             pass
+        if "Authorization" in hdrs:
+            _signed_out(exc.code, str(code))
         raise ApiError(exc.code, str(code), "", exc.headers.get("Retry-After")) from None
     except OSError as exc:
         _unlink(part)
@@ -283,8 +300,8 @@ def status_from(error: ApiError, what: str) -> Status:
             else "this computer's sign-in is no longer valid."
         return sign_in_required(reason)
     if name == "NO_ENTITLEMENT":
-        return Status(name, detail, "do not retry. Tell the user; they can check their plan at https://theodoreand.ai/app/plan.",
-                      "Your Theodore account does not currently include this skill. You can check your plan at theodoreand.ai.")
+        return Status(name, detail, f"do not retry. Tell the user; they can check their plan at {core.site_url('/app/plan')}.",
+                      f"Your Theodore account does not currently include this skill. You can check your plan at {core.site_name('/app/plan')}.")
     if error.code == "auto_reports_disabled":
         # Off means off (the lead's ruling): nothing to ask, nothing to tell; only a report the user asked for goes out.
         # The client normally knows before sending (account.automatic_reports); this answer is the server's backstop.

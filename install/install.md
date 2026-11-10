@@ -18,7 +18,10 @@ commands below. Run nothing else from this page.
    Claude Code: claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json
      (if that flag is not recognised: `claude plugin marketplace add https://theodoreand.ai/marketplace.json`,
      then `claude plugin install theodore@theodore`)
-   Codex: codex plugin marketplace add Theodore-and/theodore-plugin, then codex plugin add theodore@theodore
+   Codex: there is no direct route yet; the installer of step 1 registers Codex from its own copy of the plugin.
+     To do that by hand after step 1: codex plugin marketplace add ~/.theodore/plugin
+     (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
+     (once the plugin repository is public: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and asks for one browser sign-in.
 3. Check: run `theodore doctor` by the path the installer printed ("the stable launcher is ..."). Report its
    last line to the user.

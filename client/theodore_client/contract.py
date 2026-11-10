@@ -52,6 +52,10 @@ ROUTES = {
     "keys": ("GET", "/v1/keys", False),
 }
 
+# Routes the backend is adding and its published contract (openapi.json, snapshotted in tests/fixtures) does not list
+# yet. The contract test lets these through, and fails as soon as the snapshot has one of them: then remove it here.
+PENDING_ROUTES = ("guide_specimen",)
+
 # --- API error codes (backend design section 5) and the status each becomes -----------------------------------------
 # code: (HTTP status, launcher status name)
 API_ERRORS = {

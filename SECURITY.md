@@ -127,7 +127,12 @@ the report, stores nothing, and the client remembers.
 plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). On Windows the folders go a moment
 after the client has exited, so the first run says the removal is scheduled, not confirmed (`RETRY`); running the
 installer with `--uninstall` again confirms it, and answers `RETRY` while any of those folders or the render cache remains. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
-portal's Devices page: its next call is refused and its stored licence is deleted.
+portal's Devices page. The next command on that computer that reaches the Theodore service, whichever it is (loading
+the instructions, an update check, a report, a preference, a specimen, the hourly "in use" note), is refused: the
+client deletes the stored sign-in and the stored licence at once and answers that a sign-in is required, and from
+then on no command runs, the engine included. Loading the pptx instructions always asks the service. A computer that
+stays offline cannot learn of the revoke: by design it keeps working from its stored licence until that licence
+expires, at most 7 days after its last refresh.
 
 ## Reporting a vulnerability
 
