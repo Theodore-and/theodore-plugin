@@ -107,7 +107,9 @@ the report, stores nothing, and the client remembers.
   publisher's decision and is applied. A manifest dated more than a day ahead of this computer's clock is set aside
   and not remembered. `theodore update --reset-state` (or signing out and in again) clears what this computer
   remembers about manifests; the versions installed at that moment stay the floor until a manifest issued after the
-  reset says otherwise.
+  reset says otherwise; a download chosen before the reset is not activated. An engine becomes current only if the
+  manifest that chose it is still the newest accepted at that moment (checked and switched under one lock), so two
+  checks running at once cannot end on the older engine.
 - Downloads use HTTPS only and follow no redirect: not the launchers, not the installers (which also ignore a
   user's `.curlrc` and `.wgetrc`), not the client's runtime, engine, client and asset-pack downloads. The one
   exception is LibreOffice, fetched from The Document Foundation, whose site redirects to mirrors; that file is
@@ -121,7 +123,9 @@ the report, stores nothing, and the client remembers.
 ## Removing everything
 
 `theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
-plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
+plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). On Windows the folders go a moment
+after the client has exited, so the first run says the removal is scheduled, not confirmed (`RETRY`); running the
+installer with `--uninstall` again confirms it, and answers `RETRY` while any of those folders or the render cache remains. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
 portal's Devices page: its next call is refused and its stored licence is deleted.
 
 ## Reporting a vulnerability

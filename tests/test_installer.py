@@ -110,6 +110,25 @@ class Installer(unittest.TestCase):
         if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
             self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
 
+    @unittest.skipUnless(IS_WINDOWS, "install.cmd: the confirmation run after a deferred removal")
+    def test_uninstall_confirms_only_when_the_render_cache_is_gone_too(self):
+        # The run that confirms a scheduled removal (no launcher left) checks every path the uninstall removes,
+        # the render cache under %LOCALAPPDATA% included, and keeps answering 75 while any of it remains.
+        local = self.box.tmp / "localappdata"
+        cache = local / "pptx-runtime"
+        cache.mkdir(parents=True)
+        held = open(cache / "f", "w")           # an open file cannot be deleted on Windows
+        try:
+            left = self.install("--uninstall", env={"LOCALAPPDATA": str(local)})
+            self.assertEqual(left.returncode, 75, left.stdout + left.stderr)
+            self.assertIn("pptx-runtime", status_lines(left.stdout)[0])
+        finally:
+            held.close()
+        self.assertTrue(cache.exists())
+        done = self.install("--uninstall", env={"LOCALAPPDATA": str(local)})
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse(cache.exists())
+
     def test_without_a_code_it_starts_the_browser_sign_in_and_still_sets_up(self):
         result = self.install()
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)

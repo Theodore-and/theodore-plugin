@@ -78,11 +78,13 @@ if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with 
 
 if not defined UNINSTALL goto :install
 if exist "%HOME_DIR%\bin\theodore.cmd" "%HOME_DIR%\bin\theodore.cmd" uninstall
-rem No launcher left (a removal already ran, or was interrupted): remove what is left of Theodore's own folders and
-rem say whether anything remains.
+rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
+rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
 set "LEFTOVER="
 for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1
-for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=1"
+if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
+for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=; Theodore's folders in %HOME_DIR%"
+if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\pptx-runtime"
 if exist "%HOME_DIR%" rmdir "%HOME_DIR%" >nul 2>&1
 if defined LEFTOVER goto :uninstall_left
 echo THEODORE OK: Theodore is not installed on this computer.
@@ -295,7 +297,7 @@ rem Statuses (three lines each, then the exit code)
 rem =====================================================================================================================
 
 :uninstall_left
-echo THEODORE RETRY: some of Theodore's folders in %HOME_DIR% could not be deleted (a program may still be using them).
+echo THEODORE RETRY: some of Theodore could not be deleted yet (a program may still be using it): %LEFTOVER:~2%.
 echo NEXT: close the assistant and any Theodore window, then run the same command again.
 echo TELL THE USER: A few of Theodore's files are still in use; I will remove them once the assistant is closed.
 exit /b 75

@@ -343,7 +343,7 @@ def setup_job() -> int:
                                  "wait for a newer release.", "Theodore is waiting for a new release.")
                 version = install.stage_engine(entry, job)
                 if not install.current_engine():
-                    install.activate_engine(version)
+                    install.activate_checked(version, install._manifest_time(manifest.get("server_time")), "setup")
                 install.save_update_state(last_check=int(core.now()), latest=version, guides=manifest.get("guides") or {},
                                           tools=manifest.get("tools") or {})
                 install.start_packs_job(manifest.get("packs") or [])

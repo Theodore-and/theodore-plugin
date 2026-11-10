@@ -270,3 +270,91 @@ class Round5(unittest.TestCase):
             record["auto_reports"]["at"] -= 3601
             (home / "state" / "entitlement.json").write_text(json.dumps(record))
             self.assertEqual(account.automatic_reports(), (False, "unknown"), "an hour-old 'on' must be asked again")
+
+
+def _iso(epoch: float) -> str:
+    import time
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch)) + ".000Z"
+
+
+class Round6(unittest.TestCase):
+    """Activation decided under one lock against the newest accepted document and the floor; a cache 'from the future'."""
+
+    def engine_on_disk(self, version: str) -> dict:
+        from theodore_client import install
+        entry = {"version": version, "sha256": hashlib.sha256(version.encode()).hexdigest(), "kind": "engine-source"}
+        folder = core.home().engines / version
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / ".theodore-engine.json").write_text(json.dumps(entry))
+        return entry
+
+    def manifest(self, issued: float, entry: dict) -> dict:
+        return {"server_time": _iso(issued), "engine": entry}
+
+    def check(self, fetch):
+        from theodore_client import install
+        with mock.patch.object(install, "fetch_channel_manifest", side_effect=lambda timeout=0: fetch()), \
+                mock.patch.object(install, "engine_artifact", side_effect=lambda m: m["engine"]), \
+                mock.patch.object(install, "runtime_ready", return_value=True), \
+                mock.patch.object(install, "start_packs_job", return_value=False), \
+                mock.patch.object(install, "collect_garbage", return_value=[]), \
+                mock.patch.object(install.Job, "spawn", side_effect=AssertionError("no download is needed here")):
+            return install.check_updates(force=True, wait=0)
+
+    def current(self, version: str) -> None:
+        core.write_json(core.home().engines / "current.json", {"version": version})
+
+    def test_two_checks_at_once_never_activate_the_older_document_last(self):
+        from theodore_client import install
+        with client_home():
+            core.home().ensure()
+            two, three = self.engine_on_disk("2.0.0"), self.engine_on_disk("3.0.0")
+            self.engine_on_disk("1.9.0")
+            self.current("1.9.0")                   # both checks see an update to make
+            now = core.now()
+            older, newer = self.manifest(now - 60, two), self.manifest(now - 1, three)
+            activated = []
+            real = install.activate_engine
+            def recording(version):
+                activated.append(version)
+                return real(version)
+
+            def fetch_b():
+                install.accept_fresh("channel", newer, "release manifest")
+                return newer
+
+            def fetch_a():
+                # check A accepts the 12:00 document; before it activates, check B accepts and applies 12:01
+                install.accept_fresh("channel", older, "release manifest")
+                self.check(fetch_b)
+                return older
+
+            with mock.patch.object(install, "activate_engine", side_effect=recording):
+                self.check(fetch_a)
+            self.assertEqual(install.current_engine(), "3.0.0", f"activations in order: {activated}")
+            self.assertNotEqual(activated[-1:], ["2.0.0"])
+
+    def test_a_pending_engine_below_the_floor_is_never_activated_after_a_reset(self):
+        from theodore_client import install
+        with client_home():
+            core.home().ensure()
+            one, two = self.engine_on_disk("1.0.0"), self.engine_on_disk("2.0.0")
+            self.current("2.0.0")
+            install.save_update_state(pending={"version": "1.0.0", "sha256": one["sha256"]})
+            install.reset_update_state("test")
+            self.assertFalse(install.update_state().get("pending"), "a reset drops what was waiting to be activated")
+            install.save_update_state(pending={"version": "1.0.0", "sha256": one["sha256"]})     # an older client's leftover
+            before = float(install.update_state()["floor"]["since"]) - 60
+            self.check(lambda: install.accept_fresh("channel", self.manifest(before, one), "release manifest") or self.manifest(before, one))
+            self.assertEqual(install.current_engine(), "2.0.0")
+            self.assertFalse(install.update_state().get("pending"))
+
+    def test_a_cached_on_switch_from_the_future_is_not_trusted(self):
+        with client_home() as home:
+            core.home().ensure()
+            token = "x." + b64u(json.dumps({"feat": ["agent-reports"], "exp": 9999999999}).encode()) + ".y"
+            account.save_token(token, auto_reports=True)
+            record = json.loads((home / "state" / "entitlement.json").read_text())
+            record["auto_reports"]["at"] += 86400          # cached while the clock was a day fast, then corrected
+            (home / "state" / "entitlement.json").write_text(json.dumps(record))
+            self.assertEqual(account.automatic_reports(), (False, "unknown"))

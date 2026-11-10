@@ -584,9 +584,36 @@ def reset_update_state(reason: str) -> None:
     core.remove_tree(core.home().state / "manifest-times.json")
     state = update_state()
     state.pop("restrictions", None)
+    state.pop("pending", None)          # a download chosen by a document from before the reset is not activated
     state["last_check"] = state["last_attempt"] = 0
     state["floor"] = {"engine": current_engine(), "client": __version__, "since": core.now(), "reason": reason}
     core.write_json(core.home().state / "update.json", state)
+
+
+def below_floor(version: str | None, issued: float) -> bool:
+    """After a reset the engine installed then is the floor: a document issued before the reset cannot go below it."""
+    floor = update_state().get("floor") or {}
+    return bool(floor.get("engine") and version and issued < float(floor.get("since") or 0)
+                and core.version_key(str(version)) < core.version_key(str(floor["engine"])))
+
+
+def activate_checked(version: str, issued: float, why: str) -> bool:
+    """Make an engine current only if the document that chose it is still the newest accepted, it is not below the
+    floor and not forbidden: compare and activate under one lock, so two checks running at once cannot activate a
+    newer engine and then an older one. The loser does nothing. True when the engine is current afterwards."""
+    with core.lock("activate", timeout=60):
+        newest = float(core.read_json(core.home().state / "manifest-times.json").get("channel") or 0)
+        if issued < newest:
+            core.log(f"{why}: engine {version} not activated: a newer release manifest was accepted meanwhile")
+            return False
+        if below_floor(version, issued):
+            core.log(f"{why}: engine {version} not activated: below the engine installed at the last reset")
+            return False
+        if forbidden(version):
+            core.log(f"{why}: engine {version} not activated: withdrawn or below the channel's minimum")
+            return False
+        activate_engine(version)
+        return True
 
 
 def save_restrictions(manifest: dict) -> None:
@@ -657,8 +684,10 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     pending = state.get("pending") or {}
     if pending.get("version") and not Job("engine-update").alive():
         # a download that outlasted an earlier guide: it applies now, at this guide, never in the middle of a build
+        # only if the document that chose it is still the newest and the floor allows it (an older client's
+        # pending item carries no issue time: it counts as older than any document accepted since)
         if core.read_json(engine_dir(pending["version"]) / ".theodore-engine.json").get("sha256") == pending.get("sha256"):
-            activate_engine(pending["version"])
+            activate_checked(pending["version"], float(pending.get("issued") or 0), "pending update")
         save_update_state(pending=None)
     last = max(float(state.get("last_check") or 0), float(state.get("last_attempt") or 0))
     if not force and core.now() - last < UPDATE_CHECK_INTERVAL_S:
@@ -701,30 +730,30 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     start_packs_job(manifest.get("packs") or [])
     current = current_engine()
     target = engine.get("version")
+    issued = _manifest_time(manifest.get("server_time"))
     floor = update_state().get("floor") or {}
-    if floor and _manifest_time(manifest.get("server_time")) >= float(floor.get("since") or 0):
+    if floor and issued >= float(floor.get("since") or 0):
         save_update_state(floor=None)              # a document issued after the reset: it may roll back
-        floor = {}
-    below_floor = bool(floor.get("engine") and target and core.version_key(target) < core.version_key(str(floor["engine"])))
+    under_floor = below_floor(target, issued)
     must = bool(current) and (current in (engine.get("revoked") or []) or
                               (manifest.get("min_version") and core.version_key(current) < core.version_key(str(manifest["min_version"]))))
     pinned = pins().get("engine")
     held = state.get("held")
     failed = state.get("failed") or {}
-    skip = below_floor or forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
+    skip = under_floor or forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
            (failed.get("version") == target and core.now() - float(failed.get("at") or 0) < UPDATE_CHECK_INTERVAL_S and not force)
     have_exact = engine_installed(target) and core.read_json(engine_dir(target) / ".theodore-engine.json").get("sha256") == engine.get("sha256")
     if target and (target != current or not have_exact) and not skip and runtime_ready():
         if have_exact:
-            activate_engine(target)
+            activate_checked(target, issued, "update check")
         else:
             job = Job("engine-update")
             if not job.alive():
                 core.write_json(core.home().state / "engine-update.json", engine)
                 job.spawn(["update", "--engine-job"])
-            save_update_state(pending={"version": target, "sha256": engine.get("sha256")})
+            save_update_state(pending={"version": target, "sha256": engine.get("sha256"), "issued": issued})
             if job.wait(wait if current and not must else max(wait, 90.0)) and engine_installed(target):
-                activate_engine(target)
+                activate_checked(target, issued, "update check")
                 save_update_state(pending=None)
         if held and held != target:
             save_update_state(held=None)

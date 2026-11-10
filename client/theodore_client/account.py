@@ -110,7 +110,8 @@ def automatic_reports() -> tuple[bool, str]:
     if known.get("source") == "server" and isinstance(known.get("enabled"), bool):
         if not known["enabled"]:
             return False, "off"
-        if core.now() - float(known.get("at") or 0) <= ON_FRESH_SECONDS:     # "on" is trusted for an hour, then asked again
+        if 0 <= core.now() - float(known.get("at") or 0) <= ON_FRESH_SECONDS:     # "on" is trusted for an hour, then asked again;
+            # a time ahead of the clock (cached while the clock was fast) is not trusted at all
             return True, ""
         return False, "unknown"
     if known.get("enabled") is False and core.now() - float(known.get("at") or 0) < REFUSED_OFF_SECONDS:
