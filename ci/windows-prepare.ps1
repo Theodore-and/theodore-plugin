@@ -9,6 +9,12 @@ $file = "Git-$version-64-bit.exe"
 $url = "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/$file"
 $sha256 = '4961a4a8cc778d8b6e00a5819e5fe4d078b754555aff7aedc2d77a5d74c2de80'
 $bash = 'C:\Program Files\Git\bin\bash.exe'
+# A fresh server image fills its root store only on demand (CryptoAPI fetches a root when a chain needs it), and
+# OpenSSL-based tools such as Python's urllib only see what is already there: load Microsoft's current root list
+# once, with the inbox certutil, as a desktop that has browsed for a day already has it.
+$roots = Join-Path $env:TEMP 'theodore-ci-roots.sst'
+& "$env:SystemRoot\System32\certutil.exe" -generateSSTFromWU $roots | Out-Null
+if ($LASTEXITCODE -eq 0) { Import-Certificate -FilePath $roots -CertStoreLocation Cert:\LocalMachine\Root | Out-Null; Remove-Item $roots }
 if (Test-Path $bash) { Write-Output "ci: Git for Windows is installed ($bash)"; exit 0 }
 $dir = Join-Path $env:TEMP ("theodore-ci-" + [guid]::NewGuid())
 $null = New-Item -ItemType Directory -Path $dir

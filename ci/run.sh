@@ -154,7 +154,7 @@ run_windows() {
   [ -n "$HOST" ] || { say "windows-x64 needs --host user@host"; result "$name" shim not-run; result "$name" runtime not-run; return; }
   pins=$("$(host_python)" -c 'import json,sys; p=json.load(open(sys.argv[1]))["python"]; a=p["assets"]["win32-x64"]; print(p["pbs_release"], a["file"], a["sha256"])' \
     "$ROOT/runtime/locks/versions.json")
-  ( cd "$ROOT" && git ls-files -z | xargs -0 tar -cf "$dir/repo.tar" ) || { result "$name" shim fail; result "$name" runtime fail; return; }
+  ( cd "$ROOT" && git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar --no-mac-metadata --no-xattrs -cf "$dir/repo.tar" ) || { result "$name" shim fail; result "$name" runtime fail; return; }
   SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new ${KEY:+-i $KEY}"
   ssh $SSHO "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' &&
     scp -q $SSHO "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" &&

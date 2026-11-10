@@ -79,7 +79,7 @@ class SignIn(ClientCase):
         import urllib.request
         req = urllib.request.Request(self.api.base + "/v1/device/activate", method="POST", headers={"Content-Type": "application/json"},
                                      data=json.dumps({"code": "ABCD-1234", "device_name": "t", "platform": "darwin", "arch": "arm64",
-                                                      "host": "installer", "client_version": "0.1.0"}).encode())
+                                                      "host": "installer", "client_version": "0.2.0"}).encode())
         answer = urllib.request.urlopen(req).read()
         pending = self.box.home / "state" / "activation.pending"
         pending.parent.mkdir(parents=True, exist_ok=True)
@@ -631,7 +631,7 @@ class Engine(ClientCase):
     def test_client_update_comes_from_the_runtime_manifest_and_applies_at_the_next_start(self):
         import io, tarfile
         self.ready()
-        source = self.box.tmp / "dist" / "client-0.1.0.tar"
+        source = self.box.tmp / "dist" / f"client-{__import__('build_client').client_version()}.tar"
         raw = io.BytesIO()
         with tarfile.open(source) as old, tarfile.open(fileobj=raw, mode="w") as new:   # the same client, relabelled 0.1.1
             for member in old.getmembers():
@@ -862,7 +862,7 @@ class ReportsAndPreferences(ClientCase):
         self.assertIn("no deck content", tell)
         self.assertEqual(self.api.reports[0]["title"], "render failed")
         self.assertEqual(self.api.reports[0]["origin"], "user_requested")
-        self.assertEqual(self.api.reports[0]["environment"]["plugin_version"], "0.1.0")
+        self.assertEqual(self.api.reports[0]["environment"]["plugin_version"], json.loads((self.box.plugin / ".claude-plugin" / "plugin.json").read_text())["version"])
 
     def test_automatic_reports_switched_off_means_off_and_nothing_is_asked(self):
         self.ready()

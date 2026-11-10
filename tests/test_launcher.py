@@ -61,7 +61,8 @@ class FirstRun(LauncherCase):
         if not IS_WINDOWS:
             self.assertTrue(os.access(stable / "theodore", os.X_OK))
         self.assertEqual((self.box.home / "runtime" / "current.txt").read_text().strip(), RUNTIME_ID)
-        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.0")
+        import build_client
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), build_client.client_version())
         self.box.wait_jobs()
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "stage 2 ran in the background")
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
