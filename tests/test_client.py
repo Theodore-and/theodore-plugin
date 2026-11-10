@@ -674,6 +674,44 @@ class Packs(ClientCase):
         self.box.wait_jobs(120)
         self.assertEqual(self.client("pptx", "apply", str(unknown), env=quick).returncode, 0)
 
+    def test_pack_hashes_and_urls_come_only_from_the_signed_manifest(self):
+        self.sign_in()
+        evil = pack_zip("icons", "9.9.9")
+        self.api.files["evil/icons.zip"] = evil
+        # The unsigned pack list names another archive, its hash, and a URL on another host: none of it is used.
+        self.api.packs_manifest_override = [{"id": "icons", "version": "9.9.9", "sha256": hashlib.sha256(evil).hexdigest(),
+                                             "size_bytes": len(evil), "url": self.api.base.replace("127.0.0.1", "localhost") + "/dl/evil/icons.zip"}]
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        self.box.wait_jobs()
+        self.assertStatus(self.client("packs", "install", "--all"), "OK", 0)
+        paths = [r["path"] for r in self.api.requests]
+        self.assertNotIn("/v1/packs/manifest", paths)
+        self.assertNotIn("/dl/evil/icons.zip", paths)
+        self.assertEqual(self.state("packs/state.json")["icons"]["version"], "1.0.0")
+        self.assertTrue(all(r["auth"] for r in self.api.requests if r["path"].startswith("/v1/packs/")))
+
+    def test_a_pack_id_that_leaves_the_packs_folder_is_refused_before_anything_is_deleted(self):
+        victim = self.box.tmp / "victim"
+        victim.mkdir()
+        (victim / "keep.txt").write_text("mine")
+        self.sign_in()
+        self.client("setup", "--job")
+        self.box.wait_jobs()
+        for bad in ("../../victim", "..", "Icons", "icons/../../victim", "-x", "a" * 65):
+            data = pack_zip("icons", "1.0.0")
+            self.api.packs = [{"id": bad, "version": "1.0.0", "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}]
+            self.api.pack_files[(bad, "1.0.0")] = data
+            result = self.client("packs", "install", "--all")
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertEqual((victim / "keep.txt").read_text(), "mine", bad)
+            self.assertFalse((self.box.tmp / "victim.partial").exists(), bad)
+        for bad_version in ("../1", "1/2", ""):
+            data = pack_zip("icons", "1.0.0")
+            self.api.packs = [{"id": "icons", "version": bad_version, "sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}]
+            self.assertNotEqual(self.client("packs", "install", "--all").returncode, 0, bad_version)
+        self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
+
     def test_single_pack_install_and_unknown_pack(self):
         self.sign_in()
         self.client("setup", "--job")

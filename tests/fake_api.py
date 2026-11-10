@@ -143,6 +143,7 @@ class FakeApi:
         self.packs: list[dict] = []       # {id, version, sha256, size_bytes}
         self.pack_files: dict[tuple[str, str], bytes] = {}
         self.pack_delay = 0.0             # seconds to stall each pack download (to test waiting)
+        self.packs_manifest_override = None   # a list: what the unsigned GET /v1/packs/manifest answers instead
         self.guides = {"deck-design": {"": "# Deck design\n\nFake design guidance.\n", "license": "Apache License 2.0 (fake)\n"},
                        "pptx": {"": ""}}
         self.guide_version = "g1"
@@ -489,6 +490,8 @@ class FakeApi:
                 return self._send(h, 302, None, {"Location": f"{base}/dl/{key}"})
             return self._send(h, 200, data, {"ETag": '"' + sha256_hex(data)[:16] + '"'}, content_type="application/zip")
         if route == ["packs", "manifest"] and method == "GET":
+            if self.packs_manifest_override is not None:
+                return self._send(h, 200, {"packs": self.packs_manifest_override})
             return self._send(h, 200, {"packs": [dict(p, url=f"{self.base}/v1/packs/{p['id']}/{p['version']}") for p in self.packs]})
         if route[:1] == ["packs"] and len(route) == 3 and method == "GET":
             data = self.pack_files.get((route[1], route[2]))

@@ -722,20 +722,48 @@ def pack_ready(pack_id: str) -> bool:
     return packs_state().get(pack_id, {}).get("status") == "ready" and (core.home().packs / pack_id).is_dir()
 
 
-def fetch_packs_manifest(timeout: float = 20.0) -> list[dict]:
-    cred = credentials.load()
-    if not cred:
-        raise api.sign_in_required()
-    packs = api.call_json("packs_manifest", bearer=cred["installation_secret"], timeout=timeout).get("packs") or []
+PACK_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+PACK_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$")
+
+
+def checked_packs(entries) -> list[dict]:
+    """The pack entries of a verified channel manifest, each one checked before it names a file or a folder: an id
+    and a version that are one plain path segment, and a sha256. Anything else stops the whole list."""
+    out = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not PACK_ID.match(str(entry.get("id") or "")) \
+                or not PACK_VERSION.match(str(entry.get("version") or "")) \
+                or not re.match(r"^[0-9a-f]{64}$", str(entry.get("sha256") or "").lower()):
+            raise api.setup_failed("HASH_MISMATCH", f"the release manifest names an asset pack this client refuses ({str(entry)[:80]})")
+        out.append(entry)
     order = {name: i for i, name in enumerate(PACK_ORDER)}
-    return sorted(packs, key=lambda p: order.get(p.get("id"), len(order)))
+    return sorted(out, key=lambda p: order.get(p["id"], len(order)))
+
+
+def fetch_packs_manifest(timeout: float = 20.0) -> list[dict]:
+    """The packs of the signed channel manifest. The unsigned GET /v1/packs/manifest is not used: a pack's hash and
+    address come only from a document the manifest key signed."""
+    return checked_packs(fetch_channel_manifest(timeout=timeout).get("packs"))
+
+
+def _pack_folder(pack_id: str) -> Path:
+    """packs/<id>, resolved, and refused unless it is a direct child of the packs folder inside the install folder."""
+    packs = core.home().packs
+    packs.mkdir(parents=True, exist_ok=True)
+    root = packs.resolve()
+    target = (packs / pack_id).resolve()
+    if not PACK_ID.match(pack_id) or target.parent != root or core.home().root.resolve() not in root.parents:
+        raise api.setup_failed("HASH_MISMATCH", f"the asset pack {pack_id!r} would install outside {packs}")
+    return target
 
 
 def install_pack(entry: dict) -> None:
     home = core.home()
+    entry = checked_packs([entry])[0]
     pack_id, version = str(entry["id"]), str(entry["version"])
+    folder = _pack_folder(pack_id)
     state = packs_state().get(pack_id, {})
-    if state.get("status") == "ready" and state.get("version") == version and (home.packs / pack_id).is_dir():
+    if state.get("status") == "ready" and state.get("version") == version and folder.is_dir():
         return
     cred = credentials.load()
     if not cred:
@@ -750,19 +778,20 @@ def install_pack(entry: dict) -> None:
             _save_pack(pack_id, percent=int(pct))
 
     try:
-        api.download(entry.get("url") or api.url_for("pack", id=pack_id, version=version), archive, sha256=entry["sha256"],
-                     bearer=cred["installation_secret"], size=int(entry.get("size_bytes") or entry.get("size") or 0) or None, progress=progress)
-        partial = home.packs / f"{pack_id}.partial"
+        api.download(api.url_for("pack", id=pack_id, version=version), archive, sha256=entry["sha256"],
+                     bearer=cred["installation_secret"], size=int(entry.get("size") or entry.get("size_bytes") or 0) or None, progress=progress)
+        partial = folder.with_name(f"{pack_id}.partial")
         core.remove_tree(partial)
         if zipfile.is_zipfile(archive):
             extract_zip(archive, partial)
         else:
             extract_tar(archive, partial)
         _hoist(partial, "pack.json")
-        core.remove_tree(home.packs / pack_id)
-        os.rename(partial, home.packs / pack_id)
+        core.remove_tree(folder)
+        os.rename(partial, folder)
         core.remove_tree(archive)
     except Exception as exc:
+        core.remove_tree(archive)
         _save_pack(pack_id, status="failed", error=str(getattr(exc, "summary", exc))[:200])
         raise
     _save_pack(pack_id, status="ready", version=version, sha256=entry["sha256"], percent=100, error=None)
