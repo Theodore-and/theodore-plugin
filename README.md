@@ -34,7 +34,7 @@ else, Theodore never reads, changes or deletes it.
 | --- | --- | --- |
 | `bin/theodore`, `bin/theodore.cmd`, `bin/launcher.json` | The launcher, at one stable path | under 100 KB |
 | `client/<version>/` | The client (Python source) | under 1 MB |
-| `runtime/<id>/` | Python 3.12, the engine's Python packages, Node 24 and its modules | about 340 to 445 MB (80 to 106 MB to download; table below) |
+| `runtime/<id>/` | Python 3.12, the engine's Python packages, Node 24 and its modules | about 358 to 466 MB (84 to 111 MB to download; table below) |
 | `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); up to four versions are kept | 10 to 20 MB each |
 | `packs/` | Icon, flag, map and background libraries | about 145 MB (about 95 MB to download) |
 | `tools/libreoffice/` | LibreOffice, only on a Mac or Windows PC that has none (it renders slide previews) | about 800 MB (about 300 MB to download) |

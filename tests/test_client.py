@@ -1057,6 +1057,9 @@ class StatusDoctorUninstall(ClientCase):
         self.assertIn("runtime", first)
         self.assertNotIn("ready", tell.lower().replace("not ready", ""))
         self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        as_json = self.client("doctor", "--json")
+        self.assertEqual(as_json.returncode, 78, "doctor --json says the same with its exit code")
+        self.assertEqual(json.loads(as_json.stdout)["status"], "INTERNAL")
         if os.geteuid() != 0:
             node.write_text("#!/bin/sh\necho v24.0.0\n")
             (self.box.home).chmod(0o555)
@@ -1298,6 +1301,13 @@ class Internals(unittest.TestCase):
         from theodore_client.core import version_key
         ordered = ["0.9.0", "1.0.0-rc.2", "1.0.0-rc.3", "1.0.0-rc.10", "1.0.0", "1.0.1", "1.1.0", "2.0.0"]
         self.assertEqual(sorted(ordered[::-1], key=version_key), ordered)
+
+    def test_scrub_removes_bare_script_and_document_names_too(self):
+        from theodore_client.commands import scrub
+        self.assertEqual(scrub("build failed in Acme Holdings deck.js line 4"), "build failed in [file] line 4")
+        self.assertEqual(scrub("cannot open x.pptx"), "cannot open [file]")
+        self.assertEqual(scrub("error in Northwind slides.py while reading Board notes.md"), "error in [file] while reading [file]")
+        self.assertEqual(scrub("E_LAYOUT: overflow on slide 4 at 12pt (engine 1.4.0)"), "E_LAYOUT: overflow on slide 4 at 12pt (engine 1.4.0)")
 
     def test_scrub(self):
         from theodore_client.commands import scrub

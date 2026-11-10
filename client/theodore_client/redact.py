@@ -362,7 +362,7 @@ def _bracket_group_start(text: str, stem_end: int, floor: int) -> int:
     return at
 
 
-def _file_names(text: str) -> List[Replacement]:
+def _file_names(text: str, extension=None) -> List[Replacement]:
     """A file name is everything from the first word of its clause that is not a diagnostic word up to and
     including the extension; diagnostic words before it stay. A quoted name goes with its quotes. A clause starts
     after a quote, a separator, a colon, a comma, a semicolon, a bracket, a line end or a sentence end, except that
@@ -371,7 +371,7 @@ def _file_names(text: str) -> List[Replacement]:
     floor = 0
     pos = 0
     while True:
-        match = _FILE_EXTENSION.search(text, pos)
+        match = (extension or _FILE_EXTENSION).search(text, pos)
         if match is None:
             break
         dot = match.start()
@@ -483,6 +483,17 @@ _PASSES = (
     ("long_token", _bearer_values),
     ("long_token", _long_tokens),
 )
+
+
+# Not in the server's redactor: names of the scripts and text files a deck is built from ("Acme Holdings deck.js"),
+# which the client also removes, by the same rule as document names. The server's table is unchanged by it.
+_SCRIPT_EXTENSION = re.compile(r"\.(?:js|mjs|cjs|ts|jsx|tsx|py|json|md|txt|html?|css|xml|ya?ml|sh|ps1|cmd|bat)(?![A-Za-z0-9_])",
+                               re.IGNORECASE | re.ASCII)
+
+
+def redact_script_names(text: str) -> str:
+    """The client-side extra pass: bare script and text file names, removed with the non-diagnostic words before them."""
+    return _apply(text, _file_names(text, _SCRIPT_EXTENSION))
 
 
 def redact_with_hits(text: str, field: str, hits: Dict[str, dict]) -> str:

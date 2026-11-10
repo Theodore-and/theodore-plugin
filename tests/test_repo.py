@@ -446,8 +446,16 @@ class Documents(unittest.TestCase):
         readme = (ROOT / "README.md").read_text()
         self.assertIn("about 90 MB is downloaded before the first deck", readme)
         self.assertIn("about 550 MB on disk", readme)
+        rows = {}
         for platform in ("macOS, Apple silicon", "macOS, Intel", "Windows x64", "Linux x64", "Linux arm64"):
             self.assertIn(f"| {platform} |", readme)
+            row = re.search(rf"\| {re.escape(platform)} \| ([\d.]+) MB \([\d.]+ MiB\) \| ([\d.]+) MB \([\d.]+ MiB\) \|", readme)
+            rows[platform] = (float(row.group(1)), float(row.group(2)))
+        # The summary row agrees with the table, in the same unit (MB, rounded).
+        summary = re.search(r"about (\d+) to (\d+) MB \((\d+) to (\d+) MB to download; table below\)", readme)
+        low_disk, high_disk, low_dl, high_dl = (int(g) for g in summary.groups())
+        self.assertEqual((low_dl, high_dl), (round(min(d for d, _ in rows.values())), round(max(d for d, _ in rows.values()))))
+        self.assertEqual((low_disk, high_disk), (round(min(u for _, u in rows.values())), round(max(u for _, u in rows.values()))))
 
     def test_security_describes_reports_off_as_off(self):
         text = (ROOT / "SECURITY.md").read_text()

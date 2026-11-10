@@ -50,7 +50,13 @@ listed above. Before anything is sent, the client applies the same redaction rul
 paths are removed whole, including folder names with spaces; a document or media file name is removed together
 with the words before it, unless they are generic diagnostic words; credentials in URLs and in name=value pairs,
 email addresses and anything that looks like a key are removed; and any quoted passage (text copied from a slide
-or a file) is replaced as a whole. The service redacts again. `theodore report ... --dry-run` prints exactly what
+or a file) is replaced as a whole. The client also removes bare names of scripts and text files (`deck.js`, a `.py`
+or `.md` file) by the same rule as document names. The service redacts again.
+
+The limit, plainly: a report's description is prose the assistant writes, and no rule on this computer can prove
+that prose free of deck content (an unquoted sentence copied from a slide reads like any other sentence). What
+stands between deck content and a report is, in order: the reporting directions, which forbid deck content, file
+names and client names; the client's redaction above; and the service's own redaction. `theodore report ... --dry-run` prints exactly what
 would be sent and sends nothing. You see every report in the portal.
 
 You can switch automatic reports off in the portal. With them off, the assistant does not ask you about
@@ -68,28 +74,38 @@ the report, stores nothing, and the client remembers.
   from the last refresh: Theodore's engine works offline for up to 7 days. The deck-design guidance always
   needs a connection.
 - One-time activation codes are single-use and expire after 10 minutes. The installer redeems the code before
-  it downloads anything large and never prints it.
+  it downloads anything large and never prints it. The code is given on the command line (`--code`), by design: it
+  is in the sentence the user pastes, works once and expires within minutes. Nothing longer-lived ever is: the
+  connector's grant, which can carry the installation secret, is read only from standard input or a file only its
+  owner can read (`activate --grant -`, `activate --grant-file`).
 
 ## What protects the downloads
 
-- The installer is the root of trust: it prints its own SHA-256, and the same value is shown at
-  https://theodoreand.ai/install. The install commands download it into a new private folder (never a fixed
-  path in a shared temporary folder) and delete that folder afterwards.
+- The installer is the root of trust. The install commands fetch it over HTTPS from theodoreand.ai and run it:
+  as with any bootstrap command, what protects that first step is TLS to our domain. The installer prints its own
+  SHA-256 and the same value is published at https://theodoreand.ai/install, so anyone can compare before running it
+  (download the file, check, then run). The commands download it into a new private folder (never a fixed path in a
+  shared temporary folder) and delete that folder afterwards.
 - The installer carries, stamped in at release, the SHA-256 of Theodore's Python (an unmodified
   python-build-standalone archive) and of the client, and the Ed25519 public keys. It downloads Python and the
   client first and checks each against its SHA-256 with the system's own tool (`shasum`/`sha256sum`,
   `certutil`), and only then runs them. That Python verifies the signed plugin release document (Ed25519, the
   pinned keys; macOS and Windows have no built-in tool for it), and the plugin archive is checked against the
-  SHA-256 and size that document gives. Nothing downloaded runs before it has been checked. A build of the
+  SHA-256 and size that document gives; neither request follows a redirect. A plugin older than the one already
+  installed is refused (a replayed document cannot downgrade it). Nothing downloaded runs before it has been checked. A build of the
   installer or the plugin that still carries the placeholder key refuses to run.
 - The launcher's first two downloads (the same Python and client) are checked against SHA-256 values pinned in
   `launcher.json`.
 - Everything else (the rest of the runtime, the engine, client updates, asset packs) is listed in manifests
   signed with Ed25519; the public keys are pinned in `launcher.json`. A download that does not match is deleted
   and reported as `SETUP_FAILED` with cause `HASH_MISMATCH`. What a verified manifest forbids (the publisher's
-  pause, minimum versions, withdrawn versions) holds until a newer verified manifest says otherwise.
-- Downloads use HTTPS only and follow no redirect to another host or to plain HTTP; a transfer that stalls is
-  abandoned. The installation credential is sent only to the API host over HTTPS, never to the download host.
+  pause, minimum versions, withdrawn versions) holds until a newer verified manifest says otherwise, from the very
+  first manifest of a new installation. A signed manifest older than one already accepted on this computer is
+  refused, so a replayed document cannot downgrade the engine or the client; a newer one that rolls back is the
+  publisher's decision and is applied.
+- Downloads use HTTPS only and follow no redirect to another host or to plain HTTP (the launchers and installers
+  follow none at all, and ignore a user's `.curlrc` and `.wgetrc`); a transfer that stalls is abandoned, and none
+  lasts more than 30 minutes. The installation credential is sent only to the API host over HTTPS, never to the download host.
 - TLS uses the operating system's certificate store, so a company's inspecting proxy works when its root
   certificate is installed on the computer, and fails closed (`TLS_INTERCEPT`) when it is not.
 - Archives are unpacked only inside Theodore's folder; entries that point outside it are refused, and an asset

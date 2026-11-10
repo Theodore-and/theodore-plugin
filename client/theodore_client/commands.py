@@ -216,8 +216,8 @@ def scrub(text: str) -> str:
     and the same case table: paths with spaces removed whole, file names with the words before them unless they are
     diagnostic words, credentials in URLs and pairs, addresses, keys), then quoted text, which is slide or file
     content, replaced as a whole."""
-    from .redact import redact_free_text
-    text = redact_free_text(text)
+    from .redact import redact_free_text, redact_script_names
+    text = redact_script_names(redact_free_text(text))
     text = _QUOTED.sub("[text]", text)
     return " ".join(text.split()).strip()
 
@@ -483,20 +483,26 @@ def doctor(as_json: bool) -> int:
             f"{info['version']}" if info["status"] == "ready" else f"{info['status']} ({info['percent']}%)")
     for name in ("claude", "codex"):
         add("ok", f"assistant {name}", shutil.which(name) or "not found on PATH")
-    if as_json:
-        print(json.dumps({"checks": [{"level": l, "name": n, "detail": d} for l, n, d in checks], "snapshot": snap}, indent=2, sort_keys=True))
-        return 0
+    final = _doctor_verdict(checks, snap, home)
+    if as_json:         # the same verdict, as the exit code and in the document
+        print(json.dumps({"checks": [{"level": l, "name": n, "detail": d} for l, n, d in checks], "snapshot": snap,
+                          "status": final.name}, indent=2, sort_keys=True))
+        return final.code
     for level, name, detail in checks:
         print(f"{level.upper():4}  {name}: {detail}")
+    return core.emit(final)
+
+
+def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     blocking = _blocking_status(snap)
     if blocking:
-        return core.emit(blocking)
+        return blocking
     failed = [(n, d) for l, n, d in checks if l == "fail"]
     if any(n == "data directory" for n, _d in failed):
-        return core.emit(api.setup_failed("DISK", f"{home.root} is not writable"))
+        return api.setup_failed("DISK", f"{home.root} is not writable")
     if failed:          # the last line never says ready when a check failed
         what = "; ".join(f"{n} ({d})" for n, d in failed)
-        return core.emit(Status("INTERNAL", f"Theodore is installed but not ready: {what}.",
+        return (Status("INTERNAL", f"Theodore is installed but not ready: {what}.",
                                 f"tell the user what failed; run {quoted_launcher()} doctor again after fixing it, or report it with: "
                                 f"{quoted_launcher()} report --kind bug --origin user_requested",
                                 f"Theodore is installed but not working yet: {', '.join(n for n, _d in failed)} failed its check. I can report this to Theodore."))
@@ -514,7 +520,7 @@ def doctor(as_json: bool) -> int:
     if "rasteriser" in warned or "launcher" in warned:
         notes.append("See the check list above for details.")
     note = (" " + " ".join(notes)) if notes else ""
-    return core.emit(Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
+    return (Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
                             "start a new session if the Theodore skills are not listed yet, then ask for a deck.",
                             f"Theodore is ready (engine {snap['engine']}).{note} Start a new session and ask for a deck."))
 
