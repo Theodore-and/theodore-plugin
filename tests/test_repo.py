@@ -29,7 +29,10 @@ SKIP_DIRS = {".git", "__pycache__", "dist", ".cache", ".scratch"}
 def repo_files(base: Path = ROOT) -> list[Path]:
     found = []
     for path in base.rglob("*"):
-        if path.is_file() and not (set(path.relative_to(ROOT).parts) & SKIP_DIRS) and path.name != ".DS_Store":
+        rel = path.relative_to(ROOT).parts
+        if rel[:2] == ("ci", "out"):          # the local runner's outputs (git-ignored)
+            continue
+        if path.is_file() and not (set(rel) & SKIP_DIRS) and path.name != ".DS_Store":
             found.append(path)
     return found
 
@@ -81,7 +84,8 @@ class Stubs(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills").iterdir()), ["deck-design", "pptx"])
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills" / "deck-design").iterdir()), ["LICENSE", "NOTICE", "SKILL.md", "scripts"])
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills" / "pptx").iterdir()), ["SKILL.md", "scripts"])
-        self.assertEqual([p for p in repo_files() if p.suffix == ".ps1"], [], "no PowerShell script anywhere")
+        self.assertEqual([p for p in repo_files() if p.suffix == ".ps1" and p.relative_to(ROOT).parts[0] != "ci"], [],
+                         "no PowerShell script anywhere a user's machine runs (ci/ is the developer's runner)")
 
 
 class GeneratedFiles(unittest.TestCase):
