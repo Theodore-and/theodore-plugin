@@ -172,11 +172,12 @@ sha256_of() {
 
 # Downloads speak HTTPS only (plain HTTP only to a loopback test server), follow no redirect, and give up on a
 # transfer slower than 1 KB/s for 60 seconds (30 minutes at most): a stalled server cannot hold setup forever.
+# curl's -q comes first so that a user's .curlrc (which could add --location) is not read.
 proto() { case "$1" in http://127.0.0.1[:/]*|http://localhost[:/]*) echo =https,http ;; *) echo =https ;; esac; }
 fetch() { # url dest; on failure sets CAUSE and DETAIL
   CAUSE=NETWORK
   if command -v curl >/dev/null 2>&1; then
-    code=$(curl -sS --fail --proto "$(proto "$1")" --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 \
+    code=$(curl -q -sS --fail --proto "$(proto "$1")" --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 \
       -o "$2" -w '%{http_code}' "$1" 2>"$B/fetch.err")
     rc=$?
     [ $rc -eq 0 ] && [ "$code" = 200 ] && return 0
@@ -190,8 +191,18 @@ fetch() { # url dest; on failure sets CAUSE and DETAIL
     esac
     return 1
   elif command -v wget >/dev/null 2>&1; then
-    wget -q --max-redirect=0 --timeout=60 --tries=3 -O "$2" "$1" 2>"$B/fetch.err" && return 0
-    DETAIL="wget exit $?"
+    # wget has an idle timeout but no total one: a watchdog ends it after 30 minutes. WGETRC=/dev/null: a user's
+    # .wgetrc cannot turn redirects or anything else back on.
+    WGETRC=/dev/null wget -q --max-redirect=0 --timeout=60 --tries=3 -O "$2" "$1" 2>"$B/fetch.err" &
+    wpid=$!
+    ( sleep 1800; kill "$wpid" 2>/dev/null ) >/dev/null 2>&1 &
+    dog=$!
+    wait "$wpid"
+    rc=$?
+    kill "$dog" 2>/dev/null
+    [ $rc -eq 0 ] && return 0
+    DETAIL="wget exit $rc"
+    [ $rc -gt 128 ] && DETAIL="wget was stopped after 30 minutes"
     grep -qi certificate "$B/fetch.err" 2>/dev/null && CAUSE=TLS_INTERCEPT
     grep -q 407 "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH
     return 1
@@ -362,7 +373,7 @@ rm -f "$B/.write-test"
 # A sandbox that loses its files and cannot reach the download host has no use for a bootstrap: say so at once.
 if [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then
   probe=$(jget "$CONF" stage1_client_url)
-  if ! { command -v curl >/dev/null 2>&1 && curl -sS -I --proto "$(proto "$probe")" --connect-timeout 5 -m 10 -o /dev/null "$probe" 2>/dev/null; }; then
+  if ! { command -v curl >/dev/null 2>&1 && curl -q -sS -I --proto "$(proto "$probe")" --connect-timeout 5 -m 10 -o /dev/null "$probe" 2>/dev/null; }; then
     status CONNECTOR_REQUIRED 74 "this environment cannot reach Theodore's download host and does not keep files between sessions." \
       "call the Theodore connector's guide tool instead (skill deck-design). If no Theodore connector is available, say so; do not retry this command here." \
       "In this environment Theodore works through its connector. You can connect it at Customize > Plugins > Theodore > Connectors."

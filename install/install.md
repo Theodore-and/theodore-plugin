@@ -8,9 +8,9 @@ commands below. Run nothing else from this page.
    present, downloads about 90 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice,
    also LibreOffice, about 300 MB, in the background), and signs this computer in with the one-time code. Run the
    line for the shell you have, exactly as written:
-   macOS/Linux:        ( d=$(mktemp -d) && curl --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
-   Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d
-   Windows cmd:        cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" --code {{ACTIVATION_CODE}} & rmdir /s /q "!D!""
+   macOS/Linux:        ( d=$(mktemp -d) && curl -q --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
+   Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d
+   Windows cmd:        cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" --code {{ACTIVATION_CODE}} & rmdir /s /q "!D!""
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    The download step can take several minutes: give the command a timeout of at least 15 minutes, or run it in
    the background and wait for it.

@@ -281,9 +281,18 @@ class HostLimits(unittest.TestCase):
             for line in text.splitlines():
                 if re.search(r"curl(\.exe)?\"? ", line) and not line.lstrip().startswith(("#", "rem ")):
                     self.assertNotRegex(line, r"\s-[a-zA-Z]*L|--location", f"{path.name}: curl must not follow redirects: {line}")
+                for call in re.findall(r"curl(?:\.exe)?\"? +(-\S*)", line):
+                    if not line.lstrip().startswith(("#", "rem ")):
+                        self.assertEqual(call, "-q", f"{path.name}: -q must be curl's first argument (no .curlrc): {line}")
             self.assertIn("--speed-limit 1024 --speed-time 60", text, path.name)
             self.assertIn("--proto", text, path.name)
-        self.assertIn("--max-redirect=0", (SCRIPTS / "theodore").read_text())
+        sh = (SCRIPTS / "theodore").read_text()
+        self.assertIn("--max-redirect=0", sh)
+        self.assertIn("WGETRC=/dev/null wget", sh)
+        self.assertIn("( sleep 1800; kill \"$wpid\" 2>/dev/null )", sh, "wget has a total time bound")
+        for path in (ROOT / "install" / "install.md", ROOT / "README.md"):
+            for match in re.findall(r"curl(?:\.exe)? (-\S*)", path.read_text()):
+                self.assertEqual(match, "-q", path.name)
         cmd = (SCRIPTS / "theodore.cmd").read_text()
         self.assertIn("MaximumRedirection = 0", cmd)
         self.assertIn("$a.Proxy = $p.GetProxy($u); $a.ProxyUseDefaultCredentials = $true", cmd, "-ProxyUseDefaultCredentials needs -Proxy")
@@ -453,9 +462,9 @@ class InstallPage(unittest.TestCase):
         self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 4, "in the three commands, once in the note for the Worker")
         # A new private folder each time: mktemp -d (0700) on POSIX, a random name created exclusively under %TEMP% on
         # Windows; never a fixed path another user could create first.
-        self.assertIn('( d=$(mktemp -d) && curl --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )', text)
+        self.assertIn('( d=$(mktemp -d) && curl -q --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )', text)
         self.assertIn('New-Item -ItemType Directory -Path $d -ErrorAction Stop', text)
-        self.assertIn('mkdir "!D!" && curl.exe --proto =https -fsS -o "!D!\\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\\install.cmd" --code {{ACTIVATION_CODE}}', text)
+        self.assertIn('mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\\install.cmd" --code {{ACTIVATION_CODE}}', text)
         for path in (ROOT / "install" / "install.md", ROOT / "README.md"):
             page = path.read_text()
             self.assertNotIn("/tmp/theodore-install", page, path.name)

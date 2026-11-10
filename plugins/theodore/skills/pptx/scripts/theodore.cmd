@@ -82,7 +82,7 @@ del /q "%B%\.write-test" >nul 2>&1
 
 if not defined THEODORE_EPHEMERAL goto :start_job
 call :jget stage1_client_url "%CONF%"
-"%SYS32%\curl.exe" -sS -I --connect-timeout 5 -m 10 -o nul "%JV%" >nul 2>&1
+"%SYS32%\curl.exe" -q -sS -I --connect-timeout 5 -m 10 -o nul "%JV%" >nul 2>&1
 if errorlevel 1 goto :connector_required
 
 :start_job
@@ -207,7 +207,7 @@ set "PROTO==https"
 set "FURL=%~1"
 if /i "%FURL:~0,17%"=="http://127.0.0.1:" set "PROTO==https,http"
 if not exist "%SYS32%\curl.exe" goto :fetch_powershell
-"%SYS32%\curl.exe" -sS --fail --proto %PROTO% --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
+"%SYS32%\curl.exe" -q -sS --fail --proto %PROTO% --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
 set "RC=%ERRORLEVEL%"
 set /p HTTP=<"%B%\http.txt"
 if "%RC%"=="0" if "%HTTP%"=="200" exit /b 0
