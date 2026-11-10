@@ -198,6 +198,15 @@ class WindowsShells(LauncherCase):
         self.api.dl_delay = 0.0
         fresh.wait_jobs(120)
 
+    def test_with_no_way_to_detach_setup_runs_in_the_foreground_and_says_so(self):
+        fresh = Sandbox(self.api, home_name="foreground home")
+        self.addCleanup(fresh.close)
+        result = fresh.run_launcher("version", env={"THEODORE_TEST_STARTER": "none"}, timeout=900)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.startswith("theodore: no background job can be started"), result.stdout)
+        self.assertIn("theodore client", result.stdout)
+        fresh.wait_jobs(300)
+
     def test_inbox_tools_are_present(self):
         import shutil
         for tool in ("curl.exe", "tar.exe", "certutil.exe", "findstr.exe"):

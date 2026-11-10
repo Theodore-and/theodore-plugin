@@ -167,6 +167,25 @@ class Installer(unittest.TestCase):
                 self.assertFalse((self.box.home / "bin").exists(), "no launcher from the download ever ran")
                 self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [], "the installer removed its own files")
 
+    @unittest.skipUnless(IS_WINDOWS, "Windows ACLs")
+    def test_the_activation_answer_is_private_even_in_a_folder_others_may_read(self):
+        import subprocess
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        subprocess.run(["icacls", str(state), "/grant", "*S-1-1-0:(OI)(CI)R"], check=True, capture_output=True)   # Everyone may read
+        self.api.issue_activation_code("ABCD-1234")
+        # Stop right after the code is redeemed (Python's pin does not match), so the answer is still on disk.
+        broken = {k: "0" * 64 for k in json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+                  if k.startswith("stage1_python_") and k.endswith("_sha256")}
+        result = self.install("--code", "ABCD-1234", installer=self.box.installer(**broken))
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        pending = state / "activation.pending"
+        self.assertTrue(pending.exists(), result.stdout)
+        acl = subprocess.run(["icacls", str(pending)], capture_output=True, text=True).stdout
+        self.assertNotIn("Everyone", acl, acl)
+        self.assertNotIn("S-1-1-0", acl, acl)
+        self.assertEqual([p.name for p in state.iterdir() if p.name.startswith("incoming-")], [], "the private folder is gone")
+
     def test_the_plugin_document_and_archive_follow_no_redirect(self):
         signed = self.api.files["plugin/latest.json"]
         self.api.files["old/latest.json"] = signed

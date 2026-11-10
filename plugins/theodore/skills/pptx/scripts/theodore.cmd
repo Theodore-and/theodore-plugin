@@ -91,34 +91,38 @@ rem The job must not inherit this command's output: a caller that reads to the e
 rem does) would otherwise wait for the whole download. "start /b" passes every inheritable handle on. PowerShell's
 rem Start-Process goes through ShellExecute, which passes none; where PowerShell is missing or blocked, WMI creates
 rem the process (it inherits nothing either, and not our environment, so the home goes as an argument, by its short
-rem name). "start /b" stays as the last fallback. THEODORE_TEST_STARTER=wmic skips PowerShell, for the tests.
+rem name). Where neither works, setup runs in the foreground of this call, said in one line first: never "start /b",
+rem whose job would inherit our output and hold the caller until the download ends without saying so.
+rem THEODORE_TEST_STARTER=wmic skips PowerShell and =none skips both, for the tests.
 set "THEODORE_JOB_LAUNCHER=%LAUNCHER%"
 set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
 if /i "%THEODORE_TEST_STARTER%"=="wmic" goto :start_wmic
+if /i "%THEODORE_TEST_STARTER%"=="none" goto :start_foreground
 if not exist "%PWSH%" goto :start_wmic
 "%PWSH%" -NoProfile -NonInteractive -Command "Start-Process -WindowStyle Hidden -FilePath $env:THEODORE_JOB_LAUNCHER -ArgumentList __bootstrap" <nul >nul 2>&1
 if not errorlevel 1 goto :started
 :start_wmic
 set "WMIC=%SYS32%\wbem\WMIC.exe"
-if not exist "%WMIC%" goto :start_plain
+if not exist "%WMIC%" goto :start_foreground
 set "SHORT_L="
 set "SHORT_H="
 for %%I in ("%LAUNCHER%") do set "SHORT_L=%%~sI"
 for %%I in ("%HOME_DIR%") do set "SHORT_H=%%~sI"
-if not "%SHORT_L: =%"=="%SHORT_L%" goto :start_plain
-if not "%SHORT_H: =%"=="%SHORT_H%" goto :start_plain
-"%WMIC%" process call create "cmd.exe /d /c %SHORT_L% __bootstrap %SHORT_H%" 2>nul | "%SYS32%\findstr.exe" /c:"ReturnValue = 0" >nul 2>&1 || goto :start_plain
+if not "%SHORT_L: =%"=="%SHORT_L%" goto :start_foreground
+if not "%SHORT_H: =%"=="%SHORT_H%" goto :start_foreground
+"%WMIC%" process call create "cmd.exe /d /c %SHORT_L% __bootstrap %SHORT_H%" 2>nul | "%SYS32%\findstr.exe" /c:"ReturnValue = 0" >nul 2>&1 || goto :start_foreground
 rem Proof that the job really started (it holds job.lock open); otherwise the plain start below.
 set /a WMI_WAIT=0
 :wmic_wait
 call :job_alive
 if not errorlevel 1 goto :started
-if %WMI_WAIT% GEQ 5 goto :start_plain
+if %WMI_WAIT% GEQ 5 goto :start_foreground
 "%SYS32%\ping.exe" -n 2 127.0.0.1 >nul 2>&1
 set /a WMI_WAIT+=1
 goto :wmic_wait
-:start_plain
-start "" /b cmd /d /c ""%LAUNCHER%" __bootstrap" <nul >nul 2>&1
+:start_foreground
+echo theodore: no background job can be started on this computer (PowerShell and WMI are unavailable), so Theodore sets itself up in this call; it takes a few minutes and ends with a status.
+call "%LAUNCHER%" __bootstrap <nul >nul 2>&1
 :started
 set /a WAITED=0
 set /a LIMIT=20

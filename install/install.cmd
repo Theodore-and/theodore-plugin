@@ -114,14 +114,30 @@ if not defined WORK goto :not_writable
 
 rem --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer -----------------------
 if not defined CODE goto :stage1
+rem The answer holds the installation secret. state\ may carry explicit grants of its own (THEODORE_HOME can point
+rem anywhere), so the answer is written into a new folder of this installer whose only entry is the current user,
+rem then moved: a file keeps its own ACL when it moves on the same volume. If the ACL cannot be set, no code is
+rem redeemed (the browser sign-in follows instead).
+set "SAFE="
+for /l %%N in (1,1,5) do if not defined SAFE call :make_safe
+if not defined SAFE goto :no_safe_folder
+if "%SAFE%"=="none" goto :no_safe_folder
 set "HTTP=000"
 rem The body goes through a pipe: no file holds the code.
-echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}| "%CURL%" -q -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary @- "%API_BASE%/v1/device/activate" >"%WORK%\http.txt" 2>nul
+echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}| "%CURL%" -q -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%SAFE%\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary @- "%API_BASE%/v1/device/activate" >"%WORK%\http.txt" 2>nul
 set /p HTTP=<"%WORK%\http.txt"
-if "%HTTP%"=="200" echo theodore-install: this computer is signed in (the one-time code was accepted)
-if "%HTTP%"=="200" goto :stage1
-del /q "%HOME_DIR%\state\activation.pending" >nul 2>&1
+if not "%HTTP%"=="200" goto :code_refused
+move /y "%SAFE%\activation.pending" "%HOME_DIR%\state\activation.pending" >nul 2>&1
+rmdir /s /q "%SAFE%" >nul 2>&1
+echo theodore-install: this computer is signed in (the one-time code was accepted)
+goto :stage1
+:code_refused
+rmdir /s /q "%SAFE%" >nul 2>&1
 echo theodore-install: the one-time code was not accepted (it may have expired or been used); a browser sign-in will be offered instead
+set "CODE="
+goto :stage1
+:no_safe_folder
+echo theodore-install: the sign-in answer could not be given a private folder (icacls failed), so the one-time code was not used; a browser sign-in will be offered instead
 set "CODE="
 
 :stage1
@@ -227,6 +243,19 @@ rem ============================================================================
 :make_work
 set "TRY=%HOME_DIR%\staging\install-%RANDOM%%RANDOM%"
 mkdir "%TRY%" 2>nul && set "WORK=%TRY%"
+exit /b 0
+
+:make_safe
+rem A new folder under state\ (mkdir fails when the name exists) whose ACL is exactly: the current user, full control.
+set "TRY=%HOME_DIR%\state\incoming-%RANDOM%%RANDOM%"
+mkdir "%TRY%" 2>nul || exit /b 0
+if not defined SID goto :make_safe_failed
+"%SYS32%\icacls.exe" "%TRY%" /inheritance:r /grant:r "*%SID%:(OI)(CI)F" >nul 2>&1 || goto :make_safe_failed
+set "SAFE=%TRY%"
+exit /b 0
+:make_safe_failed
+rmdir /s /q "%TRY%" >nul 2>&1
+set "SAFE=none"
 exit /b 0
 
 :fetch
