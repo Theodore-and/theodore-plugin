@@ -468,7 +468,8 @@ class Engine(ClientCase):
     def test_manifest_signed_by_an_unknown_key_is_refused(self):
         self.sign_in()
         config = json.loads((self.box.home / "bin" / "launcher.json").read_text())
-        config["manifest_key_1_x"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        from fake_api import b64u, public_key
+        config["manifest_key_1_x"] = b64u(public_key(hashlib.sha256(b"some other key").digest()))     # a real key, not the publisher's
         (self.box.home / "bin" / "launcher.json").write_text(json.dumps(config))
         result = self.client("setup", "--job")
         self.assertEqual(result.returncode, 68)
@@ -740,6 +741,23 @@ class ReportsAndPreferences(ClientCase):
         self.assertEqual(payload["details"]["error_code"], "E_RENDER")
         self.assertEqual(sorted(payload["environment"]), ["arch", "client_version", "engine_version", "host", "os", "plugin_version"])
         self.assertEqual(payload["environment"]["engine_version"], self.ENGINE_VERSION)
+
+    def test_names_paths_and_slide_text_never_leave_in_a_report(self):
+        self.ready()
+        details = ("apply failed on Acme Q3 Board Deck.pptx; script /Volumes/ClientShare/Acme Holdings/deck.js line 4; "
+                   "the title read \"Project Falcon: revenue up 40% in Riyadh\" and the note said \u201cBoard only, Jane Roe\u201d; "
+                   "proxy https://ci" + "user:hunter" + "2pass@proxy.example/x token=" + "abc" + "123 C:\\Users\\Jane Roe\\Deck Folder\\x.js failed")
+        result = self.client("report", "--kind", "bug", "--title", "Acme Board Deck.pptx failed", "--details", details,
+                             "--verb", "apply", "--code", "E_RENDER", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        text = json.dumps(json.loads(result.stdout))
+        for leaked in ("Acme", "Board Deck", "ClientShare", "Holdings", "Falcon", "Riyadh", "Jane", "Roe", "hunter", "abc123", "Deck Folder"):
+            self.assertNotIn(leaked, text)
+        payload = json.loads(result.stdout)
+        self.assertIn("[file]", payload["details"]["message"])
+        self.assertIn("[path]", payload["details"]["message"])
+        self.assertIn("[text]", payload["details"]["message"], "quoted text (slide content) is replaced as a whole")
+        self.assertIn("failed", payload["details"]["message"], "the diagnostic words stay")
 
     def test_report_is_filed_and_shown_with_its_reference(self):
         self.ready()

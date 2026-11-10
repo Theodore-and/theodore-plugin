@@ -206,19 +206,20 @@ def run_python(args: list[str]) -> int:
 
 # --- reports and preferences -------------------------------------------------------------------------------------------------
 
-_SCRUBS = (
-    (re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\Users\\)[^\s\"']+"), "<path>"),
-    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "<email>"),
-    (re.compile(r"[^\s\"'/\\]+\.(?:pptx|pptm|potx|ppt|docx|doc|xlsx|xls|pdf|key)\b", re.I), "<file>"),
-    (re.compile(r"\b[A-Za-z0-9_\-]{32,}\b"), "<token>"),
-)
+# Text in quotes is what an assistant copies from a slide, a note or a file: it goes as a whole, whatever it says.
+_QUOTED = re.compile(r'"[^"\n]{1,2000}"|\u201c[^\u201d\n]{1,2000}\u201d|\u2018[^\u2019\n]*\s[^\u2019\n]*\u2019|\u00ab[^\u00bb\n]{1,2000}\u00bb|'
+                     r"(?<![A-Za-z0-9])'[^'\n]*\s[^'\n]*'(?![A-Za-z0-9])")
 
 
 def scrub(text: str) -> str:
-    """Remove what must never leave the machine: paths under a home folder, email addresses, document file names, long tokens."""
-    for pattern, replacement in _SCRUBS:
-        text = pattern.sub(replacement, text)
-    return text.strip()
+    """What may leave the machine in a report: the server's redactor applied here first (redact.py, the same rules
+    and the same case table: paths with spaces removed whole, file names with the words before them unless they are
+    diagnostic words, credentials in URLs and pairs, addresses, keys), then quoted text, which is slide or file
+    content, replaced as a whole."""
+    from .redact import redact_free_text
+    text = redact_free_text(text)
+    text = _QUOTED.sub("[text]", text)
+    return " ".join(text.split()).strip()
 
 
 def _os_name() -> str:

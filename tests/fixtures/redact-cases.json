@@ -1,0 +1,312 @@
+[
+ {
+  "expected": "open [path] failed",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a macOS home path with spaced folders and the file at its end",
+  "text": "open /Users/ari/Client Work/Acme deck.pptx failed"
+ },
+ {
+  "expected": "see [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a macOS home folder with a space in the user name",
+  "text": "see /Users/Alice Smith"
+ },
+ {
+  "expected": "in [path], then retried",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a home path ends at a comma",
+  "text": "in /Users/Alice Smith/x, then retried"
+ },
+ {
+  "expected": "wrote [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a Linux home path",
+  "text": "wrote /home/ari/out/x.json"
+ },
+ {
+  "expected": "wrote [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a Linux home folder with a space",
+  "text": "wrote /home/Bob Jones/out"
+ },
+ {
+  "expected": "at [path] now",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a Windows home path",
+  "text": "at C:\\Users\\Ari\\Desktop\\plan.xlsx now"
+ },
+ {
+  "expected": "at [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a Windows home path in lower case",
+  "text": "at c:\\users\\Alice\\Desktop\\Deck.pptx"
+ },
+ {
+  "expected": "at [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a Windows home path in upper case with forward slashes",
+  "text": "at D:/USERS/alice smith/Documents"
+ },
+ {
+  "expected": "at [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a Windows profile under Documents and Settings",
+  "text": "at C:\\Documents and Settings\\Ari Example\\x"
+ },
+ {
+  "expected": "see [path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a tilde path",
+  "text": "see ~/Library/Logs/theodore.log"
+ },
+ {
+  "expected": "user [email] saw it",
+  "kinds": [
+   "email"
+  ],
+  "name": "an email address",
+  "text": "user ari.example+x@acme.co.uk saw it"
+ },
+ {
+  "expected": "Cannot open [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a file name with spaces at the start of a sentence",
+  "text": "Cannot open Acme Board.pptx"
+ },
+ {
+  "expected": "E_OPEN: [file] is locked",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a file name after a colon",
+  "text": "E_OPEN: Acme Board Q3.pptx is locked"
+ },
+ {
+  "expected": "Build stopped. Then [file] failed",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a file name after a sentence end",
+  "text": "Build stopped. Then Acme Board.xlsx failed"
+ },
+ {
+  "expected": "cannot read [file] today",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a quoted Office file name with spaces",
+  "text": "cannot read \"Board Pack Q3.pptx\" today"
+ },
+ {
+  "expected": "[file] is locked",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a bare Office file name",
+  "text": "Acme_Strategy.DOCX is locked"
+ },
+ {
+  "expected": "image [file] too large",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a media file name",
+  "text": "image Acme logo.png too large"
+ },
+ {
+  "expected": "export, [file], failed",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a PDF",
+  "text": "export, Acme report final.pdf, failed"
+ },
+ {
+  "expected": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a very long clause still loses the word before the extension",
+  "text": "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word AcmeBoard.pptx"
+ },
+ {
+  "expected": "open [path] failed",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a path holding brackets runs to its end",
+  "text": "open /Users/Alice(Acme)/Desktop/Board.pptx failed"
+ },
+ {
+  "expected": "saved to [path] failed",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a path keeps going over a following word that is not a diagnostic word",
+  "text": "saved to /Users/Alice Smith-Jones failed"
+ },
+ {
+  "expected": "very very very very very very very very very very very very very very very very very very very very very very very very very very very very very very [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a long clause keeps its diagnostic words and loses the name",
+  "text": "very very very very very very very very very very very very very very very very very very very very very very very very very very very very very very Acme Board.pptx"
+ },
+ {
+  "expected": "Permission denied while writing [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "diagnostic words before a file name stay",
+  "text": "Permission denied while writing Acme Board.pptx"
+ },
+ {
+  "expected": "Unsupported codec while reading [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "another diagnostic before the same name stays different",
+  "text": "Unsupported codec while reading Acme Board.pptx"
+ },
+ {
+  "expected": "cannot open [file]",
+  "kinds": [
+   "office_file_name"
+  ],
+  "name": "a lower-case file name",
+  "text": "cannot open acme board.pptx"
+ },
+ {
+  "expected": "wrote [path] then stopped",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a path outside home, with a spaced name at its end",
+  "text": "wrote /tmp/out/Acme Board.pdf then stopped"
+ },
+ {
+  "expected": "only .pptx files are supported",
+  "kinds": [],
+  "name": "an extension mentioned alone is not a name",
+  "text": "only .pptx files are supported"
+ },
+ {
+  "expected": "[path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a POSIX path with a space before its last folder",
+  "text": "/Volumes/Clients/Acme Holdings/proposal.txt"
+ },
+ {
+  "expected": "[path]",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a drive path with a space",
+  "text": "D:\\Clients\\Acme Board\\q3.txt"
+ },
+ {
+  "expected": "copy [path] failed",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a UNC path with spaces",
+  "text": "copy \\\\fileserver\\Client Share\\Acme Board\\q3.txt failed"
+ },
+ {
+  "expected": "open [path] failed",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "a path followed by ordinary words loses the non-diagnostic one",
+  "text": "open /tmp/a b failed"
+ },
+ {
+  "expected": "copied [path] to [path] then failed",
+  "kinds": [
+   "home_path"
+  ],
+  "name": "two paths in one sentence stay two",
+  "text": "copied /Volumes/A Drive/x.txt to /Users/Bo Li/y.txt then failed"
+ },
+ {
+  "expected": "fetch https://dl.theodoreand.ai/runtime/x.tar failed",
+  "kinds": [],
+  "name": "a URL is not a path",
+  "text": "fetch https://dl.theodoreand.ai/runtime/x.tar failed"
+ },
+ {
+  "expected": "read and/or write failed",
+  "kinds": [],
+  "name": "and/or is not a path",
+  "text": "read and/or write failed"
+ },
+ {
+  "expected": "token [token] end",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "a JWT",
+  "text": "token {JWT} end"
+ },
+ {
+  "expected": "secret [token] end",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "key material",
+  "text": "secret {SK_LIVE} end"
+ },
+ {
+  "expected": "token [token] end",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "a digit-free secret",
+  "text": "token abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ end"
+ },
+ {
+  "expected": "Authorization: Bearer [token]",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "a bearer of any length",
+  "text": "Authorization: Bearer abc.def-ghi_123"
+ },
+ {
+  "expected": "request 0d6f9a4e-3c1b-4a7e-9f12-7b3c2d1e0f9a failed",
+  "kinds": [],
+  "name": "a UUID is kept",
+  "text": "request 0d6f9a4e-3c1b-4a7e-9f12-7b3c2d1e0f9a failed"
+ },
+ {
+  "expected": "E_LAYOUT: overflow on slide 4 at 12pt (engine 1.4.0)",
+  "kinds": [],
+  "name": "a technical message is left alone",
+  "text": "E_LAYOUT: overflow on slide 4 at 12pt (engine 1.4.0)"
+ }
+]
