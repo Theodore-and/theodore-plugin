@@ -5,7 +5,11 @@
                                      marketplace.json (Claude Code)
   theodore-plugin-<version>.tar.gz   the marketplace tree (.claude-plugin/, .agents/, plugins/theodore/): what the
                                      installer unpacks into <home>/plugin and Codex adds as a local marketplace
-  latest.txt                         "<version> <sha256 of the tar.gz>": what the installer reads first
+  latest.manifest.json               the plugin release document to sign: canonical JSON of {schema
+                                     "theodore-plugin-latest@1", version, archive, sha256, size} of the tar.gz. The
+                                     publish step signs these exact bytes with the manifest key and uploads
+                                     plugin/latest.json = {"manifest": <that text>, "signature", "kid"}; the
+                                     installer trusts nothing else (an unsigned latest.txt is no longer made or read)
   plugin-build.json                  version, file names, sizes and sha256 (what the lead registers)
 
 Usage: python3 tools/build_plugin_archives.py --out <dir> [--root <marketplace tree>] [--release]
@@ -88,7 +92,9 @@ def build(out: Path, root: Path = ROOT, release: bool = False) -> dict:
         return {"file": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "size": path.stat().st_size}
 
     record = {"version": version, "zip": describe(zip_path), "tar": describe(tar_path), "files": len(files)}
-    (out / "latest.txt").write_text(f"{version} {record['tar']['sha256']}\n", encoding="utf-8")
+    latest = {"schema": "theodore-plugin-latest@1", "version": version, "archive": record["tar"]["file"],
+              "sha256": record["tar"]["sha256"], "size": record["tar"]["size"]}
+    (out / "latest.manifest.json").write_bytes(json.dumps(latest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
     (out / "plugin-build.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record
 

@@ -114,6 +114,10 @@ HEADER_GUIDE_VERSION = "x-theodore-guide-version"
 # Signed manifests: `manifest` is canonical JSON text; the signature covers its UTF-8 bytes.
 CHANNEL_MANIFEST_SCHEMA = "theodore-channel-manifest@1"
 RUNTIME_MANIFEST_SCHEMA = "theodore-runtime-manifest@1"
+# The plugin release document the installer trusts: <dl>/plugin/latest.json, a signed envelope like the manifests
+# ({manifest, signature, kid}, the manifest key), whose manifest is canonical JSON of
+# {"schema": PLUGIN_LATEST_SCHEMA, "version", "archive": "theodore-plugin-<version>.tar.gz", "sha256", "size"}.
+PLUGIN_LATEST_SCHEMA = "theodore-plugin-latest@1"
 KNOWN_HOSTS = ("claude-code", "codex", "claude-desktop", "claude-web", "cowork", "chatgpt", "other")
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
 REPORT_TITLE_MAX, REPORT_SUMMARY_MAX, REPORT_MESSAGE_MAX = 160, 4000, 4000

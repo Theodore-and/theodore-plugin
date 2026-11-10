@@ -12,7 +12,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
 from support import RUNTIME_ID, IS_WINDOWS, ROOT, FakeApi, Sandbox, cmd_command, engine_zip, fake_runtime_parts, pack_zip, status_lines
 
-INSTALLER = ROOT / "install" / ("install.cmd" if IS_WINDOWS else "install.sh")
 STABLE = "theodore.cmd" if IS_WINDOWS else "theodore"
 
 
@@ -44,9 +43,10 @@ class Installer(unittest.TestCase):
         lines = self.calls.read_text().splitlines()
         return [line.replace('"', "") for line in lines] if IS_WINDOWS else lines
 
-    def install(self, *args, env=None):
+    def install(self, *args, env=None, installer=None):
         import subprocess
-        command = cmd_command(str(INSTALLER), *args) if IS_WINDOWS else ["/bin/sh", str(INSTALLER), *args]
+        installer = installer or self.box.installer()
+        command = cmd_command(str(installer), *args) if IS_WINDOWS else ["/bin/sh", str(installer), *args]
         return subprocess.run(command, env={**self.box.env, **(env or {})}, capture_output=True, text=True,
                               timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
 
@@ -78,6 +78,12 @@ class Installer(unittest.TestCase):
         self.assertFalse((self.box.user_home / ".claude" / "settings.json").exists())
         self.box.wait_jobs()
         self.assertEqual({v["status"] for v in json.loads((home / "packs" / "state.json").read_text()).values()}, {"ready"})
+        self.assertEqual([p.name for p in (home / "staging").iterdir() if p.name.startswith("install")], [], "the installer removed its own files")
+        if IS_WINDOWS:          # state\ is the current user's alone, whatever folder THEODORE_HOME points at
+            import subprocess
+            acl = subprocess.run(["icacls", str(home / "state")], capture_output=True, text=True).stdout
+            self.assertNotIn("(I)", acl, acl)
+            self.assertNotIn("BUILTIN\\Users", acl, acl)
 
         again = self.install("--code", "ABCD-1234", "--accept-settings")          # idempotent; the spent code is harmless
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
@@ -130,11 +136,69 @@ class Installer(unittest.TestCase):
         self.assertIn("register the plugin directly", nxt)
 
     def test_tampered_plugin_archive_is_refused(self):
-        self.api.files["plugin/latest.txt"] = b"0.1.0 " + b"0" * 64 + b"\n"
-        result = self.install()
-        self.assertEqual(result.returncode, 68)
-        self.assertIn("cause HASH_MISMATCH", status_lines(result.stdout)[0])
-        self.assertFalse((self.box.home / "plugin").exists())
+        """Whoever controls the download host (or an accepted inspecting proxy) cannot substitute the plugin: the
+        release document must carry a signature from a pinned key, and the archive must match it."""
+        import base64
+        from fake_api import b64u, public_key, sign
+        signed = json.loads(self.api.files["plugin/latest.json"])
+        document = json.loads(signed["manifest"])
+        other_seed = __import__("hashlib").sha256(b"an attacker's key").digest()
+        tampered_archive = self.api.files[f"plugin/{document['archive']}"][:-10] + b"0123456789"
+        forged = dict(document, sha256=__import__("hashlib").sha256(tampered_archive).hexdigest(), size=len(tampered_archive))
+        from fake_api import canonical_json
+        cases = {
+            "unsigned latest.txt only": None,
+            "a release document signed with another key": {"manifest": canonical_json(forged), "kid": signed["kid"],
+                                                           "signature": b64u(sign(other_seed, canonical_json(forged).encode()))},
+            "a signed document with a substituted archive": signed,
+            "a signed document of another kind": self.api.signed(dict(document, schema="theodore-channel-manifest@1")),
+        }
+        for name, envelope in cases.items():
+            with self.subTest(name):
+                self.api.files.pop("plugin/latest.json", None)
+                self.api.files["plugin/latest.txt"] = f"{document['version']} {forged['sha256']}\n".encode()
+                if envelope is not None:
+                    self.api.files["plugin/latest.json"] = json.dumps(envelope).encode()
+                self.api.files[f"plugin/{document['archive']}"] = tampered_archive
+                result = self.install()
+                self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+                self.assertIn("cause HASH_MISMATCH" if envelope is not None else "cause NETWORK", status_lines(result.stdout)[0])
+                self.assertFalse((self.box.home / "plugin").exists())
+                self.assertFalse((self.box.home / "bin").exists(), "no launcher from the download ever ran")
+                self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [], "the installer removed its own files")
+
+    def test_python_and_client_are_checked_against_the_installers_pins_before_anything_runs(self):
+        python_key = next(k for k in json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+                          if k.startswith("stage1_python_") and k.endswith("_sha256") and (("win32" in k) == IS_WINDOWS))
+        for overrides in ({k: "0" * 64 for k in json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+                           if k.startswith("stage1_python_") and k.endswith("_sha256")}, {"stage1_client_sha256": "0" * 64}):
+            with self.subTest(sorted(overrides)[0]):
+                result = self.install(installer=self.box.installer(**overrides))
+                self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+                self.assertIn("cause HASH_MISMATCH", status_lines(result.stdout)[0])
+                self.assertIn("SHA-256 this installer carries", status_lines(result.stdout)[0])
+                self.assertNotIn("/dl/plugin/latest.json", [r["path"] for r in self.api.requests])
+                self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
+        self.assertTrue(python_key)
+
+    def test_an_installer_without_release_keys_refuses_to_run(self):
+        result = self.install(installer=self.box.installer(manifest_key_1_kid="manifest-unset"))
+        self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+        self.assertIn("carries no release signing key", status_lines(result.stdout)[0])
+        self.assertEqual([r for r in self.api.requests], [], "nothing is downloaded")
+
+    def test_the_repository_installers_carry_the_launcher_pins(self):
+        import sync_launchers
+        config = json.loads((ROOT / "plugins" / "theodore" / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+        for kind, path in sync_launchers.INSTALLERS.items():
+            text = path.read_bytes().decode("utf-8")
+            for key, value in sync_launchers.installer_pins(config).items():
+                if kind == "cmd" and key.startswith("PIN_PYTHON_") and key != "PIN_PYTHON_win32_x64":
+                    continue
+                if kind == "sh" and key == "PIN_PYTHON_win32_x64":
+                    continue
+                self.assertIn(value, text, f"{path.name}: {key}")
+            self.assertNotIn("latest.txt", text)
 
 
 if __name__ == "__main__":

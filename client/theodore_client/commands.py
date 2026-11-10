@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 from . import __version__, account, api, core, credentials, install
-from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PREFERENCE_MAX_CHARS,
+from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
 
@@ -801,6 +801,69 @@ def _claude_settings(remove: bool) -> str:
     core.write_json(record_path, {"rules": sorted(set(record.get("rules", []) + added)), "created_marketplace": created or record.get("created_marketplace", False),
                                   "set_auto_update": set_auto or record.get("set_auto_update", False), "path": str(path)})
     return f"claude-code: automatic updates on and launcher allowed in {path}"
+
+
+# --- the installer's plugin step ----------------------------------------------------------------------------------------
+
+def install_plugin(dl_base: str, keys_text: str) -> int:
+    """Fetch <dl>/plugin/latest.json, verify it with the keys the installer carries (they are pinned in the
+    installer, whose own sha256 the site shows), then fetch the archive it names, check its sha256 and size, and
+    unpack it into <home>/plugin. The installer runs this with the Python and client it fetched against pinned
+    sha256 values, so nothing unauthenticated runs before or after it."""
+    keys = {}
+    for item in keys_text.split():
+        kid, _, x = item.partition("=")
+        if kid and x:
+            keys[kid] = x
+    home = core.home()
+    home.ensure()
+    base = dl_base.rstrip("/")
+    what = "the plugin release document"
+    try:
+        _status, _headers, raw = api.request("GET", f"{base}/plugin/latest.json", timeout=60.0)
+        envelope = json.loads(raw.decode("utf-8"))
+    except api.NetworkError as error:
+        raise api.setup_failed(error.cause, f"{what} could not be downloaded from {base} ({error.detail})") from None
+    except api.ApiError as error:
+        raise api.setup_failed("NETWORK", f"{what} could not be downloaded from {base} (HTTP {error.http_status})") from None
+    except ValueError:
+        raise api.setup_failed("HASH_MISMATCH", f"{what} is not a signed document") from None
+    if not isinstance(envelope, dict):
+        raise api.setup_failed("HASH_MISMATCH", f"{what} is not a signed document")
+    doc = account.verify_signed(envelope, what, PLUGIN_LATEST_SCHEMA, keys=keys, platform=False)
+    version, archive_name = str(doc.get("version") or ""), str(doc.get("archive") or "")
+    sha, size = str(doc.get("sha256") or "").lower(), doc.get("size")
+    if not core._SEMVER.match(version) or archive_name != f"theodore-plugin-{version}.tar.gz" or not re.match(r"^[0-9a-f]{64}$", sha) \
+            or not isinstance(size, int) or not 0 < size < 64 * 1024 * 1024:
+        raise api.setup_failed("HASH_MISMATCH", f"{what} is signed but does not describe a plugin archive")
+    archive = home.staging / archive_name
+    try:
+        api.download(f"{base}/plugin/{archive_name}", archive, sha256=sha, size=size, timeout=60.0)
+    except api.NetworkError as error:
+        raise api.setup_failed(error.cause, f"the plugin could not be downloaded from {base} ({error.detail})") from None
+    except api.ApiError as error:
+        raise api.setup_failed("NETWORK", f"the plugin could not be downloaded from {base} (HTTP {error.http_status})") from None
+    if archive.stat().st_size != size:
+        core.remove_tree(archive)
+        raise api.setup_failed("HASH_MISMATCH", "the plugin archive is not the size its signed document gives")
+    partial = home.root / "plugin.partial"
+    core.remove_tree(partial)
+    try:
+        install.extract_tar(archive, partial)
+    finally:
+        core.remove_tree(archive)
+    if not (partial / "plugins" / "theodore" / "skills" / "pptx" / "scripts" / "launcher.json").is_file():
+        core.remove_tree(partial)
+        raise core.internal("the plugin archive has no launcher.")
+    core.remove_tree(home.plugin)
+    os.rename(partial, home.plugin)
+    if not core.IS_WINDOWS:
+        for name in ("pptx", "deck-design"):
+            launcher = home.plugin / "plugins" / "theodore" / "skills" / name / "scripts" / "theodore"
+            if launcher.exists():
+                launcher.chmod(0o755)
+    print(f"theodore-install: plugin {version} is in {home.plugin} (signed by {envelope.get('kid')})", flush=True)
+    return 0
 
 
 # --- uninstall -------------------------------------------------------------------------------------------------------------------

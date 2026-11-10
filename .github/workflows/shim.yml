@@ -1,7 +1,7 @@
 # Tests the plugin, the launcher, the client and the installer, and builds the plugin archives.
 #
 # No secrets and no publishing step. The archives (theodore-<version>.zip for the hosted marketplace.json,
-# theodore-plugin-<version>.tar.gz and latest.txt for the installer, client-<version>.tar for the launcher's
+# theodore-plugin-<version>.tar.gz and latest.manifest.json (to be signed at publish) for the installer, client-<version>.tar for the launcher's
 # stage 1, and install/ with install.md, install.sh and install.cmd for the releases bucket) are uploaded as workflow artifacts; putting them on the download host is the lead's manual step.
 # Everything runs against tests/fake_api.py: no Theodore service is contacted, and no account is needed.
 name: shim

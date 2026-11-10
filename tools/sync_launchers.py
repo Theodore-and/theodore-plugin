@@ -5,6 +5,9 @@
    Python pins (file, sha256, size per platform) and runtime id from runtime/locks/.
 2. Copies the three launcher files from skills/pptx/scripts/ to skills/deck-design/scripts/ byte for byte
    (hosts copy single skill folders, so each skill carries its own launcher).
+3. Stamps the pins block of install/install.sh and install/install.cmd from that launcher.json: the API and
+   download bases, the manifest keys, and the stage-1 Python and client (path under the download base and
+   sha256). The installer trusts nothing it has not checked against these.
 
 `--check` changes nothing and exits 1 when something is out of step (tests and CI use it).
 
@@ -103,6 +106,45 @@ def stamped_launcher_json(env: str | None = None, jwks: dict | None = None) -> s
     return "{\n" + ",\n".join(lines) + "\n}\n"
 
 
+INSTALLERS = {"sh": ROOT / "install" / "install.sh", "cmd": ROOT / "install" / "install.cmd"}
+PIN_BEGIN, PIN_END = "--- pins: stamped by tools/sync_launchers.py", "--- end of pins"
+
+
+def installer_pins(config: dict) -> dict[str, str]:
+    """The installer's pins, from a launcher.json: every value the installer checks a download against."""
+    dl = config["dl_base"].rstrip("/") + "/"
+
+    def rel(url: str) -> str:
+        if not url.startswith(dl):
+            raise SystemExit(f"{url} is not under the download base {dl}")
+        return url[len(dl):]
+
+    keys = [(config[k], config.get(k[:-4] + "_x", "")) for k in sorted(config) if k.startswith("manifest_key_") and k.endswith("_kid")]
+    pins = {"PIN_API_BASE": config["api_base"], "PIN_DL_BASE": config["dl_base"],
+            "PIN_MANIFEST_KEYS": " ".join(f"{kid}={x}" for kid, x in keys),
+            "PIN_RUNTIME_ID": config["stage1_runtime_id"], "PIN_CLIENT_VERSION": config["stage1_client_version"],
+            "PIN_CLIENT": f"{rel(config['stage1_client_url'])} {config['stage1_client_sha256']}"}
+    for platform in ("darwin_arm64", "darwin_x64", "linux_arm64", "linux_x64", "win32_x64"):
+        if f"stage1_python_{platform}_url" in config:
+            pins[f"PIN_PYTHON_{platform}"] = f"{rel(config[f'stage1_python_{platform}_url'])} {config[f'stage1_python_{platform}_sha256']}"
+    return pins
+
+
+def stamped_installer(kind: str, config: dict, text: str | None = None) -> str:
+    """install.sh or install.cmd with its pins block rewritten from `config` (a launcher.json)."""
+    text = INSTALLERS[kind].read_text(encoding="utf-8") if text is None else text
+    eol = "\r\n" if kind == "cmd" else "\n"
+    lines = text.split(eol)
+    start = next(i for i, line in enumerate(lines) if PIN_BEGIN in line)
+    end = next(i for i, line in enumerate(lines) if PIN_END in line)
+    pins = installer_pins(config)
+    if kind == "cmd":
+        body = [f'set "{k}={v}"' for k, v in pins.items() if not k.startswith("PIN_PYTHON_") or k == "PIN_PYTHON_win32_x64"]
+    else:
+        body = [f'{k}="{v}"' for k, v in pins.items() if k != "PIN_PYTHON_win32_x64"]
+    return eol.join(lines[:start + 1] + body + lines[end:])
+
+
 def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description="Stamp launcher.json and refresh the generated launcher copies.")
@@ -128,6 +170,14 @@ def main() -> int:
                     folder.mkdir(parents=True, exist_ok=True)
                     copy.write_bytes(source.read_bytes())
                     copy.chmod(source.stat().st_mode & 0o777)
+    config = json.loads(wanted)
+    for kind, path in INSTALLERS.items():
+        current = path.read_bytes().decode("utf-8")
+        stamped = stamped_installer(kind, config, current)
+        if stamped != current:
+            problems.append(f"{path.relative_to(ROOT)} pins are stale")
+            if not check:
+                path.write_bytes(stamped.encode("utf-8"))
     for line in problems:
         print(("stale: " if check else "updated: ") + line)
     return 1 if (check and problems) else 0

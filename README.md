@@ -14,8 +14,9 @@ By hand:
 
 | Assistant | Command |
 | --- | --- |
-| Any, macOS or Linux | `curl -fsSLo /tmp/theodore-install.sh https://theodoreand.ai/install.sh && sh /tmp/theodore-install.sh` |
-| Any, Windows | `curl.exe -fsSLo "%TEMP%\theodore-install.cmd" https://theodoreand.ai/install.cmd && "%TEMP%\theodore-install.cmd"` |
+| Any, macOS or Linux | `( d=$(mktemp -d) && curl --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
+| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d` |
+| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!""` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
 | Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` |
 
@@ -79,7 +80,8 @@ when nothing else is in it). What is left afterwards:
 - `.pptx-state/theodore-engine.json` inside your deck workspaces (harmless; delete it if you like).
 - Claude Code's cached copy of the plugin under `~/.claude/plugins/cache/theodore/` (about 60 KB of text).
   Claude Code marks it as orphaned and deletes it itself after 14 days.
-- The installer file you downloaded (`/tmp/theodore-install.sh` or `%TEMP%\theodore-install.cmd`).
+- Nothing of the installer: the install commands above download it into a new private folder and delete that
+  folder when it ends.
 - Your account at theodoreand.ai. Remove this device, or the account, in the portal.
 
 If the launcher is gone, deleting those subfolders and the keychain item by hand does the same.

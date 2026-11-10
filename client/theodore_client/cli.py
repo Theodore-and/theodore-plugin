@@ -89,6 +89,9 @@ def _parser() -> argparse.ArgumentParser:
     hs.add_argument("--apply", action="store_true")
     ac = sub.add_parser("activate", add_help=False)
     ac.add_argument("--grant", required=True)
+    ip = sub.add_parser("install-plugin", add_help=False)       # the installer's step: not for assistants
+    ip.add_argument("--dl-base", required=True)
+    ip.add_argument("--keys", required=True)
     un = sub.add_parser("uninstall", add_help=False)
     un.add_argument("--keep-hosts", action="store_true")
     return parser
@@ -146,6 +149,8 @@ def _dispatch(argv: list[str]) -> int:
         return core.emit(account.activate_grant(args.grant))
     if cmd == "uninstall":
         return commands.uninstall(args.keep_hosts)
+    if cmd == "install-plugin":
+        return commands.install_plugin(args.dl_base, args.keys)
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 

@@ -7,11 +7,17 @@ rem   install.cmd                         the same, with a browser sign-in inste
 rem   install.cmd --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
 rem   install.cmd --uninstall             remove Theodore from this computer
 rem
-rem What it does, in order: prints its own SHA-256; downloads the Theodore plugin (a few small text files) into
-rem <home>\plugin and checks its checksum; redeems the code before any large download; downloads Theodore's
-rem Python runtime and engine (about 120 MB); registers the plugin in Claude Code and Codex when they are
-rem installed; starts the asset packs (about 95 MB) in the background; ends with "theodore doctor".
-rem Running it again is safe. Lines starting with THEODORE are statuses for the assistant: follow the NEXT line.
+rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
+rem Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
+rem plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive
+rem it names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 90 MB in all
+rem before the first deck); registers the plugin in Claude Code and Codex when they are installed; starts the asset
+rem packs (about 95 MB) in the background; ends with "theodore doctor". Running it again is safe.
+rem
+rem Trust: this file is the root. Everything it runs was checked first: Python and the client against the pinned
+rem SHA-256 values (certutil), the plugin against a document signed with a pinned key (verified by that Python:
+rem Windows has no inbox Ed25519 tool), the runtime and engine by the client against signed manifests. Downloads
+rem never follow a redirect. Lines starting with THEODORE are statuses for the assistant: follow the NEXT line.
 setlocal EnableExtensions DisableDelayedExpansion
 rem Before any SHIFT: SHIFT moves %0 too.
 set "SELF=%~f0"
@@ -21,13 +27,32 @@ set "SYS32=%SystemRoot%\System32"
 set "CURL=%SYS32%\curl.exe"
 set "TAR=%SYS32%\tar.exe"
 
-set "DL_BASE=https://dl.theodoreand.ai"
+rem --- pins: stamped by tools/sync_launchers.py from launcher.json; do not edit by hand ---------------------------
+set "PIN_API_BASE=https://api.theodoreand.ai"
+set "PIN_DL_BASE=https://dl.theodoreand.ai"
+set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+set "PIN_RUNTIME_ID=43be74ecf52f9321"
+set "PIN_CLIENT_VERSION=0.1.0"
+set "PIN_CLIENT=client/client-0.1.0.tar f974f1ea3c2fc2da6c5c08f928cafcccd8efb7b506ce516b93ffa29703fe5591"
+set "PIN_PYTHON_win32_x64=runtime/43be74ecf52f9321/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
+rem --- end of pins --------------------------------------------------------------------------------------------------
+
+set "API_BASE=%PIN_API_BASE%"
+set "DL_BASE=%PIN_DL_BASE%"
+rem Another mirror is safe: every file is checked against the pins.
 if defined THEODORE_DL_BASE set "DL_BASE=%THEODORE_DL_BASE%"
 set "HOME_DIR=%LOCALAPPDATA%\Theodore"
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
 set "ACCEPT="
+set "WORK="
+set "RC=0"
+rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
+rem abort below 1 KB/s for 60 s, 30 minutes at most.
+set "PROTO==https"
+if /i "%API_BASE:~0,17%"=="http://127.0.0.1:" set "PROTO==https,http"
+set "CURL_OPTS=-fsS --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2"
 
 :parse
 if "%~1"=="" goto :parsed
@@ -62,65 +87,103 @@ exit /b 0
 if not defined CODE goto :code_ok
 echo %CODE%| %SYS32%\findstr.exe /r /i "^[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]-[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$" >nul || goto :bad_code
 :code_ok
+rem A build without its release keys (the repository's placeholder) would trust any plugin: it stops here.
+echo.%PIN_MANIFEST_KEYS%| %SYS32%\findstr.exe /c:"manifest-unset" /c:"=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >nul && goto :no_keys
 if not exist "%CURL%" goto :no_curl
 if not exist "%TAR%" goto :no_curl
+set "ARCH="
+if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" set "ARCH=x64"
+if /i "%PROCESSOR_ARCHITEW6432%"=="AMD64" set "ARCH=x64"
+rem Windows on ARM runs the x64 build through the system's emulation.
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=x64"
+if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" set "ARCH=x64"
+if not defined ARCH goto :no_curl
 if not exist "%HOME_DIR%\staging" mkdir "%HOME_DIR%\staging" 2>nul
 if not exist "%HOME_DIR%\state" mkdir "%HOME_DIR%\state" 2>nul
 if not exist "%HOME_DIR%\staging" goto :not_writable
+rem state\ holds the activation answer (the installation secret) for a minute: only this user may read it, whatever
+rem folder THEODORE_HOME points at. Inheritance is cut and the current user alone gets access, before anything is written.
+set "SID="
+for /f "tokens=2 delims=," %%S in ('%SYS32%\whoami.exe /user /fo csv /nh 2^>nul') do set "SID=%%~S"
+if defined SID "%SYS32%\icacls.exe" "%HOME_DIR%\state" /inheritance:r /grant:r "*%SID%:(OI)(CI)F" >nul 2>&1
+if not defined SID "%SYS32%\icacls.exe" "%HOME_DIR%\state" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F" >nul 2>&1
+rem The installer's own files: one folder of its own (mkdir fails when the name exists, so it is never shared),
+rem removed at every exit.
+for /l %%N in (1,1,5) do if not defined WORK call :make_work
+if not defined WORK goto :not_writable
 
-rem --- 1. the plugin (stub skills and launcher: small text files) ------------------------------------------------
-echo theodore-install: downloading the Theodore plugin
-set "WHAT=the plugin version"
-"%CURL%" -fsSL --retry 2 --connect-timeout 20 -o "%HOME_DIR%\staging\latest.txt" "%DL_BASE%/plugin/latest.txt" 2>nul
-if errorlevel 1 goto :download_failed
-set "P_VERSION="
-set "P_SHA="
-for /f "usebackq tokens=1,2" %%A in ("%HOME_DIR%\staging\latest.txt") do if not defined P_VERSION set "P_VERSION=%%A" & set "P_SHA=%%B"
-if not defined P_SHA goto :hash_failed
-set "WHAT=the plugin"
-"%CURL%" -fsSL --retry 2 --connect-timeout 20 -o "%HOME_DIR%\staging\plugin.tar.gz" "%DL_BASE%/plugin/theodore-plugin-%P_VERSION%.tar.gz" 2>nul
-if errorlevel 1 goto :download_failed
-set "HASH="
-for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%HOME_DIR%\staging\plugin.tar.gz" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
-if defined HASH set "HASH=%HASH: =%"
-if /i not "%HASH%"=="%P_SHA%" goto :hash_failed
-if exist "%HOME_DIR%\plugin.partial" rmdir /s /q "%HOME_DIR%\plugin.partial" >nul 2>&1
-mkdir "%HOME_DIR%\plugin.partial" 2>nul
-"%TAR%" -xzf "%HOME_DIR%\staging\plugin.tar.gz" -C "%HOME_DIR%\plugin.partial"
-if errorlevel 1 goto :not_writable
-if exist "%HOME_DIR%\plugin" rmdir /s /q "%HOME_DIR%\plugin" >nul 2>&1
-move /y "%HOME_DIR%\plugin.partial" "%HOME_DIR%\plugin" >nul 2>&1
-del /q "%HOME_DIR%\staging\plugin.tar.gz" "%HOME_DIR%\staging\latest.txt" >nul 2>&1
-set "SCRIPTS=%HOME_DIR%\plugin\plugins\theodore\skills\pptx\scripts"
-set "LAUNCHER=%SCRIPTS%\theodore.cmd"
-if not exist "%LAUNCHER%" goto :no_launcher
-echo theodore-install: plugin %P_VERSION% is in %HOME_DIR%\plugin
-
-rem --- 2. redeem the one-time code first: it lasts ten minutes, the downloads may take longer -----------------------
-if not defined CODE goto :runtime
-call :jget api_base
-set "API_BASE=%JV%"
-call :jget stage1_client_version
-set "C_VERSION=%JV%"
-set "BODY=%HOME_DIR%\staging\activate.json"
->"%BODY%" echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%C_VERSION%"}
+rem --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer -----------------------
+if not defined CODE goto :stage1
 set "HTTP=000"
-"%CURL%" -sS --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary "@%BODY%" "%API_BASE%/v1/device/activate" >"%HOME_DIR%\staging\http.txt" 2>nul
-set /p HTTP=<"%HOME_DIR%\staging\http.txt"
-del /q "%BODY%" "%HOME_DIR%\staging\http.txt" >nul 2>&1
+rem The body goes through a pipe: no file holds the code.
+echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}| "%CURL%" -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary @- "%API_BASE%/v1/device/activate" >"%WORK%\http.txt" 2>nul
+set /p HTTP=<"%WORK%\http.txt"
 if "%HTTP%"=="200" echo theodore-install: this computer is signed in (the one-time code was accepted)
-if "%HTTP%"=="200" goto :runtime
+if "%HTTP%"=="200" goto :stage1
 del /q "%HOME_DIR%\state\activation.pending" >nul 2>&1
 echo theodore-install: the one-time code was not accepted (it may have expired or been used); a browser sign-in will be offered instead
 set "CODE="
 
-:runtime
-rem --- 3. runtime and engine now, so the first deck request does not wait ------------------------------------------
-echo theodore-install: downloading Theodore's runtime (about 120 MB); this is the long step
+:stage1
+rem --- 2. Python and the client, each against its pinned SHA-256 (the launcher's stage 1, the same files) -----------
+for /f "tokens=1,2" %%A in ("%PIN_PYTHON_win32_x64%") do set "PY_PATH=%%A" & set "PY_SHA=%%B"
+for /f "tokens=1,2" %%A in ("%PIN_CLIENT%") do set "C_PATH=%%A" & set "C_SHA=%%B"
+set "RT=%PIN_RUNTIME_ID%"
+set "CV=%PIN_CLIENT_VERSION%"
+set "RT_DIR=%HOME_DIR%\runtime\%RT%"
+set "PY=%RT_DIR%\python\python.exe"
+set "HAVE="
+if exist "%RT_DIR%\.parts\python" set /p HAVE=<"%RT_DIR%\.parts\python"
+if exist "%PY%" if /i "%HAVE%"=="%PY_SHA%" goto :client
+echo theodore-install: downloading Theodore's Python (checked against its pinned SHA-256)
+set "WHAT=Theodore's Python"
+call :fetch "%DL_BASE%/%PY_PATH%" "%WORK%\python.tar.gz"
+if errorlevel 1 goto :download_failed
+call :check "%WORK%\python.tar.gz" "%PY_SHA%"
+if errorlevel 1 goto :hash_failed
+if exist "%RT_DIR%\python" rmdir /s /q "%RT_DIR%\python" >nul 2>&1
+mkdir "%WORK%\py" 2>nul
+if not exist "%RT_DIR%\.parts" mkdir "%RT_DIR%\.parts" 2>nul
+"%TAR%" -xzf "%WORK%\python.tar.gz" -C "%WORK%\py"
+if errorlevel 1 goto :not_writable
+move /y "%WORK%\py\python" "%RT_DIR%\python" >nul 2>&1
+if not exist "%PY%" goto :not_writable
+>"%RT_DIR%\.parts\python" echo %PY_SHA%
+del /q "%WORK%\python.tar.gz" >nul 2>&1
+:client
+if exist "%HOME_DIR%\client\%CV%\__main__.py" goto :pointers
+set "WHAT=the Theodore client"
+call :fetch "%DL_BASE%/%C_PATH%" "%WORK%\client.tar"
+if errorlevel 1 goto :download_failed
+call :check "%WORK%\client.tar" "%C_SHA%"
+if errorlevel 1 goto :hash_failed
+mkdir "%WORK%\client" 2>nul
+if not exist "%HOME_DIR%\client" mkdir "%HOME_DIR%\client" 2>nul
+"%TAR%" -xf "%WORK%\client.tar" -C "%WORK%\client"
+if errorlevel 1 goto :not_writable
+if exist "%HOME_DIR%\client\%CV%" rmdir /s /q "%HOME_DIR%\client\%CV%" >nul 2>&1
+move /y "%WORK%\client\%CV%" "%HOME_DIR%\client\%CV%" >nul 2>&1
+if not exist "%HOME_DIR%\client\%CV%\__main__.py" goto :not_writable
+:pointers
+if not exist "%HOME_DIR%\runtime\current.txt" >"%HOME_DIR%\runtime\current.txt" echo %RT%
+if not exist "%HOME_DIR%\client\current.txt" >"%HOME_DIR%\client\current.txt" echo %CV%
+
+rem --- 3. the plugin: the signed release document, then the archive it names ---------------------------------------
+echo theodore-install: downloading the Theodore plugin (checked against its signed release document)
 set "THEODORE_HOME=%HOME_DIR%"
+"%PY%" -I "%HOME_DIR%\client\%CV%" install-plugin --dl-base "%DL_BASE%" --keys "%PIN_MANIFEST_KEYS%"
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" goto :finish
+set "SCRIPTS=%HOME_DIR%\plugin\plugins\theodore\skills\pptx\scripts"
+set "LAUNCHER=%SCRIPTS%\theodore.cmd"
+if not exist "%LAUNCHER%" goto :no_launcher
+
+rem --- 4. runtime and engine now, so the first deck request does not wait ------------------------------------------
+echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 90 MB in all); this is the long step
 set "THEODORE_BOOTSTRAP_WAIT=1800"
 call "%LAUNCHER%" setup --wait 1800
-if errorlevel 1 exit /b %ERRORLEVEL%
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" goto :finish
 set "THEODORE_BOOTSTRAP_WAIT="
 set "T=%HOME_DIR%\bin\theodore.cmd"
 if not exist "%T%" set "T=%LAUNCHER%"
@@ -130,13 +193,14 @@ call "%T%" whoami >nul 2>&1
 if errorlevel 1 call "%T%" login --start
 
 :hosts
-rem --- 4. the assistants on this computer ------------------------------------------------------------------------------
+rem --- 5. the assistants on this computer ------------------------------------------------------------------------------
 echo theodore-install: registering Theodore in the assistants found on this computer
 call "%T%" hosts register
+set "HOSTS_RC=%ERRORLEVEL%"
 if defined ACCEPT call "%T%" hosts settings --apply
 if not defined ACCEPT call "%T%" hosts settings
 
-rem --- 5. background downloads -------------------------------------------------------------------------------------------
+rem --- 6. background downloads -------------------------------------------------------------------------------------------
 call "%T%" whoami >nul 2>&1
 if errorlevel 1 goto :doctor
 call "%T%" guide pptx >nul 2>&1
@@ -144,19 +208,55 @@ echo theodore-install: asset packs (icons, flags, maps, backgrounds; about 95 MB
 call "%T%" packs install --all --background >nul 2>&1
 
 :doctor
-rem --- 6. the check the assistant reports ---------------------------------------------------------------------------------
+rem --- 7. the check the assistant reports: the last line says what failed, if anything did -------------------------
 echo theodore-install: the stable launcher is %T%
 call "%T%" doctor
-exit /b %ERRORLEVEL%
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" goto :finish
+if "%HOSTS_RC%"=="0" goto :finish
+echo THEODORE RETRY: Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above).
+echo NEXT: register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session.
+echo TELL THE USER: Theodore is installed, but I could not add it to one of your assistants automatically. I will add it by hand.
+set "RC=75"
+goto :finish
 
-:jget
-set "JV="
-for /f "usebackq tokens=1,* delims=:" %%A in (`%SYS32%\findstr.exe /c:"\"%~1\"" "%SCRIPTS%\launcher.json" 2^>nul`) do if not defined JV set "JV=%%B"
-if not defined JV exit /b 0
-set "JV=%JV:"=%"
-if "%JV:~-1%"=="," set "JV=%JV:~0,-1%"
-if "%JV:~0,1%"==" " set "JV=%JV:~1%"
+rem =====================================================================================================================
+rem Subroutines
+rem =====================================================================================================================
+
+:make_work
+set "TRY=%HOME_DIR%\staging\install-%RANDOM%%RANDOM%"
+mkdir "%TRY%" 2>nul && set "WORK=%TRY%"
 exit /b 0
+
+:fetch
+rem %1 url, %2 destination. Errorlevel 0 when the server answered 200 with the file; DETAIL says why not.
+set "HTTP=000"
+"%CURL%" %CURL_OPTS% --proto %PROTO% -o "%~2" -w "%%{http_code}" "%~1" >"%WORK%\http.txt" 2>"%WORK%\err.txt"
+set "CRC=%ERRORLEVEL%"
+set /p HTTP=<"%WORK%\http.txt"
+if "%CRC%"=="0" if "%HTTP%"=="200" exit /b 0
+set "DETAIL=curl exit %CRC%, HTTP %HTTP%"
+if "%HTTP:~0,1%"=="3" set "DETAIL=it answered with a redirect, which is not followed"
+del /q "%~2" >nul 2>&1
+exit /b 1
+
+:check
+rem %1 file, %2 expected sha256. Errorlevel 0 when they match; the file is deleted when they do not.
+set "HASH="
+for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%~1" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
+if defined HASH set "HASH=%HASH: =%"
+if /i "%HASH%"=="%~2" exit /b 0
+del /q "%~1" >nul 2>&1
+exit /b 1
+
+:finish
+if defined WORK if exist "%WORK%" rmdir /s /q "%WORK%" >nul 2>&1
+exit /b %RC%
+
+rem =====================================================================================================================
+rem Statuses (three lines each, then the exit code)
+rem =====================================================================================================================
 
 :bad_option
 echo THEODORE USAGE: unknown installer option %~1.
@@ -170,8 +270,14 @@ echo NEXT: use the code exactly as it appears in the sentence the user pasted.
 echo TELL THE USER: The activation code did not look right. Please copy the sentence again from theodoreand.ai.
 exit /b 64
 
+:no_keys
+echo THEODORE INTERNAL: this installer carries no release signing key (it was built without its keys), so it cannot trust any download.
+echo NEXT: do not retry. Tell the user to download the installer again from https://theodoreand.ai/install.
+echo TELL THE USER: This copy of the Theodore installer is incomplete. Please download it again from theodoreand.ai/install.
+exit /b 78
+
 :no_curl
-echo THEODORE UNSUPPORTED_PLATFORM: this Windows has no curl.exe or tar.exe; Theodore needs 64-bit Windows 10 version 1803 or later.
+echo THEODORE UNSUPPORTED_PLATFORM: this Windows has no curl.exe or tar.exe, or is not 64-bit; Theodore needs 64-bit Windows 10 version 1803 or later.
 echo NEXT: do not retry. Register the plugin directly instead (step 2 of the install page).
 echo TELL THE USER: Theodore's installer needs Windows 10 version 1803 or later.
 exit /b 69
@@ -180,22 +286,26 @@ exit /b 69
 echo THEODORE SETUP_FAILED: cause DISK: Theodore's folder is not writable.
 echo NEXT: free disk space or set THEODORE_HOME to a writable folder, then run the installer again.
 echo TELL THE USER: Theodore could not write its files. The disk may be full or the folder protected.
-exit /b 68
+set "RC=68"
+goto :finish
 
 :download_failed
-echo THEODORE SETUP_FAILED: cause NETWORK: %WHAT% could not be downloaded from %DL_BASE%.
+echo THEODORE SETUP_FAILED: cause NETWORK: %WHAT% could not be downloaded from %DL_BASE% (%DETAIL%).
 echo NEXT: if the download host is blocked, register the plugin directly instead (step 2 of the install page); otherwise check the connection and run the installer again.
 echo TELL THE USER: Theodore's installer could not download its files. I will try the direct route.
-exit /b 68
+set "RC=68"
+goto :finish
 
 :hash_failed
-echo THEODORE SETUP_FAILED: cause HASH_MISMATCH: the plugin did not match its published checksum.
+echo THEODORE SETUP_FAILED: cause HASH_MISMATCH: %WHAT% did not match the SHA-256 this installer carries.
 echo NEXT: run the installer again; if it fails twice, tell the user to write to support@theodoreand.ai.
 echo TELL THE USER: A Theodore download arrived damaged. I am trying again.
-exit /b 68
+set "RC=68"
+goto :finish
 
 :no_launcher
 echo THEODORE INTERNAL: the plugin archive has no launcher.
 echo NEXT: tell the user to write to support@theodoreand.ai.
 echo TELL THE USER: Theodore's download is incomplete.
-exit /b 78
+set "RC=78"
+goto :finish

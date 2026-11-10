@@ -218,13 +218,26 @@ class Sandbox:
         return config
 
     def serve_plugin_archive(self) -> dict:
-        """Build the plugin archives from this sandbox's tree (test launcher.json inside) and serve them under /dl/plugin/."""
+        """Build the plugin archives from this sandbox's tree (test launcher.json inside) and serve them under /dl/plugin/,
+        with latest.json signed by the fake's manifest key as the publish step signs it."""
         import build_plugin_archives
         out = self.tmp / "plugin-dist"
         record = build_plugin_archives.build(out, self.tree)
         for path in out.iterdir():
             self.api.files[f"plugin/{path.name}"] = path.read_bytes()
+        self.api.files["plugin/latest.json"] = json.dumps(self.api.signed(json.loads((out / "latest.manifest.json").read_text()))).encode()
         return record
+
+    def installer(self, **overrides) -> Path:
+        """install.sh or install.cmd with its pins stamped for this sandbox (the fake's key, API and stage-1 files)."""
+        import sync_launchers
+        config = json.loads((self.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text(encoding="utf-8"))
+        config.update(overrides)
+        kind = "cmd" if IS_WINDOWS else "sh"
+        path = self.tmp / "installer" / f"install.{kind}"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(sync_launchers.stamped_installer(kind, config).encode("utf-8"))
+        return path
 
     def install_client_directly(self) -> None:
         """Skip the launcher: put launcher.json where the client looks for it, so `run_client` works alone."""

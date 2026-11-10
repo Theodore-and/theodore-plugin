@@ -158,7 +158,11 @@ class GeneratedFiles(unittest.TestCase):
                 self.assertIn("skills/pptx/scripts/theodore", names)
                 self.assertEqual((bundle.getinfo("skills/pptx/scripts/theodore").external_attr >> 16) & 0o777, 0o755)
                 self.assertIn(b"\r\n", bundle.read("skills/pptx/scripts/theodore.cmd"))
-            self.assertEqual((Path(one) / "latest.txt").read_text().split(), [first["version"], first["tar"]["sha256"]])
+            latest = (Path(one) / "latest.manifest.json").read_text()
+            self.assertEqual(json.loads(latest), {"schema": "theodore-plugin-latest@1", "version": first["version"], "archive": first["tar"]["file"],
+                                                  "sha256": first["tar"]["sha256"], "size": first["tar"]["size"]})
+            self.assertEqual(latest, json.dumps(json.loads(latest), sort_keys=True, separators=(",", ":")), "canonical JSON: the bytes to sign")
+            self.assertFalse((Path(one) / "latest.txt").exists(), "nothing unsigned is published for the installer")
 
 
     def test_a_release_build_refuses_the_placeholder_key_and_takes_stamped_keys(self):
@@ -349,9 +353,17 @@ class Contract(unittest.TestCase):
 class InstallPage(unittest.TestCase):
     def test_install_md_has_the_two_commands_and_the_substitution_point(self):
         text = (ROOT / "install" / "install.md").read_text()
-        self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 3, "twice in the commands, once in the note for the Worker")
-        self.assertIn("curl -fsSLo /tmp/theodore-install.sh https://theodoreand.ai/install.sh && sh /tmp/theodore-install.sh --code {{ACTIVATION_CODE}}", text)
-        self.assertIn('curl.exe -fsSLo "%TEMP%\\theodore-install.cmd" https://theodoreand.ai/install.cmd && "%TEMP%\\theodore-install.cmd" --code {{ACTIVATION_CODE}}', text)
+        self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 4, "in the three commands, once in the note for the Worker")
+        # A new private folder each time: mktemp -d (0700) on POSIX, a random name created exclusively under %TEMP% on
+        # Windows; never a fixed path another user could create first.
+        self.assertIn('( d=$(mktemp -d) && curl --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )', text)
+        self.assertIn('New-Item -ItemType Directory -Path $d -ErrorAction Stop', text)
+        self.assertIn('mkdir "!D!" && curl.exe --proto =https -fsS -o "!D!\\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\\install.cmd" --code {{ACTIVATION_CODE}}', text)
+        for path in (ROOT / "install" / "install.md", ROOT / "README.md"):
+            page = path.read_text()
+            self.assertNotIn("/tmp/theodore-install", page, path.name)
+            self.assertNotIn("%TEMP%\\theodore-install.cmd", page, path.name)
+            self.assertNotIn("curl -fsSL", page, f"{path.name}: no redirect is followed (-L)")
         self.assertIn("claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json", text)
         self.assertIn("codex plugin add theodore@theodore", text)
         self.assertIn("If a command prints a line starting with THEODORE, follow its NEXT line.", text)

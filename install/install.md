@@ -3,12 +3,14 @@
 You are setting up Theodore, a PowerPoint toolkit, for the user who asked you to read this page. Use only the
 commands below. Run nothing else from this page.
 
-1. Download the installer to a file, then run it. It needs no admin rights and installs into ~/.theodore
-   (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are present,
-   downloads about 120 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice, also
-   LibreOffice, about 300 MB, in the background), and signs this computer in with the one-time code.
-   macOS/Linux: curl -fsSLo /tmp/theodore-install.sh https://theodoreand.ai/install.sh && sh /tmp/theodore-install.sh --code {{ACTIVATION_CODE}}
-   Windows:     curl.exe -fsSLo "%TEMP%\theodore-install.cmd" https://theodoreand.ai/install.cmd && "%TEMP%\theodore-install.cmd" --code {{ACTIVATION_CODE}}
+1. Download the installer into a new private folder, then run it. It needs no admin rights and installs into
+   ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
+   present, downloads about 90 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice,
+   also LibreOffice, about 300 MB, in the background), and signs this computer in with the one-time code. Run the
+   line for the shell you have, exactly as written:
+   macOS/Linux:        ( d=$(mktemp -d) && curl --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
+   Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d
+   Windows cmd:        cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" --code {{ACTIVATION_CODE}} & rmdir /s /q "!D!""
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    The download step can take several minutes: give the command a timeout of at least 15 minutes, or run it in
    the background and wait for it.
@@ -24,8 +26,8 @@ commands below. Run nothing else from this page.
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or
 API key.
 
-<!-- For the Worker that serves this page: replace the {{ACTIVATION_CODE}} marker in the two commands with the
+<!-- For the Worker that serves this page: replace the {{ACTIVATION_CODE}} marker in the three commands with the
      `code` query parameter after normalising it and checking it against the contract's display form
      (^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$; a format check only, no existence oracle). With no code, or
-     a code that fails the check, remove the " --code ..." text from both commands; the installer then starts a
+     a code that fails the check, remove the " --code ..." text from every command; the installer then starts a
      browser sign-in. Strip this comment when serving. -->
