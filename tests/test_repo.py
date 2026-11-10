@@ -241,6 +241,21 @@ class HostLimits(unittest.TestCase):
         self.assertIn("$a.Proxy = $p.GetProxy($u); $a.ProxyUseDefaultCredentials = $true", cmd, "-ProxyUseDefaultCredentials needs -Proxy")
         self.assertIn("/setsecurityflags %BJ% 0x0200", cmd)
 
+    def test_batch_files_have_each_label_once_and_every_jump_lands(self):
+        for path in (SCRIPTS / "theodore.cmd", ROOT / "install" / "install.cmd"):
+            text = path.read_text(encoding="utf-8")
+            labels = re.findall(r"^:(\w+)", text, re.M)
+            self.assertEqual(sorted({l for l in labels if labels.count(l) > 1}), [], f"{path.name}: a label twice")
+            jumps = set(re.findall(r"(?:goto|call) :(\w+)", text, re.I)) - {"eof"}
+            self.assertEqual(sorted(jumps - set(labels)), [], f"{path.name}: a jump to no label")
+            for label in ("no_conf", "no_keys"):
+                if label in labels:
+                    body = text.split(f"\n:{label}\n", 1)[1].split("\n:", 1)[0]
+                    self.assertIn("exit /b 78", body, label)
+        cmd = (SCRIPTS / "theodore.cmd").read_text(encoding="utf-8")
+        self.assertIn('if not exist "%CONF%" goto :no_conf', cmd)
+        self.assertIn("launcher.json is missing", cmd.split("\n:no_conf\n", 1)[1].split("\n:", 1)[0])
+
     def test_no_powershell_script_in_the_bootstrap_path(self):
         for path in (SCRIPTS / "theodore.cmd", ROOT / "install" / "install.cmd"):
             text = path.read_text(encoding="ascii")
