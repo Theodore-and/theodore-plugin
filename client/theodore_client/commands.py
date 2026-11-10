@@ -103,7 +103,7 @@ def _guide_pptx(part: int) -> int:
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_UPDATE_WAIT"):
         wait = float(os.environ["THEODORE_TEST_UPDATE_WAIT"])
     install.check_updates(force=first, wait=wait, timeout=20.0 if first else 3.0)
-    version = install.current_engine()
+    version = install.selected_engine()          # the global pin's instructions when pinned: they belong to that engine
     if not version:
         state = Job("engine-update").read()
         if state.get("failed") and not Job("engine-update").alive():
@@ -509,7 +509,7 @@ def update(action: str, value: str | None) -> int:
         return core.emit(install.rollback())
     if action == "pin":
         if not value or not install.engine_installed(value):
-            have = sorted(p.name for p in core.home().engines.iterdir() if install.engine_installed(p.name)) if core.home().engines.exists() else []
+            have = install.installed_versions()
             raise core.usage(f"engine {value or '(none given)'} is not installed. Installed: {', '.join(have) or 'none'}.")
         record = install.pins()
         record["engine"] = value

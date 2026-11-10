@@ -251,8 +251,20 @@ def pins() -> dict:
     return core.read_json(core.home().state / "pins.json")
 
 
+def engine_dirs() -> dict:
+    """engines/dirs.json: version -> folder name, for a version whose build was replaced (the compiled build of a
+    version first installed from source). Without an entry the folder is engines/<version>."""
+    return core.read_json(core.home().engines / "dirs.json")
+
+
 def engine_dir(version: str) -> Path:
-    return core.home().engines / version
+    return core.home().engines / str(engine_dirs().get(version) or version)
+
+
+def installed_versions() -> list[str]:
+    root = core.home().engines
+    found = {core.read_json(c / ".theodore-engine.json").get("version") for c in (root.iterdir() if root.exists() else []) if c.is_dir()}
+    return sorted(v for v in found if v and engine_installed(v))
 
 
 def engine_installed(version: str) -> bool:
@@ -384,7 +396,7 @@ def stage_engine(entry: dict, job: Job | None = None) -> str:
             raise api.status_from(error, f"engine {version} download") from None
         except api.NetworkError as error:
             raise api.offline(error, f"engine {version} could not be downloaded") from None
-        partial = home.engines / f"{version}.partial"
+        partial = home.engines / f"{version}@{str(entry['sha256'])[:12]}.partial"
         core.remove_tree(partial)
         try:
             extract_zip(archive, partial)
@@ -399,12 +411,18 @@ def stage_engine(entry: dict, job: Job | None = None) -> str:
             raise
         core.write_json(partial / ".theodore-engine.json", {"version": version, "sha256": entry["sha256"], "runtime_id": runtime_id,
                                                               "kind": entry.get("kind"), "installed_at": int(core.now())})
-        aside = home.engines / f"{version}.old.partial"     # the same version in another kind (source, then compiled) swaps in place
-        core.remove_tree(aside)
         if target.exists():
-            os.rename(target, aside)
-        os.rename(partial, target)
-        core.remove_tree(aside)
+            # The same version in another build (source, then compiled): installed beside it under a new name and the
+            # pointer moves. The old folder may be in use by a running build; it is collected once unused for a day.
+            final = home.engines / f"{version}@{str(entry['sha256'])[:12]}"
+            core.remove_tree(final)
+            os.rename(partial, final)
+            with core.lock("current"):
+                dirs = engine_dirs()
+                dirs[version] = final.name
+                core.write_json(home.engines / "dirs.json", dirs)
+        else:
+            os.rename(partial, target)
         core.remove_tree(archive)
     return version
 
@@ -428,28 +446,38 @@ def touch_used(version: str) -> None:
         pass
 
 
+SUPERSEDED_KEEP_S = DAY
+
+
 def collect_garbage() -> list[str]:
-    """Keep current, previous, engines used within 14 days or pinned within 30, at most four. Returns what was removed."""
+    """Keep current, previous, engines used within 14 days or pinned within 30, at most four. A folder replaced by
+    another build of its version goes once unused for a day. Returns what was removed."""
     home, state, now = core.home(), engines_state(), core.now()
     keep_always = {v for v in (state.get("version"), state.get("previous"), pins().get("engine")) if v}
     pinned = {}
     for record in (pins().get("workspaces") or {}).values():
         pinned[record.get("version")] = max(pinned.get(record.get("version"), 0), float(record.get("at") or 0))
-    candidates = []
+    candidates, removed = [], []
     for child in home.engines.iterdir() if home.engines.exists() else []:
         if not child.is_dir() or child.name.endswith(".partial") or not (child / ".theodore-engine.json").exists():
             continue
+        version = str(core.read_json(child / ".theodore-engine.json").get("version") or child.name)
         used = (child / ".last-used").stat().st_mtime if (child / ".last-used").exists() else core.read_json(child / ".theodore-engine.json").get("installed_at", 0)
-        recent = now - float(used) < ENGINE_KEEP_USED_DAYS * DAY or now - pinned.get(child.name, 0) < ENGINE_KEEP_PINNED_DAYS * DAY
-        candidates.append((child.name in keep_always, recent, float(used), child))
+        if engine_dir(version) != child:              # superseded by another build of the same version
+            if now - float(used) > SUPERSEDED_KEEP_S:
+                core.remove_tree(child)
+                removed.append(child.name)
+            continue
+        recent = now - float(used) < ENGINE_KEEP_USED_DAYS * DAY or now - pinned.get(version, 0) < ENGINE_KEEP_PINNED_DAYS * DAY
+        candidates.append((version in keep_always, recent, float(used), child))
     candidates.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
-    removed = []
     for index, (always, recent, _used, child) in enumerate(candidates):
         if always or (recent and index < ENGINE_KEEP_MAX):
             continue
         core.remove_tree(child)
         removed.append(child.name)
-    referenced = {core.read_json(c[3] / ".theodore-engine.json").get("runtime_id") for c in candidates if c[3].exists()}
+    survivors = [c for c in home.engines.iterdir() if c.is_dir() and (c / ".theodore-engine.json").exists()] if home.engines.exists() else []
+    referenced = {core.read_json(c / ".theodore-engine.json").get("runtime_id") for c in survivors}
     referenced.add(core.read_text(home.runtime / "current.txt"))
     referenced.discard(None)
     in_use = {(home.runtime / name).resolve() for name in referenced if name}      # a linked id keeps its target alive
@@ -602,6 +630,7 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
                      f"run {quoted_launcher()} update --apply, then run the same command again.",
                      "Theodore needs an update before it can continue. I am installing it.")
     enforce_restrictions(current_engine())
+    collect_garbage()
     return manifest
 
 
@@ -648,16 +677,43 @@ def _workspaces(args: list[str]) -> list[Path]:
     return found
 
 
-def engine_for(args: list[str]) -> str:
-    """Workspace pin when an argument is a directory holding .pptx-state/, otherwise the global pin or current."""
-    for workspace in _workspaces(args):
-        pinned = core.read_json(workspace / ".pptx-state" / "theodore-engine.json").get("version")
-        if pinned and engine_installed(pinned):
-            return pinned
+def selected_engine() -> str | None:
+    """The engine a call without a workspace uses: the global pin (update --pin) when installed, else current."""
     forced = pins().get("engine")
     if forced and engine_installed(forced):
         return forced
-    current = current_engine()
+    return current_engine()
+
+
+def _restore_engine(workspace: Path, record: dict) -> str:
+    """A workspace pinned to an engine that is no longer on disk gets that engine back (same version, same sha256,
+    from the release route), or is refused. It is never run on another engine without being asked."""
+    version, sha = str(record.get("version") or ""), str(record.get("sha256") or "")
+    reason = "its pin does not name the build's checksum"
+    if sha:
+        try:
+            return stage_engine({"version": version, "sha256": sha, "kind": record.get("kind"), "runtime_id": record.get("runtime_id")})
+        except EngineError as exc:
+            reason = str(exc)
+        except Status as status:
+            reason = status.summary
+    other = selected_engine() or "the current version"
+    raise Status("UPDATE_REQUIRED", f"this workspace was started with engine {version}, which is no longer on this computer and could not be "
+                                    f"fetched again ({reason}).",
+                 f"ask the user. To continue this deck with engine {other} (it may lay the deck out differently), delete "
+                 f"{workspace / '.pptx-state' / 'theodore-engine.json'} and run the same command again.",
+                 f"This deck was started with Theodore {version}, which is no longer installed and could not be downloaded again. "
+                 f"I can continue it with version {other}, which may change its layout. Shall I?")
+
+
+def engine_for(args: list[str]) -> str:
+    """Workspace pin when an argument is a directory holding .pptx-state/, otherwise the global pin or current."""
+    for workspace in _workspaces(args):
+        record = core.read_json(workspace / ".pptx-state" / "theodore-engine.json")
+        pinned = record.get("version")
+        if pinned:
+            return pinned if engine_installed(pinned) else _restore_engine(workspace, record)
+    current = selected_engine()
     if not current:
         raise Status("SETUP_IN_PROGRESS", "the engine is not installed yet.",
                      f"run {quoted_launcher()} guide pptx first; it installs the engine and prints the instructions.",
@@ -670,11 +726,13 @@ def _pin_workspaces(args: list[str], version: str) -> None:
     record = pins()
     spaces = record.setdefault("workspaces", {})
     changed = False
+    build = core.read_json(engine_dir(version) / ".theodore-engine.json")
     for workspace in _workspaces(args):
         pin_file = workspace / ".pptx-state" / "theodore-engine.json"
         if not pin_file.exists():
-            try:
-                core.write_json(pin_file, {"version": version, "pinned_at": int(core.now())})
+            try:       # the build's checksum too, so a collected engine can be fetched back exactly
+                core.write_json(pin_file, {"version": version, "pinned_at": int(core.now()), "sha256": build.get("sha256"),
+                                           "kind": build.get("kind"), "runtime_id": build.get("runtime_id")})
             except OSError:
                 continue
         pinned = core.read_json(pin_file).get("version") or version

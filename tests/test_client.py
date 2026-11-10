@@ -351,6 +351,43 @@ class Engine(ClientCase):
         self.assertEqual(sorted(p["version"] for p in pins.values()), sorted(["1.0.1", self.ENGINE_VERSION]))
         self.assertNotIn("workspace", json.dumps(pins), "no folder name is stored")
 
+    def test_a_workspace_whose_engine_was_collected_gets_it_back_or_is_refused_never_moved(self):
+        self.ready()
+        ws = self.box.tmp / "old deck"
+        ws.mkdir()
+        self.assertEqual(self.client("pptx", "start", str(ws)).returncode, 0)
+        self.assertEqual(json.loads((ws / ".pptx-state" / "theodore-engine.json").read_text())["sha256"], self.api.engine["sha256"])
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        import shutil
+        shutil.rmtree(self.box.home / "engines" / self.ENGINE_VERSION)            # collected (30 days unused)
+        self.assertEqual(self.client("pptx", "apply", str(ws)).returncode, 0)
+        self.assertEqual((ws / ".pptx-state" / "engine-used.txt").read_text(), self.ENGINE_VERSION, "the pinned engine came back")
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0", "current is unchanged")
+        shutil.rmtree(self.box.home / "engines" / self.ENGINE_VERSION)
+        del self.api.engine_files[self.ENGINE_VERSION]                            # and it can no longer be downloaded
+        (ws / ".pptx-state" / "engine-used.txt").write_text("untouched")
+        first, nxt, tell = self.assertStatus(self.client("pptx", "apply", str(ws)), "UPDATE_REQUIRED", 72)
+        self.assertIn(f"started with engine {self.ENGINE_VERSION}", first)
+        self.assertIn("theodore-engine.json", nxt)
+        self.assertIn("2.0.0", tell)
+        self.assertEqual((ws / ".pptx-state" / "engine-used.txt").read_text(), "untouched", "never silently run on another engine")
+        legacy = self.box.tmp / "older deck"                                       # a pin written before the pin carried its sha256
+        (legacy / ".pptx-state").mkdir(parents=True)
+        (legacy / ".pptx-state" / "theodore-engine.json").write_text(json.dumps({"version": "0.9.0", "pinned_at": 1}))
+        self.assertStatus(self.client("pptx", "apply", str(legacy)), "UPDATE_REQUIRED", 72)
+
+    def test_a_global_pin_selects_the_instructions_too(self):
+        self.ready()
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        self.assertStatus(self.client("update", "--pin", self.ENGINE_VERSION), "OK", 0)
+        out = self.client("guide", "pptx").stdout
+        self.assertEqual(out.splitlines()[0], f"=== THEODORE pptx {self.ENGINE_VERSION} (beta), part 1/1 ===")
+        self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", out)
+        self.assertIn(str(self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx"), out)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
+
     def test_server_rollback_is_followed_at_the_next_guide(self):
         self.ready()
         self.api.publish_engine("1.0.1", engine_zip("1.0.1"))
@@ -527,18 +564,31 @@ class Engine(ClientCase):
         source_sha = record["sha256"]
         engine_requests = [r for r in self.api.requests if r["path"].endswith("/engine")]
         self.assertTrue(all(set(r["query"]) == {"platform", "arch"} for r in engine_requests), "the client asks for its own platform's artifact")
-        # the compiled build of the same version passes parity later: same version, another archive, swapped in place
+        old = self.box.home / "engines" / self.ENGINE_VERSION
+        running = json.loads(self.client("pptx", "env").stdout)["exe"]           # a build in progress uses this folder
+        self.assertTrue(running.startswith(str(old)), running)
+        # The compiled build of the same version passes parity later: it installs beside the source build under a new
+        # folder name and the pointer moves; the folder a running build uses is not touched.
         compiled = engine_zip(self.ENGINE_VERSION, skill_text="---\nname: pptx\n---\n\n# PPTX Skill\n\nCompiled build.\n")
         self.api.publish_engine(self.ENGINE_VERSION, compiled, kind="engine-native")
+        self.api.clock_offset = 7 * 3600
         out = self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}).stdout
         self.assertIn("Compiled build.", out)
-        record = self.state(f"engines/{self.ENGINE_VERSION}/.theodore-engine.json")
-        self.assertEqual(record["kind"], "engine-native")
-        self.assertNotEqual(record["sha256"], source_sha)
+        new = self.box.home / "engines" / f"{self.ENGINE_VERSION}@{self.api.engine['sha256'][:12]}"
+        self.assertTrue((new / ".theodore-engine.json").exists())
+        self.assertEqual(self.state(f"engines/{new.name}/.theodore-engine.json")["kind"], "engine-native")
+        self.assertNotEqual(self.state(f"engines/{new.name}/.theodore-engine.json")["sha256"], source_sha)
+        self.assertTrue((old / "skills" / "pptx" / "scripts" / "pptx.py").exists(), "the source build stays until it is collected")
         self.assertEqual(self.state("engines/current.json"), {"version": self.ENGINE_VERSION, "previous": None})
-        self.assertEqual(sorted(p.name for p in (self.box.home / "engines").iterdir()), [self.ENGINE_VERSION, "current.json"])
+        self.assertTrue(json.loads(self.client("pptx", "env").stdout)["exe"].startswith(str(new)))
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
         self.assertIn("(engine-native)", self.client("doctor").stdout)
+        # Collected later: a superseded folder unused for a day goes at the next check.
+        os.utime(old / ".last-used", (time.time() - 3 * DAY, time.time() - 3 * DAY)) if (old / ".last-used").exists() else None
+        self.api.clock_offset = 3 * DAY
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(3 * DAY)})
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
 
     def test_a_manifest_without_an_installable_artifact_is_update_required(self):
         self.ready()
