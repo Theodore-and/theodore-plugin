@@ -263,8 +263,11 @@ class Failures(LauncherCase):
         key = python["url"].split("/dl/", 1)[1]
         self.api.dl_status[key] = 407
         result = self.run_launcher("guide", "pptx")
-        if IS_WINDOWS and result.returncode == 67:     # Windows tries its own proxy credentials (PowerShell, BITS) first
-            self.box.wait_jobs(180)
+        import time
+        deadline = time.monotonic() + 300
+        while IS_WINDOWS and result.returncode == 67 and time.monotonic() < deadline:
+            # Windows tries its own proxy credentials (PowerShell, then BITS, two minutes at most) before it gives up
+            time.sleep(15)
             result = self.run_launcher("guide", "pptx")
         first, nxt, _t = self.assertStatus(result, "SETUP_FAILED", 68)
         self.assertIn("cause PROXY_AUTH", first)
