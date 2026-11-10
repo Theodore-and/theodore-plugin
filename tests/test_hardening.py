@@ -237,21 +237,14 @@ class Restrictions(unittest.TestCase):
 
 class Round5(unittest.TestCase):
     def test_server_time_is_utc_whatever_the_local_time_zone(self):
-        import time as _time
-        from theodore_client import install
+        # In a fresh interpreter per zone: TZ is read at start, and not every Python has time.tzset.
+        import subprocess
         seen = []
-        saved = os.environ.get("TZ")
-        try:
-            for zone in ("UTC", "America/New_York", "Asia/Dubai"):
-                os.environ["TZ"] = zone
-                _time.tzset()
-                seen.append(install._manifest_time("2026-07-01T12:00:00.250Z"))
-        finally:
-            if saved is None:
-                os.environ.pop("TZ", None)
-            else:
-                os.environ["TZ"] = saved
-            _time.tzset()
+        for zone in ("UTC", "America/New_York", "Asia/Dubai"):
+            done = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); from theodore_client import install; "
+                                   "print(repr(install._manifest_time('2026-07-01T12:00:00.250Z')))", str(CLIENT_DIR)],
+                                  env={**os.environ, "TZ": zone}, capture_output=True, text=True, timeout=60)
+            seen.append(float(done.stdout.strip() or "nan"))
         self.assertEqual(seen, [1782907200.25] * 3)
 
     def test_semantic_version_precedence(self):
