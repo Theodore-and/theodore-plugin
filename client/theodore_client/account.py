@@ -94,6 +94,7 @@ def save_token(token: str, release: dict | None = None, auto_reports: bool | Non
 
 AGENT_REPORTS_FEATURE = "agent-reports"
 REFUSED_OFF_SECONDS = 86400
+ON_FRESH_SECONDS = 3600
 
 
 def automatic_reports() -> tuple[bool, str]:
@@ -107,7 +108,11 @@ def automatic_reports() -> tuple[bool, str]:
         return False, "plan"
     known = core.read_json(_token_path()).get("auto_reports") or {}
     if known.get("source") == "server" and isinstance(known.get("enabled"), bool):
-        return (True, "") if known["enabled"] else (False, "off")
+        if not known["enabled"]:
+            return False, "off"
+        if core.now() - float(known.get("at") or 0) <= ON_FRESH_SECONDS:     # "on" is trusted for an hour, then asked again
+            return True, ""
+        return False, "unknown"
     if known.get("enabled") is False and core.now() - float(known.get("at") or 0) < REFUSED_OFF_SECONDS:
         return False, "off"
     return False, "unknown"         # not said by the server: no automatic report (a report the user asks for still goes)
@@ -142,6 +147,8 @@ def _adopt(bundle: dict) -> None:
     core.home().ensure()
     credentials.store(bundle["installation_id"], bundle["installation_secret"])
     save_token(bundle["entitlement_token"])
+    if (core.home().state / "update.json").exists():   # a sign-in starts from fresh replay times (installed versions stay the floor)
+        _fresh_update_state("signed in")
     core.remove_tree(core.home().state / "device.json")
 
 
@@ -374,9 +381,15 @@ def activate_grant(blob: str) -> Status:
     return signed_in_status(stored_token()[1])
 
 
+def _fresh_update_state(reason: str) -> None:
+    from . import install          # imported here: install imports this module
+    install.reset_update_state(reason)
+
+
 def logout() -> Status:
     credentials.delete()
     delete_token()
+    _fresh_update_state("signed out")
     core.remove_tree(core.home().state / "device.json")
     return Status("OK", "this computer is signed out of Theodore.",
                   f"to sign in again run {quoted_launcher()} login --start.",

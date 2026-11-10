@@ -233,3 +233,47 @@ class Restrictions(unittest.TestCase):
             self.assertEqual(rules["min_version"], "2.0.0", "and the stricter minimum holds")
             install.save_restrictions({**base, "kill": False, "server_time": "2026-11-10T12:00:01.000Z"})
             self.assertFalse(install.update_state()["restrictions"]["kill"], "a newer document lifts it")
+
+
+class Round5(unittest.TestCase):
+    def test_server_time_is_utc_whatever_the_local_time_zone(self):
+        import time as _time
+        from theodore_client import install
+        seen = []
+        saved = os.environ.get("TZ")
+        try:
+            for zone in ("UTC", "America/New_York", "Asia/Dubai"):
+                os.environ["TZ"] = zone
+                _time.tzset()
+                seen.append(install._manifest_time("2026-07-01T12:00:00.250Z"))
+        finally:
+            if saved is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = saved
+            _time.tzset()
+        self.assertEqual(seen, [1782907200.25] * 3)
+
+    def test_semantic_version_precedence(self):
+        from theodore_client.core import version_key
+        ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11",
+                   "1.0.0-rc.1", "1.0.0", "1.0.1-rc.1", "1.0.1", "2.0.0"]
+        self.assertEqual(sorted(reversed(ordered), key=version_key), ordered)
+        self.assertEqual(version_key("1.0.1+build.5"), version_key("1.0.1"), "build metadata is ignored")
+        self.assertGreater(version_key("1.0.1+build"), version_key("1.0.0"))
+        self.assertLess(version_key("1.0.0-x-y"), version_key("1.0.0-x-z"), "a hyphen inside an identifier is part of it")
+
+    def test_a_cached_on_switch_is_good_for_an_hour(self):
+        from theodore_client import account
+        with client_home() as home:
+            core.home().ensure()
+            account.save_token("a.e30.c", auto_reports=True)
+            record = json.loads((home / "state" / "entitlement.json").read_text())
+            self.assertEqual(account.automatic_reports()[1], "plan")      # no agent-reports in an empty token
+            token = "x." + b64u(json.dumps({"feat": ["agent-reports"], "exp": 9999999999}).encode()) + ".y"
+            account.save_token(token, auto_reports=True)
+            self.assertEqual(account.automatic_reports(), (True, ""))
+            record = json.loads((home / "state" / "entitlement.json").read_text())
+            record["auto_reports"]["at"] -= 3601
+            (home / "state" / "entitlement.json").write_text(json.dumps(record))
+            self.assertEqual(account.automatic_reports(), (False, "unknown"), "an hour-old 'on' must be asked again")

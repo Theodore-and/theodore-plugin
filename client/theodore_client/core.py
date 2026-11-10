@@ -355,12 +355,16 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
 
 
 def version_key(version: str) -> tuple:
-    """Order versions such as 1.0.0-rc.2 < 1.0.0-rc.10 < 1.0.0 < 1.0.1."""
-    main, _, pre = version.strip().lstrip("v").partition("-")
+    """Semantic-version precedence: 1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-beta.2 < 1.0.0-beta.11 < 1.0.0 < 1.0.1.
+    Build metadata (+...) is ignored; numeric pre-release identifiers sort below alphanumeric ones and by value; a
+    shorter identifier list sorts first when the rest is equal."""
+    text = version.strip().lstrip("v").split("+", 1)[0]
+    main, _, pre = text.partition("-")
     nums = tuple(int(p) if p.isdigit() else 0 for p in main.split("."))
+    nums = (nums + (0, 0, 0))[:3]
     if not pre:
         return (nums, (1,))
-    parts = tuple((0, int(p)) if p.isdigit() else (1, p) for p in pre.replace("-", ".").split("."))
+    parts = tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
     return (nums, (0,) + parts)
 
 

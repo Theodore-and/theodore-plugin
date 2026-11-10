@@ -116,7 +116,8 @@ def fetch_runtime_manifest(runtime_id: str | None = None, timeout: float = 20.0)
     manifest = account.verify_signed(envelope, "runtime manifest", RUNTIME_MANIFEST_SCHEMA)
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", str(manifest.get("runtime_id") or "")):
         raise core.internal("the runtime manifest names a runtime id that cannot be a folder name.")
-    accept_fresh(f"runtime:{manifest['runtime_id']}", manifest, "runtime manifest")
+    # No replay check here: a runtime id names a fixed set of parts (a new set gets a new id), so an older document
+    # for the same id names the same files; which runtime and client to use comes from the channel manifest.
     return manifest
 
 
@@ -178,7 +179,7 @@ def install_runtime(job: Job | None = None, timeout: float = 20.0, runtime_id: s
                     archive = home.staging / (Path(urlparse(part["url"]).path).name or f"runtime-{rid}-{name}.tar")
                     size = int(part.get("size") or 0)
                     try:
-                        api.download(part["url"], archive, sha256=part["sha256"], size=size or None,
+                        api.download(part["url"], archive, sha256=part["sha256"], size=size or None, redirects=False,
                                      progress=(lambda pct, d=done, s=size: job.progress(f"downloading {name}", (d + s * pct / 100.0) * 100.0 / total)) if job else None)
                     except api.NetworkError as error:
                         raise api.setup_failed(error.cause, f"the runtime part {name} could not be downloaded ({error.detail})") from None
@@ -405,7 +406,7 @@ def stage_engine(entry: dict, job: Job | None = None) -> str:
             job.progress(f"downloading engine {version}", 0)
         try:
             api.download(api.url_for("release_engine", {"platform": system, "arch": arch}, version=version), archive,
-                         sha256=entry["sha256"], bearer=cred["installation_secret"], size=int(entry.get("size") or 0) or None,
+                         sha256=entry["sha256"], bearer=cred["installation_secret"], size=int(entry.get("size") or 0) or None, redirects=False,
                          progress=(lambda pct: job.progress(f"downloading engine {version}", pct)) if job else None)
         except api.ApiError as error:
             raise api.status_from(error, f"engine {version} download") from None
@@ -528,38 +529,64 @@ def rollback() -> Status:
 
 
 def _manifest_time(value) -> float:
-    """A manifest's server_time (ISO 8601, UTC, with milliseconds) as seconds, fraction kept: two documents signed
-    within the same second still have an order."""
+    """A manifest's server_time (ISO 8601 in UTC, with milliseconds) as epoch seconds, fraction kept: two documents
+    signed within the same second still have an order. Parsed as UTC whatever the computer's time zone."""
+    import calendar
     text = str(value or "")
     match = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z?$", text)
     if not match:
         return 0.0
     try:
-        whole = time.mktime(time.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")) - time.timezone
+        whole = calendar.timegm(time.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S"))
     except (ValueError, OverflowError):
         return 0.0
     return whole + float(match.group(2) or 0)
 
 
-REPLAY_TOLERANCE_S = 600
+FUTURE_LIMIT_S = 86400
+
+
+class StaleDocument(Exception):
+    """A signed document this computer must not apply: older than the newest of its kind already applied (a replay),
+    or dated more than a day ahead of this computer's clock. `future` tells the two apart."""
+
+    def __init__(self, message: str, future: bool = False):
+        super().__init__(message)
+        self.message, self.future = message, future
 
 
 def accept_fresh(kind: str, manifest: dict, what: str) -> None:
-    """Refuse a signed document older than the newest of its kind accepted on this computer (a replay: valid
-    signature, old content). The server's server_time is the issue time; ten minutes of slack let two jobs that
-    fetched at nearly the same moment both proceed. A newer document that rolls back is the server's choice and
-    is accepted."""
+    """Apply only documents at least as new as the newest of their kind applied here. The server's server_time is the
+    issue time. An older one (a replay: valid signature, old content) is ignored, with no slack: two jobs fetching at
+    the same moment get the same or a newer document. A newer one that rolls back is the server's choice. A time more
+    than a day ahead of this computer's clock is not stored or applied, so one bad document cannot lock the computer
+    out of every later one (and `update --reset-state` or signing in again clears what an older client stored)."""
     when = _manifest_time(manifest.get("server_time"))
+    if when > core.now() + FUTURE_LIMIT_S:
+        raise StaleDocument(f"the {what} is dated {manifest.get('server_time')}, more than a day ahead of this computer's clock "
+                            f"({time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(core.now()))}); it was not applied", future=True)
     path = core.home().state / "manifest-times.json"
     with core.lock("manifest-times", timeout=30):
         seen = core.read_json(path)
         newest = float(seen.get(kind) or 0)
-        if when + REPLAY_TOLERANCE_S < newest:
-            raise api.setup_failed("HASH_MISMATCH", f"the {what} is older than one already accepted on this computer "
-                                                    f"(server_time {manifest.get('server_time')}); refused as a replay")
+        if when < newest:
+            raise StaleDocument(f"the {what} (server_time {manifest.get('server_time')}) is older than the one already applied here; "
+                                f"it was ignored")
         if when > newest:
             seen[kind] = when
             core.write_json(path, seen)
+
+
+def reset_update_state(reason: str) -> None:
+    """Forget the replay times and the stored restrictions (a clock that was wrong, a document from the future).
+    The engine and client installed now become the floor: until a document issued after this moment says otherwise,
+    nothing older is installed."""
+    core.remove_tree(core.home().state / "manifest-times.json")
+    state = update_state()
+    state.pop("restrictions", None)
+    state["last_check"] = state["last_attempt"] = 0
+    state["floor"] = {"engine": current_engine(), "client": __version__, "since": core.now(), "reason": reason}
+    core.write_json(core.home().state / "update.json", state)
 
 
 def save_restrictions(manifest: dict) -> None:
@@ -643,10 +670,10 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     except api.NetworkError:
         enforce_restrictions(current_engine())
         return None
-    except Status as status:
-        if force or "replay" not in status.summary:
+    except StaleDocument as stale:
+        core.log(f"update check: {stale.message}")
+        if force:
             raise
-        core.log(f"update check: {status.summary}")
         enforce_restrictions(current_engine())
         return None
     except api.ApiError as error:
@@ -660,6 +687,10 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     enforce_restrictions()          # kill switch and plugin minimum; the engine's own case is handled below
     engine = engine_artifact(manifest)
     client = manifest.get("client") or {}
+    client_floor = (update_state().get("floor") or {}).get("client")
+    if client_floor and client.get("version") and _manifest_time(manifest.get("server_time")) < float((update_state().get("floor") or {}).get("since") or 0) \
+            and core.version_key(str(client["version"])) < core.version_key(str(client_floor)):
+        client = {}                                 # an older client from a document issued before the reset: not installed
     if client.get("version") and client.get("sha256") and client["version"] != __version__:
         if not Job("client-update").alive():
             Job("client-update").spawn(["update", "--client-job", client["version"], client["sha256"], str(engine.get("runtime_id") or "")])
@@ -670,12 +701,17 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     start_packs_job(manifest.get("packs") or [])
     current = current_engine()
     target = engine.get("version")
+    floor = update_state().get("floor") or {}
+    if floor and _manifest_time(manifest.get("server_time")) >= float(floor.get("since") or 0):
+        save_update_state(floor=None)              # a document issued after the reset: it may roll back
+        floor = {}
+    below_floor = bool(floor.get("engine") and target and core.version_key(target) < core.version_key(str(floor["engine"])))
     must = bool(current) and (current in (engine.get("revoked") or []) or
                               (manifest.get("min_version") and core.version_key(current) < core.version_key(str(manifest["min_version"]))))
     pinned = pins().get("engine")
     held = state.get("held")
     failed = state.get("failed") or {}
-    skip = forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
+    skip = below_floor or forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
            (failed.get("version") == target and core.now() - float(failed.get("at") or 0) < UPDATE_CHECK_INTERVAL_S and not force)
     have_exact = engine_installed(target) and core.read_json(engine_dir(target) / ".theodore-engine.json").get("sha256") == engine.get("sha256")
     if target and (target != current or not have_exact) and not skip and runtime_ready():
@@ -716,7 +752,7 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None) -> N
                     url = part["url"]
         except Status:
             pass
-        archive = api.download(url, home.staging / f"client-{version}.archive", sha256=sha256)
+        archive = api.download(url, home.staging / f"client-{version}.archive", sha256=sha256, redirects=False)
         partial = home.client / f"{version}.partial"
         core.remove_tree(partial)
         extract_tar(archive, partial)
@@ -959,7 +995,8 @@ def install_pack(entry: dict) -> None:
 
     try:
         api.download(api.url_for("pack", id=pack_id, version=version), archive, sha256=entry["sha256"],
-                     bearer=cred["installation_secret"], size=int(entry.get("size") or entry.get("size_bytes") or 0) or None, progress=progress)
+                     bearer=cred["installation_secret"], size=int(entry.get("size") or entry.get("size_bytes") or 0) or None, progress=progress,
+                     redirects=False)
         partial = folder.with_name(f"{pack_id}.partial")
         core.remove_tree(partial)
         if zipfile.is_zipfile(archive):

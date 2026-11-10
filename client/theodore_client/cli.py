@@ -13,7 +13,7 @@ HELP = """Theodore client commands (run through the launcher):
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --finish --wait S | --code XXXX-XXXX]    logout    whoami
   status [--json] [--wait S]     doctor [--json]         version
-  update [--check | --apply | --rollback | --channel C | --pin V | --unpin]
+  update [--check | --apply | --rollback | --channel C | --pin V | --unpin | --reset-state]
   report --kind bug|feedback --title T --details D [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
   prefs add "<text>" | list | remove <id>
   packs install <pack>|--all [--background]    packs status     tools install libreoffice [--background]
@@ -56,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--channel")
     mode.add_argument("--pin")
     mode.add_argument("--unpin", action="store_true")
+    mode.add_argument("--reset-state", action="store_true")
     mode.add_argument("--engine-job", action="store_true")
     mode.add_argument("--client-job", nargs=3)
     rp = sub.add_parser("report", add_help=False)
@@ -133,6 +134,7 @@ def _dispatch(argv: list[str]) -> int:
         if args.client_job:
             return commands.client_update_job(*args.client_job)
         action = "check" if args.check else "rollback" if args.rollback else "pin" if args.pin else "unpin" if args.unpin \
+            else "reset" if args.reset_state \
             else "channel" if args.channel else "apply"
         return commands.update(action, args.pin or args.channel)
     if cmd == "report":

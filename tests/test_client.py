@@ -490,10 +490,10 @@ class Engine(ClientCase):
         self.assertStatus(self.client("pptx", "version", env=later), "BLOCKED_BY_POLICY", 73)
         self.assertStatus(self.client("python", "-c", "print(1)", env=later), "BLOCKED_BY_POLICY", 73)
         self.assertEqual(manifests(), seen)
-        # An older signed manifest (a replay without the kill switch) is refused and does not lift it.
+        # An older signed manifest (a replay without the kill switch) is ignored and does not lift it.
         self.api.kill, self.api.clock_offset = False, 0
-        first, _n, _t = self.assertStatus(self.client("update", "--apply", env=later), "SETUP_FAILED", 68)
-        self.assertIn("refused as a replay", first)
+        first, _n, _t = self.assertStatus(self.client("update", "--apply", env=later), "OK", 0)
+        self.assertIn("older than the one already applied", first)
         self.assertStatus(self.client("pptx", "version", env=later), "BLOCKED_BY_POLICY", 73)
         self.api.clock_offset = 8 * 3600                                                           # a newer one does
         self.assertStatus(self.client("update", "--apply", env=later), "OK", 0)
@@ -536,23 +536,63 @@ class Engine(ClientCase):
                 self.assertGreater(manifests(), before, "the refusal does not stand in for a check: the next guide asks again")
         self.api.kill, self.api.min_version = False, None
 
-    def test_a_replayed_older_manifest_never_downgrades_but_a_newer_rollback_does(self):
+    def test_a_replayed_older_manifest_is_ignored_but_a_newer_rollback_is_applied(self):
         self.ready()
         self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
         self.api.clock_offset = 7 * 3600
         self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}), "OK", 0)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0")
-        # The server's answer from before (an older server_time) offering the older engine, replayed.
+        # A document one second older than the one applied (no slack), offering the older engine: ignored, no error.
         self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION))
-        self.api.clock_offset = -3600
-        first, _n, _t = self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(14 * 3600)}), "SETUP_FAILED", 68)
-        self.assertIn("older than one already accepted", first)
+        self.api.clock_offset = 7 * 3600 - 60
+        first, _n, _t = self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(14 * 3600)}), "OK", 0)
+        self.assertIn("older than the one already applied", first)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0", "no downgrade from a replay")
-        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(21 * 3600)})
+        self.assertEqual(self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(21 * 3600)}).returncode, 0)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0")
-        # The server itself moves the channel back: a newer document, accepted.
+        # The server itself moves the channel back: a newer document, applied.
         self.api.clock_offset = 15 * 3600
         self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(28 * 3600)}), "OK", 0)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
+
+    def test_a_document_dated_in_the_future_is_not_applied_and_a_reset_recovers(self):
+        self.ready()
+        times = self.box.home / "state" / "manifest-times.json"
+        self.api.clock_offset = 3 * 86400                                   # the server's clock is three days ahead
+        self.api.kill = True
+        first, _n, _t = self.assertStatus(self.client("update", "--apply"), "RETRY", 75)
+        self.assertIn("ahead of this computer's clock", first)
+        self.assertFalse((self.state("state/update.json").get("restrictions") or {}).get("kill"), "the future document's kill switch was not applied")
+        self.assertLess(json.loads(times.read_text())["channel"], time.time() + 86400, "a future time is never stored")
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION, "state kept")
+        # A computer already locked out (a far-future time and a kill switch stored, as an older client allowed):
+        state = json.loads((self.box.home / "state" / "update.json").read_text())
+        state["restrictions"] = {"server_time": 253402300740.0, "kill": True, "kill_message": "stuck", "revoked": []}
+        (self.box.home / "state" / "update.json").write_text(json.dumps(state))
+        times.write_text(json.dumps({"channel": 253402300740.0}))
+        self.api.kill, self.api.clock_offset = False, 0
+        self.assertStatus(self.client("pptx", "version"), "BLOCKED_BY_POLICY", 73)
+        self.api.publish_engine("0.9.0", engine_zip("0.9.0"))               # what an old replay would offer
+        self.api.clock_offset = -86400
+        first, _n, _t = self.assertStatus(self.client("update", "--reset-state"), "OK", 0)
+        self.assertIn("reset", first)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION,
+                         "after a reset the installed engine is the floor: an older document does not downgrade it")
+        self.api.publish_engine("0.9.0", engine_zip("0.9.0"))
+        self.api.clock_offset = 3600                                         # a document issued after the reset may roll back
+        self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": "3600"}), "OK", 0)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "0.9.0")
+
+    def test_signing_out_and_in_clears_a_poisoned_state(self):
+        self.ready()
+        state = json.loads((self.box.home / "state" / "update.json").read_text())
+        state["restrictions"] = {"server_time": 253402300740.0, "kill": True, "revoked": []}
+        (self.box.home / "state" / "update.json").write_text(json.dumps(state))
+        (self.box.home / "state" / "manifest-times.json").write_text(json.dumps({"channel": 253402300740.0}))
+        self.assertStatus(self.client("pptx", "version"), "BLOCKED_BY_POLICY", 73)
+        self.assertStatus(self.client("logout"), "OK", 0)
+        self.sign_in()
+        self.assertFalse((self.box.home / "state" / "manifest-times.json").exists())
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
     def test_a_failed_update_check_waits_six_hours_like_a_successful_one(self):
@@ -580,18 +620,17 @@ class Engine(ClientCase):
         self.assertIn("1.1.5", kept)
         self.assertNotIn(self.ENGINE_VERSION, kept)
 
-    def test_engine_download_follows_a_redirect_only_on_its_own_origin(self):
+    def test_engine_download_follows_no_redirect_at_all(self):
         self.sign_in()
-        self.api.engine_redirect = "other"            # a 302 to another host: refused, nothing is fetched from there
-        self.assertEqual(self.client("setup", "--job").returncode, 0)
-        self.assertEqual(self.state("engines/current.json"), {})
-        self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/private/")], [])
-        self.assertIn("another origin", (self.box.home / "logs" / "client.log").read_text())
-        self.api.engine_redirect = "same"             # a short-lived URL on the API origin: followed
+        for where in ("other", "same"):                # another host, and a short-lived URL on the API origin: both refused
+            self.api.engine_redirect = where
+            self.assertEqual(self.client("setup", "--job").returncode, 0)
+            self.assertEqual(self.state("engines/current.json"), {}, where)
+            self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/private/")], [], where)
+        self.assertIn("redirect", (self.box.home / "logs" / "client.log").read_text())
+        self.api.engine_redirect = None
         self.assertEqual(self.client("setup", "--job").returncode, 0)
         self.assertEqual(self.state("engines/current.json")["version"], self.ENGINE_VERSION)
-        redirected = [r for r in self.api.requests if r["path"].startswith("/dl/private/")]
-        self.assertEqual(len(redirected), 1)
 
     def test_engine_with_wrong_checksum_is_not_installed(self):
         self.sign_in()

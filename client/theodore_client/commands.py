@@ -347,8 +347,8 @@ def setup_job() -> int:
                 install.save_update_state(last_check=int(core.now()), latest=version, guides=manifest.get("guides") or {},
                                           tools=manifest.get("tools") or {})
                 install.start_packs_job(manifest.get("packs") or [])
-            except (Status, api.ApiError, api.NetworkError, install.EngineError, KeyError) as exc:
-                core.log(f"setup: engine not installed yet: {getattr(exc, 'summary', exc)}")
+            except (Status, api.ApiError, api.NetworkError, install.EngineError, install.StaleDocument, KeyError) as exc:
+                core.log(f"setup: engine not installed yet: {getattr(exc, 'summary', None) or getattr(exc, 'message', exc)}")
         job.finish()
         return 0
     except Status as status:
@@ -559,9 +559,21 @@ def update(action: str, value: str | None) -> int:
     account.require("pptx")
     install.require_runtime()
     current = install.current_engine()
+    if action == "reset":
+        install.reset_update_state("update --reset-state")
+        try:
+            install.check_updates(force=True, wait=240.0, timeout=20.0)
+        except install.StaleDocument as stale:
+            return core.emit(_stale_status(stale))
+        return core.emit(Status("OK", f"update state reset: the replay times and stored restrictions were cleared and a current signed "
+                                      f"document was applied; engine {install.current_engine() or 'none'} stays the floor until a document "
+                                      f"issued after this reset says otherwise.",
+                                "run the command you were running before.", "Theodore's update state was reset."))
     if action == "check":
         try:
             manifest = install.fetch_channel_manifest()
+        except install.StaleDocument as stale:
+            return core.emit(_stale_status(stale))
         except api.NetworkError as error:
             raise api.offline(error, "update check") from None
         except api.ApiError as error:
@@ -573,7 +585,10 @@ def update(action: str, value: str | None) -> int:
                                 "nothing to do." if same else f"run {launcher} update --apply, or just continue: it applies at the next guide.",
                                 "Theodore is up to date." if same else f"A Theodore update ({latest}) is available and will install itself."))
     install.save_update_state(held=None, failed=None)
-    manifest = install.check_updates(force=True, wait=240.0, timeout=20.0)
+    try:
+        manifest = install.check_updates(force=True, wait=240.0, timeout=20.0)
+    except install.StaleDocument as stale:
+        return core.emit(_stale_status(stale))
     if manifest is None:
         raise Status("OFFLINE", "the update could not be checked: the Theodore service could not be reached.",
                      "check the internet connection, then run the same command again.", "Theodore could not reach its service to check for updates.")
@@ -590,6 +605,17 @@ def update(action: str, value: str | None) -> int:
     return core.emit(Status("OK", f"engine {now_current} is current" + (f" (was {current})." if changed else "; nothing to update."),
                             f"run {launcher} guide pptx again before continuing." if changed else "nothing to do.",
                             f"Theodore updated to version {now_current}." if changed else "Theodore is up to date."))
+
+
+def _stale_status(stale) -> Status:
+    """A signed document that was not applied. An older one (a replay) is ignored without error; one dated far ahead
+    of this computer's clock is reported, since the clock (or the service's) needs looking at."""
+    if stale.future:
+        return Status("RETRY", f"{stale.message}. Nothing on this computer was changed.",
+                      f"ask the user to check this computer's date and time, then run the same command again; if the clock is right, "
+                      f"run it again later (or {quoted_launcher()} update --reset-state).",
+                      "Theodore received an update notice dated in the future and set it aside. Please check this computer's date and time.")
+    return Status("OK", f"{stale.message}; nothing changed.", "nothing to do.", "Theodore is up to date.")
 
 
 def engine_update_job() -> int:
@@ -673,6 +699,10 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
         if job:
             job.fail(status_.name, status_.summary)
         raise
+    except install.StaleDocument as stale:          # nothing is installed from a document that was not applied
+        if job:
+            job.finish()
+        return core.emit(_stale_status(stale))
     if job:
         job.finish()
     return core.emit(Status("OK", f"asset pack(s) installed: {', '.join(e['id'] for e in wanted)}.", "nothing to do.",
@@ -960,6 +990,15 @@ def uninstall(keep_hosts: bool) -> int:
         subprocess.Popen(f'cmd /d /s /c "{line}"', creationflags=0x00000008 | 0x08000000,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         kept = [p.name for p in root.iterdir() if p.name not in core.OWNED] if root.exists() else []
+        # The deletion runs after this process has ended, so it cannot be confirmed here: say so, and let a second
+        # run (by then without Theodore's Python: the launcher's or the installer's own uninstall) confirm it.
+        print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed; its folders in {root} are deleted a few "
+              f"seconds after this command ends, which is scheduled but not confirmed"
+              + (f"; also not removed: {'; '.join(left)}" if left else "") + ".\n"
+              "NEXT: run the same command again in 15 seconds; it confirms the deletion (or removes what is left) and says so.\n"
+              "TELL THE USER: Theodore is being removed from this computer; I am checking that its files are gone. Your decks were not touched.",
+              flush=True)
+        return 75
     else:
         for name in core.OWNED:
             core.remove_tree(root / name)
