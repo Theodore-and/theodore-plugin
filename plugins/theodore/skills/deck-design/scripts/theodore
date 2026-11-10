@@ -24,40 +24,7 @@ SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || SELF_DIR
   "run it by absolute path: sh \"<skill folder>/scripts/theodore\" ..." "Theodore could not start; I am retrying with a full path."
 SELF="$SELF_DIR/theodore"
 
-# Git Bash, MSYS and Cygwin: Windows has its own launcher beside this one. Running the .cmd directly lets MSYS write
-# a cmd /c line that starts with a quote, and cmd then drops the first and last quote of it (a path with a space
-# breaks). So the quoted line goes into a variable and cmd is given only its name; cmd cannot carry a double quote
-# inside an argument, so none is passed.
-case "$(uname -s 2>/dev/null)" in
-  MINGW*|MSYS*|CYGWIN*)
-    THEODORE_LAUNCH="\"$(cygpath -w "$SELF_DIR/theodore.cmd" 2>/dev/null || printf '%s' "$SELF_DIR/theodore.cmd")\""
-    for arg in "$@"; do
-      THEODORE_LAUNCH="$THEODORE_LAUNCH \"$arg\""
-    done
-    export THEODORE_LAUNCH
-    exec cmd //d //c '%THEODORE_LAUNCH%'
-    ;;
-esac
-
-if [ -n "${THEODORE_HOME:-}" ]; then
-  HOME_DIR=$THEODORE_HOME
-elif [ -n "${HOME:-}" ]; then
-  HOME_DIR=$HOME/.theodore
-else
-  status INTERNAL 78 "neither THEODORE_HOME nor HOME is set." "set HOME to the user's home folder and run the same command again." \
-    "Theodore could not find your home folder."
-fi
-case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd -P)/$HOME_DIR" ;; esac
-STABLE="$HOME_DIR/bin/theodore"
 CONF="$SELF_DIR/launcher.json"
-B="$HOME_DIR/state/bootstrap"
-
-# launcher.json is flat on purpose: one "key": value per line, read here with sed and in theodore.cmd with findstr.
-jget() { # file key
-  sed -n 's/^[[:space:]]*"'"$2"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\)"\{0,1\}[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -n 1
-}
-num() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
-
 [ -f "$CONF" ] || status INTERNAL 78 "launcher.json is missing beside the launcher ($SELF_DIR)." \
   "reinstall the Theodore plugin, then run the same command again." "Theodore's plugin files are incomplete; it needs to be reinstalled."
 
@@ -72,6 +39,74 @@ if [ "${1:-}" != uninstall ] && ! real_keys; then
     "do not retry. Tell the user to install Theodore from https://theodoreand.ai/install; this copy is an unstamped development build." \
     "This copy of Theodore was built without its security keys and cannot be used. Please install it again from theodoreand.ai/install."
 fi
+
+# Git Bash, MSYS and Cygwin: Windows has its own launcher beside this one, but cmd cannot carry an argument with a
+# double quote or a shell metacharacter intact (theodore.cmd re-reads %* in its own lines). So once Theodore is set
+# up, this shell starts the client's python.exe itself, and the MSYS runtime quotes every argument for it exactly.
+# Before that, the batch launcher bootstraps: given the arguments when they are plain, or `setup` when they are
+# not (the arguments then go to the client directly once setup has finished).
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    W_HOME=${THEODORE_HOME:-${LOCALAPPDATA:-}\\Theodore}
+    U_HOME=$(cygpath -u "$W_HOME" 2>/dev/null || printf '%s' "$W_HOME")
+    W_SELF=$(cygpath -w "$SELF_DIR/theodore.cmd" 2>/dev/null || printf '%s' "$SELF_DIR/theodore.cmd")
+    direct() {
+      RT=$(tr -d '\r\n' < "$U_HOME/runtime/current.txt" 2>/dev/null)
+      CV=$(tr -d '\r\n' < "$U_HOME/client/current.txt" 2>/dev/null)
+      [ -n "$RT" ] && [ -n "$CV" ] && [ -f "$U_HOME/runtime/$RT/python/python.exe" ] && [ -f "$U_HOME/client/$CV/__main__.py" ] || return 1
+      W_LAUNCHER=$W_SELF
+      [ -f "$U_HOME/bin/theodore.cmd" ] && W_LAUNCHER=$(cygpath -w "$U_HOME/bin/theodore.cmd" 2>/dev/null || printf '%s' "$W_LAUNCHER")
+      THEODORE_HOME=$(cygpath -w "$U_HOME" 2>/dev/null || printf '%s' "$W_HOME") THEODORE_LAUNCHER=$W_LAUNCHER
+      THEODORE_SKILL_DIR=${THEODORE_SKILL_DIR:-$(cygpath -w "$(dirname -- "$SELF_DIR")" 2>/dev/null)}
+      export THEODORE_HOME THEODORE_LAUNCHER THEODORE_SKILL_DIR
+      "$U_HOME/runtime/$RT/python/python.exe" -I "$(cygpath -w "$U_HOME/client/$CV" 2>/dev/null)" "$@"
+      rc=$?
+      [ "$rc" -eq 126 ] && status BLOCKED_BY_POLICY 73 "Theodore's Python could not be started (exit 126): a security policy on this computer may block programs in the user folder." \
+        "do not retry. Tell the user; their IT team can allow programs in $W_HOME, or they can use Theodore through its connector." \
+        "This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector."
+      exit "$rc"
+    }
+    direct "$@"
+    plain=1
+    for arg in "$@"; do
+      case "$arg" in *[\"%!^\&\|\<\>]*) plain= ;; esac
+    done
+    # The quoted line goes into a variable and cmd is given only its name: MSYS would otherwise write a cmd /c line
+    # that starts with a quote, and cmd drops the first and last quote of it (a path with a space breaks).
+    THEODORE_LAUNCH="\"$W_SELF\""
+    if [ -n "$plain" ]; then
+      for arg in "$@"; do THEODORE_LAUNCH="$THEODORE_LAUNCH \"$arg\""; done
+      export THEODORE_LAUNCH
+      exec cmd //d //c '%THEODORE_LAUNCH%'
+    fi
+    THEODORE_LAUNCH="$THEODORE_LAUNCH setup --wait 20"
+    export THEODORE_LAUNCH
+    out=$(cmd //d //c '%THEODORE_LAUNCH%')
+    rc=$?
+    direct "$@"
+    printf '%s\n' "$out"
+    exit "$rc"
+    ;;
+esac
+
+if [ -n "${THEODORE_HOME:-}" ]; then
+  HOME_DIR=$THEODORE_HOME
+elif [ -n "${HOME:-}" ]; then
+  HOME_DIR=$HOME/.theodore
+else
+  status INTERNAL 78 "neither THEODORE_HOME nor HOME is set." "set HOME to the user's home folder and run the same command again." \
+    "Theodore could not find your home folder."
+fi
+case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd -P)/$HOME_DIR" ;; esac
+STABLE="$HOME_DIR/bin/theodore"
+B="$HOME_DIR/state/bootstrap"
+
+# launcher.json is flat on purpose: one "key": value per line, read here with sed and in theodore.cmd with findstr.
+jget() { # file key
+  sed -n 's/^[[:space:]]*"'"$2"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",]*\)"\{0,1\}[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -n 1
+}
+num() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
+
 
 # --- 2. one stable copy in <home>/bin: newer wins --------------------------------------------------------------
 MY_GEN=$(num "$(jget "$CONF" launcher_generation)" 0)
@@ -107,7 +142,14 @@ stage1_ready() {
 run_client() {
   THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER
   export THEODORE_HOME THEODORE_LAUNCHER
-  exec "$PY" -I "$HOME_DIR/client/$CV" "$@"
+  # Not exec: when the system refuses to start the interpreter (a policy, a noexec mount) the shell gets 126 and
+  # the assistant still gets a status. The client and the engine never exit 126 themselves.
+  "$PY" -I "$HOME_DIR/client/$CV" "$@"
+  rc=$?
+  [ "$rc" -eq 126 ] && status BLOCKED_BY_POLICY 73 "Theodore's Python could not be started ($PY, exit 126): a security policy on this computer may block programs in the user folder." \
+    "do not retry. Tell the user; their IT team can allow programs in $HOME_DIR, or they can use Theodore through its connector." \
+    "This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector."
+  exit "$rc"
 }
 
 # --- platform ---------------------------------------------------------------------------------------------------------

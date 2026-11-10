@@ -156,6 +156,40 @@ class WindowsShells(LauncherCase):
         done = self._run([bash, "-c", f'sh "{sh_path}" frobnicate "two words"'])
         self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
         self.assertIn("THEODORE USAGE: ", done.stdout)
+        # Embedded quotes and shell metacharacters arrive intact: Git Bash starts the client itself once set up.
+        tricky = 'say "hi" & echo pwned | x > y'
+        done = self._run([bash, "-c", f"sh \"{sh_path}\" guide '{tricky}'"])
+        self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
+        self.assertIn(f"unknown skill '{tricky}'", done.stdout)
+        self.assertNotIn("pwned", done.stdout.replace(tricky, ""))
+        self.assertFalse((self.box.tmp / "y").exists(), "no redirection happened")
+
+    def test_without_powershell_the_job_still_inherits_no_output_handle(self):
+        """The fallback starter (WMI) must not hand the job our output pipe: the call returns at once with a status
+        while the download goes on, instead of waiting for the download to end."""
+        import shutil
+        import subprocess
+        import time
+        if not (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "wbem" / "WMIC.exe").exists():
+            self.skipTest("WMIC is not installed on this Windows")
+        fresh = Sandbox(self.api, home_name="fresh home")
+        self.addCleanup(fresh.close)
+        import ctypes
+        fresh.home.mkdir()
+        def short(path):
+            buffer = ctypes.create_unicode_buffer(1024)
+            ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 1024)
+            return buffer.value
+        if " " in short(fresh.home) or " " in short(fresh.launcher):
+            self.skipTest("this volume makes no 8.3 short names; the WMI starter then falls back to start /b")
+        self.api.dl_delay = 30.0
+        self.addCleanup(setattr, self.api, "dl_delay", 0.0)
+        started = time.monotonic()
+        result = fresh.run_launcher("version", env={"THEODORE_TEST_STARTER": "wmic", "THEODORE_BOOTSTRAP_WAIT": "2"}, timeout=120)
+        self.assertLess(time.monotonic() - started, 25, "the caller did not wait for the download")
+        self.assertEqual(result.returncode, 67, result.stdout + result.stderr)
+        self.api.dl_delay = 0.0
+        fresh.wait_jobs(120)
 
     def test_inbox_tools_are_present(self):
         import shutil
@@ -262,6 +296,19 @@ class Failures(LauncherCase):
             self.assertFalse((self.box.home / "bin").exists(), "nothing is copied, downloaded or run")
             self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/")], [])
         self.assertStatus(self.run_launcher("uninstall"), "OK", 0)
+
+    def test_an_interpreter_the_system_refuses_to_start_is_blocked_by_policy(self):
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs()
+        python = self.box.home / "runtime" / RUNTIME_ID / "python" / ("python.exe" if IS_WINDOWS else "bin/python3")
+        python.unlink()
+        if IS_WINDOWS:
+            python.write_bytes(b"MZ not a program")         # Windows refuses to start it, as it does a blocked one
+        else:
+            python.mkdir()                                  # exec fails with 126, as it does on a noexec mount
+        first, nxt, tell = self.assertStatus(self.run_launcher("version"), "BLOCKED_BY_POLICY", 73)
+        self.assertIn("could not be started", first)
+        self.assertIn("connector", tell)
 
     def test_missing_launcher_json_is_internal(self):
         (self.box.launcher.parent / "launcher.json").unlink()

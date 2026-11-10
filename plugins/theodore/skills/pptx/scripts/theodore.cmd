@@ -94,13 +94,38 @@ if errorlevel 1 goto :connector_required
 :start_job
 if not exist "%HOME_DIR%\logs" mkdir "%HOME_DIR%\logs" 2>nul
 rem The job must not inherit this command's output: a caller that reads to the end of our output (every assistant
-rem does) would otherwise wait for the whole download. "start /b" passes every inheritable handle on; PowerShell's
-rem Start-Process goes through ShellExecute, which passes none. "start /b" stays as the fallback.
+rem does) would otherwise wait for the whole download. "start /b" passes every inheritable handle on. PowerShell's
+rem Start-Process goes through ShellExecute, which passes none; where PowerShell is missing or blocked, WMI creates
+rem the process (it inherits nothing either, and not our environment, so the home goes as an argument, by its short
+rem name). "start /b" stays as the last fallback. THEODORE_TEST_STARTER=wmic skips PowerShell, for the tests.
 set "THEODORE_JOB_LAUNCHER=%LAUNCHER%"
 set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
-if not exist "%PWSH%" goto :start_plain
+if /i "%THEODORE_TEST_STARTER%"=="wmic" goto :start_wmic
+if not exist "%PWSH%" goto :start_wmic
 "%PWSH%" -NoProfile -NonInteractive -Command "Start-Process -WindowStyle Hidden -FilePath $env:THEODORE_JOB_LAUNCHER -ArgumentList __bootstrap" <nul >nul 2>&1
 if not errorlevel 1 goto :started
+:start_wmic
+set "WMIC=%SYS32%\wbem\WMIC.exe"
+if not exist "%WMIC%" goto :start_plain
+set "SHORT_L="
+set "SHORT_H="
+for %%I in ("%LAUNCHER%") do set "SHORT_L=%%~sI"
+for %%I in ("%HOME_DIR%") do set "SHORT_H=%%~sI"
+if not "%SHORT_L: =%"=="%SHORT_L%" goto :start_plain
+if not "%SHORT_H: =%"=="%SHORT_H%" goto :start_plain
+"%WMIC%" process call create "cmd.exe /d /c %SHORT_L% __bootstrap %SHORT_H%" 2>nul | "%SYS32%\findstr.exe" /c:"ReturnValue = 0" >nul 2>&1 || goto :start_plain
+rem Proof that the job really started (it holds job.lock open); otherwise the plain start below.
+set /a WMI_WAIT=0
+:wmic_wait
+call :job_alive
+if not errorlevel 1 goto :started
+if %WMI_WAIT% GEQ 5 goto :start_plain
+"%SYS32%\ping.exe" -n 2 127.0.0.1 >nul 2>&1
+set /a WMI_WAIT+=1
+goto :wmic_wait
+:start_plain
+start "" /b cmd /d /c ""%LAUNCHER%" __bootstrap" <nul >nul 2>&1
+:started
 :start_plain
 start "" /b cmd /d /c ""%LAUNCHER%" __bootstrap" <nul >nul 2>&1
 :started
@@ -125,7 +150,9 @@ goto :progress_status
 :run_client
 set "THEODORE_HOME=%HOME_DIR%"
 set "THEODORE_LAUNCHER=%LAUNCHER%"
-"%PY%" -I "%HOME_DIR%\client\%CV%" %* & call exit /b %%ERRORLEVEL%%
+rem One line, because this file may be replaced while the client runs. An error level of 131 or more, or below 0, is
+rem not the client's (its codes end at 130) but Windows refusing to start the interpreter: a policy such as AppLocker.
+"%PY%" -I "%HOME_DIR%\client\%CV%" %* & if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else if errorlevel 131 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else call exit /b %%ERRORLEVEL%%
 
 :handover
 "%STABLE%" %*
@@ -252,6 +279,10 @@ del /q "%B%\phase" >nul 2>&1
 exit /b 1
 
 :bootstrap_entry
+rem Started by WMI the job has the user's default environment, not the caller's: the home comes as an argument.
+if not "%~2"=="" set "HOME_DIR=%~f2"
+if not "%~2"=="" set "B=%~f2\state\bootstrap"
+if not "%~2"=="" if exist "%~f2\bin\theodore.cmd" set "LAUNCHER=%~f2\bin\theodore.cmd"
 if not exist "%B%" mkdir "%B%" 2>nul
 if not exist "%B%" exit /b 1
 if not exist "%HOME_DIR%\logs" mkdir "%HOME_DIR%\logs" 2>nul
