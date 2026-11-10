@@ -116,6 +116,7 @@ def fetch_runtime_manifest(runtime_id: str | None = None, timeout: float = 20.0)
     manifest = account.verify_signed(envelope, "runtime manifest", RUNTIME_MANIFEST_SCHEMA)
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", str(manifest.get("runtime_id") or "")):
         raise core.internal("the runtime manifest names a runtime id that cannot be a folder name.")
+    accept_fresh(f"runtime:{manifest['runtime_id']}", manifest, "runtime manifest")
     return manifest
 
 
@@ -300,7 +301,9 @@ def fetch_channel_manifest(timeout: float = 20.0) -> dict:
     system, arch = core.platform_arch()
     query = {"platform": system, "arch": arch}      # the channel is the account's, decided by the server
     envelope = api.call_json("releases_manifest", bearer=cred["installation_secret"], query=query, timeout=timeout)
-    return account.verify_signed(envelope, "release manifest", CHANNEL_MANIFEST_SCHEMA)
+    manifest = account.verify_signed(envelope, "release manifest", CHANNEL_MANIFEST_SCHEMA)
+    accept_fresh("channel", manifest, "release manifest")
+    return manifest
 
 
 def _prepare_engine(directory: Path, runtime_id: str) -> None:
@@ -375,6 +378,18 @@ def stage_engine(entry: dict, job: Job | None = None) -> str:
         target = engine_dir(version)
         if core.read_json(target / ".theodore-engine.json").get("sha256") == entry["sha256"]:
             return version
+        home.engines.mkdir(parents=True, exist_ok=True)
+        for child in home.engines.iterdir():       # this exact build is already on disk (B, then C, then B again)
+            record = core.read_json(child / ".theodore-engine.json")
+            if child.is_dir() and not child.name.endswith(".partial") and record.get("version") == version and record.get("sha256") == entry["sha256"]:
+                with core.lock("current"):
+                    dirs = engine_dirs()
+                    if child.name == version:
+                        dirs.pop(version, None)
+                    else:
+                        dirs[version] = child.name
+                    core.write_json(home.engines / "dirs.json", dirs)
+                return version
         runtime_id = str(entry.get("runtime_id") or core.read_text(home.runtime / "current.txt"))
         if not runtime_ready(runtime_id):
             got = install_runtime(job, runtime_id=runtime_id)
@@ -415,7 +430,8 @@ def stage_engine(entry: dict, job: Job | None = None) -> str:
             # The same version in another build (source, then compiled): installed beside it under a new name and the
             # pointer moves. The old folder may be in use by a running build; it is collected once unused for a day.
             final = home.engines / f"{version}@{str(entry['sha256'])[:12]}"
-            core.remove_tree(final)
+            while final.exists():               # never replace a folder: it may be the one a running build uses
+                final = final.with_name(final.name + "x")
             os.rename(partial, final)
             with core.lock("current"):
                 dirs = engine_dirs()
@@ -512,10 +528,38 @@ def rollback() -> Status:
 
 
 def _manifest_time(value) -> float:
+    """A manifest's server_time (ISO 8601, UTC, with milliseconds) as seconds, fraction kept: two documents signed
+    within the same second still have an order."""
+    text = str(value or "")
+    match = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z?$", text)
+    if not match:
+        return 0.0
     try:
-        return time.mktime(time.strptime(str(value)[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+        whole = time.mktime(time.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")) - time.timezone
     except (ValueError, OverflowError):
         return 0.0
+    return whole + float(match.group(2) or 0)
+
+
+REPLAY_TOLERANCE_S = 600
+
+
+def accept_fresh(kind: str, manifest: dict, what: str) -> None:
+    """Refuse a signed document older than the newest of its kind accepted on this computer (a replay: valid
+    signature, old content). The server's server_time is the issue time; ten minutes of slack let two jobs that
+    fetched at nearly the same moment both proceed. A newer document that rolls back is the server's choice and
+    is accepted."""
+    when = _manifest_time(manifest.get("server_time"))
+    path = core.home().state / "manifest-times.json"
+    with core.lock("manifest-times", timeout=30):
+        seen = core.read_json(path)
+        newest = float(seen.get(kind) or 0)
+        if when + REPLAY_TOLERANCE_S < newest:
+            raise api.setup_failed("HASH_MISMATCH", f"the {what} is older than one already accepted on this computer "
+                                                    f"(server_time {manifest.get('server_time')}); refused as a replay")
+        if when > newest:
+            seen[kind] = when
+            core.write_json(path, seen)
 
 
 def save_restrictions(manifest: dict) -> None:
@@ -523,16 +567,22 @@ def save_restrictions(manifest: dict) -> None:
     versions) until a newer verified manifest says otherwise. An older manifest, replayed, changes nothing."""
     stored = update_state().get("restrictions") or {}
     when = _manifest_time(manifest.get("server_time"))
-    if stored and when < float(stored.get("server_time") or 0):
+    if stored and when <= float(stored.get("server_time") or 0):      # only a strictly newer document replaces them
         return
     engine = manifest.get("engine") or {}
     save_update_state(restrictions={"server_time": when, "kill": bool(manifest.get("kill")), "kill_message": manifest.get("kill_message"),
                                     "shim_min": manifest.get("shim_min"), "min_version": manifest.get("min_version"),
-                                    "revoked": list(engine.get("revoked") or [])})
+                                    "revoked": list(engine.get("revoked") or []), "offered": engine.get("version")})
+
+
+def forbidden(version: str | None, rules: dict | None = None) -> bool:
+    rules = (update_state().get("restrictions") or {}) if rules is None else rules
+    return bool(version) and (version in (rules.get("revoked") or []) or
+                              bool(rules.get("min_version") and core.version_key(version) < core.version_key(str(rules["min_version"]))))
 
 
 def plugin_too_old(shim_min) -> Status:
-    shim = str(core.config().get("shim_version") or "0")
+    shim = core.plugin_version()
     return Status("UPDATE_REQUIRED", f"the Theodore plugin {shim} is older than the minimum {shim_min}.",
                   "update the plugin in the assistant (Claude Code: claude plugin update theodore@theodore; Codex: codex plugin marketplace upgrade theodore), start a new session, then run the same command again.",
                   "The Theodore plugin needs an update. I am updating it; a new session may be needed.")
@@ -548,10 +598,14 @@ def enforce_restrictions(engine_version: str | None = None) -> None:
                      "do not retry today. Tell the user; status is at https://theodoreand.ai/support.",
                      f"Theodore is paused by its publisher: {rules.get('kill_message') or 'please check theodoreand.ai for news'}.")
     shim_min = rules.get("shim_min")
-    if shim_min and core.version_key(str(core.config().get("shim_version") or "0")) < core.version_key(str(shim_min)):
+    if shim_min and core.version_key(core.plugin_version()) < core.version_key(str(shim_min)):
         raise plugin_too_old(shim_min)
-    if engine_version and (engine_version in (rules.get("revoked") or []) or
-                           (rules.get("min_version") and core.version_key(engine_version) < core.version_key(str(rules["min_version"])))):
+    if engine_version is None and not current_engine() and forbidden(rules.get("offered"), rules):
+        raise Status("UPDATE_REQUIRED", f"the engine this channel offers ({rules.get('offered')}) is withdrawn or below the channel's minimum "
+                                        f"({rules.get('min_version') or 'withdrawn'}); nothing can be installed until a newer one is published.",
+                     f"tell the user Theodore is waiting for a new release; run {quoted_launcher()} update --apply later.",
+                     "Theodore is waiting for a new release from its publisher before it can be installed. Please try again later.")
+    if engine_version and forbidden(engine_version, rules):
         raise Status("UPDATE_REQUIRED", f"engine {engine_version} was withdrawn or is below the channel's minimum ({rules.get('min_version') or 'withdrawn'}).",
                      f"run {quoted_launcher()} update --apply, then run the same command again.",
                      "Theodore needs an update before it can continue. I am installing it.")
@@ -582,6 +636,12 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     except api.NetworkError:
         enforce_restrictions(current_engine())
         return None
+    except Status as status:
+        if force or "replay" not in status.summary:
+            raise
+        core.log(f"update check: {status.summary}")
+        enforce_restrictions(current_engine())
+        return None
     except api.ApiError as error:
         if error.code in ("update_required", "installation_revoked", "unauthenticated", "account_suspended", "entitlement_inactive"):
             raise api.status_from(error, "update check") from None
@@ -608,7 +668,7 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     pinned = pins().get("engine")
     held = state.get("held")
     failed = state.get("failed") or {}
-    skip = (pinned and not must) or (held == target and not must and not force) or \
+    skip = forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
            (failed.get("version") == target and core.now() - float(failed.get("at") or 0) < UPDATE_CHECK_INTERVAL_S and not force)
     have_exact = engine_installed(target) and core.read_json(engine_dir(target) / ".theodore-engine.json").get("sha256") == engine.get("sha256")
     if target and (target != current or not have_exact) and not skip and runtime_ready():
@@ -630,6 +690,8 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
                      f"run {quoted_launcher()} update --apply, then run the same command again.",
                      "Theodore needs an update before it can continue. I am installing it.")
     enforce_restrictions(current_engine())
+    if not current_engine():
+        enforce_restrictions(None)
     collect_garbage()
     return manifest
 
@@ -745,6 +807,7 @@ def _pin_workspaces(args: list[str], version: str) -> None:
 
 
 def run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
+    enforce_restrictions()
     version = engine_for(args)
     enforce_restrictions(version)
     directory = engine_dir(version)

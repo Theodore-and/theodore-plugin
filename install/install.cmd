@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.0"
-set "PIN_CLIENT=client/client-0.2.0.tar 05ead6f94a478f48c3183399263c61d76a1ba08dc5c5416ed6cc1618c899702d"
+set "PIN_CLIENT=client/client-0.2.0.tar 4d65921717cb809f4c49e2da6b3591103f8f58db78c4660e92ea28e74b854ff9"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -52,7 +52,7 @@ rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redire
 rem abort below 1 KB/s for 60 s, 30 minutes at most.
 set "PROTO==https"
 if /i "%API_BASE:~0,17%"=="http://127.0.0.1:" set "PROTO==https,http"
-set "CURL_OPTS=-fsS --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2"
+set "CURL_OPTS=-q -fsS --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2"
 
 :parse
 if "%~1"=="" goto :parsed
@@ -116,7 +116,7 @@ rem --- 1. redeem the one-time code first: it lasts ten minutes, the downloads m
 if not defined CODE goto :stage1
 set "HTTP=000"
 rem The body goes through a pipe: no file holds the code.
-echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}| "%CURL%" -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary @- "%API_BASE%/v1/device/activate" >"%WORK%\http.txt" 2>nul
+echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}| "%CURL%" -q -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%HOME_DIR%\state\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary @- "%API_BASE%/v1/device/activate" >"%WORK%\http.txt" 2>nul
 set /p HTTP=<"%WORK%\http.txt"
 if "%HTTP%"=="200" echo theodore-install: this computer is signed in (the one-time code was accepted)
 if "%HTTP%"=="200" goto :stage1

@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.0"
-PIN_CLIENT="client/client-0.2.0.tar 05ead6f94a478f48c3183399263c61d76a1ba08dc5c5416ed6cc1618c899702d"
+PIN_CLIENT="client/client-0.2.0.tar 4d65921717cb809f4c49e2da6b3591103f8f58db78c4660e92ea28e74b854ff9"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -109,7 +109,7 @@ trap 'rm -rf "$WORK"; exit 130' INT TERM HUP
 # abort when slower than 1 KB/s for 60 s, 30 minutes at most.
 proto() { case "$1" in http://127.0.0.1[:/]*|http://localhost[:/]*) echo =https,http ;; *) echo =https ;; esac; }
 fetch() { # url dest what
-  curl -fsS --proto "$(proto "$1")" --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2 -o "$2" -w '%{http_code}' "$1" \
+  curl -q -fsS --proto "$(proto "$1")" --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2 -o "$2" -w '%{http_code}' "$1" \
     >"$WORK/http" 2>"$WORK/err" && [ "$(cat "$WORK/http")" = 200 ] && return 0
   rc=$?
   cause=NETWORK
@@ -134,7 +134,7 @@ if [ -n "$CODE" ]; then
     "$CODE" "${name:-computer}" "$PLAT" "$ARCH" "$PIN_CLIENT_VERSION")
   pending="$HOME_DIR/state/activation.pending"
   ( umask 077; : > "$pending" )
-  http=$(printf '%s' "$body" | curl -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$pending" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$API_BASE/v1/device/activate" 2>/dev/null) || http=000
+  http=$(printf '%s' "$body" | curl -q -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$pending" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$API_BASE/v1/device/activate" 2>/dev/null) || http=000
   if [ "$http" = 200 ]; then
     say "this computer is signed in (the one-time code was accepted)"
   else

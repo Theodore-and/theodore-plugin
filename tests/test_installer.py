@@ -167,6 +167,30 @@ class Installer(unittest.TestCase):
                 self.assertFalse((self.box.home / "bin").exists(), "no launcher from the download ever ran")
                 self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [], "the installer removed its own files")
 
+    def test_the_plugin_document_and_archive_follow_no_redirect(self):
+        signed = self.api.files["plugin/latest.json"]
+        self.api.files["old/latest.json"] = signed
+        self.api.dl_redirect["plugin/latest.json"] = f"{self.api.base}/dl/old/latest.json"      # same origin, still refused
+        result = self.install()
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        self.assertIn("redirect", status_lines(result.stdout)[0])
+        self.assertNotIn("/dl/old/latest.json", [r["path"] for r in self.api.requests])
+        self.assertFalse((self.box.home / "plugin").exists())
+
+    def test_an_older_plugin_than_the_installed_one_is_refused(self):
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.install("--code", "ABCD-1234").returncode, 0)
+        self.box.wait_jobs()
+        installed = self.box.home / "plugin" / "plugins" / "theodore" / ".claude-plugin" / "plugin.json"
+        data = json.loads(installed.read_text())
+        data["version"] = "9.0.0"                                     # the computer already has a newer plugin
+        installed.write_text(json.dumps(data))
+        result = self.install()
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        self.assertIn("older than the installed plugin 9.0.0", status_lines(result.stdout)[0])
+        self.assertEqual(json.loads(installed.read_text())["version"], "9.0.0", "nothing was replaced")
+        self.box.wait_jobs()
+
     def test_python_and_client_are_checked_against_the_installers_pins_before_anything_runs(self):
         python_key = next(k for k in json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
                           if k.startswith("stage1_python_") and k.endswith("_sha256") and (("win32" in k) == IS_WINDOWS))

@@ -264,9 +264,17 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
         return 0
     if origin != "user_requested":
         allowed, why = account.automatic_reports()
+        if why == "unknown":        # learn the switch from a licence refresh first; never guess "on"
+            try:
+                account.refresh(timeout=8.0)
+            except (api.ApiError, api.NetworkError):
+                pass
+            allowed, why = account.automatic_reports()
         if not allowed:     # known before sending: nothing leaves this computer
-            return core.emit(Status("BLOCKED_BY_POLICY", "automatic reports are off for this account; nothing was sent." if why == "off"
-                                    else "automatic reports are not part of this account's plan; nothing was sent.", _REPORTS_OFF_NEXT, None))
+            summary = {"off": "automatic reports are off for this account; nothing was sent.",
+                       "plan": "automatic reports are not part of this account's plan; nothing was sent.",
+                       "unknown": "whether automatic reports are on for this account is not known yet; nothing was sent."}[why]
+            return core.emit(Status("BLOCKED_BY_POLICY", summary, _REPORTS_OFF_NEXT, None))
     try:
         _status, _headers, raw = _api("reports", "report", body=payload)
     except Status as status_:
@@ -325,7 +333,15 @@ def setup_job() -> int:
         if credentials.load():
             try:
                 manifest = install.fetch_channel_manifest()
-                version = install.stage_engine(install.engine_artifact(manifest), job)
+                # The first manifest counts like any later one: its restrictions are kept and enforced, and a
+                # forbidden engine is not installed. A refusal is not recorded as a check, so the next guide asks again.
+                install.save_restrictions(manifest)
+                install.enforce_restrictions()
+                entry = install.engine_artifact(manifest)
+                if install.forbidden(entry.get("version")):
+                    raise Status("UPDATE_REQUIRED", f"the engine this channel offers ({entry.get('version')}) is withdrawn or below the minimum.",
+                                 "wait for a newer release.", "Theodore is waiting for a new release.")
+                version = install.stage_engine(entry, job)
                 if not install.current_engine():
                     install.activate_engine(version)
                 install.save_update_state(last_check=int(core.now()), latest=version, guides=manifest.get("guides") or {},
@@ -829,7 +845,7 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
     base = dl_base.rstrip("/")
     what = "the plugin release document"
     try:
-        _status, _headers, raw = api.request("GET", f"{base}/plugin/latest.json", timeout=60.0)
+        _status, _headers, raw = api.request("GET", f"{base}/plugin/latest.json", timeout=60.0, redirects=False)
         envelope = json.loads(raw.decode("utf-8"))
     except api.NetworkError as error:
         raise api.setup_failed(error.cause, f"{what} could not be downloaded from {base} ({error.detail})") from None
@@ -845,9 +861,14 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
     if not core._SEMVER.match(version) or archive_name != f"theodore-plugin-{version}.tar.gz" or not re.match(r"^[0-9a-f]{64}$", sha) \
             or not isinstance(size, int) or not 0 < size < 64 * 1024 * 1024:
         raise api.setup_failed("HASH_MISMATCH", f"{what} is signed but does not describe a plugin archive")
+    installed = core.read_json(home.plugin / "plugins" / "theodore" / ".claude-plugin" / "plugin.json").get("version")
+    if installed and core._SEMVER.match(str(installed)) and core.version_key(version) < core.version_key(str(installed)):
+        # A signed document cannot be told from a replayed old one; an older plugin than the one installed is refused.
+        raise api.setup_failed("HASH_MISMATCH", f"the plugin release document offers {version}, older than the installed plugin {installed}; "
+                                                f"refused (a replayed document, or a rollback that only an uninstall can apply)")
     archive = home.staging / archive_name
     try:
-        api.download(f"{base}/plugin/{archive_name}", archive, sha256=sha, size=size, timeout=60.0)
+        api.download(f"{base}/plugin/{archive_name}", archive, sha256=sha, size=size, timeout=60.0, redirects=False)
     except api.NetworkError as error:
         raise api.setup_failed(error.cause, f"the plugin could not be downloaded from {base} ({error.detail})") from None
     except api.ApiError as error:

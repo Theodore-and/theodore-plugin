@@ -474,9 +474,11 @@ class Engine(ClientCase):
         self.assertStatus(self.client("pptx", "version", env=later), "BLOCKED_BY_POLICY", 73)
         self.assertStatus(self.client("python", "-c", "print(1)", env=later), "BLOCKED_BY_POLICY", 73)
         self.assertEqual(manifests(), seen)
-        # An older signed manifest (a replay without the kill switch) does not lift it.
+        # An older signed manifest (a replay without the kill switch) is refused and does not lift it.
         self.api.kill, self.api.clock_offset = False, 0
-        self.assertStatus(self.client("update", "--apply", env=later), "BLOCKED_BY_POLICY", 73)
+        first, _n, _t = self.assertStatus(self.client("update", "--apply", env=later), "SETUP_FAILED", 68)
+        self.assertIn("refused as a replay", first)
+        self.assertStatus(self.client("pptx", "version", env=later), "BLOCKED_BY_POLICY", 73)
         self.api.clock_offset = 8 * 3600                                                           # a newer one does
         self.assertStatus(self.client("update", "--apply", env=later), "OK", 0)
         self.assertEqual(self.client("pptx", "version", env=later).stdout.strip(), self.ENGINE_VERSION)
@@ -491,6 +493,51 @@ class Engine(ClientCase):
         self.assertStatus(self.client("update", "--apply", env=later), "UPDATE_REQUIRED", 72)
         _f, nxt, _t = self.assertStatus(self.client("pptx", "version", env=later), "UPDATE_REQUIRED", 72)
         self.assertIn("claude plugin update theodore@theodore", nxt)
+
+    def test_the_first_setup_enforces_the_manifests_restrictions_like_a_later_check(self):
+        manifests = lambda: len([r for r in self.api.requests if r["path"] == "/v1/releases/manifest"])
+        for name, change, status, code in (("kill", {"kill": True, "kill_message": "maintenance"}, "BLOCKED_BY_POLICY", 73),
+                                           ("minimum", {"min_version": "9.0.0"}, "UPDATE_REQUIRED", 72),
+                                           ("withdrawn", {"revoked": True}, "UPDATE_REQUIRED", 72)):
+            with self.subTest(name):
+                box = Sandbox(self.api, home_name=f"home {name}")
+                self.addCleanup(box.close)
+                box.install_client_directly()
+                self.box = box
+                self.api.kill, self.api.kill_message, self.api.min_version = False, "", None
+                self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION))
+                if change.pop("revoked", False):
+                    self.api.engine["revoked"] = [self.ENGINE_VERSION]
+                for key, value in change.items():
+                    setattr(self.api, key, value)
+                self.sign_in()
+                self.client("setup", "--job")
+                box.wait_jobs()
+                self.assertEqual(self.state("engines/current.json"), {}, "nothing is installed from a manifest that forbids it")
+                before = manifests()
+                self.assertStatus(self.client("guide", "pptx"), status, code)
+                self.assertStatus(self.client("pptx", "version"), status, code)
+                self.assertGreater(manifests(), before, "the refusal does not stand in for a check: the next guide asks again")
+        self.api.kill, self.api.min_version = False, None
+
+    def test_a_replayed_older_manifest_never_downgrades_but_a_newer_rollback_does(self):
+        self.ready()
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.api.clock_offset = 7 * 3600
+        self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}), "OK", 0)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0")
+        # The server's answer from before (an older server_time) offering the older engine, replayed.
+        self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION))
+        self.api.clock_offset = -3600
+        first, _n, _t = self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(14 * 3600)}), "SETUP_FAILED", 68)
+        self.assertIn("older than one already accepted", first)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0", "no downgrade from a replay")
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(21 * 3600)})
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), "2.0.0")
+        # The server itself moves the channel back: a newer document, accepted.
+        self.api.clock_offset = 15 * 3600
+        self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(28 * 3600)}), "OK", 0)
+        self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
     def test_a_failed_update_check_waits_six_hours_like_a_successful_one(self):
         self.ready()
@@ -589,6 +636,26 @@ class Engine(ClientCase):
         self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(3 * DAY)})
         self.assertFalse(old.exists())
         self.assertTrue(new.exists())
+
+    def test_builds_going_back_and_forth_never_delete_a_folder_in_use(self):
+        self.ready()
+        b = engine_zip(self.ENGINE_VERSION)
+        c = engine_zip(self.ENGINE_VERSION, skill_text="---\nname: pptx\n---\n\n# PPTX Skill\n\nBuild C.\n")
+        folders = {}
+        for step, (label, data) in enumerate((("B", b), ("C", c), ("B", b), ("C", c))):
+            # within one day: a superseded folder is collected only after a day unused
+            self.api.publish_engine(self.ENGINE_VERSION, data)
+            offset = (step + 1) * 600
+            self.api.clock_offset = offset
+            self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(offset)}), "OK", 0)
+            used = Path(json.loads(self.client("pptx", "env").stdout)["exe"]).parents[2]
+            if label not in folders:
+                folders[label] = used
+                (used / "a running build's file").write_text("in use")        # what a build in progress would lose
+            self.assertEqual(used, folders[label], f"step {step}: build {label} reuses its own folder")
+            for other in folders.values():
+                self.assertTrue((other / "a running build's file").exists(), f"step {step}: {other.name} was deleted or replaced")
+        self.assertNotEqual(folders["B"], folders["C"])
 
     def test_a_manifest_without_an_installable_artifact_is_update_required(self):
         self.ready()
@@ -867,25 +934,30 @@ class ReportsAndPreferences(ClientCase):
     def test_automatic_reports_switched_off_means_off_and_nothing_is_asked(self):
         self.ready()
         self.api.auto_reports = False
+        posts = lambda: len([r for r in self.api.requests if r["path"] == "/v1/reports"])
         args = ("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
-        refused = self.client(*args)       # the switch is not known yet: the server refuses and stores nothing (the backstop)
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(13 * 3600)})       # a refresh learns the switch
+        refused = self.client(*args, env={"THEODORE_TEST_CLOCK_OFFSET": str(13 * 3600)})
         self.assertEqual(refused.returncode, 73, refused.stdout + refused.stderr)
         self.assertEqual(refused.stdout.strip().splitlines(), [
-            "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; the Theodore service refused this report and did not store it.",
+            "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; nothing was sent.",
             "NEXT: do not retry and do not ask the user about it; continue with the user's task. Send a report only when "
             "the user explicitly asks for one, with --origin user_requested."])
-        self.assertEqual(self.api.reports, [], "nothing was stored")
-        self.assertTrue((self.box.home / "state" / "entitlement.json").exists(), "this 403 must not sign the device out")
-        posts = lambda: len([r for r in self.api.requests if r["path"] == "/v1/reports"])
-        before = posts()
-        again = self.client(*args)          # now the client knows: nothing is sent at all
-        self.assertEqual(again.returncode, 73, again.stdout)
-        self.assertEqual(again.stdout.strip().splitlines()[0],
-                         "THEODORE BLOCKED_BY_POLICY: automatic reports are off for this account; nothing was sent.")
-        self.assertEqual(posts(), before, "no request left this computer")
+        self.assertEqual(posts(), 0, "nothing left this computer")
+        self.assertTrue((self.box.home / "state" / "entitlement.json").exists())
         _f, _n, tell = self.assertStatus(self.client(*args, "--origin", "user_requested"), "OK", 0)
         self.assertIn("no deck content", tell, "a report the user asked for is confirmed to the user")
         self.assertEqual([r["origin"] for r in self.api.reports], ["user_requested"])
+
+    def test_an_unknown_switch_sends_no_automatic_report(self):
+        self.api.refresh_carries_report_switch = False            # a server that does not say: the client does not guess
+        self.ready()
+        result = self.client("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77")
+        self.assertEqual(result.returncode, 73, result.stdout)
+        self.assertIn("not known", result.stdout.splitlines()[0])
+        self.assertEqual([r for r in self.api.requests if r["path"] == "/v1/reports"], [])
+        self.assertStatus(self.client("report", "--kind", "bug", "--title", "render failed", "--details", "exit code 77",
+                                      "--origin", "user_requested"), "OK", 0)
 
     def test_the_switch_and_the_plan_feature_are_known_before_anything_is_sent(self):
         self.api.refresh_carries_report_switch = True

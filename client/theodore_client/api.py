@@ -73,14 +73,21 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_OPENER = None
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """For the installer's plugin document and archive: no redirect at all, not even on the same origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RedirectRefused(f"the server answered with a redirect (HTTP {code}), which is not followed for this download")
 
 
-def _opener():
-    global _OPENER
-    if _OPENER is None:
-        _OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _Redirects())
-    return _OPENER
+_OPENERS: dict = {}
+
+
+def _opener(redirects: bool = True):
+    if redirects not in _OPENERS:
+        _OPENERS[redirects] = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()),
+                                                          _Redirects() if redirects else _NoRedirects())
+    return _OPENERS[redirects]
 
 
 def _network_error(exc: Exception) -> NetworkError:
@@ -94,7 +101,7 @@ def _network_error(exc: Exception) -> NetworkError:
 
 
 def request(method: str, url: str, *, bearer: str | None = None, body=None, headers: dict | None = None,
-            timeout: float = 20.0):
+            timeout: float = 20.0, redirects: bool = True):
     """One HTTP exchange. Returns (status, headers, bytes) for 2xx and 304; raises ApiError or NetworkError."""
     data = None
     hdrs = {"User-Agent": core.user_agent(), "Accept": "application/json, text/markdown;q=0.9, */*;q=0.1"}
@@ -106,7 +113,7 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
-        with _opener().open(req, timeout=timeout) as resp:
+        with _opener(redirects).open(req, timeout=timeout) as resp:
             return resp.status, resp.headers, resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
@@ -158,7 +165,7 @@ def call_json(route: str, **kwargs):
 
 
 def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, size: int | None = None,
-             progress=None, timeout: float = 60.0) -> Path:
+             progress=None, timeout: float = 60.0, redirects: bool = True) -> Path:
     """Stream `url` to `dest` and check its sha256. A mismatch deletes the file and raises SETUP_FAILED."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
@@ -168,7 +175,7 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
     req = urllib.request.Request(url, headers=hdrs)
     digest, done = hashlib.sha256(), 0
     try:
-        with _opener().open(req, timeout=timeout) as resp, open(part, "wb") as out:
+        with _opener(redirects).open(req, timeout=timeout) as resp, open(part, "wb") as out:
             total = size or int(resp.headers.get("Content-Length") or 0)
             while True:
                 block = resp.read(1 << 18)

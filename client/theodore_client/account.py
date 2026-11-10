@@ -100,15 +100,17 @@ def automatic_reports() -> tuple[bool, str]:
     """Whether an automatic report may be sent, decided before anything is sent: (allowed, why not).
 
     The plan feature `agent-reports` is in the entitlement's feat claim. The user's switch is cached with the
-    entitlement: from the licence refresh answer when the server includes it, or from a 403 auto_reports_disabled
-    (remembered for a day, since that answer cannot say when the user turns reports back on)."""
+    entitlement: from the licence refresh answer (auto_report_enabled), or from a 403 auto_reports_disabled
+    (remembered for a day). When neither has said, the answer is "unknown" and no automatic report is sent."""
     token, claims = stored_token()
     if token and AGENT_REPORTS_FEATURE not in (claims.get("feat") or []):
         return False, "plan"
     known = core.read_json(_token_path()).get("auto_reports") or {}
-    if known.get("enabled") is False and (known.get("source") == "server" or core.now() - float(known.get("at") or 0) < REFUSED_OFF_SECONDS):
+    if known.get("source") == "server" and isinstance(known.get("enabled"), bool):
+        return (True, "") if known["enabled"] else (False, "off")
+    if known.get("enabled") is False and core.now() - float(known.get("at") or 0) < REFUSED_OFF_SECONDS:
         return False, "off"
-    return True, ""
+    return False, "unknown"         # not said by the server: no automatic report (a report the user asks for still goes)
 
 
 def remember_automatic_reports_off() -> None:
