@@ -728,7 +728,7 @@ class Packs(ClientCase):
 
     def test_each_pack_is_waited_for_by_its_documented_helper_and_doubt_waits_for_all(self):
         self.sign_in()
-        self.api.pack_delay = 6.0                                   # nothing has arrived while the checks below run
+        self.api.pack_delay = 30.0                                  # nothing has arrived while the checks below run, even on a loaded machine
         self.assertEqual(self.client("setup", "--job").returncode, 0)
         quick = {"THEODORE_TEST_PACK_WAIT": "0.2"}
         documented = {"icon": "await safeIcon('rocket')", "flag": "const png = await flagToBase64Png('ae', 64);",
