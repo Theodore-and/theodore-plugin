@@ -122,6 +122,7 @@ class FakeApi:
         self.requests: list[dict] = []    # {method, path, auth} of every request, for assertions
         self.files: dict[str, bytes | Path] = {}      # /dl/<key> -> content
         self.dl_status: dict[str, int] = {}           # /dl/<key> -> forced HTTP status (for example 407)
+        self.dl_redirect: dict[str, str] = {}         # /dl/<key> -> Location of a 302
         self.dl_delay = 0.0                           # seconds to stall every /dl/ download (a slow connection)
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
         self.devices: dict[str, dict] = {}            # device_code -> {user_code, status}
@@ -343,6 +344,8 @@ class FakeApi:
         if seg[:1] == ["dl"]:
             key = "/".join(seg[1:])
             content = self.files.get(key)
+            if key in self.dl_redirect:
+                return self._send(h, 302, b"", {"Location": self.dl_redirect[key]}, content_type="text/plain")
             if key in self.dl_status:
                 return self._send(h, self.dl_status[key], b"refused", content_type="text/plain")
             if self.dl_delay:

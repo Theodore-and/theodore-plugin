@@ -227,6 +227,20 @@ class HostLimits(unittest.TestCase):
                     done = subprocess.run([exe, "-n", str(script)], capture_output=True, text=True)
                     self.assertEqual(done.returncode, 0, f"{shell} -n {script.name}: {done.stderr}")
 
+    def test_downloads_follow_no_redirect_and_cannot_stall(self):
+        for path in (SCRIPTS / "theodore", SCRIPTS / "theodore.cmd", ROOT / "install" / "install.sh", ROOT / "install" / "install.cmd"):
+            text = path.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                if re.search(r"curl(\.exe)?\"? ", line) and not line.lstrip().startswith(("#", "rem ")):
+                    self.assertNotRegex(line, r"\s-[a-zA-Z]*L|--location", f"{path.name}: curl must not follow redirects: {line}")
+            self.assertIn("--speed-limit 1024 --speed-time 60", text, path.name)
+            self.assertIn("--proto", text, path.name)
+        self.assertIn("--max-redirect=0", (SCRIPTS / "theodore").read_text())
+        cmd = (SCRIPTS / "theodore.cmd").read_text()
+        self.assertIn("MaximumRedirection = 0", cmd)
+        self.assertIn("$a.Proxy = $p.GetProxy($u); $a.ProxyUseDefaultCredentials = $true", cmd, "-ProxyUseDefaultCredentials needs -Proxy")
+        self.assertIn("/setsecurityflags %BJ% 0x0200", cmd)
+
     def test_no_powershell_script_in_the_bootstrap_path(self):
         for path in (SCRIPTS / "theodore.cmd", ROOT / "install" / "install.cmd"):
             text = path.read_text(encoding="ascii")

@@ -198,6 +198,16 @@ class Failures(LauncherCase):
         self.assertIn("cause TLS_INTERCEPT", first)
         self.assertIn("root certificate", nxt)
 
+    def test_a_redirect_is_not_followed(self):
+        python = next(p for p in self.api.runtime["parts"] if p["part"] == "python")
+        key = python["url"].split("/dl/", 1)[1]
+        self.api.files["elsewhere/python.tar.gz"] = self.api.files[key]
+        self.api.dl_redirect[key] = self.api.base.replace("127.0.0.1", "localhost") + "/dl/elsewhere/python.tar.gz"
+        first, _n, _t = self.assertStatus(self.run_launcher("guide", "pptx"), "SETUP_FAILED", 68)
+        self.assertIn("redirect", first)
+        self.assertNotIn("/dl/elsewhere/python.tar.gz", [r["path"] for r in self.api.requests])
+        self.assertFalse((self.box.home / "runtime" / RUNTIME_ID / "python").exists())
+
     def test_proxy_authentication_is_proxy_auth(self):
         python = next(p for p in self.api.runtime["parts"] if p["part"] == "python")
         key = python["url"].split("/dl/", 1)[1]

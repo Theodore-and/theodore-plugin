@@ -88,7 +88,7 @@ del /q "%B%\.write-test" >nul 2>&1
 
 if not defined THEODORE_EPHEMERAL goto :start_job
 call :jget stage1_client_url "%CONF%"
-"%SYS32%\curl.exe" -sS -I -L --connect-timeout 5 -m 10 -o nul "%JV%" >nul 2>&1
+"%SYS32%\curl.exe" -sS -I --connect-timeout 5 -m 10 -o nul "%JV%" >nul 2>&1
 if errorlevel 1 goto :connector_required
 
 :start_job
@@ -180,35 +180,43 @@ if defined HASH set "HASH=%HASH: =%"
 exit /b 0
 
 :fetch
-rem %1 url, %2 destination. Errorlevel 0 on success; otherwise CAUSE and DETAIL are set.
+rem %1 url, %2 destination. Errorlevel 0 on success; otherwise CAUSE and DETAIL are set. Every route speaks HTTPS only
+rem (plain HTTP only to a loopback test server), follows no redirect and gives up on a stalled transfer.
 set "CAUSE=NETWORK"
 set "DETAIL=no download tool worked"
 set "HTTP=000"
+set "PROTO==https"
+set "FURL=%~1"
+if /i "%FURL:~0,17%"=="http://127.0.0.1:" set "PROTO==https,http"
 if not exist "%SYS32%\curl.exe" goto :fetch_powershell
-"%SYS32%\curl.exe" -sS -L --fail --retry 2 --connect-timeout 20 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
+"%SYS32%\curl.exe" -sS --fail --proto %PROTO% --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
 set "RC=%ERRORLEVEL%"
 set /p HTTP=<"%B%\http.txt"
-if "%RC%"=="0" exit /b 0
+if "%RC%"=="0" if "%HTTP%"=="200" exit /b 0
 set "DETAIL=curl exit %RC%, HTTP %HTTP%"
+if "%HTTP:~0,1%"=="3" goto :fetch_redirect
 if "%RC%"=="23" set "CAUSE=DISK"
 if "%RC%"=="23" exit /b 1
 for %%C in (35 51 53 58 59 60 77 83 90 91) do if "%RC%"=="%%C" set "CAUSE=TLS_INTERCEPT"
 if "%HTTP%"=="407" set "CAUSE=PROXY_AUTH"
 "%SYS32%\findstr.exe" /c:"407" "%B%\fetch.err" >nul 2>&1 && set "CAUSE=PROXY_AUTH"
 :fetch_powershell
-rem Second try: Windows' own HTTP stack with the signed-in user's proxy credentials.
+rem Second try: Windows' own HTTP stack with the signed-in user's proxy credentials. -ProxyUseDefaultCredentials needs
+rem -Proxy, so the system proxy for this URL is named, unless the URL bypasses it. No redirect (MaximumRedirection 0).
 set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%PWSH%" goto :fetch_bits
-"%PWSH%" -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 -ProxyUseDefaultCredentials -Uri $env:THEODORE_FETCH_URL -OutFile $env:THEODORE_FETCH_OUT; exit 0 } catch { exit 1 }" >nul 2>&1
+"%PWSH%" -NoProfile -NonInteractive -Command "$ProgressPreference='SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $u = [Uri]$env:THEODORE_FETCH_URL; $p = [Net.WebRequest]::GetSystemWebProxy(); $a = @{ UseBasicParsing = $true; TimeoutSec = 120; MaximumRedirection = 0; Uri = $u; OutFile = $env:THEODORE_FETCH_OUT }; if (-not $p.IsBypassed($u)) { $a.Proxy = $p.GetProxy($u); $a.ProxyUseDefaultCredentials = $true }; Invoke-WebRequest @a; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 if exist "%~2" exit /b 0
-exit /b 1
+del /q "%~2" >nul 2>&1
+rem PowerShell failed too: BITS, which has its own proxy handling, is the last route.
 :fetch_bits
-rem Only where PowerShell is missing: the Background Intelligent Transfer Service. BITS retries a transient error
-rem for days, so the job gets 60 seconds without progress and 30 minutes in all, then is cancelled.
+rem The Background Intelligent Transfer Service. BITS retries a transient error for days, so the job gets 60 seconds
+rem without progress and 30 minutes in all, then is cancelled. Redirects are refused (BG_HTTP_REDIRECT_POLICY_DISALLOW).
 if not exist "%SYS32%\bitsadmin.exe" exit /b 1
 set "BJ=theodore-setup-%RANDOM%%RANDOM%"
 "%SYS32%\bitsadmin.exe" /create /download %BJ% >nul 2>&1 || exit /b 1
 "%SYS32%\bitsadmin.exe" /addfile %BJ% "%~1" "%~2" >nul 2>&1
+"%SYS32%\bitsadmin.exe" /setsecurityflags %BJ% 0x0200 >nul 2>&1
 "%SYS32%\bitsadmin.exe" /setnoprogresstimeout %BJ% 60 >nul 2>&1
 "%SYS32%\bitsadmin.exe" /setpriority %BJ% FOREGROUND >nul 2>&1
 "%SYS32%\bitsadmin.exe" /resume %BJ% >nul 2>&1
@@ -230,6 +238,10 @@ if exist "%~2" exit /b 0
 exit /b 1
 :bits_cancel
 "%SYS32%\bitsadmin.exe" /cancel %BJ% >nul 2>&1
+exit /b 1
+:fetch_redirect
+set "DETAIL=the server answered with a redirect, which is not followed (HTTP %HTTP%)"
+del /q "%~2" >nul 2>&1
 exit /b 1
 
 :fail
