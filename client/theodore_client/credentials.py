@@ -90,9 +90,11 @@ def _keychain_load() -> str | None:
         return None
 
 
-def _keychain_delete() -> None:
-    subprocess.run([SECURITY, "delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()],
-                   text=True, capture_output=True)
+def _keychain_delete() -> bool:
+    """True when no item is left: deleted, or there was none (security exits 44 for "not found")."""
+    done = subprocess.run([SECURITY, "delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()],
+                          text=True, capture_output=True)
+    return done.returncode in (0, 44)
 
 
 def store(installation_id: str, installation_secret: str) -> str:
@@ -135,10 +137,11 @@ def load() -> dict | None:
     return None
 
 
-def delete() -> None:
-    if backend() == "keychain":
-        _keychain_delete()
+def delete() -> bool:
+    """Remove the credential. False when the keychain item could not be deleted (it is then still there)."""
+    gone = _keychain_delete() if backend() == "keychain" else True
     core.remove_tree(_file())
+    return gone and not _file().exists()
 
 
 def describe() -> str:

@@ -320,6 +320,45 @@ class Failures(LauncherCase):
         self.assertStatus(result, "OK", 0)
         self.assertFalse(self.box.home.exists())
 
+    @unittest.skipIf(IS_WINDOWS, "the sh launcher's own uninstall")
+    def test_uninstall_without_python_removes_registrations_keychain_and_cache_and_names_what_is_left(self):
+        import hashlib
+        import subprocess
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        settings = self.box.user_home / ".claude" / "settings.json"
+        (state / "host-settings.json").write_text(json.dumps({"rules": ["Bash(x *)"], "path": str(settings)}, indent=2))
+        cache = (self.box.user_home / "Library" / "Caches" / "pptx-runtime") if sys.platform == "darwin" else (self.box.user_home / ".cache" / "pptx-runtime")
+        cache.mkdir(parents=True)
+        fake = self.box.tmp / "fakebin"
+        fake.mkdir()
+        log = self.box.tmp / "calls.log"
+        for name in ("claude", "codex"):
+            (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\nexit 0\n')
+            (fake / name).chmod(0o755)
+        env = {"PATH": f"{fake}{os.pathsep}{self.box.env['PATH']}"}
+        keychain = None
+        if sys.platform == "darwin":
+            keychain = self.box.tmp / "test.keychain-db"
+            subprocess.run(["/usr/bin/security", "create-keychain", "-p", "", str(keychain)], check=True, capture_output=True)
+            self.addCleanup(lambda: subprocess.run(["/usr/bin/security", "delete-keychain", str(keychain)], capture_output=True))
+            account = "installation-" + hashlib.sha256(str(self.box.home).encode()).hexdigest()[:12]
+            subprocess.run(["/usr/bin/security", "add-generic-password", "-a", account, "-s", "ai.theodoreand.theodore", "-w", "x", str(keychain)],
+                           check=True, capture_output=True)
+            env["THEODORE_TEST_KEYCHAIN"] = str(keychain)
+        first, nxt, _t = self.assertStatus(self.run_launcher("uninstall", env=env), "RETRY", 75)
+        self.assertIn(str(settings), first, "the settings entries it cannot take back without Python are named")
+        self.assertNotIn("keychain", first)
+        calls = log.read_text().splitlines()
+        for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
+                         "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
+            self.assertIn(expected, calls)
+        self.assertFalse(cache.exists())
+        self.assertFalse(self.box.home.exists())
+        if keychain:
+            found = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "ai.theodoreand.theodore", str(keychain)], capture_output=True)
+            self.assertNotEqual(found.returncode, 0, "the keychain item is gone")
+
     def test_a_folder_that_already_holds_other_things_is_shared_politely(self):
         foreign = self.box.home / "memory" / "notes.txt"
         foreign.parent.mkdir(parents=True)

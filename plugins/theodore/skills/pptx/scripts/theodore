@@ -159,6 +159,11 @@ case "$OS" in Darwin) PLAT=darwin ;; Linux) PLAT=linux ;; *) PLAT= ;; esac
 case "$MACHINE" in arm64|aarch64) ARCH=arm64 ;; x86_64|amd64) ARCH=x64 ;; *) ARCH= ;; esac
 if [ "$PLAT" = linux ] && (ldd --version 2>&1 | grep -qi musl); then PLAT=; fi
 
+sha256_of_stdin() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else openssl dgst -sha256 | sed 's/^.*= *//'; fi
+}
 sha256_of() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
   elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
@@ -261,11 +266,47 @@ fi
 
 # --- not installed yet ----------------------------------------------------------------------------------------------
 if [ "${1:-}" = "uninstall" ]; then
+  # Theodore's Python is not there (never installed, or removed by something else): the launcher does what the
+  # client's uninstall does, as far as sh can, and says what it could not do.
   [ -f "$B/pid" ] && kill "$(cat "$B/pid" 2>/dev/null)" 2>/dev/null
+  left=
+  unreg() { # name command...: run an unregistration; anything but "done" or "nothing there" is residue
+    name=$1; shift
+    out=$("$@" 2>&1) && return 0
+    printf '%s' "$out" | grep -qiE 'not found|not installed|no such|does not exist|unknown plugin|unknown marketplace|not registered' && return 0
+    left="$left; the $name registration ($(printf '%s' "$out" | tail -n 1 | cut -c1-120))"
+  }
+  if command -v claude >/dev/null 2>&1; then
+    unreg claude-code claude plugin uninstall theodore@theodore
+    unreg claude-code claude plugin marketplace remove theodore
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    unreg codex codex plugin remove theodore@theodore
+    unreg codex codex plugin marketplace remove theodore
+  fi
+  if [ -f "$HOME_DIR/state/host-settings.json" ]; then
+    settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$HOME_DIR/state/host-settings.json" | head -n 1)
+    left="$left; two Theodore entries in ${settings:-the Claude Code settings.json} (the extraKnownMarketplaces.theodore autoUpdate and the two Bash(...theodore...) rules under permissions.allow)"
+  fi
+  if [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /usr/bin/security ]; then
+    account="installation-$(printf '%s' "${HOME_DIR%/}" | sha256_of_stdin | cut -c1-12)"
+    extra=
+    case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) extra=${THEODORE_TEST_KEYCHAIN:-} ;; esac
+    /usr/bin/security delete-generic-password -a "$account" -s ai.theodoreand.theodore ${extra:+"$extra"} >/dev/null 2>&1
+    case $? in 0|44) ;; *) left="$left; the sign-in item in the login keychain (service ai.theodoreand.theodore)" ;; esac
+    rm -rf "${HOME:-/nonexistent}/Library/Caches/pptx-runtime"
+  else
+    rm -rf "${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/pptx-runtime"
+  fi
   # Only Theodore's own subfolders: the folder may hold things that are not Theodore's.
   for d in bin client runtime engines packs tools state logs staging plugin; do rm -rf "${HOME_DIR:?}/$d"; done
   rmdir "$HOME_DIR" 2>/dev/null
-  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR were removed." "nothing to do." "Theodore is uninstalled."
+  if [ -n "$left" ]; then
+    status RETRY 75 "Theodore's folders in $HOME_DIR were removed, but these could not be: ${left#; }." \
+      "tell the user what is left; it can be removed by hand (see 'Remove it' at https://github.com/Theodore-and/theodore-plugin)." \
+      "Theodore's files are removed, but a few pieces could not be: ${left#; }. Your decks were not touched."
+  fi
+  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed." "nothing to do." "Theodore is uninstalled."
 fi
 
 if [ -z "$PLAT" ] || [ -z "$ARCH" ]; then

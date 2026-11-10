@@ -1045,6 +1045,20 @@ class StatusDoctorUninstall(ClientCase):
 
 
 class Hosts(ClientCase):
+    def test_uninstall_says_what_it_could_not_remove(self):
+        self.ready()
+        bin_dir = self.box.tmp / "fakebin"
+        bin_dir.mkdir()
+        (bin_dir / "claude").write_text('#!/bin/sh\ncase "$*" in "plugin uninstall"*) echo "Error: plugin database is locked" >&2; exit 1;; esac\nexit 0\n')
+        (bin_dir / "claude").chmod(0o755)
+        self.box.env["PATH"] = f"{bin_dir}{os.pathsep}{self.box.env['PATH']}"
+        result = self.client("uninstall")
+        first, _n, tell = self.assertStatus(result, "RETRY", 75)
+        self.assertIn("claude-code registration", first)
+        self.assertIn("database is locked", first)
+        self.assertNotIn("Theodore is uninstalled", tell)
+        self.assertFalse((self.box.home / "engines").exists(), "the files are still removed")
+
     def _fake_tools(self, claude_first_rc: int = 0) -> Path:
         bin_dir = self.box.tmp / "fakebin"
         bin_dir.mkdir()

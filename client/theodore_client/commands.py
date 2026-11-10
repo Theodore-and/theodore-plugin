@@ -885,17 +885,31 @@ def _render_cache_dirs() -> list[Path]:
     return [Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "pptx-runtime"]
 
 
+_NOT_THERE = ("not found", "not installed", "no such", "does not exist", "unknown plugin", "unknown marketplace", "not registered")
+
+
+def _unregistered(command: list[str]) -> str | None:
+    """Run one unregistration; None when it worked or there was nothing to remove, else what went wrong."""
+    code, out = _run(command)
+    if code == 0 or any(text in out.lower() for text in _NOT_THERE):
+        return None
+    return (out.splitlines()[-1] if out else f"exit {code}")[:160]
+
+
 def uninstall(keep_hosts: bool) -> int:
     home = core.home()
+    left: list[str] = []
     if not keep_hosts:
         claude, codex = shutil.which("claude"), shutil.which("codex")
-        if claude:
-            _run([claude, "plugin", "uninstall", "theodore@theodore"])
-            _run([claude, "plugin", "marketplace", "remove", "theodore"])
-        if codex:
-            _run([codex, "plugin", "remove", "theodore@theodore"])
-            _run([codex, "plugin", "marketplace", "remove", "theodore"])
-        _claude_settings(remove=True)
+        for name, tool, commands_ in (("claude-code", claude, (["plugin", "uninstall", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"])),
+                                      ("codex", codex, (["plugin", "remove", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"]))):
+            for args in commands_ if tool else ():
+                problem = _unregistered([tool, *args])
+                if problem:
+                    left.append(f"the {name} registration ({' '.join(args)}: {problem})")
+        settings = _claude_settings(remove=True)
+        if "not changed" in settings or "not valid" in settings:
+            left.append(f"the two Theodore entries in {_claude_settings_path()} ({settings})")
     for name in ("setup", "packs", "engine-update", "client-update", "libreoffice"):
         pid = int(Job(name).read().get("pid") or 0)
         if pid and pid != os.getpid() and Job(name).alive():
@@ -903,9 +917,12 @@ def uninstall(keep_hosts: bool) -> int:
                 os.kill(pid, 15)
             except OSError:
                 pass
-    credentials.delete()
+    if not credentials.delete():
+        left.append(f"the sign-in item in the login keychain (service {credentials.SERVICE})")
     for cache in _render_cache_dirs():
         core.remove_tree(cache)
+        if cache.exists():
+            left.append(f"the render cache {cache}")
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
@@ -919,13 +936,21 @@ def uninstall(keep_hosts: bool) -> int:
     else:
         for name in core.OWNED:
             core.remove_tree(root / name)
-        kept = sorted(p.name for p in root.iterdir()) if root.exists() else []
-        if not kept:
+            if (root / name).exists():
+                left.append(f"{root / name}")
+        kept = sorted(p.name for p in root.iterdir() if p.name not in core.OWNED) if root.exists() else []
+        if root.exists() and not any(root.iterdir()):
             try:
                 root.rmdir()
             except OSError:
                 pass
     what = f"its folders in {root} were deleted; {len(kept)} other item(s) there were not Theodore's and were left alone" if kept else f"{root} was deleted"
+    if left:          # say exactly what is still there, never "removed"
+        print(f"THEODORE RETRY: Theodore's files were removed ({what}), but these could not be: {'; '.join(left)}.\n"
+              "NEXT: tell the user what is left; it can be removed by hand (see 'Remove it' at https://github.com/Theodore-and/theodore-plugin), "
+              "or run the same command again once the assistant is closed.\n"
+              "TELL THE USER: Theodore's files are removed, but a few pieces could not be: " + "; ".join(left) + ". Your decks were not touched.", flush=True)
+        return 75
     print(f"THEODORE OK: Theodore was removed from this computer ({what}; sign-in removed).\n"
           "NEXT: nothing to do. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
           "TELL THE USER: Theodore is uninstalled. Your decks and workspaces were not touched.", flush=True)
