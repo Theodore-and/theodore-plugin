@@ -475,6 +475,15 @@ def doctor(as_json: bool) -> int:
     blocking = _blocking_status(snap)
     if blocking:
         return core.emit(blocking)
+    failed = [(n, d) for l, n, d in checks if l == "fail"]
+    if any(n == "data directory" for n, _d in failed):
+        return core.emit(api.setup_failed("DISK", f"{home.root} is not writable"))
+    if failed:          # the last line never says ready when a check failed
+        what = "; ".join(f"{n} ({d})" for n, d in failed)
+        return core.emit(Status("INTERNAL", f"Theodore is installed but not ready: {what}.",
+                                f"tell the user what failed; run {quoted_launcher()} doctor again after fixing it, or report it with: "
+                                f"{quoted_launcher()} report --kind bug --origin user_requested",
+                                f"Theodore is installed but not working yet: {', '.join(n for n, _d in failed)} failed its check. I can report this to Theodore."))
     warned = {n for l, n, _d in checks if l == "warn"}
     notes = []
     if any(n.startswith("pack ") for n in warned):

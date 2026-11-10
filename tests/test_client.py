@@ -953,6 +953,26 @@ class StatusDoctorUninstall(ClientCase):
         report = json.loads(self.client("doctor", "--json").stdout)
         self.assertEqual({c["name"] for c in report["checks"] if c["level"] == "fail"}, set())
 
+    def test_doctor_never_says_ready_when_a_check_failed(self):
+        self.ready()
+        node = self.box.home / "runtime" / RUNTIME_ID / "node" / "bin" / "node"
+        node.unlink()
+        node.write_text("#!/bin/sh\nexit 1\n")                      # Node blocked or broken
+        node.chmod(0o755)
+        result = self.client("doctor")
+        first, _n, tell = self.assertStatus(result, "INTERNAL", 78)
+        self.assertIn("FAIL  runtime", result.stdout)
+        self.assertIn("runtime", first)
+        self.assertNotIn("ready", tell.lower().replace("not ready", ""))
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        if os.geteuid() != 0:
+            node.write_text("#!/bin/sh\necho v24.0.0\n")
+            (self.box.home).chmod(0o555)
+            self.addCleanup(lambda: self.box.home.chmod(0o755))
+            first, _n, _t = self.assertStatus(self.client("doctor"), "SETUP_FAILED", 68)
+            self.assertIn("cause DISK", first)
+            self.box.home.chmod(0o755)
+
     def test_doctor_says_plainly_when_windows_on_arm_runs_the_x64_build(self):
         self.ready()
         self.box.env["THEODORE_TEST_NATIVE_MACHINE"] = "arm64"         # what IsWow64Process2 reports on Windows on ARM
