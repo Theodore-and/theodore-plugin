@@ -132,7 +132,7 @@ class FakeApi:
         self.auto_reports = True
         self.engine: dict | None = None   # {version, sha256, size, runtime_id, min_client, revoked: [], kind}
         self.engine_files: dict[str, bytes] = {}
-        self.engine_redirect = False      # True: answer the engine route with a 302 to /dl/private/...
+        self.engine_redirect = None       # "same": 302 to /dl/private/... on this origin; "other": the same on localhost
         self.client = {"version": "0.1.0", "sha256": ""}
         self.shim_min: str | None = "0.1.0"
         self.min_version = None
@@ -485,7 +485,8 @@ class FakeApi:
             if self.engine_redirect:
                 key = f"private/engine-{route[1]}-{uuid.uuid4().hex}.zip"
                 self.files[key] = data
-                return self._send(h, 302, None, {"Location": f"{self.base.replace('127.0.0.1', 'localhost')}/dl/{key}"})
+                base = self.base if self.engine_redirect == "same" else self.base.replace("127.0.0.1", "localhost")
+                return self._send(h, 302, None, {"Location": f"{base}/dl/{key}"})
             return self._send(h, 200, data, {"ETag": '"' + sha256_hex(data)[:16] + '"'}, content_type="application/zip")
         if route == ["packs", "manifest"] and method == "GET":
             return self._send(h, 200, {"packs": [dict(p, url=f"{self.base}/v1/packs/{p['id']}/{p['version']}") for p in self.packs]})

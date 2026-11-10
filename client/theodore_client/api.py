@@ -41,15 +41,36 @@ def _ssl_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    port = parts.port or {"https": 443, "http": 80}.get(parts.scheme)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), port
+
+
+def may_carry_bearer(url: str) -> bool:
+    """The installation bearer goes only to the configured API origin (scheme, host and port), and only over HTTPS;
+    the tests' loopback API is the one plain-HTTP exception."""
+    api_origin = _origin(str(core.config().get("api_base") or ""))
+    if _origin(url) != api_origin or not api_origin[1]:
+        return False
+    return api_origin[0] == "https" or (api_origin[0] == "http" and core.is_loopback_api())
+
+
+class RedirectRefused(urllib.error.URLError):
+    pass
+
+
 class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Follow redirects (engine and pack downloads may answer 302 to a short-lived URL) without leaking the bearer."""
+    """A redirect is followed only on the origin it started from (engine and pack downloads may answer 302 to a
+    short-lived URL on the same host). One to another host, another port or from HTTPS to HTTP is refused, so
+    neither a credential nor the download itself can be sent elsewhere."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        new = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new is not None and urllib.parse.urlparse(newurl).netloc != urllib.parse.urlparse(req.full_url).netloc:
-            new.headers.pop("Authorization", None)
-            new.unredirected_hdrs.pop("Authorization", None)
-        return new
+        newurl = urllib.parse.urljoin(req.full_url, newurl)
+        if _origin(newurl) != _origin(req.full_url):
+            raise RedirectRefused(f"a redirect from {_origin(req.full_url)[1]} to another origin ({urllib.parse.urlsplit(newurl).scheme}://"
+                                  f"{urllib.parse.urlsplit(newurl).netloc}) was refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _OPENER = None
@@ -80,7 +101,7 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
     if body is not None:
         data = json.dumps(body, separators=(",", ":")).encode("utf-8")
         hdrs["Content-Type"] = "application/json"
-    if bearer:
+    if bearer and may_carry_bearer(url):
         hdrs["Authorization"] = f"Bearer {bearer}"
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
@@ -142,7 +163,7 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     hdrs = {"User-Agent": core.user_agent()}
-    if bearer:
+    if bearer and may_carry_bearer(url):        # a URL off the API origin is fetched without the credential
         hdrs["Authorization"] = f"Bearer {bearer}"
     req = urllib.request.Request(url, headers=hdrs)
     digest, done = hashlib.sha256(), 0

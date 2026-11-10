@@ -93,3 +93,85 @@ class PlaceholderKeys(unittest.TestCase):
         with client_home(manifest_key_2_kid="manifest-unset", manifest_key_2_x=ZERO_X):
             self.assertEqual(account.verify_signed(envelope({"schema": "x"}), "test"), {"schema": "x"})
             self.assertEqual(sorted(core.manifest_keys()), ["k1"])
+
+
+class CredentialBoundary(unittest.TestCase):
+    """The installation bearer goes to the configured API origin over HTTPS and nowhere else; no redirect leaves the
+    origin it started on or drops to plain HTTP."""
+
+    def setUp(self):
+        from fake_api import FakeApi
+        self.api = FakeApi().start()
+        self.addCleanup(self.api.stop)
+        self.api.files["thing.bin"] = b"payload"
+        self.sha = hashlib.sha256(b"payload").hexdigest()
+
+    def test_only_the_api_origin_over_https_may_carry_the_bearer(self):
+        with client_home(api_base="https://api.example.test"):
+            self.assertTrue(api.may_carry_bearer("https://api.example.test/v1/packs/icons/1.0.0"))
+            for url in ("http://api.example.test/v1/x", "https://api.example.test:8443/v1/x", "https://dl.example.test/x",
+                        "https://attacker.example/v1/x", "https://api.example.test.attacker.example/v1/x", "ftp://api.example.test/x"):
+                self.assertFalse(api.may_carry_bearer(url), url)
+        with client_home(api_base="http://api.example.test"):
+            self.assertFalse(api.may_carry_bearer("http://api.example.test/v1/x"), "plain HTTP never carries it, loopback aside")
+        with client_home(api_base=self.api.base):
+            self.assertTrue(api.may_carry_bearer(self.api.base + "/v1/x"), "the tests' loopback API over HTTP")
+            self.assertFalse(api.may_carry_bearer(self.api.base.replace("127.0.0.1", "localhost") + "/v1/x"))
+
+    def test_a_download_from_another_origin_gets_no_bearer(self):
+        with client_home(api_base=self.api.base) as home:
+            other = self.api.base.replace("127.0.0.1", "localhost") + "/dl/thing.bin"
+            api.download(other, home / "out.bin", sha256=self.sha, bearer="secret-value")
+            api.download(self.api.base + "/dl/thing.bin", home / "out2.bin", sha256=self.sha, bearer="secret-value")
+        self.assertEqual([r["auth"] for r in self.api.requests if r["path"] == "/dl/thing.bin"], [False, True])
+
+    def test_a_redirect_to_another_host_is_refused_and_one_on_the_same_origin_is_followed(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        seen = []
+        target = {"location": ""}
+
+        class Redirector(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen.append((self.path, bool(self.headers.get("Authorization"))))
+                if self.path == "/same":
+                    self.send_response(302)
+                    self.send_header("Location", "/dl")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif self.path == "/dl":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "7")
+                    self.end_headers()
+                    self.wfile.write(b"payload")
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", target["location"])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with client_home(api_base=base) as home:
+            api.download(base + "/same", home / "a.bin", sha256=self.sha, bearer="secret-value")
+            self.assertEqual(seen, [("/same", True), ("/dl", True)])
+            for elsewhere in (self.api.base + "/dl/thing.bin", base.replace("127.0.0.1", "localhost") + "/dl"):
+                target["location"] = elsewhere
+                with self.assertRaises(api.NetworkError) as caught:
+                    api.download(base + "/elsewhere", home / "b.bin", sha256=self.sha, bearer="secret-value")
+                self.assertIn("redirect", caught.exception.detail)
+                with self.assertRaises(api.NetworkError):
+                    api.request("GET", base + "/elsewhere", bearer="secret-value")
+        self.assertEqual([r for r in self.api.requests if r["path"] == "/dl/thing.bin"], [], "the other host was never contacted")
+
+    def test_a_redirect_from_https_to_http_is_refused(self):
+        handler = api._Redirects()
+        request = __import__("urllib.request").request.Request("https://api.example.test/v1/x", headers={"Authorization": "Bearer s"})
+        with self.assertRaises(Exception) as caught:
+            handler.redirect_request(request, None, 302, "Found", {}, "http://api.example.test/v1/x")
+        self.assertIn("redirect", str(caught.exception))

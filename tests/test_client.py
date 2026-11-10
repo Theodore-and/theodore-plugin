@@ -440,14 +440,18 @@ class Engine(ClientCase):
         self.assertIn("1.1.5", kept)
         self.assertNotIn(self.ENGINE_VERSION, kept)
 
-    def test_engine_download_through_a_redirect_does_not_forward_the_bearer(self):
+    def test_engine_download_follows_a_redirect_only_on_its_own_origin(self):
         self.sign_in()
-        self.api.engine_redirect = True
+        self.api.engine_redirect = "other"            # a 302 to another host: refused, nothing is fetched from there
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        self.assertEqual(self.state("engines/current.json"), {})
+        self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/private/")], [])
+        self.assertIn("another origin", (self.box.home / "logs" / "client.log").read_text())
+        self.api.engine_redirect = "same"             # a short-lived URL on the API origin: followed
         self.assertEqual(self.client("setup", "--job").returncode, 0)
         self.assertEqual(self.state("engines/current.json")["version"], self.ENGINE_VERSION)
         redirected = [r for r in self.api.requests if r["path"].startswith("/dl/private/")]
         self.assertEqual(len(redirected), 1)
-        self.assertFalse(redirected[0]["auth"], "the installation secret must not follow a redirect to another host")
 
     def test_engine_with_wrong_checksum_is_not_installed(self):
         self.sign_in()
