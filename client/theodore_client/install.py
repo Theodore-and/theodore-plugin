@@ -574,6 +574,8 @@ def accept_fresh(kind: str, manifest: dict, what: str) -> None:
                                 f"it was ignored")
         if when > newest:
             seen[kind] = when
+            if kind == "channel":           # what the newest document chose: an older check may still activate that
+                seen["channel_engine"] = (manifest.get("engine") or {}).get("version")
             core.write_json(path, seen)
 
 
@@ -598,12 +600,13 @@ def below_floor(version: str | None, issued: float) -> bool:
 
 
 def activate_checked(version: str, issued: float, why: str) -> bool:
-    """Make an engine current only if the document that chose it is still the newest accepted, it is not below the
-    floor and not forbidden: compare and activate under one lock, so two checks running at once cannot activate a
+    """Make an engine current only if the document that chose it is still the newest accepted (or the newest chose the
+    same engine: setup and a guide may fetch one after the other), it is not below the floor and not forbidden: compare and activate under one lock, so two checks running at once cannot activate a
     newer engine and then an older one. The loser does nothing. True when the engine is current afterwards."""
     with core.lock("activate", timeout=60):
-        newest = float(core.read_json(core.home().state / "manifest-times.json").get("channel") or 0)
-        if issued < newest:
+        seen = core.read_json(core.home().state / "manifest-times.json")
+        newest = float(seen.get("channel") or 0)
+        if issued < newest and version != seen.get("channel_engine"):
             core.log(f"{why}: engine {version} not activated: a newer release manifest was accepted meanwhile")
             return False
         if below_floor(version, issued):
