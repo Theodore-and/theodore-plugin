@@ -182,7 +182,7 @@ def refresh(timeout: float = 20.0) -> dict:
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
         update_path = core.home().state / "update.json"
         state = core.read_json(update_path)
-        state["last_check"] = 0
+        state["last_check"] = state["last_attempt"] = 0
         core.write_json(update_path, state)
     return answer
 

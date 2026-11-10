@@ -483,11 +483,59 @@ def rollback() -> Status:
                   f"Theodore went back to version {previous}.")
 
 
+def _manifest_time(value) -> float:
+    try:
+        return time.mktime(time.strptime(str(value)[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def save_restrictions(manifest: dict) -> None:
+    """Keep what a verified channel manifest forbids (kill switch, plugin minimum, engine minimum, withdrawn
+    versions) until a newer verified manifest says otherwise. An older manifest, replayed, changes nothing."""
+    stored = update_state().get("restrictions") or {}
+    when = _manifest_time(manifest.get("server_time"))
+    if stored and when < float(stored.get("server_time") or 0):
+        return
+    engine = manifest.get("engine") or {}
+    save_update_state(restrictions={"server_time": when, "kill": bool(manifest.get("kill")), "kill_message": manifest.get("kill_message"),
+                                    "shim_min": manifest.get("shim_min"), "min_version": manifest.get("min_version"),
+                                    "revoked": list(engine.get("revoked") or [])})
+
+
+def plugin_too_old(shim_min) -> Status:
+    shim = str(core.config().get("shim_version") or "0")
+    return Status("UPDATE_REQUIRED", f"the Theodore plugin {shim} is older than the minimum {shim_min}.",
+                  "update the plugin in the assistant (Claude Code: claude plugin update theodore@theodore; Codex: codex plugin marketplace upgrade theodore), start a new session, then run the same command again.",
+                  "The Theodore plugin needs an update. I am updating it; a new session may be needed.")
+
+
+def enforce_restrictions(engine_version: str | None = None) -> None:
+    """Refuse what the last verified manifest forbids, on every call: BLOCKED_BY_POLICY for the kill switch,
+    UPDATE_REQUIRED for a plugin below its minimum or for running an engine that is withdrawn or below the minimum."""
+    rules = update_state().get("restrictions") or {}
+    if rules.get("kill"):
+        message = rules.get("kill_message") or "no reason given"
+        raise Status("BLOCKED_BY_POLICY", f"Theodore has paused this channel: {message}",
+                     "do not retry today. Tell the user; status is at https://theodoreand.ai/support.",
+                     f"Theodore is paused by its publisher: {rules.get('kill_message') or 'please check theodoreand.ai for news'}.")
+    shim_min = rules.get("shim_min")
+    if shim_min and core.version_key(str(core.config().get("shim_version") or "0")) < core.version_key(str(shim_min)):
+        raise plugin_too_old(shim_min)
+    if engine_version and (engine_version in (rules.get("revoked") or []) or
+                           (rules.get("min_version") and core.version_key(engine_version) < core.version_key(str(rules["min_version"])))):
+        raise Status("UPDATE_REQUIRED", f"engine {engine_version} was withdrawn or is below the channel's minimum ({rules.get('min_version') or 'withdrawn'}).",
+                     f"run {quoted_launcher()} update --apply, then run the same command again.",
+                     "Theodore needs an update before it can continue. I am installing it.")
+
+
 def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = UPDATE_CHECK_TIMEOUT_S) -> dict | None:
-    """The update check that `guide` runs: at most every six hours, short timeout, silent on network failure.
+    """The update check that `guide` runs: at most every six hours (a failed attempt counts), short timeout,
+    silent on network failure.
 
     Raises only what must stop the assistant: BLOCKED_BY_POLICY (kill switch) and UPDATE_REQUIRED (a revoked or
-    below-minimum engine, or a plugin too old) when the fix could not be applied.
+    below-minimum engine, or a plugin too old) when the fix could not be applied. Those restrictions are kept from
+    the last verified manifest and enforced between checks too.
     """
     state = update_state()
     pending = state.get("pending") or {}
@@ -496,28 +544,25 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
         if core.read_json(engine_dir(pending["version"]) / ".theodore-engine.json").get("sha256") == pending.get("sha256"):
             activate_engine(pending["version"])
         save_update_state(pending=None)
-    if not force and core.now() - float(state.get("last_check") or 0) < UPDATE_CHECK_INTERVAL_S:
+    last = max(float(state.get("last_check") or 0), float(state.get("last_attempt") or 0))
+    if not force and core.now() - last < UPDATE_CHECK_INTERVAL_S:
+        enforce_restrictions(current_engine())
         return None
+    save_update_state(last_attempt=int(core.now()))
     try:
         manifest = fetch_channel_manifest(timeout=timeout)
     except api.NetworkError:
+        enforce_restrictions(current_engine())
         return None
     except api.ApiError as error:
         if error.code in ("update_required", "installation_revoked", "unauthenticated", "account_suspended", "entitlement_inactive"):
             raise api.status_from(error, "update check") from None
+        enforce_restrictions(current_engine())
         return None
     save_update_state(last_check=int(core.now()), latest=manifest.get("engine", {}).get("version"),
                       guides=manifest.get("guides") or {}, tools=manifest.get("tools") or {})
-    if manifest.get("kill"):
-        raise Status("BLOCKED_BY_POLICY", f"Theodore has paused this channel: {manifest.get('kill_message') or 'no reason given'}",
-                     "do not retry today. Tell the user; status is at https://theodoreand.ai/support.",
-                     f"Theodore is paused by its publisher: {manifest.get('kill_message') or 'please check theodoreand.ai for news'}.")
-    shim_min = manifest.get("shim_min")
-    shim = str(core.config().get("shim_version") or "0")
-    if shim_min and core.version_key(shim) < core.version_key(str(shim_min)):
-        raise Status("UPDATE_REQUIRED", f"the Theodore plugin {shim} is older than the minimum {shim_min}.",
-                     "update the plugin in the assistant (Claude Code: claude plugin update theodore@theodore; Codex: codex plugin marketplace upgrade theodore), start a new session, then run the same command again.",
-                     "The Theodore plugin needs an update. I am updating it; a new session may be needed.")
+    save_restrictions(manifest)
+    enforce_restrictions()          # kill switch and plugin minimum; the engine's own case is handled below
     engine = engine_artifact(manifest)
     client = manifest.get("client") or {}
     if client.get("version") and client.get("sha256") and client["version"] != __version__:
@@ -556,6 +601,7 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
         raise Status("UPDATE_REQUIRED", f"engine {current} was withdrawn and the replacement {target or ''} is not installed yet.",
                      f"run {quoted_launcher()} update --apply, then run the same command again.",
                      "Theodore needs an update before it can continue. I am installing it.")
+    enforce_restrictions(current_engine())
     return manifest
 
 
@@ -642,6 +688,7 @@ def _pin_workspaces(args: list[str], version: str) -> None:
 
 def run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
     version = engine_for(args)
+    enforce_restrictions(version)
     directory = engine_dir(version)
     touch_used(version)
     python = engine_python(directory)

@@ -425,6 +425,46 @@ class Engine(ClientCase):
         _f, nxt, _t = self.assertStatus(self.client("guide", "pptx", env=much_later), "UPDATE_REQUIRED", 72)
         self.assertIn("claude plugin update theodore@theodore", nxt)
 
+    def test_restrictions_hold_on_every_call_until_a_newer_manifest_lifts_them(self):
+        self.ready()
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}
+        self.api.clock_offset = 7 * 3600
+        self.api.kill, self.api.kill_message = True, "maintenance until noon"
+        self.assertStatus(self.client("guide", "pptx", env=later), "BLOCKED_BY_POLICY", 73)
+        manifests = lambda: len([r for r in self.api.requests if r["path"] == "/v1/releases/manifest"])
+        seen = manifests()
+        self.assertStatus(self.client("guide", "pptx", env=later), "BLOCKED_BY_POLICY", 73)       # inside six hours: no new check
+        self.assertStatus(self.client("pptx", "version", env=later), "BLOCKED_BY_POLICY", 73)
+        self.assertStatus(self.client("python", "-c", "print(1)", env=later), "BLOCKED_BY_POLICY", 73)
+        self.assertEqual(manifests(), seen)
+        # An older signed manifest (a replay without the kill switch) does not lift it.
+        self.api.kill, self.api.clock_offset = False, 0
+        self.assertStatus(self.client("update", "--apply", env=later), "BLOCKED_BY_POLICY", 73)
+        self.api.clock_offset = 8 * 3600                                                           # a newer one does
+        self.assertStatus(self.client("update", "--apply", env=later), "OK", 0)
+        self.assertEqual(self.client("pptx", "version", env=later).stdout.strip(), self.ENGINE_VERSION)
+        # Minimum version and plugin minimum hold the same way.
+        self.api.clock_offset = 9 * 3600
+        self.api.min_version = "9.0.0"
+        self.assertStatus(self.client("update", "--apply", env=later), "UPDATE_REQUIRED", 72)
+        for _ in range(2):
+            self.assertStatus(self.client("guide", "pptx", env=later), "UPDATE_REQUIRED", 72)
+            self.assertStatus(self.client("pptx", "version", env=later), "UPDATE_REQUIRED", 72)
+        self.api.clock_offset, self.api.min_version, self.api.shim_min = 10 * 3600, None, "9.0.0"
+        self.assertStatus(self.client("update", "--apply", env=later), "UPDATE_REQUIRED", 72)
+        _f, nxt, _t = self.assertStatus(self.client("pptx", "version", env=later), "UPDATE_REQUIRED", 72)
+        self.assertIn("claude plugin update theodore@theodore", nxt)
+
+    def test_a_failed_update_check_waits_six_hours_like_a_successful_one(self):
+        self.ready()
+        self.box.wait_jobs()
+        self.api.requests.clear()
+        self.api.down = True
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)}
+        for _ in range(3):
+            self.assertEqual(self.client("guide", "pptx", env=later).returncode, 0)
+        self.assertEqual(len([r for r in self.api.requests if r["path"] == "/v1/releases/manifest"]), 1)
+
     def test_garbage_collection_keeps_at_most_four(self):
         self.ready()
         offset = 0
