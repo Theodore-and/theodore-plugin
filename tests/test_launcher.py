@@ -247,7 +247,11 @@ class Failures(LauncherCase):
         python = next(p for p in self.api.runtime["parts"] if p["part"] == "python")
         key = python["url"].split("/dl/", 1)[1]
         self.api.dl_status[key] = 407
-        first, nxt, _t = self.assertStatus(self.run_launcher("guide", "pptx"), "SETUP_FAILED", 68)
+        result = self.run_launcher("guide", "pptx")
+        if IS_WINDOWS and result.returncode == 67:     # Windows tries its own proxy credentials (PowerShell, BITS) first
+            self.box.wait_jobs(180)
+            result = self.run_launcher("guide", "pptx")
+        first, nxt, _t = self.assertStatus(result, "SETUP_FAILED", 68)
         self.assertIn("cause PROXY_AUTH", first)
         self.assertIn("proxy", nxt)
 
@@ -301,12 +305,15 @@ class Failures(LauncherCase):
     def test_an_interpreter_the_system_refuses_to_start_is_blocked_by_policy(self):
         self.assertEqual(self.run_launcher("version").returncode, 0)
         self.box.wait_jobs()
-        python = self.box.home / "runtime" / RUNTIME_ID / "python" / ("python.exe" if IS_WINDOWS else "bin/python3")
-        python.unlink()
+        # A runtime whose interpreter the system will not start: current.txt points at it (the real one may still be
+        # running a job, and a running program cannot be deleted on Windows).
+        blocked = self.box.home / "runtime" / "blocked-rt" / "python"
         if IS_WINDOWS:
-            python.write_bytes(b"MZ not a program")         # Windows refuses to start it, as it does a blocked one
+            blocked.mkdir(parents=True)
+            (blocked / "python.exe").write_bytes(b"MZ not a program")    # Windows refuses to start it, as it does a blocked one
         else:
-            python.mkdir()                                  # exec fails with 126, as it does on a noexec mount
+            (blocked / "bin" / "python3").mkdir(parents=True)              # exec fails with 126, as on a noexec mount
+        (self.box.home / "runtime" / "current.txt").write_text("blocked-rt")
         first, nxt, tell = self.assertStatus(self.run_launcher("version"), "BLOCKED_BY_POLICY", 73)
         self.assertIn("could not be started", first)
         self.assertIn("connector", tell)

@@ -48,7 +48,7 @@ fresh() { # dir: empty it (the variable is never empty: every caller passes a pa
 run_mac() { # name platform-key arch-prefix
   name=$1 key=$2 prefix=$3
   dir="$OUT/$name"
-  mkdir -p "$dir" "$CACHE"; fresh "$dir/bundle"; fresh "$dir/tmp"; rm -rf "${dir:?}/work"
+  mkdir -p "$dir" "$CACHE"; fresh "$dir/bundle"; fresh "$dir/tmp"; rm -rf "${dir:?}/work"; rm -f "$dir/"*.result "$dir/"*.log
   PY=$("$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") ||
     { result "$name" shim fail; result "$name" runtime fail; return; }
   say "$name: $($prefix "$PY" -c 'import platform,sys; print(sys.version.split()[0], platform.machine())')"
@@ -95,20 +95,23 @@ run_linux() { # name docker-platform platform-key
 }
 
 # --- the corporate network: a trusted inspecting certificate and an authenticating proxy --------------------------------
+# In a linux/arm64 container: tinyproxy stops after its first request under x86-64 emulation on an Apple-silicon
+# host, and the job tests the launcher and the client, which are the same on every Linux.
 run_network() {
   dir="$OUT/network"; mkdir -p "$dir"; rm -f "$dir/"*.result "$dir/"*.log
-  in_container linux/amd64 network "$SETUP
+  in_container linux/arm64 network "$SETUP
     apt-get install -y -qq --no-install-recommends tinyproxy >/dev/null
     openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/trusted-key.pem -out /tmp/trusted-cert.pem -days 2 -subj /CN=127.0.0.1 \
       -addext subjectAltName=IP:127.0.0.1,DNS:localhost -addext basicConstraints=critical,CA:TRUE 2>/dev/null
     chmod 644 /tmp/trusted-key.pem
     cp /tmp/trusted-cert.pem /usr/local/share/ca-certificates/theodore-test.crt && update-ca-certificates >/dev/null
     printf 'Port 18888\nListen 127.0.0.1\nTimeout 600\nBasicAuth tester secret\nAllow 127.0.0.1\n' > /tmp/tinyproxy.conf
-    tinyproxy -c /tmp/tinyproxy.conf; sleep 1
+    tinyproxy -d -c /tmp/tinyproxy.conf > /tmp/tinyproxy.log 2>&1 &
+    sleep 1
     code=\$(curl -s -o /dev/null -w '%{http_code}' -x http://127.0.0.1:18888 http://example.com/ || true)
     echo \"proxy without credentials answers \$code\" > ci/out/network/network.log; test \"\$code\" = 407
     chown -R tester ci/out/network ci/out/cache
-    su tester -c 'cd /repo; PY=\$(python3 ci/bootstrap_python.py linux-x64 /home/tester/py ci/out/cache) &&
+    su tester -c 'cd /repo; PY=\$(python3 ci/bootstrap_python.py linux-arm64 /home/tester/py ci/out/cache) &&
       THEODORE_TEST_TRUSTED_CERT=/tmp/trusted-cert.pem:/tmp/trusted-key.pem THEODORE_TEST_AUTH_PROXY=http://127.0.0.1:18888 \
       THEODORE_TEST_AUTH_PROXY_CREDENTIALS=tester:secret \$PY -m unittest -v tests.test_launcher.CorporateNetwork' >> ci/out/network/network.log 2>&1" \
     && result network job pass || result network job fail

@@ -230,17 +230,17 @@ rem PowerShell failed too. Only a proxy that wants a sign-in is worth BITS (its 
 rem else BITS would add a minute of retries to a failure that is already known.
 if not "%CAUSE%"=="PROXY_AUTH" exit /b 1
 :fetch_bits
-rem The Background Intelligent Transfer Service. BITS retries a transient error for days, so the job gets 60 seconds
-rem without progress and 30 minutes in all, then is cancelled. Redirects are refused (BG_HTTP_REDIRECT_POLICY_DISALLOW).
+rem The Background Intelligent Transfer Service. BITS retries a transient error for days, so the job gets 30 seconds
+rem without progress and 2 minutes in all, then is cancelled. Redirects are refused (BG_HTTP_REDIRECT_POLICY_DISALLOW).
 if not exist "%SYS32%\bitsadmin.exe" exit /b 1
 set "BJ=theodore-setup-%RANDOM%%RANDOM%"
 "%SYS32%\bitsadmin.exe" /create /download %BJ% >nul 2>&1 || exit /b 1
 "%SYS32%\bitsadmin.exe" /addfile %BJ% "%~1" "%~2" >nul 2>&1
 "%SYS32%\bitsadmin.exe" /setsecurityflags %BJ% 0x0200 >nul 2>&1
-"%SYS32%\bitsadmin.exe" /setnoprogresstimeout %BJ% 60 >nul 2>&1
+"%SYS32%\bitsadmin.exe" /setnoprogresstimeout %BJ% 30 >nul 2>&1
 "%SYS32%\bitsadmin.exe" /setpriority %BJ% FOREGROUND >nul 2>&1
 "%SYS32%\bitsadmin.exe" /resume %BJ% >nul 2>&1
-set /a BITS_LEFT=1800
+set /a BITS_LEFT=120
 :bits_wait
 set "BSTATE="
 for /f "delims=" %%S in ('%SYS32%\bitsadmin.exe /rawreturn /getstate %BJ% 2^>nul') do set "BSTATE=%%S"
