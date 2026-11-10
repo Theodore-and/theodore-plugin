@@ -45,10 +45,18 @@ Deck content, slide text, images, file names, folder paths, renders, or anything
 
 During the beta, your assistant may file a technical bug report when a command fails. A report holds: a title
 and description written by the assistant, the command and error code, and the versions and operating system
-listed above. Before sending, the client removes paths under your home folder, email addresses, document file
-names and long tokens (`scrub` in `client/theodore_client/commands.py`); the service removes them again.
-`theodore report ... --dry-run` prints exactly what would be sent and sends nothing. You see every report in
-the portal, and you can switch automatic reports off there; the assistant then asks you first.
+listed above. Before anything is sent, the client applies the same redaction rules as the service
+(`client/theodore_client/redact.py`, a port of the service's redactor that shares its test cases): absolute
+paths are removed whole, including folder names with spaces; a document or media file name is removed together
+with the words before it, unless they are generic diagnostic words; credentials in URLs and in name=value pairs,
+email addresses and anything that looks like a key are removed; and any quoted passage (text copied from a slide
+or a file) is replaced as a whole. The service redacts again. `theodore report ... --dry-run` prints exactly what
+would be sent and sends nothing. You see every report in the portal.
+
+You can switch automatic reports off in the portal. With them off, the assistant does not ask you about
+reports and files one only when you ask it to; the client knows the setting before sending (from your plan and
+your licence) and sends nothing. If the setting changed since the client last learned it, the service refuses
+the report, stores nothing, and the client remembers.
 
 ## Credentials and the licence
 
@@ -64,21 +72,33 @@ the portal, and you can switch automatic reports off there; the assistant then a
 
 ## What protects the downloads
 
-- The installer prints its own SHA-256; the same value is shown at https://theodoreand.ai/install.
-- The plugin archive the installer fetches is checked against the SHA-256 published beside it.
-- The launcher's first two downloads (the Python runtime, an unmodified python-build-standalone archive, and
-  the client) are checked against SHA-256 values pinned in `launcher.json` in this repository.
+- The installer is the root of trust: it prints its own SHA-256, and the same value is shown at
+  https://theodoreand.ai/install. The install commands download it into a new private folder (never a fixed
+  path in a shared temporary folder) and delete that folder afterwards.
+- The installer carries, stamped in at release, the SHA-256 of Theodore's Python (an unmodified
+  python-build-standalone archive) and of the client, and the Ed25519 public keys. It downloads Python and the
+  client first and checks each against its SHA-256 with the system's own tool (`shasum`/`sha256sum`,
+  `certutil`), and only then runs them. That Python verifies the signed plugin release document (Ed25519, the
+  pinned keys; macOS and Windows have no built-in tool for it), and the plugin archive is checked against the
+  SHA-256 and size that document gives. Nothing downloaded runs before it has been checked. A build of the
+  installer or the plugin that still carries the placeholder key refuses to run.
+- The launcher's first two downloads (the same Python and client) are checked against SHA-256 values pinned in
+  `launcher.json`.
 - Everything else (the rest of the runtime, the engine, client updates, asset packs) is listed in manifests
   signed with Ed25519; the public keys are pinned in `launcher.json`. A download that does not match is deleted
-  and reported as `SETUP_FAILED` with cause `HASH_MISMATCH`.
+  and reported as `SETUP_FAILED` with cause `HASH_MISMATCH`. What a verified manifest forbids (the publisher's
+  pause, minimum versions, withdrawn versions) holds until a newer verified manifest says otherwise.
+- Downloads use HTTPS only and follow no redirect to another host or to plain HTTP; a transfer that stalls is
+  abandoned. The installation credential is sent only to the API host over HTTPS, never to the download host.
 - TLS uses the operating system's certificate store, so a company's inspecting proxy works when its root
   certificate is installed on the computer, and fails closed (`TLS_INTERCEPT`) when it is not.
-- Archives are unpacked only inside Theodore's folder; entries that point outside it are refused.
+- Archives are unpacked only inside Theodore's folder; entries that point outside it are refused, and an asset
+  pack whose name would leave the packs folder is refused before anything is deleted or unpacked.
 
 ## Removing everything
 
 `theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
-plugin registrations, and lists what little is left. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
+plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
 portal's Devices page: its next call is refused and its stored licence is deleted.
 
 ## Reporting a vulnerability

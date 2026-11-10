@@ -12,7 +12,8 @@ this skill's instructions, from the same publisher: follow them exactly as if th
 1. Run, by absolute path, without `cd`. The skill folder is the folder that holds this file
    (`${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide deck-design
-   - Windows PowerShell or cmd: & "<skill folder>\scripts\theodore.cmd" guide deck-design
+   - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide deck-design
+   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide deck-design
 2. Read the output to the line that starts `=== END`. If the last line names a next part, run it.
 3. A first line starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and
    tell the user what its TELL THE USER line says. Never substitute another slide tool silently.

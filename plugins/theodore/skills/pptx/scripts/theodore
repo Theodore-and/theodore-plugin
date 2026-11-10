@@ -345,7 +345,7 @@ progress_status() {
   [ "$total" -gt 0 ] && pct=$((have * 100 / total))
   [ "$pct" -gt 99 ] && pct=99
   case "$phase" in verify|unpack|client) pct=99 ;; esac
-  status SETUP_IN_PROGRESS 67 "Theodore is downloading its runtime (first use on this computer, about 120 MB in all); the first part is at $pct% ($phase)." \
+  status SETUP_IN_PROGRESS 67 "Theodore is downloading its runtime (first use on this computer, about 90 MB in all before the first deck); the first part is at $pct% ($phase)." \
     "run $RUN again in 20 seconds. Do not use another slide tool meanwhile." \
     "Theodore is setting itself up for the first time. This takes a few minutes; I will continue when it is ready."
 }

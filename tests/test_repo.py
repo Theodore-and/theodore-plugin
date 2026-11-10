@@ -63,7 +63,10 @@ class Stubs(unittest.TestCase):
         for skill in ("pptx", "deck-design"):
             body = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[1]
             self.assertIn(f'sh "<skill folder>/scripts/theodore" guide {skill}', body)
-            self.assertIn(f'& "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body)
+            self.assertIn(f'- Windows PowerShell:       & "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body)
+            self.assertIn(f'- Windows cmd:              "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body,
+                          "cmd has no call operator: its line must not start with &")
+            self.assertNotIn("PowerShell or cmd", body)
             self.assertIn("`=== END`", body)
             self.assertIn("A first line starting `THEODORE ` is a status", body)
             self.assertIn("Never substitute another slide tool silently.", body)
@@ -406,6 +409,26 @@ class Contract(unittest.TestCase):
                 text = path.read_text()
                 self.assertNotRegex(text, r"\burllib\.request\b|\bhttp\.client\b|\bimport requests\b|\bsocket\.create_connection\b",
                                     f"{path.name} talks to the network outside api.py")
+
+
+class Documents(unittest.TestCase):
+    def test_sizes_are_the_measured_ones_everywhere(self):
+        for path in [ROOT / "README.md", ROOT / "install" / "install.md", ROOT / "install" / "install.sh", ROOT / "install" / "install.cmd",
+                     PLUGIN / "README.md", SCRIPTS / "theodore", SCRIPTS / "theodore.cmd"]:
+            text = path.read_text(encoding="utf-8")
+            for stale in ("120 MB", "82 MB", "380 MB", "about 80 MB"):
+                self.assertNotIn(stale, text, f"{path.name}: {stale}")
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("about 90 MB is downloaded before the first deck", readme)
+        self.assertIn("about 550 MB on disk", readme)
+        for platform in ("macOS, Apple silicon", "macOS, Intel", "Windows x64", "Linux x64", "Linux arm64"):
+            self.assertIn(f"| {platform} |", readme)
+
+    def test_security_describes_reports_off_as_off(self):
+        text = (ROOT / "SECURITY.md").read_text()
+        self.assertNotIn("the assistant then asks you first", text)
+        self.assertIn("the assistant does not ask you about\nreports and files one only when you ask it to", text)
+        self.assertIn("redact.py", text)
 
 
 class InstallPage(unittest.TestCase):

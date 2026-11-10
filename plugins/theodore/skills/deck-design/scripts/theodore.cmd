@@ -438,7 +438,7 @@ if %PCT% GTR 99 set /a PCT=99
 if /i "%PHASE%"=="verify" set /a PCT=99
 if /i "%PHASE%"=="unpack" set /a PCT=99
 if /i "%PHASE%"=="client" set /a PCT=99
-echo THEODORE SETUP_IN_PROGRESS: Theodore is downloading its runtime (first use on this computer, about 120 MB in all); the first part is at %PCT%%% (%PHASE%).
+echo THEODORE SETUP_IN_PROGRESS: Theodore is downloading its runtime (first use on this computer, about 90 MB in all before the first deck); the first part is at %PCT%%% (%PHASE%).
 echo NEXT: run the same command again in 20 seconds. Do not use another slide tool meanwhile.
 echo TELL THE USER: Theodore is setting itself up for the first time. This takes a few minutes; I will continue when it is ready.
 exit /b 67

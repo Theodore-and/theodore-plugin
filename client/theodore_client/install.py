@@ -803,6 +803,11 @@ def _engine_refusal(directory: Path) -> Status | None:
         return Status("NO_ENTITLEMENT", f"the engine refused the licence because this computer's clock looks wrong ({code}).",
                       "ask the user to check the date and time of this computer, then run the same command again.",
                       "Theodore could not confirm your licence because this computer's date or time looks wrong. Please check it.")
+    if code == "entitlement_state_unavailable":
+        return Status("NO_ENTITLEMENT", f"the engine could not use Theodore's state folder {core.home().state} ({code}).",
+                      f"run {launcher} logout, then {launcher} login --start, and follow what it prints (signing in again recreates the folder). "
+                      f"If it repeats, make {core.home().state} writable.",
+                      "Theodore needs to sign in again on this computer to repair its licence files. I am starting it.")
     return Status("NO_ENTITLEMENT", f"the engine refused the licence on this computer ({code}).",
                   f"run {launcher} logout, then {launcher} login --start, and follow what it prints. If it repeats, run {launcher} update --apply.",
                   "Theodore's licence on this computer needs to be renewed. I am signing in again.")
