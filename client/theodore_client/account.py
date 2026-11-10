@@ -339,6 +339,25 @@ def login_code(code: str) -> Status:
     return signed_in_status(stored_token()[1])
 
 
+def read_grant(flag: str | None, path: str | None) -> str:
+    """The connector's grant from standard input (`--grant -`) or from a file only its owner can read
+    (`--grant-file`), never from the command line: a credential bundle holds the installation secret, and a
+    process's arguments are visible to other users and land in shell histories and logs."""
+    if path:
+        file = __import__("pathlib").Path(path)
+        try:
+            if not core.IS_WINDOWS and file.stat().st_mode & 0o077:
+                raise core.usage("the grant file must be readable only by its owner (mode 0600).",
+                                 "write it with mode 0600 (or pass it on standard input with --grant -) and run the command again.")
+            return file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise core.usage(f"the grant file could not be read ({exc.__class__.__name__}).") from None
+    if flag == "-":
+        return sys.stdin.read()
+    raise core.usage("a grant is never taken from the command line (it can carry the installation secret).",
+                     "pass it on standard input: activate --grant - , or in a 0600 file: activate --grant-file <path>.")
+
+
 def activate_grant(blob: str) -> Status:
     """Connector route: accept an entitlement token, or a base64url JSON credential bundle, handed over by the connector."""
     blob = blob.strip()

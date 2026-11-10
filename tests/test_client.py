@@ -90,8 +90,24 @@ class SignIn(ClientCase):
 
     def test_connector_grant_with_entitlement_only(self):
         token = self.api.mint_entitlement("inst-connector")
-        self.assertStatus(self.client("activate", "--grant", token), "OK", 0)
-        self.assertStatus(self.client("activate", "--grant", "garbage"), "USAGE", 64)
+        import subprocess as sp
+        piped = sp.run([sys.executable, "-I", str(Path(__file__).resolve().parents[1] / "client"), "activate", "--grant", "-"],
+                       input=token + "\n", env=self.box.env, capture_output=True, text=True, timeout=60)
+        self.assertStatus(piped, "OK", 0)
+        grant = self.box.tmp / "grant.txt"
+        grant.write_text(token)
+        grant.chmod(0o600)
+        self.assertStatus(self.client("activate", "--grant-file", str(grant)), "OK", 0)
+        grant.chmod(0o644)                                       # readable by others: refused
+        first, _n, _t = self.assertStatus(self.client("activate", "--grant-file", str(grant)), "USAGE", 64)
+        self.assertIn("0600", first)
+        # never on the command line: the bundle can carry the installation secret
+        first, _n, _t = self.assertStatus(self.client("activate", "--grant", token), "USAGE", 64)
+        self.assertIn("command line", first)
+        self.assertNotIn(token, first)
+        grant.write_text("garbage")
+        grant.chmod(0o600)
+        self.assertStatus(self.client("activate", "--grant-file", str(grant)), "USAGE", 64)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS keychain only")
     def test_keychain_backend_in_a_scratch_keychain(self):
