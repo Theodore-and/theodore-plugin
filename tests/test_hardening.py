@@ -216,3 +216,20 @@ class CredentialStorage(unittest.TestCase):
             account.import_pending_activation()
             self.assertFalse(pending.exists())
             self.assertEqual(credentials.load()["installation_id"], "i-1")
+
+
+class Restrictions(unittest.TestCase):
+    def test_sub_second_order_and_equal_instants(self):
+        from theodore_client import install
+        base = {"schema": "x", "engine": {"version": "1.0.0", "revoked": []}, "shim_min": None, "min_version": None}
+        with client_home():
+            core.home().ensure()
+            install.save_restrictions({**base, "kill": True, "kill_message": "stop", "server_time": "2026-11-10T12:00:00.900Z"})
+            install.save_restrictions({**base, "kill": False, "server_time": "2026-11-10T12:00:00.100Z"})     # older, same second
+            self.assertTrue(install.update_state()["restrictions"]["kill"])
+            install.save_restrictions({**base, "kill": False, "min_version": "2.0.0", "server_time": "2026-11-10T12:00:00.900Z"})
+            rules = install.update_state()["restrictions"]
+            self.assertTrue(rules["kill"], "the same instant cannot lift the kill switch")
+            self.assertEqual(rules["min_version"], "2.0.0", "and the stricter minimum holds")
+            install.save_restrictions({**base, "kill": False, "server_time": "2026-11-10T12:00:01.000Z"})
+            self.assertFalse(install.update_state()["restrictions"]["kill"], "a newer document lifts it")

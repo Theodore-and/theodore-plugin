@@ -567,12 +567,19 @@ def save_restrictions(manifest: dict) -> None:
     versions) until a newer verified manifest says otherwise. An older manifest, replayed, changes nothing."""
     stored = update_state().get("restrictions") or {}
     when = _manifest_time(manifest.get("server_time"))
-    if stored and when <= float(stored.get("server_time") or 0):      # only a strictly newer document replaces them
-        return
     engine = manifest.get("engine") or {}
-    save_update_state(restrictions={"server_time": when, "kill": bool(manifest.get("kill")), "kill_message": manifest.get("kill_message"),
-                                    "shim_min": manifest.get("shim_min"), "min_version": manifest.get("min_version"),
-                                    "revoked": list(engine.get("revoked") or []), "offered": engine.get("version")})
+    fresh = {"server_time": when, "kill": bool(manifest.get("kill")), "kill_message": manifest.get("kill_message"),
+             "shim_min": manifest.get("shim_min"), "min_version": manifest.get("min_version"),
+             "revoked": list(engine.get("revoked") or []), "offered": engine.get("version")}
+    if stored and when < float(stored.get("server_time") or 0):       # an older document changes nothing
+        return
+    if stored and when == float(stored.get("server_time") or 0):      # same instant: the stricter of the two holds
+        newer = lambda a, b: a if not b or (a and core.version_key(str(a)) >= core.version_key(str(b))) else b
+        fresh = {"server_time": when, "kill": bool(stored.get("kill")) or fresh["kill"],
+                 "kill_message": fresh["kill_message"] or stored.get("kill_message"),
+                 "shim_min": newer(fresh["shim_min"], stored.get("shim_min")), "min_version": newer(fresh["min_version"], stored.get("min_version")),
+                 "revoked": sorted(set(fresh["revoked"]) | set(stored.get("revoked") or [])), "offered": fresh["offered"]}
+    save_update_state(restrictions=fresh)
 
 
 def forbidden(version: str | None, rules: dict | None = None) -> bool:
