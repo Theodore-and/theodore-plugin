@@ -334,6 +334,47 @@ class Round6(unittest.TestCase):
             self.assertEqual(install.current_engine(), "3.0.0", f"activations in order: {activated}")
             self.assertNotEqual(activated[-1:], ["2.0.0"])
 
+    def test_an_older_check_may_activate_only_the_engine_the_newest_document_chose(self):
+        # Setup and a guide fetch one after the other: the first to finish its download may hold the older document.
+        # It activates the engine only when the newest document names that same engine; any other engine is refused.
+        from theodore_client import install
+        with client_home(), mock.patch.object(install, "collect_garbage", return_value=[]):
+            core.home().ensure()
+            two, three = self.engine_on_disk("2.0.0"), self.engine_on_disk("3.0.0")
+            now = core.now()
+            install.accept_fresh("channel", self.manifest(now - 60, three), "release manifest")
+            install.accept_fresh("channel", self.manifest(now - 1, three), "release manifest")
+            self.assertFalse(install.activate_checked("2.0.0", now - 60, "test"))
+            self.assertIsNone(install.current_engine())
+            self.assertTrue(install.activate_checked("3.0.0", now - 60, "test"), "the same engine as the newest document")
+            self.assertEqual(install.current_engine(), "3.0.0")
+            install.accept_fresh("channel", self.manifest(now, two), "release manifest")       # a newer document rolls back
+            self.assertFalse(install.activate_checked("3.0.0", now - 1, "test"))
+            self.assertTrue(install.activate_checked("2.0.0", now, "test"))
+            self.assertEqual(install.current_engine(), "2.0.0")
+
+    def test_the_comparison_and_the_activation_happen_under_one_lock(self):
+        # While another process holds the activate lock, a check can neither compare nor activate; a newer document
+        # accepted in that time is what it compares against once the lock is free.
+        import threading
+        from theodore_client import install
+        with client_home():
+            core.home().ensure()
+            two, three = self.engine_on_disk("2.0.0"), self.engine_on_disk("3.0.0")
+            now = core.now()
+            install.accept_fresh("channel", self.manifest(now - 60, two), "release manifest")
+            answer = []
+            worker = threading.Thread(target=lambda: answer.append(install.activate_checked("2.0.0", now - 60, "test")))
+            with core.lock("activate", timeout=10):
+                worker.start()
+                worker.join(1.0)
+                self.assertTrue(worker.is_alive(), "the check must wait for the activate lock")
+                self.assertIsNone(install.current_engine())
+                install.accept_fresh("channel", self.manifest(now - 1, three), "release manifest")
+            worker.join(30)
+            self.assertEqual(answer, [False])
+            self.assertIsNone(install.current_engine())
+
     def test_a_pending_engine_below_the_floor_is_never_activated_after_a_reset(self):
         from theodore_client import install
         with client_home():
