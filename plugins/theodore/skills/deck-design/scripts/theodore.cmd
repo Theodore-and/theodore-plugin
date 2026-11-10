@@ -490,26 +490,28 @@ echo NEXT: run the same command again. If it fails twice, stop and tell the user
 echo TELL THE USER: A Theodore download arrived damaged. I am trying again.
 exit /b 68
 
+:unreg
+rem %1 a name for the message, then the command. A failure other than "there was nothing to remove" is residue.
+set "UNAME=%~1"
+shift
+call %1 %2 %3 %4 %5 >"%UOUT%" 2>&1 && exit /b 0
+"%SYS32%\findstr.exe" /i /c:"not found" /c:"not installed" /c:"no such" /c:"does not exist" /c:"unknown plugin" /c:"unknown marketplace" /c:"not registered" "%UOUT%" >nul 2>&1 && exit /b 0
+set "LEFT=%LEFT%; the %UNAME% registration"
+exit /b 0
+
 :uninstall_bare
-rem Theodore's Python is not there: do what the client's uninstall does, as far as batch can, and say what is left.
-rem The DPAPI credential is a file in state\, which goes with the folders.
+rem Theodore's Python is not there: do what the client's uninstall does, as far as batch can, and say exactly what is
+rem left. The DPAPI credential is a file in state\, which goes with the folders.
 set "LEFT="
-where claude >nul 2>&1 && (call claude plugin uninstall theodore@theodore >nul 2>&1 & call claude plugin marketplace remove theodore >nul 2>&1)
-where codex >nul 2>&1 && (call codex plugin remove theodore@theodore >nul 2>&1 & call codex plugin marketplace remove theodore >nul 2>&1)
-if exist "%HOME_DIR%\state\host-settings.json" set "LEFT=two Theodore entries in the Claude Code settings.json (the extraKnownMarketplaces.theodore autoUpdate and the two Bash rules for the launcher under permissions.allow)"
+set "UOUT=%TEMP%\theodore-uninstall-%RANDOM%%RANDOM%.txt"
+where claude >nul 2>&1 && call :unreg claude-code claude plugin uninstall theodore@theodore
+where claude >nul 2>&1 && call :unreg claude-code claude plugin marketplace remove theodore
+where codex >nul 2>&1 && call :unreg codex codex plugin remove theodore@theodore
+where codex >nul 2>&1 && call :unreg codex codex plugin marketplace remove theodore
+del /q "%UOUT%" >nul 2>&1
+if exist "%HOME_DIR%\state\host-settings.json" set "LEFT=%LEFT%; two Theodore entries in the Claude Code settings.json, the extraKnownMarketplaces.theodore autoUpdate and the two Bash rules for the launcher under permissions.allow"
 if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
-if defined LEFT goto :uninstall_bare_left
-echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed.
-echo NEXT: nothing to do.
-echo TELL THE USER: Theodore is uninstalled.
-goto :uninstall_bare_remove
-:uninstall_bare_left
-echo THEODORE RETRY: Theodore's folders were removed, but these could not be: %LEFT%.
-echo NEXT: tell the user what is left; it can be removed by hand (see 'Remove it' at https://github.com/Theodore-and/theodore-plugin).
-echo TELL THE USER: Theodore's files are removed, but a few pieces could not be: %LEFT%. Your decks were not touched.
-set "BARE_RC=75"
-:uninstall_bare_remove
-if not defined BARE_RC set "BARE_RC=0"
-rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this
-rem file may be inside one of them.
-(for %%D in (client runtime engines packs tools state logs staging plugin bin) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & exit /b %BARE_RC%
+if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\pptx-runtime"
+rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this file
+rem may be inside one of them: delete, then report what is still there (if defined and call echo run late enough).
+(for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; it can be removed by hand, see 'Remove it' at https://github.com/Theodore-and/theodore-plugin.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)

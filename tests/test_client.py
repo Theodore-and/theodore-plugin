@@ -1123,6 +1123,7 @@ class StatusDoctorUninstall(ClientCase):
 
     def test_uninstall_leaves_nothing_behind(self):
         self.ready()
+        (self.box.home / "plugin.partial" / "plugins").mkdir(parents=True)          # an interrupted plugin unpack
         workspace = self.box.tmp / "ws"
         workspace.mkdir()
         self.client("pptx", "start", str(workspace))

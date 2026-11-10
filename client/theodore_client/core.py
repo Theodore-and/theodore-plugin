@@ -105,7 +105,7 @@ def host_name() -> str:
 
 # The only things Theodore creates, manages or removes inside its data directory. The directory itself may exist
 # before Theodore and may hold other folders: those are never read, changed or deleted.
-OWNED = ("bin", "client", "runtime", "engines", "packs", "tools", "state", "logs", "staging", "plugin")
+OWNED = ("bin", "client", "runtime", "engines", "packs", "tools", "state", "logs", "staging", "plugin", "plugin.partial")
 
 
 class Home:

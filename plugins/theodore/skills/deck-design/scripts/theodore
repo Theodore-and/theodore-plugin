@@ -310,12 +310,15 @@ if [ "${1:-}" = "uninstall" ]; then
     rm -rf "${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/pptx-runtime"
   fi
   # Only Theodore's own subfolders: the folder may hold things that are not Theodore's.
-  for d in bin client runtime engines packs tools state logs staging plugin; do rm -rf "${HOME_DIR:?}/$d"; done
+  for d in bin client runtime engines packs tools state logs staging plugin plugin.partial; do
+    rm -rf "${HOME_DIR:?}/$d" 2>/dev/null
+    [ -e "$HOME_DIR/$d" ] && left="$left; $HOME_DIR/$d"
+  done
   rmdir "$HOME_DIR" 2>/dev/null
   if [ -n "$left" ]; then
-    status RETRY 75 "Theodore's folders in $HOME_DIR were removed, but these could not be: ${left#; }." \
+    status RETRY 75 "Theodore was not fully installed, and these could not be removed: ${left#; }." \
       "tell the user what is left; it can be removed by hand (see 'Remove it' at https://github.com/Theodore-and/theodore-plugin)." \
-      "Theodore's files are removed, but a few pieces could not be: ${left#; }. Your decks were not touched."
+      "Theodore is mostly removed, but these pieces could not be: ${left#; }. Your decks were not touched."
   fi
   status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed." "nothing to do." "Theodore is uninstalled."
 fi

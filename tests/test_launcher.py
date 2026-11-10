@@ -382,6 +382,30 @@ class Failures(LauncherCase):
             found = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "ai.theodoreand.theodore", str(keychain)], capture_output=True)
             self.assertNotEqual(found.returncode, 0, "the keychain item is gone")
 
+    def test_uninstall_without_python_reports_what_it_could_not_remove(self):
+        fake = self.box.tmp / "failing tools"
+        fake.mkdir()
+        if IS_WINDOWS:
+            (fake / "claude.cmd").write_text("@echo off\r\necho plugin database is locked\r\nexit /b 1\r\n")
+        else:
+            (fake / "claude").write_text('#!/bin/sh\necho "plugin database is locked"\nexit 1\n')
+            (fake / "claude").chmod(0o755)
+        (self.box.home / "plugin.partial" / "plugins").mkdir(parents=True)           # an interrupted plugin unpack
+        env = {"PATH": f"{fake}{os.pathsep}{self.box.env['PATH']}"}
+        first, _n, tell = self.assertStatus(self.run_launcher("uninstall", env=env), "RETRY", 75)
+        self.assertIn("claude-code registration", first)
+        self.assertNotIn("Theodore is uninstalled", tell)
+        self.assertFalse((self.box.home / "plugin.partial").exists(), "an interrupted unpack is Theodore's and goes too")
+        if not IS_WINDOWS and os.geteuid() != 0:
+            stuck = self.box.home / "state" / "stuck"
+            stuck.mkdir(parents=True)
+            (stuck / "file").write_text("x")
+            stuck.chmod(0o555)
+            self.addCleanup(lambda: stuck.chmod(0o755))
+            first, _n, _t = self.assertStatus(self.run_launcher("uninstall"), "RETRY", 75)
+            self.assertIn(str(self.box.home / "state"), first, "a folder it could not delete is named")
+            stuck.chmod(0o755)
+
     def test_a_folder_that_already_holds_other_things_is_shared_politely(self):
         foreign = self.box.home / "memory" / "notes.txt"
         foreign.parent.mkdir(parents=True)
