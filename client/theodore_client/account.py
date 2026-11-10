@@ -150,9 +150,9 @@ def import_pending_activation() -> None:
     if not pending.exists():
         return
     bundle = core.read_json(pending)
-    core.remove_tree(pending)
     if bundle.get("installation_secret"):
-        _adopt(bundle)
+        _adopt(bundle)          # the file is the only copy of the secret: it goes only once the credential is stored
+    core.remove_tree(pending)
 
 
 def refresh(timeout: float = 20.0) -> dict:

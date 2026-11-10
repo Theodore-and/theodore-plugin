@@ -175,3 +175,44 @@ class CredentialBoundary(unittest.TestCase):
         with self.assertRaises(Exception) as caught:
             handler.redirect_request(request, None, 302, "Found", {}, "http://api.example.test/v1/x")
         self.assertIn("redirect", str(caught.exception))
+
+
+class CredentialStorage(unittest.TestCase):
+    def test_a_credential_saved_while_the_keychain_is_locked_wins_over_the_old_keychain_item(self):
+        from theodore_client import credentials
+        keychain = {"item": json.dumps({"installation_id": "old", "installation_secret": "old-secret"})}
+        locked = {"value": True}
+
+        def store(secret):
+            if locked["value"]:
+                return False
+            keychain["item"] = secret
+            return True
+
+        with client_home(), mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), \
+                mock.patch.object(credentials, "_keychain_store", store), \
+                mock.patch.object(credentials, "_keychain_load", lambda: keychain.get("item")), \
+                mock.patch.object(credentials, "_keychain_delete", lambda: locked["value"] or keychain.pop("item", None)):
+            core.home().ensure()
+            self.assertEqual(credentials.store("new", "new-secret"), "file")
+            self.assertEqual(credentials.load()["installation_id"], "new", "the newer credential, not the stale keychain item")
+            locked["value"] = False                                     # the keychain is unlocked later
+            self.assertEqual(credentials.load()["installation_id"], "new")
+            self.assertEqual(credentials.store("newer", "newer-secret"), "keychain")
+            self.assertFalse((core.home().state / "credentials").exists())
+            self.assertEqual(credentials.load()["installation_id"], "newer")
+
+    def test_a_pending_activation_is_kept_until_the_credential_is_stored(self):
+        from theodore_client import credentials
+        with client_home() as home:
+            core.home().ensure()
+            pending = home / "state" / "activation.pending"
+            bundle = {"installation_id": "i-1", "installation_secret": "s-1", "entitlement_token": "a.b.c"}
+            pending.write_text(json.dumps(bundle))
+            with mock.patch.object(credentials, "store", side_effect=OSError(28, "No space left on device")):
+                with self.assertRaises(OSError):
+                    account.import_pending_activation()
+            self.assertTrue(pending.exists(), "the only copy of the installation secret survives a full disk")
+            account.import_pending_activation()
+            self.assertFalse(pending.exists())
+            self.assertEqual(credentials.load()["installation_id"], "i-1")

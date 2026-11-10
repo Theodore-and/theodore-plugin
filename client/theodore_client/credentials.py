@@ -104,6 +104,7 @@ def store(installation_id: str, installation_secret: str) -> str:
             core.remove_tree(_file())
             return "keychain"
         kind = "file"  # locked or unavailable keychain (for example an SSH session): fall back to the 0600 file
+        _keychain_delete()  # an older item must not win later; when the keychain refuses this too, load() prefers the file
     if kind == "dpapi":
         core.write_atomic(_file(), b"DPAPI1" + _dpapi(payload.encode("utf-8"), True), 0o600)
         return "dpapi"
@@ -112,8 +113,10 @@ def store(installation_id: str, installation_secret: str) -> str:
 
 
 def load() -> dict | None:
+    # The file wins when it exists: a successful keychain store deletes it, so a file beside a keychain item is
+    # always the newer credential (saved while the keychain was locked).
     raw: str | None = None
-    if backend() == "keychain":
+    if backend() == "keychain" and not _file().exists():
         raw = _keychain_load()
     if raw is None and _file().exists():
         try:
