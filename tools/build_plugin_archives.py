@@ -8,7 +8,11 @@
   latest.txt                         "<version> <sha256 of the tar.gz>": what the installer reads first
   plugin-build.json                  version, file names, sizes and sha256 (what the lead registers)
 
-Usage: python3 tools/build_plugin_archives.py --out <dir> [--root <marketplace tree>]
+Usage: python3 tools/build_plugin_archives.py --out <dir> [--root <marketplace tree>] [--release]
+
+--release refuses a tree whose launcher.json still carries the repository's placeholder manifest key (kid
+manifest-unset or an all-zero key): such a plugin would refuse to start for every user. Stamp the keys first
+(tools/sync_launchers.py --env ... --keys ...). The release step always passes --release.
 """
 
 from __future__ import annotations
@@ -33,7 +37,25 @@ def tree_files(root: Path) -> list[Path]:
     return keep
 
 
-def build(out: Path, root: Path = ROOT) -> dict:
+def placeholder_keys(root: Path) -> list[str]:
+    """The launcher.json files of the tree that carry no real manifest key (the client's own rule)."""
+    import sys
+    sys.path.insert(0, str(ROOT / "client"))
+    from theodore_client.core import placeholder_key
+    bad = []
+    for path in sorted((root / "plugins" / "theodore" / "skills").glob("*/scripts/launcher.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        real = [k for k in data if k.startswith("manifest_key_") and k.endswith("_kid")
+                and not placeholder_key(str(data[k]), str(data.get(k[:-4] + "_x") or ""))]
+        if not real:
+            bad.append(str(path.relative_to(root)))
+    return bad
+
+
+def build(out: Path, root: Path = ROOT, release: bool = False) -> dict:
+    if release and placeholder_keys(root):
+        raise SystemExit("not a release: the placeholder manifest key is still in " + ", ".join(placeholder_keys(root)) +
+                         "; stamp the keys with tools/sync_launchers.py --env <env> --keys <jwks.json>")
     plugin = root / "plugins" / "theodore"
     version = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
     out.mkdir(parents=True, exist_ok=True)
@@ -75,4 +97,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", required=True)
     parser.add_argument("--root", default=str(ROOT))
-    print(json.dumps(build(Path(parser.parse_args().out), Path(parser.parse_args().root)), indent=2))
+    parser.add_argument("--release", action="store_true")
+    args = parser.parse_args()
+    print(json.dumps(build(Path(args.out), Path(args.root), args.release), indent=2))

@@ -161,6 +161,28 @@ class GeneratedFiles(unittest.TestCase):
             self.assertEqual((Path(one) / "latest.txt").read_text().split(), [first["version"], first["tar"]["sha256"]])
 
 
+    def test_a_release_build_refuses_the_placeholder_key_and_takes_stamped_keys(self):
+        import build_plugin_archives
+        import sync_launchers
+        self.assertEqual(json.loads((SCRIPTS / "launcher.json").read_text())["manifest_key_1_kid"], "manifest-unset",
+                         "the repository carries the placeholder; keys are stamped per environment at release")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit) as refused:
+                build_plugin_archives.build(Path(tmp) / "out", release=True)
+            self.assertIn("placeholder manifest key", str(refused.exception))
+            tree = Path(tmp) / "tree"
+            for rel in (".claude-plugin", ".agents", "plugins"):
+                shutil.copytree(ROOT / rel, tree / rel)
+            sys.path.insert(0, str(ROOT / "tests"))
+            from fake_api import b64u, public_key
+            real = b64u(public_key(hashlib.sha256(b"release check").digest()))
+            stamped = sync_launchers.stamped_launcher_json(None, {"keys": [{"kid": "manifest-test", "x": real, "purpose": "manifest"}]})
+            for skill in ("pptx", "deck-design"):
+                (tree / "plugins" / "theodore" / "skills" / skill / "scripts" / "launcher.json").write_text(stamped)
+            self.assertEqual(build_plugin_archives.build(Path(tmp) / "out", tree, release=True)["version"],
+                             json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"])
+
+
 class HostLimits(unittest.TestCase):
     def test_no_bin_no_lockfile_no_hooks_at_the_plugin_root(self):
         names = {p.name for p in PLUGIN.iterdir()}

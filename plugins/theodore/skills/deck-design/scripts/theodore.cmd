@@ -27,7 +27,19 @@ if "%HOME_DIR%"=="\Theodore" goto :no_home
 set "STABLE=%HOME_DIR%\bin\theodore.cmd"
 set "CONF=%SELF_DIR%\launcher.json"
 set "B=%HOME_DIR%\state\bootstrap"
-if not exist "%CONF%" goto :no_conf
+if not exist "%CONF%" goto :no_keys
+echo THEODORE INTERNAL: this copy of the Theodore plugin carries no release signing key (launcher.json has only the placeholder key), so it cannot trust any download.
+echo NEXT: do not retry. Tell the user to install Theodore from https://theodoreand.ai/install; this copy is an unstamped development build.
+echo TELL THE USER: This copy of Theodore was built without its security keys and cannot be used. Please install it again from theodoreand.ai/install.
+exit /b 78
+
+:no_conf
+rem A plugin built without its release keys (the placeholder: kid manifest-unset, an all-zero key) trusts any
+rem download: it runs nothing but uninstall. The client refuses such keys too, exactly.
+if /i "%~1"=="uninstall" goto :keys_ok
+"%SYS32%\findstr.exe" /r /c:"\"manifest_key_[0-9]*_kid\"" "%CONF%" 2>nul | "%SYS32%\findstr.exe" /v /c:"manifest-unset" >nul 2>&1 || goto :no_keys
+"%SYS32%\findstr.exe" /r /c:"\"manifest_key_[0-9]*_x\"" "%CONF%" 2>nul | "%SYS32%\findstr.exe" /v /c:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >nul 2>&1 || goto :no_keys
+:keys_ok
 
 rem --- 2. one stable copy in <home>\bin: newer wins ---------------------------------------------------------------
 call :jget launcher_generation "%CONF%"

@@ -18,14 +18,18 @@ from .core import Status, quoted_launcher
 
 # --- signed documents --------------------------------------------------------------------------------------------------
 
-def verify_signed(envelope: dict, what: str, schema: str | None = None) -> dict:
+def verify_signed(envelope: dict, what: str, schema: str | None = None, keys: dict | None = None, platform: bool = True) -> dict:
     """Check {manifest, signature, kid} against the manifest keys pinned in launcher.json; return the manifest.
 
     The signature covers the bytes of the `manifest` string exactly as received; it is parsed only afterwards.
-    `schema` pins the kind of manifest, so one signed for another purpose cannot stand in for it.
+    `schema` pins the kind of manifest, so one signed for another purpose cannot stand in for it, and `platform`
+    pins it to this computer's platform and arch. `keys` (kid -> base64url key) replaces launcher.json's keys; the
+    installer passes the keys it carries before any launcher.json exists.
     """
     manifest, signature, kid = envelope.get("manifest"), envelope.get("signature"), envelope.get("kid")
-    keys = core.manifest_keys()
+    keys = core.manifest_keys() if keys is None else {k: v for k, v in keys.items() if not core.placeholder_key(k, v)}
+    if not keys:
+        raise core.no_release_keys()
     if manifest is None or not signature or kid not in keys:
         raise api.setup_failed("HASH_MISMATCH", f"the {what} is not signed with a key this launcher knows")
     if isinstance(manifest, str):
@@ -47,7 +51,7 @@ def verify_signed(envelope: dict, what: str, schema: str | None = None) -> dict:
     if schema:
         system, arch = core.platform_arch()
         if not isinstance(parsed, dict) or parsed.get("schema") != schema or \
-                (parsed.get("platform"), parsed.get("arch")) != (system, arch):
+                (platform and (parsed.get("platform"), parsed.get("arch")) != (system, arch)):
             raise api.setup_failed("HASH_MISMATCH", f"the {what} is signed but is not the document asked for")
     return parsed
 

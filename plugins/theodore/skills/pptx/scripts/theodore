@@ -61,6 +61,18 @@ num() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
 [ -f "$CONF" ] || status INTERNAL 78 "launcher.json is missing beside the launcher ($SELF_DIR)." \
   "reinstall the Theodore plugin, then run the same command again." "Theodore's plugin files are incomplete; it needs to be reinstalled."
 
+# A plugin built without its release keys (the repository's placeholder: kid manifest-unset, an all-zero key)
+# would trust any download. It runs nothing; the client refuses such keys too, exactly.
+real_keys() {
+  grep -E '^ *"manifest_key_[0-9]+_kid": *"' "$CONF" 2>/dev/null | grep -qv '"manifest-unset"' &&
+    grep -E '^ *"manifest_key_[0-9]+_x": *"[A-Za-z0-9_-]{43}"' "$CONF" 2>/dev/null | grep -qvE '"A{43}"'
+}
+if [ "${1:-}" != uninstall ] && ! real_keys; then
+  status INTERNAL 78 "this copy of the Theodore plugin carries no release signing key (launcher.json has only the placeholder key), so it cannot trust any download." \
+    "do not retry. Tell the user to install Theodore from https://theodoreand.ai/install; this copy is an unstamped development build." \
+    "This copy of Theodore was built without its security keys and cannot be used. Please install it again from theodoreand.ai/install."
+fi
+
 # --- 2. one stable copy in <home>/bin: newer wins --------------------------------------------------------------
 MY_GEN=$(num "$(jget "$CONF" launcher_generation)" 0)
 if [ "$SELF" != "$STABLE" ]; then

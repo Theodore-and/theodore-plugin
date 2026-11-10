@@ -243,6 +243,16 @@ class Failures(LauncherCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.box.wait_jobs()
 
+    def test_a_plugin_with_the_placeholder_key_refuses_to_start(self):
+        for overrides in ({"manifest_key_1_kid": "manifest-unset"}, {"manifest_key_1_x": "A" * 43}):
+            self.box.write_launcher_json(**overrides)
+            first, nxt, _t = self.assertStatus(self.run_launcher("guide", "pptx"), "INTERNAL", 78)
+            self.assertIn("no release signing key", first)
+            self.assertIn("theodoreand.ai/install", nxt)
+            self.assertFalse((self.box.home / "bin").exists(), "nothing is copied, downloaded or run")
+            self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/")], [])
+        self.assertStatus(self.run_launcher("uninstall"), "OK", 0)
+
     def test_missing_launcher_json_is_internal(self):
         (self.box.launcher.parent / "launcher.json").unlink()
         self.assertStatus(self.run_launcher("guide", "pptx"), "INTERNAL", 78)

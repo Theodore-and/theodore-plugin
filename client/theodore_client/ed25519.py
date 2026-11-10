@@ -78,9 +78,16 @@ def point_decompress(data: bytes):
     return (x, y, 1, x * y % P)
 
 
+def small_order(public_key: bytes) -> bool:
+    """True for a key that cannot be a real signing key: not a curve point, or a point of small order (the all-zero
+    placeholder is one). Such a key "verifies" signatures nobody made, so both verifiers refuse it first."""
+    A = point_decompress(public_key) if len(public_key) == 32 else None
+    return A is None or point_equal(point_mul(8, A), ZERO)
+
+
 def verify(public_key: bytes, message: bytes, signature: bytes) -> bool:
     """True when `signature` is a valid Ed25519 signature of `message` under `public_key` (32 raw bytes)."""
-    if len(public_key) != 32 or len(signature) != 64:
+    if len(public_key) != 32 or len(signature) != 64 or small_order(public_key):
         return False
     try:
         from cryptography.exceptions import InvalidSignature

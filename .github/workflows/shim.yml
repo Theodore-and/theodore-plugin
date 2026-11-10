@@ -16,6 +16,11 @@ on:
       - "runtime/locks/**"
       - "**.md"
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Build the archives as a release: refused while launcher.json carries the placeholder manifest key"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -131,9 +136,18 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Build
+      # The repository carries the placeholder manifest key; keys are stamped per environment at release. A release
+      # build must refuse a tree that was not stamped (the plugin would refuse to start for every user).
+      - name: A release build refuses the placeholder key
         run: |
-          python tools/build_plugin_archives.py --out dist/plugin
+          if python tools/build_plugin_archives.py --out "$RUNNER_TEMP/release-check" --release; then
+            echo "an unstamped tree was accepted as a release"; exit 1
+          fi
+      - name: Build
+        env:
+          RELEASE: ${{ inputs.release && '--release' || '' }}
+        run: |
+          python tools/build_plugin_archives.py --out dist/plugin $RELEASE
           python runtime/build/build_client.py --out dist/client
           mkdir -p dist/install && cp install/install.md install/install.sh install/install.cmd dist/install/
           sha256sum dist/plugin/* dist/client/* dist/install/* | tee dist/SHA256SUMS

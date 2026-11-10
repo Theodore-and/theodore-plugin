@@ -214,15 +214,38 @@ def config() -> dict:
     return _CONFIG
 
 
+PLACEHOLDER_KID = "manifest-unset"
+
+
+def placeholder_key(kid: str, x: str) -> bool:
+    """The repository's unstamped key (kid manifest-unset, or an all-zero or otherwise unusable public key)."""
+    from . import ed25519
+    if kid == PLACEHOLDER_KID or not x:
+        return True
+    try:
+        raw = ed25519.b64url_decode(x)
+    except ValueError:
+        return True
+    return len(raw) != 32 or not any(raw) or ed25519.small_order(raw)
+
+
 def manifest_keys() -> dict[str, str]:
-    """kid -> base64url Ed25519 public key, from the flat launcher.json keys manifest_key_<n>_kid / _x."""
+    """kid -> base64url Ed25519 public key, from the flat launcher.json keys manifest_key_<n>_kid / _x. A placeholder
+    key is never returned: a plugin built without its release keys trusts nothing."""
     cfg, out = config(), {}
     for key, value in cfg.items():
         if key.startswith("manifest_key_") and key.endswith("_kid"):
-            x = cfg.get(key[:-4] + "_x")
-            if x:
-                out[str(value)] = str(x)
+            x = str(cfg.get(key[:-4] + "_x") or "")
+            if not placeholder_key(str(value), x):
+                out[str(value)] = x
     return out
+
+
+def no_release_keys() -> Status:
+    return Status("INTERNAL", "this copy of the Theodore plugin carries no release signing key (launcher.json has only the "
+                              "placeholder key), so it cannot trust any download.",
+                  "do not retry. Tell the user to install Theodore from https://theodoreand.ai/install; this copy is an unstamped development build.",
+                  "This copy of Theodore was built without its security keys and cannot be used. Please install it again from theodoreand.ai/install.")
 
 
 def is_loopback_api() -> bool:
