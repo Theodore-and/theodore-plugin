@@ -491,6 +491,7 @@ class Entitlement(ClientCase):
         config = json.loads((self.box.home / "bin" / "launcher.json").read_text())
         config["api_base"] = "https://api.invalid.example"
         (self.box.home / "bin" / "launcher.json").write_text(json.dumps(config))
+        (self.box.home / "state" / "environment").write_text(config["api_base"] + "\n")      # the folder is that service's
         result = self.client("pptx", "version", env={"THEODORE_TEST_CLOCK_OFFSET": str(30 * DAY)})
         self.assertEqual(result.returncode, 0, result.stdout)        # the offset did not expire the token
 
