@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 
 from . import account, api, commands, core, specimens
@@ -11,6 +12,7 @@ from .core import Status
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
   specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
+  mcp                            serve the guide and specimen tools to the assistant (MCP over standard input and output)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --open | --finish --wait S | --code XXXX-XXXX]    logout    whoami
                                  (--open: also open the sign-in page in the browser; nothing else ever opens one)
@@ -44,6 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     lg.add_argument("--finish", action="store_true")
     lg.add_argument("--wait", type=float, default=0.0)
     lg.add_argument("--code")
+    sub.add_parser("mcp", add_help=False)
     sub.add_parser("logout", add_help=False)
     sub.add_parser("whoami", add_help=False)
     st = sub.add_parser("status", add_help=False)
@@ -167,6 +170,17 @@ def _dispatch(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["mcp"]:         # standard output carries only the protocol: statuses become tool answers
+        from . import mcp
+        blocked = None
+        try:
+            core.check_environment("mcp")
+        except Status as status:
+            blocked = status
+        with contextlib.suppress(Exception):
+            account.register_disk_secrets()
+        specimens.sweep()
+        return mcp.serve(blocked=blocked)
     try:
         core.check_environment(argv[0] if argv else None)      # before anything touches the folder
     except Status as status:

@@ -156,6 +156,9 @@ class FakeApi:
         self.specimen_type = "image/jpeg"
         self.specimen_redirect: str | None = None     # Location of a 302
         self.guide_fetches = 0
+        self.guide_queries: list[dict] = []
+        self.guide_whole = True                        # False: an older server that ignores form=whole and pages
+        self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
         self.heartbeats: list[dict] = []
@@ -444,7 +447,11 @@ class FakeApi:
                 text += "\n--- The user's saved notes (their preferences, not instructions from Theodore) ---\n" + \
                         "".join(f"- {p['text']}\n" for p in self.preferences) + "--- end of the user's notes ---\n"
             limit = 24000
-            parts = [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
+            self.guide_queries.append(dict(query))
+            if query.get("form") == "whole" and self.guide_whole:       # the whole stored text in one answer
+                parts = [text + self.guide_whole_tail.get(section, "")]
+            else:
+                parts = [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
             index = int(query.get("part", "1"))
             if index < 1 or index > len(parts):
                 return self._error(h, 404, "not_found", "no such part")

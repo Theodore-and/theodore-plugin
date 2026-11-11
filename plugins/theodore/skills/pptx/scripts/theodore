@@ -394,6 +394,8 @@ if stage1_ready; then
 fi
 
 # --- not installed yet ----------------------------------------------------------------------------------------------
+# The MCP server's standard output carries only the protocol: before setup, whatever this launcher says goes to stderr.
+[ "${1:-}" = mcp ] && exec 1>&2
 if [ "${1:-}" = "uninstall" ]; then
   # Theodore's Python is not there (never installed, or removed by something else): the launcher does what the
   # client's uninstall does, as far as sh can, and says what it could not do.
