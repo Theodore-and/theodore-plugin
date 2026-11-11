@@ -339,13 +339,31 @@ def _claim_environment(own: str) -> None:
     """Record the folder's service in one exclusive step: written whole beside its place, then linked (POSIX) or
     renamed (Windows, which refuses to replace) into it, which fails when a record is already there. The caller reads
     the record afterwards, so of two builds racing on an empty folder one wins and the other refuses."""
-    tmp = environment_path().with_name(f".environment.{os.getpid()}.{threading.get_ident()}")
+    final = environment_path()
+    tmp = final.with_name(f".environment.{os.getpid()}.{threading.get_ident()}")
     try:
         tmp.write_text(own + "\n", encoding="utf-8")
         if IS_WINDOWS:
-            os.rename(tmp, environment_path())
+            os.rename(tmp, final)
         else:
-            os.link(tmp, environment_path())
+            try:
+                os.link(tmp, final)
+            except FileExistsError:
+                pass
+            except OSError:         # no hard links on this file system: an exclusive claim directory, then a rename
+                claim = final.with_name(".environment.claim")
+                try:
+                    os.mkdir(claim)
+                except FileExistsError:
+                    deadline = time.monotonic() + 10
+                    while claim.is_dir() and not final.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                else:
+                    try:
+                        if not final.exists():
+                            os.rename(tmp, final)
+                    finally:
+                        os.rmdir(claim)
     except OSError:
         pass
     finally:

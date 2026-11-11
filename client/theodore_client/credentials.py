@@ -78,6 +78,10 @@ def _account() -> str:
     return "installation-" + hashlib.sha256(f"{core.home().root}\n{_service_base()}".encode("utf-8")).hexdigest()[:12]
 
 
+def _account_for(service: str) -> str:
+    return "installation-" + hashlib.sha256(f"{core.home().root}\n{service}".encode("utf-8")).hexdigest()[:12]
+
+
 def _legacy_account() -> str:
     """The name a client before round 8 used (the folder alone): never read, only deleted."""
     return "installation-" + hashlib.sha256(str(core.home().root).encode("utf-8")).hexdigest()[:12]
@@ -134,8 +138,8 @@ def _keychain_store(secret: str) -> bool:
     return done is not None and done.returncode == 0 and "error" not in (done.stderr or "").lower()
 
 
-def _keychain_load() -> str | None:
-    done = _security(["find-generic-password", "-a", _account(), "-s", SERVICE, "-w", *_keychain_args()])
+def _keychain_load(account: str | None = None) -> str | None:
+    done = _security(["find-generic-password", "-a", account or _account(), "-s", SERVICE, "-w", *_keychain_args()])
     if done is None or done.returncode != 0 or not done.stdout.strip():
         return None
     try:
@@ -151,11 +155,19 @@ def _keychain_delete() -> bool:
     if _keychain_skipped():         # nothing can be confirmed: an item known or suspected to be there stays tombstoned
         gone = not _holds_marker().exists() and not _tombstone().exists()
     else:
-        done = _security(["delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()])
-        gone = done is not None and done.returncode in (0, 44)
-        if gone:                    # the item of a client before round 8, if any: it goes too
-            legacy = _security(["delete-generic-password", "-a", _legacy_account(), "-s", SERVICE, *_keychain_args()])
-            gone = legacy is not None and legacy.returncode in (0, 44)
+        # This build's item, the item of the service the folder records (another service's folder being uninstalled),
+        # and the item of a client before round 8.
+        accounts = [_account()]
+        recorded = core.home_environment()
+        if recorded and recorded != _service_base():
+            accounts.append(_account_for(recorded))
+        accounts.append(_legacy_account())
+        gone = True
+        for account in accounts:
+            done = _security(["delete-generic-password", "-a", account, "-s", SERVICE, *_keychain_args()])
+            if done is None or done.returncode not in (0, 44):
+                gone = False
+                break
     if gone:
         core.remove_tree(_tombstone())
         core.remove_tree(_holds_marker())
@@ -163,6 +175,34 @@ def _keychain_delete() -> bool:
         with contextlib.suppress(OSError):
             core.write_atomic(_tombstone(), str(int(core.now())), 0o600)
     return gone
+
+
+def _migrate_legacy_item() -> str | None:
+    """A sign-in kept by a client before round 8 (the item named by the folder alone) is moved, not stranded, but only
+    when this folder's recorded service is this build's: then it can only be this service's credential. Write the new
+    item, read it back, then delete the old one; if the move fails the credential is still used for this run. With
+    another service's record it is never read."""
+    own = _service_base()
+    if not own or core.home_environment() != own:
+        return None
+    raw = _keychain_load(_legacy_account())
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if not (isinstance(value, dict) and value.get("installation_id") and value.get("installation_secret")):
+        return None
+    core.register_secret(value["installation_secret"])
+    payload = json.dumps({"installation_id": value["installation_id"], "installation_secret": value["installation_secret"],
+                          "api_base": own}, separators=(",", ":"))
+    if _keychain_store(payload) and _keychain_load() is not None:
+        with contextlib.suppress(OSError):
+            core.write_atomic(_holds_marker(), str(int(core.now())), 0o600)
+        _security(["delete-generic-password", "-a", _legacy_account(), "-s", SERVICE, *_keychain_args()])
+        core.log("the keychain sign-in was moved to its per-service item")
+    return payload
 
 
 def store(installation_id: str, installation_secret: str) -> str:
@@ -193,6 +233,8 @@ def load() -> dict | None:
         _keychain_delete()          # retried on every run until it is confirmed; the item is never read meanwhile
     elif backend() == "keychain" and not _file().exists():
         raw = _keychain_load()
+        if raw is None:
+            raw = _migrate_legacy_item()
         if raw and not _holds_marker().exists():          # stored by a client from before the marker
             with contextlib.suppress(OSError):
                 core.write_atomic(_holds_marker(), str(int(core.now())), 0o600)

@@ -171,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
         core.check_environment(argv[0] if argv else None)      # before anything touches the folder
     except Status as status:
         return core.emit(status)
+    try:
+        account.register_disk_secrets()     # before any server diagnostic can be printed
+    except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run
+        pass
     specimens.sweep()       # specimen sheets older than an hour go before anything else is done
     try:
         code = _dispatch(argv)

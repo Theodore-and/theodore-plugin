@@ -524,6 +524,15 @@ class Failures(LauncherCase):
         self.assertFalse(untouched.exists(), "untouched for an hour in today's temporary folder: removed")
         self.assertTrue(fresh.exists() and recent.exists(), "recent ones stay")
 
+    @unittest.skipIf(IS_WINDOWS, "the sh launcher: a file system without hard links")
+    def test_without_hard_links_two_services_racing_still_end_with_one(self):
+        fake = self.box.tmp / "no-links"
+        fake.mkdir()
+        (fake / "ln").write_text("#!/bin/sh\nexit 1\n")
+        (fake / "ln").chmod(0o755)
+        self.box.env["PATH"] = f"{fake}{os.pathsep}{self.box.env['PATH']}"
+        self.test_of_launchers_of_two_services_racing_on_an_empty_folder_one_wins()
+
     def test_of_launchers_of_two_services_racing_on_an_empty_folder_one_wins(self):
         # Round 8 (review 6): the claim is one exclusive step; the losers read the winner's record and refuse.
         import shutil
@@ -606,6 +615,22 @@ class Failures(LauncherCase):
         self.assertIn(result.returncode, (67, 68), result.stdout + result.stderr)
         status_lines(result.stdout)
         self.assertTrue(folder.exists())
+
+    @unittest.skipIf(IS_WINDOWS, "Windows keeps the credential in a DPAPI file in state, removed with the folder")
+    def test_uninstall_of_another_services_folder_deletes_that_services_keychain_item(self):
+        # Round 9 (review 17): service A's folder, its runtime gone, uninstalled by service B's launcher.
+        import hashlib
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        other = "https://api.other.example.test"
+        (state / "environment").write_text(other + "\n")
+        log = self.box.tmp / "security.log"
+        fake = self.box.tmp / "fake-security"
+        fake.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexit 0\n')
+        fake.chmod(0o755)
+        self.assertStatus(self.run_launcher("uninstall", env={"THEODORE_TEST_SECURITY": str(fake)}), "OK", 0)
+        expected = "installation-" + hashlib.sha256(f"{self.box.home}\n{other}".encode()).hexdigest()[:12]
+        self.assertIn(f"-a {expected} ", log.read_text(), "the item of the service the folder belongs to is deleted")
 
     def test_uninstall_without_python_reports_what_it_could_not_remove(self):
         fake = self.box.tmp / "failing tools"

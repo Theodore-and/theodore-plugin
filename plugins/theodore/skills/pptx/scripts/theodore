@@ -125,14 +125,26 @@ refuse_foreign() {
 # Claiming a folder is one exclusive step: the record is written whole beside its place and hard-linked into it, which
 # fails when one is already there (two installers or launchers of different services racing on an empty folder: one
 # wins, the other then reads the winner's record and refuses).
-claim_environment() {
-  [ -n "$MY_API" ] && [ -d "$HOME_DIR/state" ] && [ ! -e "$HOME_DIR/state/environment" ] || return 0
-  tmp="$HOME_DIR/state/.environment.$$"
-  if printf '%s\n' "$MY_API" > "$tmp" 2>/dev/null; then
-    ln "$tmp" "$HOME_DIR/state/environment" 2>/dev/null || ( set -C; cat "$tmp" > "$HOME_DIR/state/environment" ) 2>/dev/null
+publish_environment() { # value: the record, written whole beside its place, then put there in one exclusive step
+  env_file="$HOME_DIR/state/environment" claim="$HOME_DIR/state/.environment.claim" tmp="$HOME_DIR/state/.environment.$$"
+  printf '%s\n' "$1" > "$tmp" 2>/dev/null || return 0
+  if ! ln "$tmp" "$env_file" 2>/dev/null; then
+    # No hard links on this file system: a claim directory (mkdir is exclusive everywhere) decides who publishes, by
+    # rename; the others wait for the record. It is never seen half-written.
+    if mkdir "$claim" 2>/dev/null; then
+      [ -e "$env_file" ] || mv -f "$tmp" "$env_file" 2>/dev/null
+      rmdir "$claim" 2>/dev/null
+    else
+      n=0
+      while [ -d "$claim" ] && [ ! -e "$env_file" ] && [ "$n" -lt 10 ]; do sleep 1; n=$((n + 1)); done
+    fi
   fi
   rm -f "$tmp"
   return 0
+}
+claim_environment() {
+  [ -n "$MY_API" ] && [ -d "$HOME_DIR/state" ] && [ ! -e "$HOME_DIR/state/environment" ] || return 0
+  publish_environment "$MY_API"
 }
 FOREIGN=
 if foreign; then
@@ -418,8 +430,13 @@ if [ "${1:-}" = "uninstall" ]; then
   # Test seams (a keychain file, a stand-in for security), honoured only against a loopback API.
   case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) extra=${THEODORE_TEST_KEYCHAIN:-}; security=${THEODORE_TEST_SECURITY:-$security} ;; esac
   if { [ "$(uname -s 2>/dev/null)" = Darwin ] || [ "$security" != /usr/bin/security ]; } && [ -x "$security" ]; then
-    # The item of this folder and service (the client's name for it), then that of a client before round 8 (folder only).
-    for account in "installation-$(printf '%s\n%s' "${HOME_DIR%/}" "$MY_API" | sha256_of_stdin | cut -c1-12)" \
+    # The item of this folder and its service (the client's name for it): the service the folder records, which for a
+    # folder of another service is not this launcher's; then this launcher's own; then that of a client before round 8
+    # (folder only).
+    svc=$MY_API
+    [ -n "$FOREIGN" ] && [ -n "${HOME_API:-}" ] && svc=$HOME_API
+    for account in "installation-$(printf '%s\n%s' "${HOME_DIR%/}" "$svc" | sha256_of_stdin | cut -c1-12)" \
+                   "installation-$(printf '%s\n%s' "${HOME_DIR%/}" "$MY_API" | sha256_of_stdin | cut -c1-12)" \
                    "installation-$(printf '%s' "${HOME_DIR%/}" | sha256_of_stdin | cut -c1-12)"; do
       # A keychain that shows a system dialog never answers: 10 seconds, then it is stopped (killed two seconds later
       # if it ignores that) and named as left.

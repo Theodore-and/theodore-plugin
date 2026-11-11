@@ -704,6 +704,11 @@ class Round8Environment(unittest.TestCase):
                 self.assertEqual(result, "ok" if base == winner else "USAGE", (name, base, winner))
             self.assertEqual(len(outcomes), 8)
 
+    @unittest.skipIf(os.name == "nt", "Windows publishes by rename, which never replaces")
+    def test_without_hard_links_the_record_is_still_claimed_once_and_never_seen_half_written(self):
+        with mock.patch.object(os, "link", side_effect=PermissionError("no hard links here")):
+            self.test_of_many_builds_racing_on_an_empty_folder_exactly_one_service_wins()
+
     def test_a_credential_of_another_service_is_never_loaded(self):
         import subprocess
         from theodore_client import credentials
@@ -726,6 +731,81 @@ class Round8Environment(unittest.TestCase):
                 self.assertEqual(credentials.load()["installation_secret"], "secret-prod")
                 with mock.patch.object(core, "running_stamp", return_value={"api_base": "https://api.staging.example.test"}):
                     self.assertIsNone(credentials.load(), "a staging build never loads the production credential")
+
+
+class Round9KeychainMigration(unittest.TestCase):
+    """Round 9 (review 15): a sign-in kept under the pre-round-8 keychain name is moved to the per-service item when
+    the folder's recorded service is this build's, and never read otherwise; a cached licence keeps working offline."""
+
+    def keychain(self, items: dict):
+        import subprocess
+
+        def security(command, **kwargs):
+            if command[1] == "-i":
+                account = kwargs["input"].split('-a "', 1)[1].split('"', 1)[0]
+                items[account] = kwargs["input"].split('-w "', 1)[1].split('"', 1)[0]
+                return subprocess.CompletedProcess(command, 0, "", "")
+            account = command[command.index("-a") + 1]
+            if command[1] == "find-generic-password":
+                return subprocess.CompletedProcess(command, 0 if account in items else 44, items.get(account, "") + "\n", "")
+            if command[1] == "delete-generic-password":
+                return subprocess.CompletedProcess(command, 0 if items.pop(account, None) is not None else 44, "", "")
+            raise AssertionError(command)
+        return mock.patch.object(subprocess, "run", side_effect=security)
+
+    def legacy(self, items: dict) -> None:
+        import base64
+        from theodore_client import credentials
+        raw = json.dumps({"installation_id": "inst-old", "installation_secret": "secret-old"})
+        items[credentials._legacy_account()] = base64.urlsafe_b64encode(raw.encode()).decode()
+
+    def test_the_old_item_moves_when_the_folder_is_this_services(self):
+        from theodore_client import credentials
+        items: dict = {}
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), self.keychain(items):
+            core.home().ensure()
+            (home / "state" / "environment").write_text("https://api.example.test\n")
+            self.legacy(items)
+            from theodore_client.contract import ENTITLEMENT_AUD
+            claims = {"aud": ENTITLEMENT_AUD, "feat": ["pptx"], "exp": core.now() + 86400, "rfa": core.now() + 3600}
+            account.save_token("x." + b64u(json.dumps(claims).encode()) + ".y")      # an unexpired licence; the service is down
+            with mock.patch.object(api, "call_json", side_effect=api.NetworkError("down")), \
+                    mock.patch.object(api, "request", side_effect=api.NetworkError("down")):
+                self.assertEqual(account.require("pptx")["feat"], ["pptx"], "offline, the cached licence still works")
+            self.assertNotIn(credentials._legacy_account(), items, "the old item was deleted once the new one was verified")
+            self.assertIn(credentials._account(), items)
+            self.assertEqual(credentials.load()["installation_secret"], "secret-old", "read from the new item from now on")
+
+    def test_the_old_item_is_never_read_for_a_folder_of_another_service(self):
+        from theodore_client import credentials
+        items: dict = {}
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), self.keychain(items):
+            core.home().ensure()
+            (home / "state" / "environment").write_text("https://api.other.example.test\n")
+            self.legacy(items)
+            self.assertIsNone(credentials.load())
+            self.assertIn(credentials._legacy_account(), items, "left alone")
+            self.assertNotIn(credentials._account(), items)
+
+
+class Round9ForeignDelete(unittest.TestCase):
+    def test_deleting_from_another_services_folder_removes_that_services_item(self):
+        import subprocess
+        from theodore_client import credentials
+        deleted = []
+
+        def security(command, **kwargs):
+            if command[1] == "delete-generic-password":
+                deleted.append(command[command.index("-a") + 1])
+            return subprocess.CompletedProcess(command, 44, "", "")
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), \
+                mock.patch.object(subprocess, "run", side_effect=security):
+            core.home().ensure()
+            (home / "state" / "environment").write_text("https://api.other.example.test\n")
+            self.assertTrue(credentials.delete())
+            self.assertIn(credentials._account_for("https://api.other.example.test"), deleted)
+            self.assertIn(credentials._account(), deleted)
+            self.assertIn(credentials._legacy_account(), deleted)
 
 
 class Round8Refusals(unittest.TestCase):
@@ -765,6 +845,23 @@ class Round8Refusals(unittest.TestCase):
                 self.assertEqual(core.emit(core.Status("OK", "fine", "go on", "ok")), 70)
                 self.assertEqual(core.emit(core.Status("OK", "again", "go on", "ok")), 70)
             self.assertEqual(out.getvalue().count("THEODORE NO_ENTITLEMENT"), 1, "once")
+
+    def test_a_pending_device_code_never_reaches_a_printed_line(self):
+        # Round 9 (review 10): a login --finish whose error echoes the pending device code, which this process did not
+        # receive: it was read from disk.
+        import io
+        from theodore_client import cli
+        with client_home() as home:
+            core.home().ensure()
+            code = "dc-" + "f00d" * 10
+            core.write_json(home / "state" / "device.json", {"device_code": code, "url": "https://example.test/device?code=WXYZ-1234",
+                                                             "interval": 1, "expires_at": core.now() + 600}, 0o600)
+            out = io.StringIO()
+            failing = api.ApiError(500, "internal_error", f"lookup for {code} failed")
+            with mock.patch.object(api, "call_json", side_effect=failing), mock.patch("sys.stdout", new=out):
+                cli.main(["login", "--finish"])
+            self.assertIn("THEODORE RETRY", out.getvalue())
+            self.assertNotIn(code, out.getvalue())
 
     def test_server_diagnostics_are_scrubbed_before_log_or_print(self):
         import io

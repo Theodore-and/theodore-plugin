@@ -157,6 +157,18 @@ def _adopt(bundle: dict) -> None:
     core.remove_tree(core.home().state / "device.json")
 
 
+def register_disk_secrets() -> None:
+    """Every credential-like value this home holds on disk goes to the scrubber before anything can be printed: the
+    pending sign-in's device code, an activation answer waiting to be imported, the stored licence. The installation
+    secret is registered whenever it is loaded (credentials.load), which every authenticated call does first."""
+    state = core.home().state
+    core.register_secret(str(core.read_json(state / "device.json").get("device_code") or ""))
+    pending = core.read_json(state / "activation.pending")
+    for key in ("installation_secret", "entitlement_token"):
+        core.register_secret(str(pending.get(key) or ""))
+    stored_token()
+
+
 def import_pending_activation() -> None:
     """The installer redeems the activation code with curl before any large download and leaves the answer in
     state/activation.pending (0600). Move it into the credential store and delete the file."""
@@ -280,6 +292,7 @@ def login_start(reason: str = "this computer is not signed in to Theodore.", ope
             return api.offline(error, "sign-in could not start")
         except api.ApiError as error:
             return api.status_from(error, "sign-in could not start")
+        core.register_secret(str(answer.get("device_code") or ""))
         pending = {"device_code": answer["device_code"], "user_code": answer.get("user_code"),
                    "url": answer.get("verification_uri_complete") or answer.get("verification_uri"),
                    "interval": int(answer.get("interval") or 5),
@@ -359,6 +372,7 @@ def signed_in_status(claims: dict) -> Status:
 def login_finish(wait_seconds: float) -> Status:
     pending_path = core.home().state / "device.json"
     pending = core.read_json(pending_path)
+    core.register_secret(str(pending.get("device_code") or ""))
     if credentials.load() and not pending.get("device_code"):
         return signed_in_status(stored_token()[1])
     if not pending.get("device_code"):

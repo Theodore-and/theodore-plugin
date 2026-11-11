@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.1"
-PIN_CLIENT="client/client-0.2.1.tar 3e40955e1ccb6cb170a43a674bd0247aad626a111100240a21d14f24df8dcb09"
+PIN_CLIENT="client/client-0.2.1.tar 02113b51ed961c4e2e4b7c7b881bde01c41e1216756cec15193a14d1741c770d"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -189,10 +189,18 @@ mkdir -p "$HOME_DIR/staging" "$HOME_DIR/state" 2>/dev/null && chmod 700 "$HOME_D
 # fails when a record is there), then check: two installers of different services racing on one empty folder cannot
 # both pass.
 if [ ! -e "$HOME_DIR/state/environment" ]; then
-  printf '%s\n' "${API_BASE%/}" > "$HOME_DIR/state/.environment.$$" 2>/dev/null &&
-    { ln "$HOME_DIR/state/.environment.$$" "$HOME_DIR/state/environment" 2>/dev/null ||
-      ( set -C; cat "$HOME_DIR/state/.environment.$$" > "$HOME_DIR/state/environment" ) 2>/dev/null; }
-  rm -f "$HOME_DIR/state/.environment.$$"
+  env_file="$HOME_DIR/state/environment" claim="$HOME_DIR/state/.environment.claim" tmp="$HOME_DIR/state/.environment.$$"
+  if printf '%s\n' "${API_BASE%/}" > "$tmp" 2>/dev/null && ! ln "$tmp" "$env_file" 2>/dev/null; then
+    # No hard links: a claim directory decides who publishes, by rename; the others wait (never a half-written record).
+    if mkdir "$claim" 2>/dev/null; then
+      [ -e "$env_file" ] || mv -f "$tmp" "$env_file" 2>/dev/null
+      rmdir "$claim" 2>/dev/null
+    else
+      n=0
+      while [ -d "$claim" ] && [ ! -e "$env_file" ] && [ "$n" -lt 10 ]; do sleep 1; n=$((n + 1)); done
+    fi
+  fi
+  rm -f "$tmp"
 fi
 foreign && { rm -rf "$WORK"; refuse_foreign; }
 # The installer's own files live in one private folder (mktemp -d makes it 0700) and go when it ends, whatever happens.
