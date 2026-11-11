@@ -403,6 +403,32 @@ class Failures(LauncherCase):
         self.assertLess(took, 30, f"the uninstall waited {took:.0f} s for the keychain")
         self.assertFalse(self.box.home.exists(), "everything else is still removed")
 
+    def test_uninstall_without_python_removes_recorded_specimen_folders(self):
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        elsewhere = self.box.tmp / "an old TMPDIR"             # recorded while TMPDIR pointed here
+        recorded = elsewhere / "theodore-specimens-0123456789abcdef"
+        current = Path(self.box.env["TMPDIR"]) / "theodore-specimens-fedcba9876543210"      # not recorded, in today's root
+        for folder in (recorded, current):
+            folder.mkdir(parents=True)
+            (folder / "cover-01.jpg").write_bytes(b"jpeg")
+        precious = self.box.tmp / "Documents"
+        precious.mkdir()
+        (precious / "keep.txt").write_text("keep")
+        lines = [f"1700000000 {recorded}", f"1700000000 {precious}"]
+        link = elsewhere / "theodore-specimens-link"
+        if not IS_WINDOWS:
+            os.symlink(precious, link)
+            lines.append(f"1700000000 {link}")
+        (state / "specimens.txt").write_text("\n".join(lines) + "\n")
+        self.assertStatus(self.run_launcher("uninstall"), "OK", 0)
+        self.assertFalse(recorded.exists(), "a recorded folder goes, wherever it is")
+        self.assertFalse(current.exists(), "a folder in the current temporary folder goes")
+        self.assertTrue((precious / "keep.txt").exists(), "a recorded path that is not a specimen folder is never deleted")
+        if not IS_WINDOWS:
+            self.assertTrue(os.path.lexists(link) and (precious / "keep.txt").exists(), "a link is not followed")
+        self.assertFalse(self.box.home.exists())
+
     def test_uninstall_without_python_reports_what_it_could_not_remove(self):
         fake = self.box.tmp / "failing tools"
         fake.mkdir()

@@ -140,6 +140,12 @@ class Specimen(ClientCase):
         self.temp = Path(self.box.env["TMPDIR"])
         self.deck = self.box.tmp / "deck"
         (self.deck / ".pptx-state").mkdir(parents=True)
+        self.work = self.box.tmp / "work"           # a working folder that does not contain the temporary folder
+        self.work.mkdir()
+
+    def client(self, *args, **kwargs):
+        kwargs.setdefault("cwd", getattr(self, "work", None))
+        return super().client(*args, **kwargs)
 
     def folders(self, root: Path | None = None) -> list[Path]:
         return sorted(p for p in (root or self.temp).iterdir() if p.name.startswith("theodore-specimens-"))
@@ -188,7 +194,7 @@ class Specimen(ClientCase):
                 self.assertNotIn(self.deck.resolve(), path.resolve().parents)
                 self.assertNotIn(self.box.home.resolve(), path.resolve().parents)
             else:
-                self.assertStatus(result, "INTERNAL", 78)
+                self.assertStatus(result, "BLOCKED_BY_POLICY", 73)
             self.assertEqual(self.folders(inside), [])
             self.assertEqual(list(self.deck.rglob("*.jpg")) + list(self.box.home.rglob("*.jpg")), [])
 

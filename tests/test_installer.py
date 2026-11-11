@@ -164,6 +164,20 @@ class Installer(unittest.TestCase):
         self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/")], [], "nothing was downloaded")
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["state"])
 
+    def test_uninstall_without_a_launcher_still_removes_recorded_specimen_folders(self):
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        recorded = self.box.tmp / "an old TMPDIR" / "theodore-specimens-0123456789abcdef"
+        recorded.mkdir(parents=True)
+        (recorded / "cover-01.jpg").write_bytes(b"jpeg")
+        precious = self.box.tmp / "Documents"
+        precious.mkdir()
+        (state / "specimens.txt").write_text(f"1700000000 {recorded}\n1700000000 {precious}\n")
+        result = self.install("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(recorded.exists())
+        self.assertTrue(precious.exists())
+
     def test_bad_arguments(self):
         for args in (("--frobnicate",), ("--code", "nope")):
             result = self.install(*args)

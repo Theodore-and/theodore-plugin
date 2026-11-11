@@ -191,6 +191,29 @@ if "%JV:~-1%"=="," set "JV=%JV:~0,-1%"
 if "%JV:~0,1%"==" " set "JV=%JV:~1%"
 exit /b 0
 
+:remove_specimens
+rem Specimen folders: every one the client made is a line "<created epoch> <path>" in state\specimens.txt; they go
+rem with the uninstall, from that record and from the current roots, whatever TEMP was when they were made. Only
+rem folders named theodore-specimens-* that are real folders (not a junction or link) are removed. Result in SPLEFT.
+set "SPLEFT="
+if exist "%HOME_DIR%\state\specimens.txt" for /f "usebackq tokens=1,*" %%A in ("%HOME_DIR%\state\specimens.txt") do call :remove_specimen "%%B"
+if defined TEMP for /d %%D in ("%TEMP%\theodore-specimens-*") do call :remove_specimen "%%~fD"
+if defined LOCALAPPDATA for /d %%D in ("%LOCALAPPDATA%\Theodore\Cache\specimens\theodore-specimens-*") do call :remove_specimen "%%~fD"
+if defined LOCALAPPDATA rmdir "%LOCALAPPDATA%\Theodore\Cache\specimens" >nul 2>&1
+if defined LOCALAPPDATA rmdir "%LOCALAPPDATA%\Theodore\Cache" >nul 2>&1
+exit /b 0
+
+:remove_specimen
+set "SPN=%~nx1"
+if not "%SPN:~0,19%"=="theodore-specimens-" exit /b 0
+if "%SPN%"=="theodore-specimens-" exit /b 0
+if not exist "%~1\" exit /b 0
+set "SPA=%~a1"
+if not "%SPA:l=%"=="%SPA%" exit /b 0
+rmdir /s /q "%~1" >nul 2>&1
+if exist "%~1\" set "SPLEFT=%SPLEFT%; the specimen folder %~1"
+exit /b 0
+
 :self_copy
 if not exist "%HOME_DIR%\bin" mkdir "%HOME_DIR%\bin" 2>nul
 if not exist "%HOME_DIR%\bin" exit /b 0
@@ -542,6 +565,8 @@ where codex >nul 2>&1 && call :unreg codex codex plugin remove theodore@theodore
 where codex >nul 2>&1 && call :unreg codex codex plugin marketplace remove theodore
 del /q "%UOUT%" >nul 2>&1
 if exist "%HOME_DIR%\state\host-settings.json" set "LEFT=%LEFT%; two Theodore entries in the Claude Code settings.json, the extraKnownMarketplaces.theodore autoUpdate and the two Bash rules for the launcher under permissions.allow"
+call :remove_specimens
+if defined SPLEFT set "LEFT=%LEFT%%SPLEFT%"
 if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
 if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\pptx-runtime"
 rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this file

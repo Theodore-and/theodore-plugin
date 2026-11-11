@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.1"
-PIN_CLIENT="client/client-0.2.1.tar 8fb59c94b09a08f725ac505eebe51c78c77e989e7005e785f3ffaf50538dbae6"
+PIN_CLIENT="client/client-0.2.1.tar de9d8d0935accc19206cfc8d3f7322582829cf23ca2dc4c3b8cf5509184e42ea"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -80,10 +80,40 @@ if [ -z "$UNINSTALL" ] && [ -n "$HOME_API" ] && [ "$HOME_API" != "${API_BASE%/}"
     "Theodore found an installation for another Theodore service ($HOME_API) in $HOME_DIR. To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first."
 fi
 
+# Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt; they go with
+# the uninstall, from that record and from the current roots, whatever TMPDIR was when they were made. Only folders
+# named theodore-specimens-*, real (not a link) and this user's own are removed.
+specimen_cache() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then echo "${HOME:-/nonexistent}/Library/Caches/Theodore/specimens"
+  else echo "${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/theodore/specimens"; fi
+}
+remove_specimen() {
+  case "${1##*/}" in theodore-specimens-?*) ;; *) return 0 ;; esac
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 0
+  rm -rf "$1" 2>/dev/null
+  [ -e "$1" ] && left="$left; the specimen folder $1"
+  return 0
+}
+remove_specimens() {
+  if [ -f "$HOME_DIR/state/specimens.txt" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do remove_specimen "${line#* }"; done < "$HOME_DIR/state/specimens.txt"
+  fi
+  sc=$(specimen_cache)
+  for d in "${TMPDIR:-/tmp}"/theodore-specimens-* "$sc"/theodore-specimens-*; do remove_specimen "${d%/}"; done
+  rmdir "$sc" 2>/dev/null && rmdir "${sc%/*}" 2>/dev/null
+  return 0
+}
 if [ -n "$UNINSTALL" ]; then
   if [ -f "$HOME_DIR/bin/theodore" ]; then
     exec sh "$HOME_DIR/bin/theodore" uninstall
   fi
+  # No launcher left: the specimen folders the client recorded still go, and the record with them.
+  left=
+  remove_specimens
+  [ -n "$left" ] || rm -f "$HOME_DIR/state/specimens.txt" 2>/dev/null
+  rmdir "$HOME_DIR/state" "$HOME_DIR" 2>/dev/null
+  [ -z "$left" ] || status RETRY 75 "Theodore is not installed in $HOME_DIR, but these could not be removed: ${left#; }." \
+    "tell the user what is left; each item is a folder that can be deleted by hand." "A few of Theodore's temporary files could not be removed: ${left#; }."
   status OK 0 "Theodore is not installed in $HOME_DIR." "nothing to do." "Theodore was not installed on this computer."
 fi
 

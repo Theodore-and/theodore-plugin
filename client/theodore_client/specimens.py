@@ -1,8 +1,12 @@
 """Deck-design specimen sheets. They are the publisher's images: fetched one at a time when the assistant asks,
 held in a private temporary folder of this run for at most an hour, and never put in Theodore's folder or in a deck's.
 
-`theodore specimen <file>...` fetches into a new folder <temp>/theodore-specimens-XXXXXXXX (the current user's
-alone). Every client call first removes such folders older than an hour; `uninstall` removes them all.
+`theodore specimen <file>...` fetches into a new folder <root>/theodore-specimens-XXXXXXXX (the current user's
+alone), where <root> is the system's temporary folder or, when that lies inside the working folder, the user's cache
+folder (~/Library/Caches/Theodore/specimens, $XDG_CACHE_HOME/theodore/specimens, %LOCALAPPDATA%\Theodore\Cache\specimens).
+Every folder made is recorded in <home>/state/specimens.txt, one line "<created epoch> <path>", which the launchers and
+installers read too. Every client call first removes recorded folders, and folders in the current roots, older than an
+hour; `uninstall` removes them all. A changed TMPDIR therefore cannot strand a folder.
 """
 
 from __future__ import annotations
@@ -13,7 +17,9 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 from . import core
@@ -33,22 +39,52 @@ def valid_name(name: str) -> bool:
     return bool(NAME.fullmatch(name)) and name.split(".", 1)[0].upper() not in DEVICES
 
 
+def cache_root() -> Path:
+    """The user's cache folder for specimen folders: the root used when the temporary folder is inside the working folder."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "Theodore" / "specimens"
+    if core.IS_WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Theodore" / "Cache" / "specimens"
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "theodore" / "specimens"
+
+
 def roots() -> list[Path]:
-    """The temporary folders of this computer where a specimen folder may be: the system's choice first."""
+    """Where a specimen folder may be, in order: the system's temporary folder, then the user's cache folder (made
+    when it is used)."""
     candidates = [tempfile.gettempdir()]
     if core.IS_WINDOWS:
         local = os.environ.get("LOCALAPPDATA")
         if local:
             candidates.append(os.path.join(local, "Temp"))
-    else:
-        candidates += ["/tmp", "/var/tmp"]
+    candidates.append(str(cache_root()))
     found: list[Path] = []
     for candidate in candidates:
         with contextlib.suppress(OSError, RuntimeError):
             path = Path(candidate).resolve()
-            if path.is_dir() and path not in found:
+            if path not in found:
                 found.append(path)
     return found
+
+
+def registry() -> Path:
+    return core.home().state / "specimens.txt"
+
+
+def _read_registry() -> list[tuple[float, Path]]:
+    entries = []
+    for line in core.read_text(registry()).splitlines():
+        made, _, path = line.strip().partition(" ")
+        with contextlib.suppress(ValueError):
+            if path:
+                entries.append((float(made), Path(path)))
+    return entries
+
+
+def _write_registry(entries: list[tuple[float, Path]]) -> None:
+    if entries:
+        core.write_atomic(registry(), "".join(f"{int(made)} {path}\n" for made, path in entries), 0o600)
+    else:
+        core.remove_tree(registry())
 
 
 def _within(path: Path, parent: Path) -> bool:
@@ -56,16 +92,15 @@ def _within(path: Path, parent: Path) -> bool:
 
 
 def _usable(root: Path) -> bool:
-    """Not inside Theodore's folder, not inside a deck (a folder holding .pptx-state), and not inside the folder the
-    assistant works in, unless that folder holds the user's home (then it is no project: a session started in the
-    home folder or above it, where the system's temporary folder often is)."""
+    """Never inside the folder the assistant works in (whatever it holds, the user's home included), never inside a
+    deck (a folder holding .pptx-state), never inside Theodore's folder (the cache root that Windows keeps under
+    %LOCALAPPDATA%\Theodore\Cache is the one exception: it is made for this)."""
     with contextlib.suppress(OSError, RuntimeError):
-        if _within(root, core.home().root.resolve()):
+        if _within(root, Path.cwd().resolve()):
+            return False
+        if root != cache_root().resolve() and _within(root, core.home().root.resolve()):
             return False
         if any((folder / ".pptx-state").is_dir() for folder in (root, *root.parents)):
-            return False
-        here = Path.cwd().resolve()
-        if _within(root, here) and not _within(Path.home().resolve(), here):
             return False
         return True
     return False
@@ -111,11 +146,17 @@ def _make_private(folder: Path) -> None:
 
 
 def make_folder() -> Path:
-    """A new folder for this run's sheets. No private folder outside Theodore's and the deck's: no sheet is fetched."""
-    problem = "no temporary folder outside Theodore's folder and the working folder"
+    """A new folder for this run's sheets, recorded before anything is put in it. No private folder outside the
+    working folder, the deck and Theodore's folder: no sheet is fetched."""
+    problem = None
     for root in roots():
         if not _usable(root):
             continue
+        if root == cache_root().resolve():
+            with contextlib.suppress(OSError):
+                root.mkdir(parents=True, exist_ok=True)
+                if not core.IS_WINDOWS:
+                    os.chmod(root, 0o700)
         folder = root / (PREFIX + secrets.token_hex(8))
         try:        # a new folder: mkdir fails when the name exists, so it is never one somebody else prepared
             if core.IS_WINDOWS:
@@ -127,10 +168,26 @@ def make_folder() -> Path:
             continue
         try:
             _make_private(folder)
-            return folder
         except (OSError, subprocess.SubprocessError) as exc:
             core.remove_tree(folder)
             problem = f"a folder in {root} could not be made private ({exc})"
+            continue
+        try:
+            with core.lock("specimens", timeout=10):
+                _write_registry(_read_registry() + [(core.now(), folder)])
+        except (OSError, Status) as exc:
+            core.remove_tree(folder)
+            raise Status("RETRY", f"the specimen folder could not be recorded ({getattr(exc, 'summary', exc)}); nothing was fetched.",
+                         "run the same command again once.", "A design specimen could not be opened just now; I am trying once more.") from None
+        return folder
+    if problem is None:
+        here = Path.cwd()
+        raise Status("BLOCKED_BY_POLICY", f"the specimen sheet was not fetched: the working folder ({here}) contains every place a "
+                                          f"specimen folder may go ({', '.join(str(r) for r in roots())}), and sheets are never put "
+                                          f"inside the working folder.",
+                     "continue without the sheet; do not fetch it another way. Sheets work when the assistant works in a project "
+                     "folder that does not contain the user's temporary or cache folder.",
+                     "I could not open a design specimen from this working folder; I am continuing without it.")
     raise Status("INTERNAL", f"the specimen sheet was not fetched: {problem}.",
                  "continue without the sheet; do not fetch it another way.",
                  "I could not open a design specimen on this computer; I am continuing without it.")
@@ -144,34 +201,67 @@ def write(folder: Path, name: str, data: bytes) -> Path:
     return path
 
 
-def _folders() -> list[Path]:
-    """Theodore's specimen folders in the temporary folders: real folders (never a link), this user's own."""
+def _ours(path: Path) -> float | None:
+    """The folder's modification time when it is one of Theodore's specimen folders: the name, a real folder (never
+    a link), this user's own. None otherwise."""
+    if not path.name.startswith(PREFIX):
+        return None
+    with contextlib.suppress(OSError):
+        info = os.lstat(path)
+        if stat.S_ISDIR(info.st_mode) and (core.IS_WINDOWS or info.st_uid == os.getuid()):
+            return info.st_mtime
+    return None
+
+
+def _folders() -> list[tuple[Path, float]]:
+    """Theodore's specimen folders in the current roots, with their modification times."""
     found = []
     for root in roots():
         with contextlib.suppress(OSError):
             with os.scandir(root) as entries:
                 for entry in entries:
-                    if not entry.name.startswith(PREFIX):
-                        continue
-                    with contextlib.suppress(OSError):
-                        info = entry.stat(follow_symlinks=False)
-                        if stat.S_ISDIR(info.st_mode) and (core.IS_WINDOWS or info.st_uid == os.getuid()):
-                            found.append((Path(entry.path), info.st_mtime))
+                    made = _ours(Path(entry.path))
+                    if made is not None:
+                        found.append((Path(entry.path), made))
     return found
 
 
 def sweep(everything: bool = False) -> list[Path]:
     """Remove the specimen folders older than an hour (or dated ahead of the clock); with `everything`, all of them.
-    Returns the folders that should be gone and are still there. Never raises: it runs before every command."""
-    left = []
+    Both what the registry records (wherever it is: a changed TMPDIR cannot strand one) and what is in the current
+    roots. Returns the folders that should be gone and are still there. Never raises: it runs before every command."""
+    left: list[Path] = []
     try:
         now = core.now()
+        expired = lambda made: everything or not 0 <= now - made <= KEEP_SECONDS
+        remove = []
+        if registry().exists():
+            with core.lock("specimens", timeout=10 if everything else 2):
+                kept = []
+                for made, folder in _read_registry():
+                    if _ours(folder) is None:
+                        continue                         # gone already, or never ours to delete: the line goes
+                    if expired(made):
+                        remove.append(folder)
+                    else:
+                        kept.append((made, folder))
+                for folder in remove:
+                    with contextlib.suppress(OSError):
+                        core.remove_tree(folder)
+                    if folder.exists():
+                        left.append(folder)
+                        kept.append((now - KEEP_SECONDS - 1, folder))      # tried again at the next call
+                _write_registry(kept)
         for folder, made in _folders():
-            if everything or not 0 <= now - made <= KEEP_SECONDS:
+            if folder not in remove and expired(made):
                 with contextlib.suppress(OSError):
                     core.remove_tree(folder)
-                if folder.exists():
+                if folder.exists() and folder not in left:
                     left.append(folder)
+        if everything:              # the cache root and its Theodore folder are Theodore's: they go when empty
+            for empty in (cache_root(), cache_root().parent):
+                with contextlib.suppress(OSError):
+                    empty.rmdir()
     except Exception:       # noqa: BLE001  a cleanup must not stop the command it precedes
         pass
     return left

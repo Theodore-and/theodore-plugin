@@ -392,5 +392,93 @@ class KeychainTombstone(unittest.TestCase):
             self.assertEqual(credentials.load()["installation_secret"], "secret-3")
 
 
+class SpecimenRegistry(unittest.TestCase):
+    """Ruling 4: every specimen folder is recorded in the Theodore home; the sweeps work from the record and from the
+    current roots; a folder is never put under the working folder, whatever it contains."""
+
+    @contextlib.contextmanager
+    def world(self):
+        import shutil
+        import tempfile
+        from theodore_client import specimens
+        base = Path(tempfile.mkdtemp(prefix="theodore-r7-")).resolve()
+        elsewhere = Path(tempfile.mkdtemp(prefix="theodore-r7-cache-")).resolve()      # not under the working folder's parent
+        dirs = {name: base / name for name in ("tmp-a", "tmp-b", "work", "user")}
+        dirs["cache"] = elsewhere / "cache"
+        for path in dirs.values():
+            path.mkdir()
+        before = os.getcwd()
+        os.chdir(dirs["work"])
+        cache = dirs["cache"] / "specimens"
+        try:
+            with client_home() as home, mock.patch.object(specimens, "cache_root", return_value=cache), \
+                    mock.patch.object(tempfile, "tempdir", str(dirs["tmp-a"])), mock.patch.object(Path, "home", return_value=dirs["user"]):
+                core.home().ensure()
+                yield specimens, home, dirs
+        finally:
+            os.chdir(before)
+            shutil.rmtree(base, ignore_errors=True)
+            shutil.rmtree(elsewhere, ignore_errors=True)
+
+    def age(self, specimens, folder: Path, seconds: float) -> None:
+        lines = []
+        for made, path in specimens._read_registry():
+            lines.append((made - seconds if path == folder else made, path))
+        specimens._write_registry(lines)
+        os.utime(folder, (time.time() - seconds, time.time() - seconds))
+
+    def test_every_folder_is_recorded_one_line_each(self):
+        with self.world() as (specimens, home, dirs):
+            one, two = specimens.make_folder(), specimens.make_folder()
+            lines = (home / "state" / "specimens.txt").read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            for line, folder in zip(lines, (one, two)):
+                made, path = line.split(" ", 1)
+                self.assertTrue(made.isdigit())
+                self.assertEqual(Path(path), folder)
+                self.assertEqual(folder.parent, dirs["tmp-a"])
+
+    def test_a_changed_temporary_folder_cannot_strand_a_folder(self):
+        import tempfile
+        with self.world() as (specimens, home, dirs):
+            old, fresh = specimens.make_folder(), specimens.make_folder()
+            self.age(specimens, old, 3601)
+            with mock.patch.object(tempfile, "tempdir", str(dirs["tmp-b"])):
+                self.assertEqual(specimens.sweep(), [])
+                self.assertFalse(old.exists(), "older than an hour: removed although TMPDIR changed")
+                self.assertTrue(fresh.exists())
+                self.assertEqual(specimens.sweep(everything=True), [])
+                self.assertFalse(fresh.exists(), "uninstall removes every recorded folder")
+            self.assertFalse((home / "state" / "specimens.txt").exists())
+
+    def test_the_record_never_deletes_what_is_not_a_specimen_folder(self):
+        with self.world() as (specimens, home, dirs):
+            precious = dirs["user"] / "Documents"
+            precious.mkdir()
+            (precious / "keep.txt").write_text("keep")
+            link = dirs["tmp-b"] / "theodore-specimens-link"
+            os.symlink(precious, link, target_is_directory=True)
+            (home / "state" / "specimens.txt").write_text(f"0 {precious}\n0 {link}\n")
+            self.assertEqual(specimens.sweep(everything=True), [])
+            self.assertTrue((precious / "keep.txt").exists())
+            self.assertTrue(os.path.lexists(link))
+
+    def test_never_under_the_working_folder_even_when_it_holds_the_temporary_folder_or_the_home(self):
+        with self.world() as (specimens, home, dirs):
+            base = dirs["work"].parent
+            os.chdir(base)                      # the working folder holds the temporary folder and the user's home
+            folder = specimens.make_folder()
+            self.assertEqual(folder.parent, dirs["cache"] / "specimens", "the cache root is used instead")
+            self.assertTrue(os.path.lexists(folder))
+            os.chdir(os.path.commonpath([dirs["work"], dirs["cache"]]))     # ...and now the cache root too: refused, nothing made
+            before = (home / "state" / "specimens.txt").read_text()
+            with self.assertRaises(core.Status) as raised:
+                specimens.make_folder()
+            self.assertEqual(raised.exception.name, "BLOCKED_BY_POLICY")
+            self.assertIn("working folder", raised.exception.summary)
+            self.assertEqual((home / "state" / "specimens.txt").read_text(), before)
+            self.assertEqual([p.name for p in (dirs["cache"] / "specimens").iterdir()], [folder.name])
+
+
 if __name__ == "__main__":
     unittest.main()

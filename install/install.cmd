@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.1"
-set "PIN_CLIENT=client/client-0.2.1.tar 8fb59c94b09a08f725ac505eebe51c78c77e989e7005e785f3ffaf50538dbae6"
+set "PIN_CLIENT=client/client-0.2.1.tar de9d8d0935accc19206cfc8d3f7322582829cf23ca2dc4c3b8cf5509184e42ea"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -81,9 +81,11 @@ if exist "%HOME_DIR%\bin\theodore.cmd" "%HOME_DIR%\bin\theodore.cmd" uninstall
 rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
 rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
 set "LEFTOVER="
+call :remove_specimens
+if defined SPLEFT set "LEFTOVER=%SPLEFT%"
 for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
-for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=; Theodore's folders in %HOME_DIR%"
+for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=%LEFTOVER%; Theodore's folders in %HOME_DIR%"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\pptx-runtime"
 if exist "%HOME_DIR%" rmdir "%HOME_DIR%" >nul 2>&1
 if defined LEFTOVER goto :uninstall_left
@@ -277,6 +279,29 @@ goto :finish
 rem =====================================================================================================================
 rem Subroutines
 rem =====================================================================================================================
+
+:remove_specimens
+rem Specimen folders: every one the client made is a line "<created epoch> <path>" in state\specimens.txt; they go
+rem with the uninstall, from that record and from the current roots, whatever TEMP was when they were made. Only
+rem folders named theodore-specimens-* that are real folders (not a junction or link) are removed. Result in SPLEFT.
+set "SPLEFT="
+if exist "%HOME_DIR%\state\specimens.txt" for /f "usebackq tokens=1,*" %%A in ("%HOME_DIR%\state\specimens.txt") do call :remove_specimen "%%B"
+if defined TEMP for /d %%D in ("%TEMP%\theodore-specimens-*") do call :remove_specimen "%%~fD"
+if defined LOCALAPPDATA for /d %%D in ("%LOCALAPPDATA%\Theodore\Cache\specimens\theodore-specimens-*") do call :remove_specimen "%%~fD"
+if defined LOCALAPPDATA rmdir "%LOCALAPPDATA%\Theodore\Cache\specimens" >nul 2>&1
+if defined LOCALAPPDATA rmdir "%LOCALAPPDATA%\Theodore\Cache" >nul 2>&1
+exit /b 0
+
+:remove_specimen
+set "SPN=%~nx1"
+if not "%SPN:~0,19%"=="theodore-specimens-" exit /b 0
+if "%SPN%"=="theodore-specimens-" exit /b 0
+if not exist "%~1\" exit /b 0
+set "SPA=%~a1"
+if not "%SPA:l=%"=="%SPA%" exit /b 0
+rmdir /s /q "%~1" >nul 2>&1
+if exist "%~1\" set "SPLEFT=%SPLEFT%; the specimen folder %~1"
+exit /b 0
 
 :make_work
 set "TRY=%HOME_DIR%\staging\install-%RANDOM%%RANDOM%"

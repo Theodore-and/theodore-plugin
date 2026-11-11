@@ -99,7 +99,10 @@ when nothing else is in it). What is left afterwards:
 - In the system's temporary folder (`$TMPDIR`, `%TEMP%`): the engine's LibreOffice profile (`pptx-soffice-profile/`,
   `pptx-soffice-profile.warm-seed/`, `pptx-soffice-profile.lock`) and its empty lock files
   (`theodore-pptx-locks/*.lock`). The system clears that folder itself; they can be deleted at any time. Specimen
-  folders (`theodore-specimens-*`) are removed by the uninstall.
+  folders (`theodore-specimens-*`) are not left: each is recorded in `state/specimens.txt` when it is made, goes within
+  the hour, and the uninstall (the launcher's and the installer's own included) removes every one, wherever `TMPDIR`
+  pointed. When the temporary folder lies inside the working folder they go to `~/Library/Caches/Theodore/specimens`,
+  `~/.cache/theodore/specimens` or `%LOCALAPPDATA%\Theodore\Cache\specimens` instead; never under the working folder.
 - In Codex's folder (`~/.codex`): nothing of Theodore's. The uninstall removes Codex's empty plugin cache folder
   for Theodore and a configuration file of zero bytes; in Claude Code's `settings.json` it removes the keys that
   are empty once Theodore's entries are gone (`enabledPlugins`, `extraKnownMarketplaces`, `permissions.allow`).
