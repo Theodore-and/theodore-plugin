@@ -129,7 +129,8 @@ def remember_automatic_reports_off() -> None:
 
 
 def delete_token() -> None:
-    core.remove_tree(_token_path())
+    with core.lock("entitlement", timeout=30):      # never between a refresh's read and its write
+        core.remove_tree(_token_path())
 
 
 def release_hint() -> dict:

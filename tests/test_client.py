@@ -1609,6 +1609,39 @@ class Hosts(ClientCase):
         self.assertTrue(path.exists(), "no longer the file Theodore left: it stays, emptied of Theodore's entries")
         self.assertEqual(json.loads(path.read_text()), {})
 
+    def test_not_ours_survives_register_unregister_and_uninstall(self):
+        # Round 9 (review 9): pre-existing registrations -> register -> unregister -> register again -> uninstall: the
+        # registrations that were there before are never removed, for Claude Code and for Codex.
+        log = self.registering_tools(claude_markets="theodore (https://x.test/marketplace.json)", codex_markets="theodore  ~/.theodore/plugin")
+        claude = self.box.tmp / "fakebin" / "claude"
+        claude.write_text(claude.read_text().replace('"plugin list --json") echo "[]";;', '"plugin list --json") echo \'[{"id": "theodore@theodore"}]\';;'))
+        codex = self.box.tmp / "fakebin" / "codex"
+        codex.write_text(codex.read_text().replace('case "$*" in\n', 'case "$*" in\n"plugin list") echo "theodore@theodore  enabled";;\n', 1))
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        record = json.loads((self.box.home / "state" / "host-settings.json").read_text())
+        self.assertEqual(record, {"claude_added_marketplace": False, "claude_registered": False, "codex_added_marketplace": False, "codex_registered": False})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)            # a repeated successful plugin add: still not ours
+        self.assertIs(json.loads((self.box.home / "state" / "host-settings.json").read_text())["codex_registered"], False)
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        calls = log.read_text().splitlines()
+        for removal in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
+                        "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
+            self.assertNotIn(removal, calls)
+
+    def test_a_created_file_the_user_replaced_with_an_empty_one_is_theirs(self):
+        # Round 9 (review 11): Theodore creates settings, the user replaces them with {}, settings are applied again,
+        # then taken back: the user's file stays.
+        self._fake_tools()
+        path = self.settings_file()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        path.unlink()
+        path.write_text("{}")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertTrue(path.exists(), "the user's replacement stays")
+        self.assertEqual(json.loads(path.read_text()), {})
+
     def test_broken_settings_file_is_left_alone(self):
         self._fake_tools()
         settings = self.box.user_home / ".claude" / "settings.json"

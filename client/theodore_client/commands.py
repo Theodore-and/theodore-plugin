@@ -939,7 +939,7 @@ def hosts(action: str, apply: bool) -> int:
                 lines.append("claude-code: registered" if code == 0 else f"claude-code: FAILED ({out.splitlines()[-1] if out else 'no output'})")
                 if code == 0:           # what the registration itself added to the settings file
                     after = _load_settings(settings_path) or {}
-                    record["claude_registered"] = True
+                    record.setdefault("claude_registered", True)       # "not ours" (False) is never overwritten
                     record.setdefault("claude_added_marketplace", not market_before)
                     record["path"] = str(settings_path)
                     record["created_keys"] = sorted(set(record.get("created_keys") or []) | {k for k in after if k not in before})
@@ -961,7 +961,7 @@ def hosts(action: str, apply: bool) -> int:
                 code, out = _run([codex, "plugin", "add", "theodore@theodore"])
                 lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
                 if code == 0:
-                    record["codex_registered"] = True
+                    record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
                     record.setdefault("codex_added_marketplace", not market_before)
                     record["codex_config_created"] = bool(record.get("codex_config_created")) or (not config_before and _codex_config().exists())
         else:
@@ -1010,6 +1010,9 @@ def _claude_settings_apply() -> str:
             or not isinstance(markets.get("theodore", {}), dict):
         return f"claude-code: settings not changed ({path} has these keys in another shape than expected)"
     record = _host_record()
+    if record.get("file_created") and path.exists() and record.get("file_identity") != _identity(path):
+        record["file_created"] = False      # replaced since Theodore made it: the user's file now, never Theodore's to delete
+        record.pop("file_identity", None)
     created = set(record.get("created_keys") or [])
     file_created = bool(record.get("file_created")) or not path.exists()
     if "permissions" not in settings:
@@ -1146,8 +1149,15 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) ->
         left.append(f"the Theodore entries in {_claude_settings_path()} ({problem})")
     notes += settings_notes
     _codex_leftovers()                      # reads the record: before it goes
-    if len(left) == problems_before:        # everything taken back: the record has done its job (a stale one could
-        core.remove_tree(_host_record_path())   # later claim a settings file the user made)
+    if len(left) == problems_before:
+        # Everything taken back: the record has done its job (a stale one could later claim a settings file the user
+        # made). What it says is not Theodore's stays recorded until the uninstall has finished, so a later
+        # register, unregister or uninstall never removes a registration that was there before.
+        not_ours = {k: v for k, v in _host_record().items() if k.endswith(("_registered", "_added_marketplace")) and v is False}
+        if not_ours:
+            _save_host_record(not_ours)
+        else:
+            core.remove_tree(_host_record_path())
     return notes
 
 
