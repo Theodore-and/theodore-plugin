@@ -101,9 +101,13 @@ class Listing(McpCase):
         server = self.server()
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["enum"], ["craft", "forms"])
-        self.assertEqual(tools["specimen"]["inputSchema"]["properties"]["file"]["enum"], ["cover-01.jpg", "rules-and-ledgers.jpg"])
+        one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
+        self.assertEqual(one["enum"], ["cover-01.jpg", "rules-and-ledgers.jpg"])
+        self.assertEqual((many["type"], many["items"]["enum"], many["minItems"], many["maxItems"]),
+                         ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], 1, 6))
         self.assertEqual([t["description"] for t in tools.values()],
-                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.", "Returns one specimen sheet as an image."])
+                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.",
+                          "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name)."])
         listing = server.call("list", skill="deck-design")["content"][0]["text"]
         self.assertEqual(listing, "SKILL.md\nreferences/craft.md\nreferences/forms.md\nspecimens/cover-01.jpg\nspecimens/rules-and-ledgers.jpg\n")
 
@@ -126,7 +130,7 @@ class Listing(McpCase):
         self.sign_in()
         server = self.server()
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertNotIn("enum", tools["specimen"]["inputSchema"]["properties"]["file"])
+        self.assertNotIn("enum", tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"][0])
         self.assertTrue(server.call("list", skill="deck-design")["content"][0]["text"].startswith("THEODORE RETRY: "))
         self.assertNotIn("isError", server.call("guide", skill="deck-design"))
 
@@ -212,6 +216,36 @@ class Specimen(McpCase):
                     data = path.read_bytes()
                     self.assertNotIn(b"sheet bytes sheet bytes", data, path)
                     self.assertNotIn(b"ENTRY-MARKER", data, path)
+
+    def test_a_list_of_up_to_six_comes_back_as_name_then_image_in_order(self):
+        self.sign_in()
+        names = [f"s{i}.jpg" for i in range(6)]
+        self.api.specimens = {name: JPEG + name.encode() for name in names}
+        server = self.server()
+        asked = [names[3], names[0], names[5], names[1], names[4], names[2]]
+        before = len([r for r in self.api.requests if r["path"].startswith("/v1/guide/specimens/")])
+        content = server.call("specimen", file=asked)["content"]
+        self.assertEqual(len(content), 12)
+        for i, name in enumerate(asked):
+            self.assertEqual(content[2 * i], {"type": "text", "text": name})
+            self.assertEqual((content[2 * i + 1]["type"], content[2 * i + 1]["mimeType"]), ("image", "image/jpeg"))
+            self.assertEqual(base64.b64decode(content[2 * i + 1]["data"]), JPEG + name.encode())
+        fetched = [r for r in self.api.requests if r["path"].startswith("/v1/guide/specimens/")][before:]
+        self.assertEqual(len(fetched), 6, "each sheet is one fetch")
+        # one file, as before: the image alone
+        self.assertEqual([b["type"] for b in server.call("specimen", file=names[0])["content"]], ["image"])
+        # a list of one is the list form
+        self.assertEqual([b["type"] for b in server.call("specimen", file=[names[0]])["content"]], ["text", "image"])
+        # more than six, or none: refused, naming the limit, nothing fetched
+        before = len(self.api.requests)
+        for bad in (names + ["s6.jpg"], []):
+            text = server.call("specimen", file=bad)["content"][0]["text"]
+            self.assertTrue(text.startswith("THEODORE USAGE: "), text)
+            self.assertIn("1 to 6 files", text)
+        self.assertEqual(len(self.api.requests), before)
+        # one bad name in a list: refused before any fetch
+        self.assertTrue(server.call("specimen", file=[names[0], "../x"])["content"][0]["text"].startswith("THEODORE USAGE: "))
+        self.assertEqual(len(self.api.requests), before)
 
     def test_refusals_are_short_texts(self):
         self.sign_in()

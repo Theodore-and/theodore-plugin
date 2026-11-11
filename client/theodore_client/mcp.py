@@ -26,11 +26,12 @@ from .core import Status
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 GUIDE_MAX_RESULT_CHARS = 400_000
+SPECIMEN_MAX_PER_CALL = 6          # sheets one specimen call returns; each is one fetch against the service's limit
 
 DESCRIPTIONS = {
     "list": "Lists the files of a Theodore skill.",
     "guide": "Returns one file of a Theodore skill, whole.",
-    "specimen": "Returns one specimen sheet as an image.",
+    "specimen": "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name).",
 }
 
 
@@ -50,7 +51,9 @@ def tools(index: dict | None = None) -> list[dict]:
                          "required": ["skill"], "additionalProperties": False},
          "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS}},
         {"name": "specimen", "description": DESCRIPTIONS["specimen"],
-         "inputSchema": {"type": "object", "properties": {"file": sheet}, "required": ["file"], "additionalProperties": False}},
+         "inputSchema": {"type": "object", "properties": {"file": {"anyOf": [
+             sheet, {"type": "array", "items": sheet, "minItems": 1, "maxItems": SPECIMEN_MAX_PER_CALL}]}},
+             "required": ["file"], "additionalProperties": False}},
     ]
 
 
@@ -187,11 +190,8 @@ def tool_guide(args: dict) -> dict:
 
 # --- specimen ------------------------------------------------------------------------------------------------------------
 
-def tool_specimen(args: dict) -> dict:
-    name = args.get("file")
-    if not isinstance(name, str) or not specimens.valid_name(name):
-        raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
-    account.require("deck-design")
+def _sheet(name: str) -> bytes:
+    """One sheet's bytes, checked (JPEG, at most 1 MiB, the SHA-256 the service sent). One fetch."""
     what = f"specimen {name}"
     try:
         _s, headers, raw = commands._api("guide_specimen", what, file=name, query={"skill": "deck-design"},
@@ -205,9 +205,38 @@ def tool_specimen(args: dict) -> dict:
         raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing).",
                      "call the same tool again once. If it fails again, continue without the sheet.",
                      "A design specimen arrived damaged. I am trying once more.")
+    return raw
+
+
+def _image(raw: bytes) -> dict:
+    return {"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": "image/jpeg"}
+
+
+def tool_specimen(args: dict) -> dict:
+    """`file` is one name (the result is that image, as before) or a list of up to SPECIMEN_MAX_PER_CALL names (for
+    each, in the order asked, a text block with the name and then its image). All or nothing: a refused sheet answers
+    with its status and no image."""
+    asked = args.get("file")
+    many = isinstance(asked, list)
+    names = asked if many else [asked]
+    if many and not 1 <= len(names) <= SPECIMEN_MAX_PER_CALL:
+        raise core.usage(f"specimen takes one file or a list of 1 to {SPECIMEN_MAX_PER_CALL} files; {len(names)} were given. "
+                         f"Ask for the rest in another call.")
+    if not all(isinstance(name, str) and specimens.valid_name(name) for name in names):
+        raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
+    account.require("deck-design")
+    sheets: dict[str, bytes] = {}
+    for name in names:
+        if name not in sheets:
+            sheets[name] = _sheet(name)
     if core.refused():
         raise api.sign_in_required()
-    return {"content": [{"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": "image/jpeg"}]}
+    if not many:
+        return {"content": [_image(sheets[names[0]])]}
+    content: list[dict] = []
+    for name in names:
+        content += [{"type": "text", "text": name}, _image(sheets[name])]
+    return {"content": content}
 
 
 def tool_list(args: dict) -> dict:
