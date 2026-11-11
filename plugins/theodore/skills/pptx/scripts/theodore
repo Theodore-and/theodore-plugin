@@ -192,8 +192,10 @@ stage1_ready() {
   [ -x "$PY" ] && [ -f "$HOME_DIR/client/$CV/__main__.py" ]
 }
 run_client() {
-  THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER
-  export THEODORE_HOME THEODORE_LAUNCHER
+  # THEODORE_CALLER_PID: the shell that ran this command line (exec keeps it), so the client can tell guide commands
+  # chained in one line from separate tool calls.
+  THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER THEODORE_CALLER_PID=$PPID
+  export THEODORE_HOME THEODORE_LAUNCHER THEODORE_CALLER_PID
   # Not exec: when the system refuses to start the interpreter (a policy, a noexec mount) the shell gets 126 and
   # the assistant still gets a status. The client and the engine never exit 126 themselves.
   "$PY" -I "$HOME_DIR/client/$CV" "$@"
@@ -239,7 +241,7 @@ fetch() { # url dest; on failure sets CAUSE and DETAIL
       35|51|53|58|59|60|77|83|90|91) CAUSE=TLS_INTERCEPT ;;
       23) CAUSE=DISK ;;
       22) [ "$code" = 407 ] && CAUSE=PROXY_AUTH ;;
-      56) grep -q 407 "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH ;;
+      56) grep -Eq '(^|[^0-9:])407([^0-9]|$)' "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH ;;
     esac
     return 1
   elif command -v wget >/dev/null 2>&1; then
@@ -256,7 +258,7 @@ fetch() { # url dest; on failure sets CAUSE and DETAIL
     DETAIL="wget exit $rc"
     [ $rc -gt 128 ] && DETAIL="wget was stopped after 30 minutes"
     grep -qi certificate "$B/fetch.err" 2>/dev/null && CAUSE=TLS_INTERCEPT
-    grep -q 407 "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH
+    grep -Eq '(^|[^0-9:])407([^0-9]|$)' "$B/fetch.err" 2>/dev/null && CAUSE=PROXY_AUTH
     return 1
   fi
   DETAIL="neither curl nor wget is installed"

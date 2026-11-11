@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import socket
 import ssl
@@ -127,7 +128,8 @@ def _network_error(exc: Exception) -> NetworkError:
     text = str(reason) or reason.__class__.__name__
     if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in text or "certificate" in text.lower():
         return NetworkError(text, "TLS_INTERCEPT")
-    if "407" in text or "Proxy Authentication" in text:
+    # 407 as a status code, never the digits of a port in a URL (127.0.0.1:64071)
+    if re.search(r"(?<![\d:])407(?!\d)", text) or "Proxy Authentication" in text:
         return NetworkError(text, "PROXY_AUTH")
     return NetworkError(text, "NETWORK")
 

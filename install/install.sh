@@ -27,8 +27,8 @@ PIN_API_BASE="https://api.theodoreand.ai"
 PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
-PIN_CLIENT_VERSION="0.2.1"
-PIN_CLIENT="client/client-0.2.1.tar 02113b51ed961c4e2e4b7c7b881bde01c41e1216756cec15193a14d1741c770d"
+PIN_CLIENT_VERSION="0.2.2"
+PIN_CLIENT="client/client-0.2.2.tar 4fc9b8981247d2fc9ed7807ea6097d539c5c1ed5143b6bd096e560aa6143e235"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -216,7 +216,8 @@ fetch() { # url dest what
   rc=$?
   cause=NETWORK
   case "$rc" in 35|51|53|58|59|60|77|83|90|91) cause=TLS_INTERCEPT ;; 23) cause=DISK ;; esac
-  grep -q 407 "$WORK/err" "$WORK/http" 2>/dev/null && cause=PROXY_AUTH
+  # a 407 status, never the digits of a port in the URL curl quotes (127.0.0.1:64071)
+  { grep -qx 407 "$WORK/http" || grep -Eq '(^|[^0-9:])407([^0-9]|$)' "$WORK/err"; } 2>/dev/null && cause=PROXY_AUTH
   case "$(cat "$WORK/http" 2>/dev/null)" in 3??) detail="it answered with a redirect, which is not followed" ;; *) detail="curl exit $rc, HTTP $(cat "$WORK/http" 2>/dev/null)" ;; esac
   status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail)." \
     "if the download host is blocked, register the plugin directly instead (step 2 of the install page); otherwise check the connection and run the installer again." \

@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install, specimens
+from . import __version__, account, api, core, credentials, install, reading, specimens
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -78,7 +78,7 @@ def _end_line(skill: str, name: str, body: str, part: int, total: int, next_comm
 
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
-                    header_lines: list[str], next_command: str) -> None:
+                    header_lines: list[str], next_command: str, section: str | None = None, headers=None) -> None:
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
@@ -88,6 +88,7 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
     sys.stdout.write(_end_line(skill, name, body, part, total, next_command) + "\n")
     sys.stdout.flush()
+    reading.record_print(skill, section, part, total, headers)      # every byte was written: this part counts as read
 
 
 def guide(skill: str, section: str | None, part: int, license_text: bool) -> int:
@@ -228,7 +229,8 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
     next_command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''} --part {part + 1}"
-    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], next_command)
+    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], next_command,
+                    section=section, headers=headers)
     return 0
 
 
@@ -265,6 +267,7 @@ def specimen(files: list[str]) -> int:
         raise
     for name in files:
         print(paths[name].resolve().as_posix(), flush=True)
+    reading.record_specimens(len(paths))
     return 0
 
 
@@ -286,7 +289,14 @@ def _heartbeat(engine_version: str) -> None:
 
 # --- engine pass-through -----------------------------------------------------------------------------------------------------
 
+def _reading_gate(verb: str) -> None:
+    refusal = reading.gate(verb)
+    if refusal is not None:
+        raise refusal
+
+
 def run_pptx(args: list[str]) -> int:
+    _reading_gate(reading.verb_of(args))          # before anything runs: the design method's reading comes first
     account.require("pptx", allow_refresh=False)
     install.require_runtime()
     install.wait_for_packs(args)
@@ -294,6 +304,7 @@ def run_pptx(args: list[str]) -> int:
 
 
 def run_python(args: list[str]) -> int:
+    _reading_gate(reading.python_verb(args))      # the engine's entry run through `python` is gated the same way
     account.require("pptx", allow_refresh=False)
     install.require_runtime()
     return install.run_engine(args, python_passthrough=True)

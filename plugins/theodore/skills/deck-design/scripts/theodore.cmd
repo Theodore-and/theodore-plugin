@@ -347,7 +347,7 @@ if "%RC%"=="23" set "CAUSE=DISK"
 if "%RC%"=="23" exit /b 1
 for %%C in (35 51 53 58 59 60 77 83 90 91) do if "%RC%"=="%%C" set "CAUSE=TLS_INTERCEPT"
 if "%HTTP%"=="407" set "CAUSE=PROXY_AUTH"
-"%SYS32%\findstr.exe" /c:"407" "%B%\fetch.err" >nul 2>&1 && set "CAUSE=PROXY_AUTH"
+"%SYS32%\findstr.exe" /r /c:"[^0-9:]407[^0-9]" /c:"[^0-9:]407$" "%B%\fetch.err" >nul 2>&1 && set "CAUSE=PROXY_AUTH"
 :fetch_powershell
 rem Second try: Windows' own HTTP stack with the signed-in user's proxy credentials. -ProxyUseDefaultCredentials needs
 rem -Proxy, so the system proxy for this URL is named, unless the URL bypasses it. No redirect (MaximumRedirection 0).

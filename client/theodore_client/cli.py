@@ -5,12 +5,16 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import account, api, commands, core, specimens
+import time
+
+from . import account, api, commands, core, reading, specimens
 from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
+                                 (one guide command per tool call: never chained, never redirected)
   specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
+  reading                        what the design method still requires before building (no guidance text)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --open | --finish --wait S | --code XXXX-XXXX]    logout    whoami
                                  (--open: also open the sign-in page in the browser; nothing else ever opens one)
@@ -36,6 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     g.add_argument("section", nargs="?")
     g.add_argument("--part", type=int, default=1)
     g.add_argument("--license", action="store_true")
+    sub.add_parser("reading", add_help=False)
     sp = sub.add_parser("specimen", add_help=False)
     sp.add_argument("files", nargs="*")
     lg = sub.add_parser("login", add_help=False)
@@ -105,6 +110,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _guide_argv(args) -> str:
+    """The guide command as typed, for a NEXT line (only characters a section name or a skill can have)."""
+    words = ["guide", args.skill] + ([args.section] if args.section else []) + (["--license"] if args.license else []) + \
+            ([f"--part {args.part}"] if args.part and args.part > 1 else [])
+    return " ".join("".join(ch for ch in word if ch.isalnum() or ch in "-_. ") for word in words)
+
+
 def _dispatch(argv: list[str]) -> int:
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(HELP, end="")
@@ -116,7 +128,13 @@ def _dispatch(argv: list[str]) -> int:
     args = _parser().parse_args(argv)
     cmd = args.command
     if cmd == "guide":
-        return commands.guide(args.skill, args.section, args.part, args.license)
+        try:
+            reading.guard_guide(_guide_argv(args))
+            return commands.guide(args.skill, args.section, args.part, args.license)
+        finally:
+            reading.record_run()
+    if cmd == "reading":
+        return core.emit(reading.status())
     if cmd == "specimen":
         return commands.specimen(args.files)
     if cmd == "login":
@@ -166,6 +184,7 @@ def _dispatch(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    reading.STARTED = time.time()
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         core.check_environment(argv[0] if argv else None)      # before anything touches the folder

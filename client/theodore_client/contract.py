@@ -26,6 +26,10 @@ EXIT = {
     "RETRY": 75,
     "INTERNAL": 78,
 }
+# Statuses that share a frozen exit code above (the table is the backend's launcher contract and does not grow):
+# ONE_AT_A_TIME means "run it again, alone" (as RETRY); OUTPUT_REDIRECTED and READING_REQUIRED mean "called the wrong
+# way or too early; nothing ran" (as USAGE).
+STATUS_EXIT_ALIASES = {"ONE_AT_A_TIME": "RETRY", "OUTPUT_REDIRECTED": "USAGE", "READING_REQUIRED": "USAGE"}
 SETUP_FAILED_CAUSES = ("NETWORK", "TLS_INTERCEPT", "PROXY_AUTH", "DISK", "HASH_MISMATCH")
 
 # --- routes on the API host (backend design section 5.4) ---------------------------------------------------------
@@ -115,6 +119,10 @@ RUNTIME_PARTS = ("python", "wheels", "node", "node_modules")
 HEADER_GUIDE_PARTS = "x-theodore-parts"
 HEADER_GUIDE_PART = "x-theodore-part"
 HEADER_GUIDE_VERSION = "x-theodore-guide-version"
+# Sent by servers from lane C4 on for a skill with a reading workflow (absent from older servers: nothing is enforced).
+HEADER_GUIDE_READING = "x-theodore-reading"       # required section keys before drafting, comma-separated, in order, entry excluded
+HEADER_GUIDE_REVIEW = "x-theodore-review"         # section keys to read after the first draft
+HEADER_GUIDE_SECTION = "x-theodore-section"       # the section this answer delivers, or "entry"
 
 # Signed manifests: `manifest` is canonical JSON text; the signature covers its UTF-8 bytes.
 CHANNEL_MANIFEST_SCHEMA = "theodore-channel-manifest@1"

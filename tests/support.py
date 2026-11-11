@@ -177,6 +177,7 @@ class Sandbox:
             "XDG_CACHE_HOME": str(self.user_home / ".cache"), "TMPDIR": str(self.tmp / "tmp"),
             "THEODORE_CREDENTIAL_STORE": "file", "THEODORE_NO_BROWSER": "1", "THEODORE_BOOTSTRAP_WAIT": "60",
             "THEODORE_TEST_POLL_INTERVAL": "0.2",
+            "THEODORE_TEST_CHAIN_WINDOW": "0",     # a test runs commands one after another as a loop would; the chain tests set it
             "PATH": os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin"]) if not IS_WINDOWS else os.environ["PATH"],
             "LANG": "en_US.UTF-8",
         }
