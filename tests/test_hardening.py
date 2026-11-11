@@ -792,7 +792,8 @@ class ClaudeGitBash(unittest.TestCase):
             claude_dir.mkdir(parents=True)
             settings = claude_dir / "settings.json"
             settings.write_text(json.dumps({"enabledPlugins": {"theodore@theodore": True}}))
-            env = {"CLAUDE_CONFIG_DIR": str(claude_dir), "ProgramFiles": str(home / "pf"), "LOCALAPPDATA": str(home / "lad")}
+            env = {"CLAUDE_CONFIG_DIR": str(claude_dir), "ProgramFiles": str(home / "pf"), "ProgramFiles(x86)": str(home / "pf86"),
+                   "ProgramW6432": str(home / "pf"), "LOCALAPPDATA": str(home / "lad"), "CLAUDE_CODE_GIT_BASH_PATH": ""}
             with mock.patch.dict(os.environ, env), mock.patch.object(core, "IS_WINDOWS", True), \
                     mock.patch.object(commands.shutil, "which", side_effect=lambda n: r"C:\claude.exe" if n == "claude" else None), \
                     mock.patch.object(install, "git_pin", return_value=pin), \
