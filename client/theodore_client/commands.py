@@ -1006,9 +1006,13 @@ def _claude_git_bash_apply(bash: Path) -> str:
     env = settings.get("env", {})
     if not isinstance(env, dict):
         return f"claude-code: settings not changed ({path} has env in another shape than expected)"
-    if env.get("CLAUDE_CODE_GIT_BASH_PATH") and env.get("CLAUDE_CODE_GIT_BASH_PATH") != str(bash):
+    current = env.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if current and current != str(bash):       # the user already points Claude Code at a bash: never replaced
         return f"claude-code: CLAUDE_CODE_GIT_BASH_PATH is already set in {path}; left as it is"
     record = _host_record()
+    if "git_bash_prior" not in record and current != str(bash):     # what was there before Theodore's first change
+        record["git_bash_prior"] = {"present": "CLAUDE_CODE_GIT_BASH_PATH" in env,
+                                    **({"value": current} if "CLAUDE_CODE_GIT_BASH_PATH" in env else {})}
     created = set(record.get("created_keys") or [])
     file_created = bool(record.get("file_created")) or not path.exists()
     if "env" not in settings:
@@ -1253,7 +1257,11 @@ def _claude_settings_restore(file_ours: bool = False) -> tuple[str | None, list[
     env = settings.get("env")
     if record.get("git_bash") and isinstance(env, dict):
         if env.get("CLAUDE_CODE_GIT_BASH_PATH") == record["git_bash"]:
-            env.pop("CLAUDE_CODE_GIT_BASH_PATH")
+            prior = record.get("git_bash_prior") or {}
+            if prior.get("present"):
+                env["CLAUDE_CODE_GIT_BASH_PATH"] = prior.get("value")      # exactly what was there, an empty string too
+            else:
+                env.pop("CLAUDE_CODE_GIT_BASH_PATH")
         elif "CLAUDE_CODE_GIT_BASH_PATH" in env:
             notes.append(f"env.CLAUDE_CODE_GIT_BASH_PATH in {path} was changed after Theodore set it, so it was left as it is")
     markets = settings.get("extraKnownMarketplaces")

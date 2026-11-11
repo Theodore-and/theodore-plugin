@@ -812,6 +812,33 @@ class ClaudeGitBash(unittest.TestCase):
                 self.assertIn("already set", commands._claude_git_bash_apply(bash))
                 self.assertEqual(json.loads(settings.read_text())["env"]["CLAUDE_CODE_GIT_BASH_PATH"], r"D:\mine\bash.exe")
 
+    def test_the_git_bash_setting_restores_exactly_what_was_there(self):
+        from theodore_client import commands
+        with client_home() as home:
+            claude_dir = home / "user" / ".claude"
+            claude_dir.mkdir(parents=True)
+            settings = claude_dir / "settings.json"
+            bash = home / "tools" / "git" / "bin" / "bash.exe"
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_GIT_BASH_PATH": "", "CLAUDE_CONFIG_DIR": str(claude_dir)}):
+                os.environ.pop("CLAUDE_CODE_GIT_BASH_PATH")
+                cases = (("absent", {"model": "x"}, {"model": "x"}),
+                         ("empty", {"env": {"CLAUDE_CODE_GIT_BASH_PATH": "", "OTHER": "1"}}, {"env": {"CLAUDE_CODE_GIT_BASH_PATH": "", "OTHER": "1"}}),
+                         ("env without the key", {"env": {"OTHER": "1"}}, {"env": {"OTHER": "1"}}))
+                for name, before, after in cases:
+                    commands._host_record_path().unlink(missing_ok=True)
+                    settings.write_text(json.dumps(before))
+                    self.assertIn("Git Bash set", commands._claude_git_bash_apply(bash), name)
+                    self.assertEqual(json.loads(settings.read_text())["env"]["CLAUDE_CODE_GIT_BASH_PATH"], str(bash), name)
+                    self.assertIn("Git Bash set", commands._claude_git_bash_apply(bash), name)        # again: the prior state stays the first one
+                    problem, _notes = commands._claude_settings_restore()
+                    self.assertIsNone(problem, name)
+                    self.assertEqual(json.loads(settings.read_text()), after, name)
+                commands._host_record_path().unlink(missing_ok=True)
+                settings.write_text(json.dumps({"env": {"CLAUDE_CODE_GIT_BASH_PATH": r"D:\mine\bash.exe"}}))
+                self.assertIn("already set", commands._claude_git_bash_apply(bash))
+                self.assertEqual(json.loads(settings.read_text()), {"env": {"CLAUDE_CODE_GIT_BASH_PATH": r"D:\mine\bash.exe"}})
+                self.assertNotIn("git_bash", commands._host_record(), "nothing recorded when nothing was changed")
+
     def test_the_installer_asks_for_git_bash_only_through_if_needed(self):
         text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
         self.assertIn('call "%T%" tools install git --if-needed', text)
