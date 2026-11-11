@@ -20,39 +20,94 @@ import io
 import json
 import sys
 
-from . import __version__, account, api, commands, core, specimens
-from .contract import HEADER_GUIDE_PARTS, SKILLS
+from . import __version__, account, api, commands, core, credentials, install, specimens
+from .contract import HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, SKILLS
 from .core import Status
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 GUIDE_MAX_RESULT_CHARS = 400_000
 
-TOOLS = [
-    {
-        "name": "guide",
-        "description": "Returns the instructions of a Theodore skill, or one named section of them, as one whole text.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "skill": {"type": "string", "enum": list(SKILLS)},
-                "section": {"type": "string"},
-            },
-            "required": ["skill"],
-            "additionalProperties": False,
-        },
-        "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS},
-    },
-    {
-        "name": "specimen",
-        "description": "Returns one deck-design specimen sheet, named as the deck-design text names it, as an image.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"file": {"type": "string"}},
-            "required": ["file"],
-            "additionalProperties": False,
-        },
-    },
-]
+DESCRIPTIONS = {
+    "list": "Lists the files of a Theodore skill.",
+    "guide": "Returns one file of a Theodore skill, whole.",
+    "specimen": "Returns one specimen sheet as an image.",
+}
+
+
+def tools(index: dict | None = None) -> list[dict]:
+    """The tool definitions. With the published index, `section` and `file` name the actual sections and sheets, as a
+    folder listing would show them."""
+    sections = [s for s in (index or {}).get("sections") or []]
+    sheets = [s for s in (index or {}).get("specimens") or []]
+    section = {"type": "string", **({"enum": sections} if sections else {})}
+    sheet = {"type": "string", **({"enum": sheets} if sheets else {})}
+    return [
+        {"name": "list", "description": DESCRIPTIONS["list"],
+         "inputSchema": {"type": "object", "properties": {"skill": {"type": "string", "enum": list(SKILLS)}},
+                         "required": ["skill"], "additionalProperties": False}},
+        {"name": "guide", "description": DESCRIPTIONS["guide"],
+         "inputSchema": {"type": "object", "properties": {"skill": {"type": "string", "enum": list(SKILLS)}, "section": section},
+                         "required": ["skill"], "additionalProperties": False},
+         "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS}},
+        {"name": "specimen", "description": DESCRIPTIONS["specimen"],
+         "inputSchema": {"type": "object", "properties": {"file": sheet}, "required": ["file"], "additionalProperties": False}},
+    ]
+
+
+# --- the published index: names only ------------------------------------------------------------------------------------
+
+INDEX: dict | None = None          # {"version", "sections": [names], "specimens": [files]} of deck-design, when known
+NOTIFY: list[dict] = []            # notifications the server sends after its next answer
+
+
+def _names(items, key: str, pattern) -> list[str]:
+    out = []
+    for item in items if isinstance(items, list) else []:
+        name = item.get(key) if isinstance(item, dict) else item
+        if isinstance(name, str) and pattern(name) and name not in out:
+            out.append(name)
+    return out
+
+
+def fetch_index() -> dict | None:
+    """GET /v1/guide/deck-design?form=index: {version, sections: [{name}], specimens: [{file}]}. None when signed out,
+    offline, or from a service without the index (then the tools take any name, as before)."""
+    try:
+        cred = credentials.load()
+        if not cred:
+            return None
+        _s, headers, raw = api.call("guide", bearer=cred["installation_secret"], skill="deck-design", query={"form": "index"}, timeout=5.0)
+        if "json" not in str(headers.get("Content-Type") or "").lower():
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:       # noqa: BLE001  no index: the tools still work by name
+        return None
+    if not isinstance(data, dict):
+        return None
+    sections = _names(data.get("sections"), "name", commands.SECTION_NAME.fullmatch)
+    sheets = _names(data.get("specimens"), "file", specimens.valid_name)
+    if not sections and not sheets:
+        return None
+    return {"version": str(data.get("version") or ""), "sections": sections, "specimens": sheets}
+
+
+def _index() -> dict | None:
+    global INDEX
+    if INDEX is None:
+        INDEX = fetch_index()
+    return INDEX
+
+
+def _seen_version(version: str | None) -> None:
+    """A guide answer named its guide version: when it is not the index's, fetch the index again and tell the host
+    that the tools changed."""
+    global INDEX
+    if not version or INDEX is None or not INDEX.get("version") or version == INDEX["version"]:
+        return
+    fresh = fetch_index()
+    if fresh and fresh != INDEX:
+        INDEX = fresh
+        NOTIFY.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
 
 
 def _text(text: str, error: bool = False) -> dict:
@@ -89,6 +144,7 @@ def _fetch_whole(skill: str, section: str | None) -> str:
     else:
         _s, headers, raw = commands._api("guide", what, skill=skill, query=query)
         route, extra = "guide", {}
+    _seen_version(headers.get(HEADER_GUIDE_VERSION))
     chunks = [raw]
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     for part in range(2, total + 1):
@@ -154,7 +210,32 @@ def tool_specimen(args: dict) -> dict:
     return {"content": [{"type": "image", "data": base64.b64encode(raw).decode("ascii"), "mimeType": "image/jpeg"}]}
 
 
-HANDLERS = {"guide": tool_guide, "specimen": tool_specimen}
+def tool_list(args: dict) -> dict:
+    skill = args.get("skill")
+    if skill not in SKILLS:
+        raise core.usage(f"unknown skill {skill!r}. The skills are: {', '.join(SKILLS)}.")
+    if skill == "pptx":         # the engine's skill folder, on disk
+        claims = account.require("pptx")
+        del claims
+        version = install.selected_engine()
+        if not version:
+            raise Status("SETUP_IN_PROGRESS", "Theodore's engine is not installed yet.",
+                         f"run {core.quoted_launcher()} guide pptx; it installs the engine.", "Theodore is setting up its PowerPoint engine.")
+        root = install.engine_dir(version) / "skills" / "pptx"
+        names = sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                       if p.is_file() and "__pycache__" not in p.parts and not p.name.startswith("."))
+        return _text("\n".join(names) + "\n")
+    account.require("deck-design")
+    index = _index()
+    if index is None:
+        raise Status("RETRY", "the list of the deck-design files could not be fetched just now.",
+                     "call the same tool again once; the files are also named by the links in the skill's text.",
+                     "Theodore could not list its design files just now; I am trying once more.")
+    lines = ["SKILL.md"] + [f"references/{n}.md" for n in index["sections"]] + [f"specimens/{f}" for f in index["specimens"]]
+    return _text("\n".join(lines) + "\n")
+
+
+HANDLERS = {"list": tool_list, "guide": tool_guide, "specimen": tool_specimen}
 
 
 # --- the server ----------------------------------------------------------------------------------------------------------
@@ -189,12 +270,12 @@ def handle(message: dict) -> dict | None:
     if method == "initialize":
         asked = str((message.get("params") or {}).get("protocolVersion") or "")
         result = {"protocolVersion": asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
-                  "capabilities": {"tools": {"listChanged": False}},
+                  "capabilities": {"tools": {"listChanged": True}},
                   "serverInfo": {"name": "theodore", "version": __version__}}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": TOOLS}
+        result = {"tools": tools(_index())}
     elif method == "tools/call":
         params = message.get("params") or {}
         result = call_tool(str(params.get("name") or ""), params.get("arguments") or {})
@@ -228,7 +309,8 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None) -> int:
                 answer = handle(message)
             else:
                 answer = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
-        if answer is not None:
-            out.write(json.dumps(answer, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-            out.flush()
+        for item in ([answer] if answer is not None else []) + NOTIFY:
+            out.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+        NOTIFY.clear()
+        out.flush()
     return 0

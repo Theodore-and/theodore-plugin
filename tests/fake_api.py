@@ -157,6 +157,7 @@ class FakeApi:
         self.specimen_redirect: str | None = None     # Location of a 302
         self.guide_fetches = 0
         self.guide_queries: list[dict] = []
+        self.guide_index: dict | None = None           # GET /v1/guide/deck-design?form=index; None: an older server (answers the text)
         self.guide_whole = True                        # False: an older server that ignores form=whole and pages
         self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
         self.preferences: list[dict] = []
@@ -448,6 +449,8 @@ class FakeApi:
                         "".join(f"- {p['text']}\n" for p in self.preferences) + "--- end of the user's notes ---\n"
             limit = 24000
             self.guide_queries.append(dict(query))
+            if query.get("form") == "index" and self.guide_index is not None and not section:
+                return self._send(h, 200, self.guide_index)
             if query.get("form") == "whole" and self.guide_whole:       # the whole stored text in one answer
                 parts = [text + self.guide_whole_tail.get(section, "")]
             else:

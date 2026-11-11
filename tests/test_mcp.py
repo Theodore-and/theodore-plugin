@@ -24,6 +24,7 @@ class Server:
         self.proc = subprocess.Popen([sys.executable, "-I", str(CLIENT_DIR), "mcp"], env={**case.box.env, **(env or {})},
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(case.box.tmp))
         self.next_id = 0
+        self.notifications: list[dict] = []
 
     def send(self, method: str, params: dict | None = None, notify: bool = False):
         message = {"jsonrpc": "2.0", "method": method}
@@ -36,7 +37,11 @@ class Server:
         self.proc.stdin.flush()
         if notify:
             return None
-        answer = json.loads(self.proc.stdout.readline())
+        while True:                         # notifications the server sends come before or after an answer
+            answer = json.loads(self.proc.stdout.readline())
+            if "id" in answer:
+                break
+            self.notifications.append(answer)
         assert answer["id"] == self.next_id, answer
         return answer
 
@@ -72,13 +77,63 @@ class Handshake(McpCase):
         server.send("notifications/initialized", notify=True)
         self.assertEqual(server.send("ping")["result"], {})
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertEqual(sorted(tools), ["guide", "specimen"])
+        self.assertEqual(sorted(tools), ["guide", "list", "specimen"])
+        self.assertEqual(init["result"]["capabilities"]["tools"], {"listChanged": True})
+        self.assertNotIn("enum", tools["guide"]["inputSchema"]["properties"]["section"], "signed out: no index, any name")
         self.assertEqual(tools["guide"]["_meta"], {"anthropic/maxResultSizeChars": 400000})
         self.assertEqual(tools["guide"]["inputSchema"]["required"], ["skill"])
         for tool in tools.values():
             self.assertEqual(tool["description"].count("."), 1, "one neutral sentence")
         self.assertEqual(server.send("nonsense/method")["error"]["code"], -32601)
         self.assertEqual(server.close(), b"", "nothing but answers on standard output")
+
+
+INDEX = {"version": "g1", "sections": [{"name": "craft"}, {"name": "forms"}, {"name": "../bad"}],
+         "specimens": [{"file": "cover-01.jpg"}, {"file": "keys-and-locators.jpg"}, {"file": "nope.png"}]}
+
+
+class Listing(McpCase):
+    """The published index makes the files visible as a folder listing would: the `list` tool and the enums."""
+
+    def test_list_and_enums_from_the_index(self):
+        self.sign_in()
+        self.api.guide_index = INDEX
+        server = self.server()
+        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
+        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["enum"], ["craft", "forms"])
+        self.assertEqual(tools["specimen"]["inputSchema"]["properties"]["file"]["enum"], ["cover-01.jpg", "keys-and-locators.jpg"])
+        self.assertEqual([t["description"] for t in tools.values()],
+                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.", "Returns one specimen sheet as an image."])
+        listing = server.call("list", skill="deck-design")["content"][0]["text"]
+        self.assertEqual(listing, "SKILL.md\nreferences/craft.md\nreferences/forms.md\nspecimens/cover-01.jpg\nspecimens/keys-and-locators.jpg\n")
+
+    def test_a_new_guide_version_refreshes_the_index_and_says_so(self):
+        self.sign_in()
+        self.api.guide_index = dict(INDEX)
+        server = self.server()
+        server.send("tools/list")
+        server.call("guide", skill="deck-design")
+        self.assertEqual(server.notifications, [])
+        self.api.guide_version = "g2"
+        self.api.guide_index = {"version": "g2", "sections": [{"name": "craft"}, {"name": "critique"}], "specimens": []}
+        server.call("guide", skill="deck-design")
+        server.send("ping")
+        self.assertEqual(server.notifications, [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}])
+        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
+        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["enum"], ["craft", "critique"])
+
+    def test_without_the_index_names_still_work(self):
+        self.sign_in()
+        server = self.server()
+        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
+        self.assertNotIn("enum", tools["specimen"]["inputSchema"]["properties"]["file"])
+        self.assertTrue(server.call("list", skill="deck-design")["content"][0]["text"].startswith("THEODORE RETRY: "))
+        self.assertNotIn("isError", server.call("guide", skill="deck-design"))
+
+    def test_pptx_lists_the_engine_skill_folder(self):
+        self.ready()
+        listing = self.server().call("list", skill="pptx")["content"][0]["text"].splitlines()
+        self.assertEqual(listing, ["SKILL.md", "pptxgenjs.md", "scripts/pptx.py"])
 
 
 class Guide(McpCase):
@@ -254,8 +309,8 @@ class ThroughTheLauncher(unittest.TestCase):
 
 @unittest.skipUnless(IS_WINDOWS, "the batch launcher")
 class WindowsLauncher(unittest.TestCase):
-    """What Claude Code on Windows spawns from the plugin's .mcp.json: the extensionless launcher path, which Windows
-    resolves to theodore.cmd beside it."""
+    """`theodore.cmd mcp` keeps standard output for the protocol and serves once set up (named without its extension,
+    which Windows resolves to theodore.cmd beside it)."""
 
     def setUp(self):
         self.api = FakeApi().start()
@@ -285,7 +340,7 @@ class WindowsLauncher(unittest.TestCase):
         answers = [json.loads(line) for line in out.decode().splitlines() if line.strip()]
         self.assertEqual([a["id"] for a in answers], [1, 2], out)
         self.assertEqual(answers[0]["result"]["serverInfo"]["name"], "theodore")
-        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "specimen"])
+        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "list", "specimen"])
 
 
 if __name__ == "__main__":

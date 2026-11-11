@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "theodore": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore",
+      "command": "sh",
       "args": [
+        "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore",
         "mcp"
       ]
     }

@@ -351,9 +351,9 @@ class HostLimits(unittest.TestCase):
         self.assertEqual(set(codex["plugins"][0]["policy"]), {"installation", "authentication"})
         # The local MCP server (theodore mcp), registered for Claude Code (.mcp.json) and for Codex (mcp.json, named by plugin.json).
         self.assertEqual(json.loads((PLUGIN / ".mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "args": ["mcp"]}}})
+                         {"mcpServers": {"theodore": {"command": "sh", "args": ["${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "mcp"]}}})
         self.assertEqual(json.loads((PLUGIN / "mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "./skills/pptx/scripts/theodore", "args": ["mcp"], "cwd": "."}}})
+                         {"mcpServers": {"theodore": {"command": "sh", "args": ["./skills/pptx/scripts/theodore", "mcp"], "cwd": "."}}})
         self.assertEqual(portable["mcpServers"], "./mcp.json")
 
     @unittest.skipUnless(shutil.which("claude"), "the claude CLI is not installed")
