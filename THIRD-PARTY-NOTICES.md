@@ -44,7 +44,6 @@ import lists were read from the binaries, not assumed. They are taken unmodified
 each checked against the sha256 in `runtime/locks/versions.json`. These three files are on Microsoft's list of
 redistributable Visual C++ files, which may be deployed app-local beside the program that uses them; nothing is
 installed system-wide. Microsoft's licence terms are in `licenses/vc-redist/license.rtf` (sha256 pinned too).
-Counsel's read is asked together with the other notice items.
 
 ### Licences that are not plain permissive
 
