@@ -590,6 +590,7 @@ def accept_fresh(kind: str, manifest: dict, what: str) -> None:
             seen[kind] = when
             if kind == "channel":           # what the newest document chose: an older check may still activate that
                 seen["channel_engine"] = (manifest.get("engine") or {}).get("version")
+                seen["channel_client"] = (manifest.get("client") or {}).get("version")
             core.write_json(path, seen)
 
 
@@ -606,6 +607,10 @@ def reset_update_state(reason: str) -> None:
         state["last_check"] = state["last_attempt"] = 0
         state["floor"] = {"engine": current_engine(), "client": __version__, "since": core.now(), "reason": reason}
         core.write_json(core.home().state / "update.json", state)
+
+
+def newer_document_accepted(issued: float) -> bool:
+    return issued < float(core.read_json(core.home().state / "manifest-times.json").get("channel") or 0)
 
 
 def below_floor(version: str | None, issued: float) -> bool:
@@ -639,7 +644,13 @@ def activate_checked(version: str, issued: float, why: str) -> bool:
 
 def save_restrictions(manifest: dict) -> None:
     """Keep what a verified channel manifest forbids (kill switch, plugin minimum, engine minimum, withdrawn
-    versions) until a newer verified manifest says otherwise. An older manifest, replayed, changes nothing."""
+    versions) until a newer verified manifest says otherwise. An older manifest, replayed, changes nothing. Compared
+    and written under the update lock."""
+    with update_lock():
+        _save_restrictions(manifest)
+
+
+def _save_restrictions(manifest: dict) -> None:
     stored = update_state().get("restrictions") or {}
     when = _manifest_time(manifest.get("server_time"))
     engine = manifest.get("engine") or {}
@@ -747,43 +758,49 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
         client = {}                                 # an older client from a document issued before the reset: not installed
     if client.get("version") and client.get("sha256") and client["version"] != __version__:
         if not Job("client-update").alive():
-            Job("client-update").spawn(["update", "--client-job", client["version"], client["sha256"], str(engine.get("runtime_id") or "")])
+            Job("client-update").spawn(["update", "--client-job", client["version"], client["sha256"], str(engine.get("runtime_id") or ""),
+                                        repr(_manifest_time(manifest.get("server_time")))])
         if engine.get("min_client") and core.version_key(__version__) < core.version_key(str(engine["min_client"])):
             Job("client-update").wait(60)
             raise Status("RETRY", "the Theodore client was updated and must restart.", "run the same command again now.",
                          "Theodore updated itself; I am continuing.")
     start_packs_job(manifest.get("packs") or [])
-    current = current_engine()
     target = engine.get("version")
     issued = _manifest_time(manifest.get("server_time"))
-    floor = update_state().get("floor") or {}
-    if floor and issued >= float(floor.get("since") or 0):
-        save_update_state(floor=None)              # a document issued after the reset: it may roll back
-    under_floor = below_floor(target, issued)
-    must = bool(current) and (current in (engine.get("revoked") or []) or
-                              (manifest.get("min_version") and core.version_key(current) < core.version_key(str(manifest["min_version"]))))
-    pinned = pins().get("engine")
-    held = state.get("held")
-    failed = state.get("failed") or {}
-    skip = under_floor or forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
-           (failed.get("version") == target and core.now() - float(failed.get("at") or 0) < UPDATE_CHECK_INTERVAL_S and not force)
-    have_exact = engine_installed(target) and core.read_json(engine_dir(target) / ".theodore-engine.json").get("sha256") == engine.get("sha256")
-    if target and (target != current or not have_exact) and not skip and runtime_ready():
-        if have_exact:
+    # Decide and act under one hold of the update lock: the floor read and cleared, the restrictions compared and the
+    # activation of an engine already on disk. A reset or another check cannot come between them.
+    with update_lock():
+        state = update_state()
+        current = current_engine()
+        floor = state.get("floor") or {}
+        if floor and issued >= float(floor.get("since") or 0) and not newer_document_accepted(issued):
+            save_update_state(floor=None)          # a document issued after the reset, and still the newest: it may roll back
+        under_floor = below_floor(target, issued)
+        must = bool(current) and (current in (engine.get("revoked") or []) or
+                                  (manifest.get("min_version") and core.version_key(current) < core.version_key(str(manifest["min_version"]))))
+        pinned = pins().get("engine")
+        held = state.get("held")
+        failed = state.get("failed") or {}
+        skip = under_floor or forbidden(target, update_state().get("restrictions") or {}) or (pinned and not must) or (held == target and not must and not force) or \
+               (failed.get("version") == target and core.now() - float(failed.get("at") or 0) < UPDATE_CHECK_INTERVAL_S and not force)
+        have_exact = engine_installed(target) and core.read_json(engine_dir(target) / ".theodore-engine.json").get("sha256") == engine.get("sha256")
+        act = bool(target and (target != current or not have_exact) and not skip and runtime_ready())
+        if act and have_exact:
             activate_checked(target, issued, "update check")
-        else:
-            job = Job("engine-update")
-            if not job.alive():
-                core.write_json(core.home().state / "engine-update.json", engine)
-                job.spawn(["update", "--engine-job"])
+        elif act:       # recorded under the same hold: a reset after this point drops it
             save_update_state(pending={"version": target, "sha256": engine.get("sha256"), "issued": issued})
-            if job.wait(wait if current and not must else max(wait, 90.0)) and engine_installed(target):
-                with update_lock():
-                    activate_checked(target, issued, "update check")
-                    if (update_state().get("pending") or {}).get("version") == target:
-                        save_update_state(pending=None)
-        if held and held != target:
+        if act and held and held != target:
             save_update_state(held=None)
+    if act and not have_exact:      # the download runs without the lock; its activation takes it again and rechecks
+        job = Job("engine-update")
+        if not job.alive():
+            core.write_json(core.home().state / "engine-update.json", engine)
+            job.spawn(["update", "--engine-job"])
+        if job.wait(wait if current and not must else max(wait, 90.0)) and engine_installed(target):
+            with update_lock():
+                if (update_state().get("pending") or {}).get("version") == target:
+                    activate_checked(target, issued, "update check")
+                    save_update_state(pending=None)
     if must and current_engine() == current:
         raise Status("UPDATE_REQUIRED", f"engine {current} was withdrawn and the replacement {target or ''} is not installed yet.",
                      f"run {quoted_launcher()} update --apply, then run the same command again.",
@@ -795,9 +812,11 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     return manifest
 
 
-def update_client(version: str, sha256: str, runtime_id: str | None = None) -> None:
+def update_client(version: str, sha256: str, runtime_id: str | None = None, issued: float | None = None) -> None:
     """Install the client the channel manifest names: the `client` part of the engine's runtime. Verify, unpack
-    beside the running one, switch. It takes effect the next time the launcher starts the client."""
+    beside the running one, switch. It takes effect the next time the launcher starts the client. The switch is
+    decided under the update lock: not when a newer accepted document names another client, not below the floor of
+    a reset that came after the document that chose it."""
     home = core.home()
     target = home.client / version
     if not (target / "__main__.py").exists():
@@ -816,9 +835,19 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None) -> N
         core.remove_tree(target)
         os.rename(partial, target)
         core.remove_tree(archive)
-    core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
+    with update_lock():
+        when = float(issued or 0)
+        seen = core.read_json(home.state / "manifest-times.json")
+        floor = update_state().get("floor") or {}
+        if when < float(seen.get("channel") or 0) and seen.get("channel_client") and version != seen.get("channel_client"):
+            core.log(f"client {version} not switched to: a newer release manifest names client {seen.get('channel_client')}")
+            return
+        if floor.get("client") and when < float(floor.get("since") or 0) and core.version_key(version) < core.version_key(str(floor["client"])):
+            core.log(f"client {version} not switched to: below the client installed at the last reset")
+            return
+        core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
     for child in home.client.iterdir():
-        if child.is_dir() and child.name not in (version, __version__):
+        if child.is_dir() and child.name not in (version, __version__, core.read_text(home.client / "current.txt")):
             core.remove_tree(child)
 
 

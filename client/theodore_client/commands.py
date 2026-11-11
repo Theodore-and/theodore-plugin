@@ -742,11 +742,11 @@ def engine_update_job() -> int:
         return 78
 
 
-def client_update_job(version_: str, sha256: str, runtime_id: str | None = None) -> int:
+def client_update_job(version_: str, sha256: str, runtime_id: str | None = None, issued: str | None = None) -> int:
     job = Job("client-update")
     job.begin("client")
     try:
-        install.update_client(version_, sha256, runtime_id or None)
+        install.update_client(version_, sha256, runtime_id or None, float(issued) if issued else None)
         job.finish()
         return 0
     except Exception as exc:

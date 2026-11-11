@@ -162,7 +162,11 @@ class UpdateStateMachine(unittest.TestCase):
             one = engine_on_disk("1.0.0")
             now = core.now()
             install.accept_fresh("channel", {"server_time": _iso(now - 60), "engine": one}, "release manifest")
-            files = [core.home().state / "manifest-times.json", core.home().state / "update.json", core.home().engines / "current.json"]
+            version = __import__("theodore_client").__version__
+            (core.home().client / version).mkdir(parents=True)
+            (core.home().client / version / "__main__.py").write_text("")          # on disk: only the switch is left to do
+            files = [core.home().state / "manifest-times.json", core.home().state / "update.json", core.home().engines / "current.json",
+                     core.home().client / "current.txt"]
             install.save_update_state(last_check=1)
 
             def snapshot():
@@ -174,6 +178,8 @@ class UpdateStateMachine(unittest.TestCase):
                 "reset": lambda: install.reset_update_state("test"),
                 "save": lambda: install.save_update_state(last_check=2),
                 "pending": lambda: install.check_updates(force=False, wait=0),
+                "restrictions": lambda: install.save_restrictions({"server_time": _iso(now + 1), "engine": one, "kill": True}),
+                "client": lambda: install.update_client(__import__("theodore_client").__version__, "0" * 64, None, now),
             }
             install.save_update_state(pending={"version": "1.0.0", "sha256": one["sha256"], "issued": now}, last_check=int(now))
             before = snapshot()
@@ -200,6 +206,69 @@ class UpdateStateMachine(unittest.TestCase):
                 other.join(10)
             self.assertEqual(outcomes, {name: "RETRY" for name in attempts})
             self.assertEqual(snapshot(), before, "no write without the lock")
+
+    def test_a_reset_between_reading_the_floor_and_clearing_it_is_not_undone(self):
+        # Round 8 (review 1): A reads an old reset's floor and decides its newer document may clear it; B resets
+        # again (engine 3 is the floor) and returns; A must not clear B's floor and activate engine 2.
+        from theodore_client import install
+        with client_home():
+            core.home().ensure()
+            two, _three = engine_on_disk("2.0.0"), engine_on_disk("3.0.0")
+            set_current("3.0.0")
+            install.reset_update_state("first reset")
+            issued = core.now() + 2         # issued after the first reset (whole seconds: _iso drops the fraction)
+            doc = {"server_time": _iso(issued), "engine": two}
+            real = install.save_update_state
+            reached, go, returned = threading.Event(), threading.Event(), {}
+
+            def pausing(**fields):
+                if threading.current_thread().name == "A" and fields == {"floor": None} and not reached.is_set():
+                    reached.set()
+                    go.wait(3.0)
+                return real(**fields)
+
+            def fetch_a():
+                install.accept_fresh("channel", doc, "release manifest")
+                return doc
+
+            def check():
+                install.check_updates(force=True, wait=0)
+
+            def reset():
+                install.reset_update_state("second reset")
+                returned["floor"] = (install.update_state().get("floor") or {}).get("engine")
+            with self.patched({"A": fetch_a}), mock.patch.object(install, "save_update_state", side_effect=pausing):
+                a, b = threading.Thread(target=check, name="A"), threading.Thread(target=reset, name="B")
+                a.start()
+                self.assertTrue(reached.wait(10))
+                b.start()
+                b.join(1.5)
+                go.set()
+                a.join(30)
+                b.join(30)
+            self.assertIn("floor", returned)
+            current = install.current_engine()
+            self.assertGreaterEqual(core.version_key(current), core.version_key(str(returned["floor"])),
+                                    f"engine {current} activated below the floor {returned['floor']} of a reset that had returned")
+
+    def test_the_client_switch_is_checked_under_the_lock(self):
+        from theodore_client import install
+        with client_home() as home:
+            core.home().ensure()
+            for version in ("0.1.0", "0.2.5", "0.3.0"):
+                (home / "client" / version).mkdir(parents=True)
+                (home / "client" / version / "__main__.py").write_text("")
+            (home / "client" / "current.txt").write_text("0.2.0")
+            now = core.now()
+            install.save_update_state(floor={"engine": None, "client": "0.2.0", "since": now})
+            install.update_client("0.1.0", "0" * 64, None, now - 60)
+            self.assertEqual((home / "client" / "current.txt").read_text().strip(), "0.2.0", "below the reset's floor: not switched")
+            install.save_update_state(floor=None)
+            install.accept_fresh("channel", {"server_time": _iso(now), "engine": {"version": "1.0.0"}, "client": {"version": "0.3.0"}}, "release manifest")
+            install.update_client("0.2.5", "0" * 64, None, now - 30)
+            self.assertEqual((home / "client" / "current.txt").read_text().strip(), "0.2.0", "a newer document names another client")
+            install.update_client("0.3.0", "0" * 64, None, now - 30)
+            self.assertEqual((home / "client" / "current.txt").read_text().strip(), "0.3.0", "the client the newest document names")
 
     def test_the_lock_is_one_and_reentrant_within_a_thread(self):
         from theodore_client import install
