@@ -271,7 +271,16 @@ def _deck_design_body() -> str:
     if core.refused():
         raise api.sign_in_required()
     rest = 'call the Theodore guide tool with skill "deck-design"' if tool else f"run {quoted_launcher()} guide deck-design"
-    return _bounded(_without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace")), rest)
+    body = _without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace"))
+    # The host ran this command, not the agent: "the launcher you used" (or the service's "where it is" wording for
+    # tool delivery) becomes this launcher's own path, which is true however the text arrived.
+    for line in _LAUNCHER_LINES:
+        body = body.replace(line, f"Run {quoted_launcher()} with:")
+    return _bounded(body, rest)
+
+
+_LAUNCHER_LINES = ("Run the Theodore launcher you used to get these instructions with:",
+                   "Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd on Windows) with:")
 
 
 def _pptx_body() -> str:

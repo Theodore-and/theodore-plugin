@@ -232,6 +232,19 @@ class SkillBody(ClientCase):
         self.assertEqual(result.stderr, "")
         return result.stdout
 
+    def test_the_reporting_line_names_this_launcher(self):
+        """The host ran `theodore skill`, not the agent: "the launcher you used" (or the service's tool-form wording)
+        becomes this launcher's path, the one the reporting command runs."""
+        self.sign_in()
+        for line in ("Run the Theodore launcher you used to get these instructions with:",
+                     "Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd on Windows) with:"):
+            self.api.guides["deck-design"][""] = f"# Deck design\n\nBody.\n\n{line}\n\nreport --kind bug\n"
+            for env in ({"CLAUDECODE": "1"}, {}):
+                out = self.body("deck-design", env=env)
+                self.assertNotIn("launcher you used", out)
+                self.assertNotIn("either Theodore skill", out)
+                self.assertRegex(out, r"\nRun .*theodore\"? with:\n")
+
     def test_signed_out_and_unknown_are_statuses_with_exit_0(self):
         out = self.body("deck-design")
         self.assertTrue(out.startswith("THEODORE SIGN_IN_REQUIRED: "), out)
