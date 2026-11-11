@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -1113,6 +1114,27 @@ class Packs(ClientCase):
         self.api.pack_delay = 0
         self.box.wait_jobs(120)
         self.assertEqual(self.client("pptx", "apply", str(unknown), env=quick).returncode, 0)
+
+    def test_a_catalogue_call_waits_for_its_pack_and_restarts_a_fetch_that_died(self):
+        """`pptx assets list|search|show <pack>` is how a build finds an icon: a pack still arriving, or a fetch that died
+        (the computer slept, the session that started it ended), must not read as "not installed"."""
+        self.sign_in()
+        self.api.pack_delay = 30.0
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        quick = {"THEODORE_TEST_PACK_WAIT": "0.2"}
+        for call, noun in ((("assets", "search", "icons", "basket", "--style", "one-tone"), "icon"),
+                           (("assets", "show", "flags", "sa"), "flag"), (("assets", "list"), "icon")):
+            first, _n, _t = self.assertStatus(self.client("pptx", *call, env=quick), "SETUP_IN_PROGRESS", 67)
+            self.assertIn(f"the {noun} pack is still downloading", first, call)
+        self.assertEqual(self.client("pptx", "assets", "show", "layouts", env=quick).returncode, 0, "layouts are no pack")
+        record = json.loads((self.box.home / "state" / "jobs" / "packs.json").read_text())
+        os.kill(int(record["pid"]), signal.SIGKILL)                   # the fetch dies with its downloads unfinished
+        self.api.pack_delay = 0
+        done = self.client("pptx", "assets", "search", "icons", "basket", env={"THEODORE_TEST_PACK_WAIT": "60"})
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(json.loads(done.stdout)["verb"], "assets")
+        self.assertEqual(self.state("packs/state.json")["icons"]["status"], "ready", "the next catalogue call fetched it again")
+        self.box.wait_jobs(120)
 
     def test_pack_hashes_and_urls_come_only_from_the_signed_manifest(self):
         self.sign_in()

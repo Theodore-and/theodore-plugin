@@ -622,3 +622,81 @@ class HostTest(unittest.TestCase):
         with client_home():
             self.assertEqual(core.site_url("/install"), "the Theodore site")
             self.assertNotIn("theodoreand.ai", core.no_release_keys().render().replace("@theodoreand.ai", ""))
+
+
+class WindowsRenderer(unittest.TestCase):
+    """Windows, where nothing fetches LibreOffice at install unless it is needed: the admin image's runtime, the wait
+    before a rendering call, and the installer's `--if-needed` call. In process, with Windows' answers stubbed."""
+
+    PIN = {"version": "26.2.7", "url": "https://download.example.test/LibreOffice_26.2.7_Win_x86-64.msi", "sha256": "0" * 64, "size": 350_000_000}
+
+    @contextlib.contextmanager
+    def windows(self, *, office=None, powerpoint=False, pin=PIN):
+        from theodore_client import install
+        with mock.patch.object(install, "IS_WINDOWS", True), mock.patch.object(install, "system_libreoffice", return_value=office), \
+                mock.patch.object(install, "powerpoint_registered", return_value=powerpoint), \
+                mock.patch.object(install, "libreoffice_pin", return_value=pin):
+            yield install
+
+    def test_the_admin_image_gets_its_x64_runtime_beside_the_program_and_drops_the_package_copy(self):
+        from theodore_client import install
+
+        def admin_install(command, **_kwargs):          # what `msiexec /a` leaves: program, System64 (x64), System (x86)
+            target = Path(command[-1].split("=", 1)[1])
+            for folder, name, data in (("program", "soffice.exe", b"exe"), ("System64", "msvcp140_1.dll", b"x64"),
+                                       ("System64", "vcruntime140.dll", b"x64"), ("System", "msvcp140_1.dll", b"x86")):
+                (target / folder).mkdir(parents=True, exist_ok=True)
+                (target / folder / name).write_bytes(data)
+            (target / Path(command[2]).name).write_bytes(b"package copy")
+            return mock.Mock(returncode=0)
+
+        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), \
+                mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"msi"))), \
+                mock.patch.object(install.subprocess, "run", side_effect=admin_install):
+            binary = install.install_libreoffice()
+            program = home / "tools" / "libreoffice" / "program"
+            self.assertEqual(binary, program / "soffice.exe")
+            self.assertEqual((program / "msvcp140_1.dll").read_bytes(), b"x64", "the 64-bit copy, never System's 32-bit one")
+            self.assertEqual((program / "vcruntime140.dll").read_bytes(), b"x64")
+            self.assertFalse((home / "tools" / "libreoffice" / "LibreOffice_26.2.7_Win_x86-64.msi").exists())
+
+    def test_a_rendering_call_with_no_converter_fetches_libreoffice_and_says_so(self):
+        from theodore_client import install
+        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True) as spawn, \
+                mock.patch.dict(os.environ, {"THEODORE_TEST_RENDERER_WAIT": "0"}), mock.patch.object(core, "is_loopback_api", return_value=True):
+            with self.assertRaises(core.Status) as raised:
+                win.wait_for_renderer(["apply", "C:/deck/ws"])
+            self.assertEqual(raised.exception.name, "SETUP_IN_PROGRESS")
+            self.assertIn("LibreOffice", raised.exception.summary)
+            self.assertEqual(spawn.call_args.args[1], ["tools", "install", "libreoffice", "--job"])
+            spawn.reset_mock()
+            for call in (["assets", "search", "icons", "cart"], ["start", "--blank"], ["version"]):
+                win.wait_for_renderer(call)                         # no rendering: nothing is fetched or waited for
+            spawn.assert_not_called()
+            install.Job("libreoffice").update(pid=0, failed={"cause": "SETUP_FAILED", "detail": "msiexec returned 1601"})
+            with self.assertRaises(core.Status) as raised:
+                win.wait_for_renderer(["render", "C:/deck/ws"])
+            self.assertEqual(raised.exception.name, "SETUP_FAILED", "a failed fetch is reported, not started again on every call")
+            self.assertIn("1601", raised.exception.summary)
+            self.assertIn("tools install libreoffice", raised.exception.next_step)
+            spawn.assert_not_called()
+
+    def test_a_converter_or_another_system_means_nothing_is_fetched(self):
+        from theodore_client import commands, install
+        cases = ({"office": r"C:\Program Files\LibreOffice\program\soffice.exe"}, {"powerpoint": True}, {"pin": None})
+        with client_home(), mock.patch.object(install.Job, "spawn", side_effect=AssertionError("nothing to fetch")), \
+                mock.patch("builtins.print"):
+            for case in cases:
+                with self.windows(**case) as win:
+                    win.wait_for_renderer(["apply", "C:/deck/ws"])
+                    self.assertFalse(win.needs_libreoffice(), case)
+                    self.assertEqual(commands.tools("libreoffice", True, False, if_needed=True), 0, case)
+            with mock.patch.object(install, "IS_WINDOWS", False):       # macOS fetches at install; Linux uses the system's
+                self.assertFalse(install.needs_libreoffice())
+                install.wait_for_renderer(["apply", "/deck/ws"])
+
+    def test_the_installer_asks_for_libreoffice_only_through_if_needed(self):
+        text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
+        self.assertIn('call "%T%" tools install libreoffice --background --if-needed >nul 2>&1', text)
+        self.assertNotIn("tools install libreoffice --background >nul", text)
+

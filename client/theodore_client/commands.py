@@ -379,6 +379,7 @@ def run_pptx(args: list[str]) -> int:
     account.require("pptx", allow_refresh=False)
     install.require_runtime()
     install.wait_for_packs(args)
+    install.wait_for_renderer(args)
     return install.run_engine(args)
 
 
@@ -916,9 +917,12 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
                             "Theodore's asset libraries are installed."))
 
 
-def tools(name: str, background: bool, as_job: bool) -> int:
+def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) -> int:
     if name != "libreoffice":
         raise core.usage(f"unknown tool '{name}'. The only tool is: libreoffice.")
+    if if_needed and not install.needs_libreoffice():      # the Windows installer's call: only when nothing can render
+        return core.emit(Status("OK", "LibreOffice is not needed here: a converter is available or none is fetched on this system.",
+                                "nothing to do.", "Nothing to install."))
     existing = install.system_libreoffice() or install.libreoffice_binary()
     if existing and not as_job:
         return core.emit(Status("OK", f"LibreOffice is already available at {existing}.", "nothing to do.", "LibreOffice is already installed."))

@@ -1164,6 +1164,12 @@ def packs_needed(args: list[str]) -> set[str] | None:
     needed: set[str] = set()
     if args and args[0] in PACK_HELPERS:        # a pack named as the verb, for example a catalogue search
         needed.add(args[0])
+    if args[:1] == ["assets"]:                  # the catalogue: `assets list|search|show <pack> ...`
+        named = [a for a in args[1:3] if a in PACK_HELPERS]
+        if named:
+            needed.add(named[-1])
+        elif args[1:2] == ["list"] and len([a for a in args[2:] if not a.startswith("-")]) == 0:
+            needed |= set(PACK_ORDER)           # the list of every pack reports each one's state
     spaces = _workspaces(args)
     if not spaces:
         return needed or None
@@ -1254,6 +1260,80 @@ def system_libreoffice() -> str | None:
     return None
 
 
+def powerpoint_registered() -> bool:
+    """True on Windows when PowerPoint's COM class is registered (the engine then converts with PowerPoint). Read only."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"PowerPoint.Application\CLSID"):
+            return True
+    except OSError:
+        return False
+
+
+def needs_libreoffice() -> bool:
+    """On Windows, nothing can turn a deck into slide images: no LibreOffice anywhere and no PowerPoint, and Theodore
+    has a LibreOffice to fetch. (macOS fetches it at install; Linux uses the system's.)"""
+    return IS_WINDOWS and not system_libreoffice() and not libreoffice_binary() and not powerpoint_registered() \
+        and libreoffice_pin() is not None
+
+
+def _libreoffice_failed(failed: dict) -> Status:
+    return Status("SETUP_FAILED", f"LibreOffice, which turns the slides into images, could not be installed "
+                  f"({failed.get('detail') or failed.get('cause') or 'unknown error'}).",
+                  f"run {quoted_launcher()} tools install libreoffice to try again; if it fails again, tell the user what it says.",
+                  "Theodore could not install LibreOffice, which it needs to render the slides.")
+
+
+# The engine calls that turn the deck into images: without a converter they cannot finish.
+RENDERING_CALLS = (("apply",), ("render",), ("slide", "add"))
+
+
+def wait_for_renderer(args: list[str], wait: float = 25.0) -> None:
+    """A rendering call on a Windows computer with no converter: fetch LibreOffice (in the background, as on macOS at
+    install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, not retried."""
+    if not any(tuple(args[:len(call)]) == call for call in RENDERING_CALLS) or not needs_libreoffice():
+        return
+    if core.is_loopback_api() and os.environ.get("THEODORE_TEST_RENDERER_WAIT"):
+        wait = float(os.environ["THEODORE_TEST_RENDERER_WAIT"])
+    job = Job("libreoffice")
+    failed = job.read().get("failed") if not job.alive() else None
+    if failed:
+        raise _libreoffice_failed(failed)
+    if not job.alive():
+        job.spawn(["tools", "install", "libreoffice", "--job"])
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline and job.alive() and not libreoffice_binary():
+        time.sleep(0.5)
+    if libreoffice_binary():
+        return
+    state = job.read()
+    if state.get("failed"):
+        failed = state["failed"]
+        raise _libreoffice_failed(failed)
+    megabytes = int((libreoffice_pin() or {}).get("size", 0) / 1e6) or 300
+    raise Status("SETUP_IN_PROGRESS", f"LibreOffice, which turns the slides into images for this call, is still being installed "
+                 f"({int(state.get('percent') or 0)}%, about {megabytes} MB in all).",
+                 "run the same command again in a minute.",
+                 f"Theodore is downloading LibreOffice (about {megabytes} MB) to render the slides. I will continue as soon as it is here.")
+
+
+def libreoffice_app_local_runtime(image: Path) -> None:
+    """Put the Visual C++ runtime that LibreOffice's package carries beside its program.
+
+    A full install puts those DLLs into System32; an administrative install leaves them in the image's `System64`
+    folder (the x64 copies; `System` holds the 32-bit ones), where the loader never looks. On a computer without
+    Microsoft's redistributable, soffice then fails to start (STATUS_DLL_NOT_FOUND). Copies beside the program are
+    found first by the loader and touch nothing outside Theodore's folder.
+    """
+    source, program = image / "System64", image / "program"
+    if not source.is_dir() or not program.is_dir():
+        return
+    for dll in sorted(source.glob("*.dll")):
+        shutil.copy2(dll, program / dll.name)
+
+
 def install_libreoffice(job: Job | None = None) -> Path:
     pin = libreoffice_pin()
     if not pin:
@@ -1305,6 +1385,8 @@ def install_libreoffice(job: Job | None = None) -> Path:
                 core.remove_tree(mount)
         elif IS_WINDOWS:  # an administrative install only copies files: no elevation, nothing registered
             subprocess.run(["msiexec", "/a", str(archive), "/qn", f"TARGETDIR={partial}"], check=True, capture_output=True)
+            libreoffice_app_local_runtime(partial)
+            (partial / archive.name).unlink(missing_ok=True)     # the image keeps a copy of the package (about 350 MB)
         else:
             raise OSError("no unpack method for this platform")
     except (OSError, subprocess.CalledProcessError) as exc:

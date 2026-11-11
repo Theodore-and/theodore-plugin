@@ -92,6 +92,7 @@ def _parser() -> argparse.ArgumentParser:
     tl.add_argument("action", choices=("install",))
     tl.add_argument("name")
     tl.add_argument("--background", action="store_true")
+    tl.add_argument("--if-needed", action="store_true")
     tl.add_argument("--job", action="store_true")
     su = sub.add_parser("setup", add_help=False)
     su.add_argument("--job", action="store_true")
@@ -159,7 +160,7 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "packs":
         return commands.packs(args.action, args.name, args.all, args.background, args.job)
     if cmd == "tools":
-        return commands.tools(args.name, args.background, args.job)
+        return commands.tools(args.name, args.background, args.job, args.if_needed)
     if cmd == "setup":
         return commands.setup_job() if args.job else commands.setup(args.wait)
     if cmd == "hosts":
