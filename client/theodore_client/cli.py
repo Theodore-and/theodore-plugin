@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import account, commands, core, specimens
+from . import account, api, commands, core, specimens
 from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
@@ -170,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch(argv)
     except Status as status:
         return core.emit(status)
+    except api.TooLarge as exc:
+        return core.emit(core.internal(f"an answer from the Theodore service was longer than {exc.limit} bytes; it was refused and not read further."))
     except KeyboardInterrupt:
         return 130
     except Exception as exc:  # never show a traceback to the assistant: it would try to "fix" it

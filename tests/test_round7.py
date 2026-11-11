@@ -259,5 +259,79 @@ class ReportSwitch(unittest.TestCase):
                 self.assertEqual((code, asked, sent), (73, 1, []), "off, no answer or no connection: nothing is sent")
 
 
+class BoundedBodies(unittest.TestCase):
+    """Ruling 3: every answer body is read up to a bound, success or error (errors at 64 KiB); a longer one is refused."""
+
+    class Body:
+        """An answer of `size` bytes that records how much was asked for (never more than it holds is produced)."""
+
+        def __init__(self, size: int, headers: dict | None = None):
+            self.size, self.pos, self.asked = size, 0, []
+            self.status, self.headers = 200, headers or {}
+
+        def read(self, n=-1):
+            self.asked.append(n)
+            if n is None or n < 0:
+                n = self.size - self.pos
+            n = min(n, self.size - self.pos)
+            self.pos += n
+            return b"x" * n
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def close(self):
+            pass
+
+    def opener(self, body, error: int | None = None):
+        import email.message
+        import urllib.error
+
+        class Opener:
+            def open(self, req, timeout=0):
+                if error:
+                    headers = email.message.Message()
+                    raise urllib.error.HTTPError(req.full_url, error, "error", headers, body)
+                return body
+        return Opener()
+
+    def test_an_error_body_is_read_to_64_kib_and_a_longer_one_is_refused(self):
+        with client_home():
+            for size, refused in ((64 * 1024, False), (64 * 1024 + 1, True), (1_048_577, True)):
+                with self.subTest(size=size):
+                    body = self.Body(size)
+                    with mock.patch.object(api, "_opener", return_value=self.opener(body, error=503)):
+                        with self.assertRaises(api.TooLarge if refused else api.ApiError):
+                            api.request("GET", "https://api.example.test/v1/x", limit=1_048_576)
+                    self.assertTrue(body.asked and all(0 <= n <= 64 * 1024 + 1 for n in body.asked), body.asked)
+
+    def test_a_success_body_without_an_explicit_limit_is_still_bounded(self):
+        with client_home():
+            body = self.Body(api.DEFAULT_LIMIT + 1)
+            with mock.patch.object(api, "_opener", return_value=self.opener(body)):
+                with self.assertRaises(api.TooLarge):
+                    api.request("GET", "https://api.example.test/v1/x")
+            self.assertTrue(all(0 <= n <= api.DEFAULT_LIMIT + 1 for n in body.asked), body.asked)
+
+    def test_a_download_stops_at_its_size_and_its_error_body_is_bounded(self):
+        with client_home() as home:
+            dest = home / "staging" / "file.bin"
+            body = self.Body(10_000)
+            with mock.patch.object(api, "_opener", return_value=self.opener(body)):
+                with self.assertRaises(core.Status) as raised:
+                    api.download("https://dl.example.test/f", dest, sha256="0" * 64, size=100)
+            self.assertEqual(raised.exception.name, "SETUP_FAILED")
+            self.assertLessEqual(body.pos, 100 + (1 << 18), "reading stopped once more than the size had arrived")
+            self.assertFalse(dest.exists() or dest.with_name("file.bin.part").exists())
+            body = self.Body(1_048_577)
+            with mock.patch.object(api, "_opener", return_value=self.opener(body, error=500)):
+                with self.assertRaises(api.TooLarge):
+                    api.download("https://dl.example.test/f", dest, sha256="0" * 64)
+            self.assertTrue(all(0 <= n <= 64 * 1024 + 1 for n in body.asked), body.asked)
+
+
 if __name__ == "__main__":
     unittest.main()

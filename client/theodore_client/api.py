@@ -108,10 +108,27 @@ def _network_error(exc: Exception) -> NetworkError:
     return NetworkError(text, "NETWORK")
 
 
+DEFAULT_LIMIT = 8 << 20          # an API answer (manifest, guide part, list) is far smaller
+ERROR_LIMIT = 64 << 10           # an error answer is a short JSON object
+DOWNLOAD_LIMIT = 2 << 30         # a download without a published size (none is larger than LibreOffice)
+
+
+def _read_bounded(response, limit: int) -> bytes:
+    """The whole body, or TooLarge when it is (or says it is) longer than `limit`; never more than limit + 1 bytes read."""
+    declared = str(response.headers.get("Content-Length") or "") if response.headers is not None else ""
+    if declared.isdigit() and int(declared) > limit:
+        raise TooLarge(limit)
+    raw = response.read(limit + 1) or b""
+    if len(raw) > limit:
+        raise TooLarge(limit)
+    return raw
+
+
 def request(method: str, url: str, *, bearer: str | None = None, body=None, headers: dict | None = None,
             timeout: float = 20.0, redirects: bool = True, limit: int | None = None):
     """One HTTP exchange. Returns (status, headers, bytes) for 2xx and 304; raises ApiError or NetworkError.
-    With `limit`, a body longer than that many bytes raises TooLarge and is not read further."""
+    Every body is bounded: a success body longer than `limit` (DEFAULT_LIMIT when not given), or an error body longer
+    than ERROR_LIMIT, raises TooLarge and is not read further."""
     data = None
     hdrs = {"User-Agent": core.user_agent(), "Accept": "application/json, text/markdown;q=0.9, */*;q=0.1"}
     if body is not None:
@@ -123,21 +140,13 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
         with _opener(redirects).open(req, timeout=timeout) as resp:
-            if limit is None:
-                return resp.status, resp.headers, resp.read()
-            declared = str(resp.headers.get("Content-Length") or "")
-            if declared.isdigit() and int(declared) > limit:
-                raise TooLarge(limit)
-            raw = resp.read(limit + 1)
-            if len(raw) > limit:
-                raise TooLarge(limit)
-            return resp.status, resp.headers, raw
+            return resp.status, resp.headers, _read_bounded(resp, DEFAULT_LIMIT if limit is None else limit)
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return 304, exc.headers, b""
         if exc.code == 407:
             raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
-        raw = exc.read() or b""
+        raw = _read_bounded(exc, ERROR_LIMIT)
         code, message = f"http_{exc.code}", ""
         try:
             parsed = json.loads(raw.decode("utf-8"))
@@ -206,6 +215,7 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
         hdrs["Authorization"] = f"Bearer {bearer}"
     req = urllib.request.Request(url, headers=hdrs)
     digest, done = hashlib.sha256(), 0
+    bound = size or DOWNLOAD_LIMIT
     try:
         with _opener(redirects).open(req, timeout=timeout) as resp, open(part, "wb") as out:
             total = size or int(resp.headers.get("Content-Length") or 0)
@@ -213,6 +223,10 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
                 block = resp.read(1 << 18)
                 if not block:
                     break
+                if done + len(block) > bound:         # longer than published: refused, not read further
+                    out.close()
+                    _unlink(part)
+                    raise setup_failed("HASH_MISMATCH", f"{dest.name} is larger than its published size")
                 out.write(block)
                 digest.update(block)
                 done += len(block)
@@ -222,7 +236,7 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
         _unlink(part)
         if exc.code == 407:
             raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
-        raw = exc.read() or b""
+        raw = _read_bounded(exc, ERROR_LIMIT)
         code = f"http_{exc.code}"
         try:
             err = json.loads(raw.decode("utf-8")).get("error")
