@@ -106,7 +106,7 @@ class Installer(unittest.TestCase):
         for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
                          "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
             self.assertIn(expected, calls)
-        self.assertEqual(json.loads((self.box.user_home / ".claude" / "settings.json").read_text()), {}, "no empty key is left behind")
+        self.assertFalse((self.box.user_home / ".claude" / "settings.json").exists(), "the settings file Theodore created is gone again")
         if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
             self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
 

@@ -330,15 +330,18 @@ if [ "${1:-}" = "uninstall" ]; then
     printf '%s' "$out" | grep -qiE 'not found|not installed|no such|does not exist|unknown plugin|unknown marketplace|not registered' && return 0
     left="$left; the $name registration ($(printf '%s' "$out" | tail -n 1 | cut -c1-120))"
   }
+  # A marketplace that was there before Theodore registered (the record says so) is not Theodore's to remove.
+  rec="$HOME_DIR/state/host-settings.json"
+  kept_market() { grep -q "\"$1_added_marketplace\": false" "$rec" 2>/dev/null; }
   if command -v claude >/dev/null 2>&1; then
     unreg claude-code claude plugin uninstall theodore@theodore
-    unreg claude-code claude plugin marketplace remove theodore
+    kept_market claude || unreg claude-code claude plugin marketplace remove theodore
   fi
   if command -v codex >/dev/null 2>&1; then
     unreg codex codex plugin remove theodore@theodore
-    unreg codex codex plugin marketplace remove theodore
+    kept_market codex || unreg codex codex plugin marketplace remove theodore
   fi
-  if [ -f "$HOME_DIR/state/host-settings.json" ]; then
+  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update)":' "$rec" 2>/dev/null; then
     settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$HOME_DIR/state/host-settings.json" | head -n 1)
     left="$left; two Theodore entries in ${settings:-the Claude Code settings.json} (the extraKnownMarketplaces.theodore autoUpdate and the two Bash(...theodore...) rules under permissions.allow)"
   fi

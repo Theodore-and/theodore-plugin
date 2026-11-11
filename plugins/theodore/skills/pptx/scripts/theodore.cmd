@@ -559,12 +559,20 @@ rem Theodore's Python is not there: do what the client's uninstall does, as far 
 rem left. The DPAPI credential is a file in state\, which goes with the folders.
 set "LEFT="
 set "UOUT=%TEMP%\theodore-uninstall-%RANDOM%%RANDOM%.txt"
+rem A marketplace that was there before Theodore registered (the record says so) is not Theodore's to remove.
+set "REC=%HOME_DIR%\state\host-settings.json"
+set "KEEP_CLAUDE_MARKET="
+set "KEEP_CODEX_MARKET="
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"claude_added_marketplace\": false" "%REC%" >nul 2>&1 && set "KEEP_CLAUDE_MARKET=1"
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"codex_added_marketplace\": false" "%REC%" >nul 2>&1 && set "KEEP_CODEX_MARKET=1"
 where claude >nul 2>&1 && call :unreg claude-code claude plugin uninstall theodore@theodore
-where claude >nul 2>&1 && call :unreg claude-code claude plugin marketplace remove theodore
+if not defined KEEP_CLAUDE_MARKET (where claude >nul 2>&1 && call :unreg claude-code claude plugin marketplace remove theodore)
 where codex >nul 2>&1 && call :unreg codex codex plugin remove theodore@theodore
-where codex >nul 2>&1 && call :unreg codex codex plugin marketplace remove theodore
+if not defined KEEP_CODEX_MARKET (where codex >nul 2>&1 && call :unreg codex codex plugin marketplace remove theodore)
 del /q "%UOUT%" >nul 2>&1
-if exist "%HOME_DIR%\state\host-settings.json" set "LEFT=%LEFT%; two Theodore entries in the Claude Code settings.json, the extraKnownMarketplaces.theodore autoUpdate and the two Bash rules for the launcher under permissions.allow"
+set "SETTINGS_LEFT="
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
+if defined SETTINGS_LEFT set "LEFT=%LEFT%; two Theodore entries in the Claude Code settings.json, the extraKnownMarketplaces.theodore autoUpdate and the two Bash rules for the launcher under permissions.allow"
 call :remove_specimens
 if defined SPLEFT set "LEFT=%LEFT%%SPLEFT%"
 if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1

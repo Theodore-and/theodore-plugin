@@ -875,17 +875,57 @@ def _permission_rules() -> list[str]:
     return [f"Bash({launcher} *)", f'Bash("{launcher}" *)']
 
 
+# What Theodore added or changed in each assistant's settings is recorded in state/host-settings.json when it does it
+# (registration and `hosts settings --apply`), so the uninstall takes back exactly that and nothing else. The record
+# is flat JSON on purpose: the launchers' own uninstall reads two of its keys with grep and findstr.
+def _host_record_path() -> Path:
+    return core.home().state / "host-settings.json"
+
+
+def _host_record() -> dict:
+    return core.read_json(_host_record_path())
+
+
+def _save_host_record(record: dict) -> None:
+    core.home().ensure()
+    core.write_json(_host_record_path(), record, 0o600)
+
+
+def _load_settings(path: Path):
+    """The settings object, {} for no file, or None when the file is not a JSON object (then nothing is touched)."""
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _codex_config() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+
+
+def _listed(command: list[str], name: str = "theodore") -> bool:
+    code, out = _run(command, timeout=60)
+    return code == 0 and re.search(rf"(?<![A-Za-z0-9_-]){name}(?![A-Za-z0-9_-])", out) is not None
+
+
 def hosts(action: str, apply: bool) -> int:
     cfg, home = core.config(), core.home()
     lines: list[str] = []
     claude, codex = shutil.which("claude"), shutil.which("codex")
     plugin_dir = home.plugin
     if action == "register":
+        record = _host_record()
         if claude:
             code, out = _run([claude, "plugin", "list", "--json"])
             if code == 0 and '"theodore@theodore"' in out:
                 lines.append("claude-code: already registered")
             else:
+                settings_path = _claude_settings_path()
+                before_file, before = settings_path.exists(), _load_settings(settings_path) or {}
+                market_before = _listed([claude, "plugin", "marketplace", "list"])
                 url = str(cfg.get("marketplace_url") or "")
                 code, out = _run([claude, "plugin", "install", "theodore", "--marketplace", url]) if url else (1, "")
                 if code != 0 and url:
@@ -895,32 +935,42 @@ def hosts(action: str, apply: bool) -> int:
                     _run([claude, "plugin", "marketplace", "add", str(plugin_dir)])
                     code, out = _run([claude, "plugin", "install", "theodore@theodore"])
                 lines.append("claude-code: registered" if code == 0 else f"claude-code: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+                if code == 0:           # what the registration itself added to the settings file
+                    after = _load_settings(settings_path) or {}
+                    record["claude_registered"] = True
+                    record.setdefault("claude_added_marketplace", not market_before)
+                    record["path"] = str(settings_path)
+                    record["created_keys"] = sorted(set(record.get("created_keys") or []) | {k for k in after if k not in before})
+                    record["file_created"] = bool(record.get("file_created")) or (not before_file and settings_path.exists())
         else:
             lines.append("claude-code: not found on this computer")
         if codex:
             if not (plugin_dir / ".agents" / "plugins" / "marketplace.json").exists():
                 lines.append(f"codex: FAILED (no plugin copy in {plugin_dir}; run the installer again)")
             else:
+                config_before = _codex_config().exists()
+                market_before = _listed([codex, "plugin", "marketplace", "list"])
                 _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
                 code, out = _run([codex, "plugin", "add", "theodore@theodore"])
                 lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+                if code == 0:
+                    record["codex_registered"] = True
+                    record.setdefault("codex_added_marketplace", not market_before)
+                    record["codex_config_created"] = bool(record.get("codex_config_created")) or (not config_before and _codex_config().exists())
         else:
             lines.append("codex: not found on this computer")
+        if record:
+            _save_host_record(record)
     elif action == "unregister":
-        if claude:
-            _run([claude, "plugin", "uninstall", "theodore@theodore"])
-            _run([claude, "plugin", "marketplace", "remove", "theodore"])
-            lines.append("claude-code: removed")
-        if codex:
-            _run([codex, "plugin", "remove", "theodore@theodore"])
-            _run([codex, "plugin", "marketplace", "remove", "theodore"])
-            lines.append("codex: removed")
-        _claude_settings(remove=True)
+        left: list[str] = []
+        notes = _unregister_hosts(claude, codex, left)
+        lines += [f"{name}: removed" for name, tool in (("claude-code", claude), ("codex", codex)) if tool]
+        lines += [f"not removed: {item}" for item in left] + notes
     elif action == "settings":
         if not claude:
             lines.append("claude-code: not found; nothing to set")
         elif apply:
-            lines.append(_claude_settings(remove=False))
+            lines.append(_claude_settings_apply())
         else:
             return core.emit(Status("OK", f"optional, not applied: Claude Code can update the Theodore plugin by itself and run {home.launcher()} "
                                           f"without a permission prompt (two entries in {_claude_settings_path()}).",
@@ -940,56 +990,134 @@ def hosts(action: str, apply: bool) -> int:
                             "Theodore is registered in the assistants found on this computer." if action == "register" else "Done."))
 
 
-def _claude_settings(remove: bool) -> str:
-    """Add (or take back) exactly two things in Claude Code's user settings: marketplace auto-update and the launcher rule."""
+def _claude_settings_apply() -> str:
+    """Add exactly two things in Claude Code's user settings (marketplace auto-update and the launcher rule) and
+    record what was added or changed: the rules, the keys and the file created, the marketplace entry created or the
+    autoUpdate value it had before."""
     path = _claude_settings_path()
-    record_path = core.home().state / "host-settings.json"
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, ValueError):
-        return f"claude-code: settings not changed ({path} is not valid JSON)"
-    if not isinstance(settings, dict):
-        return f"claude-code: settings not changed ({path} is not an object)"
-    record = core.read_json(record_path)
-    if remove:
-        before = json.dumps(settings, sort_keys=True)
-        permissions = settings.get("permissions")
-        if record:
-            allow = permissions.get("allow") if isinstance(permissions, dict) else None
-            if isinstance(allow, list):
-                permissions["allow"] = [r for r in allow if r not in record.get("rules", [])]
-            markets = settings.get("extraKnownMarketplaces")
-            market = markets.get("theodore") if isinstance(markets, dict) else None
-            if isinstance(market, dict):
-                if record.get("created_marketplace"):
-                    markets.pop("theodore", None)
-                elif record.get("set_auto_update"):
-                    market.pop("autoUpdate", None)
-        # Keys that are empty once Theodore's entries are gone (ours, or what the assistant's own unregistration
-        # leaves) hold nothing: they go, so the file is as it was before Theodore.
-        if isinstance(permissions, dict) and permissions.get("allow") == []:
-            del permissions["allow"]
-        for key in ("permissions", "enabledPlugins", "extraKnownMarketplaces"):
-            if settings.get(key) == {}:
-                del settings[key]
-        if path.exists() and json.dumps(settings, sort_keys=True) != before:
-            core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
-        core.remove_tree(record_path)
-        return "claude-code: settings taken back" if record else "claude-code: no settings to take back"
-    rules = _permission_rules()
-    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-    added = [r for r in rules if r not in allow]
+    settings = _load_settings(path)
+    if settings is None:
+        return f"claude-code: settings not changed ({path} is not a valid JSON object)"
+    permissions, markets = settings.get("permissions", {}), settings.get("extraKnownMarketplaces", {})
+    if not isinstance(permissions, dict) or not isinstance(permissions.get("allow", []), list) or not isinstance(markets, dict) \
+            or not isinstance(markets.get("theodore", {}), dict):
+        return f"claude-code: settings not changed ({path} has these keys in another shape than expected)"
+    record = _host_record()
+    created = set(record.get("created_keys") or [])
+    file_created = bool(record.get("file_created")) or not path.exists()
+    if "permissions" not in settings:
+        created.add("permissions")
+    permissions = settings.setdefault("permissions", {})
+    if "allow" not in permissions:
+        created.add("permissions.allow")
+    allow = permissions.setdefault("allow", [])
+    added = [r for r in _permission_rules() if r not in allow]
     allow.extend(added)
+    if "extraKnownMarketplaces" not in settings:
+        created.add("extraKnownMarketplaces")
     markets = settings.setdefault("extraKnownMarketplaces", {})
-    created = "theodore" not in markets
-    if created:
-        markets["theodore"] = {"source": {"source": "url", "url": str(core.config().get("marketplace_url") or "")}}
-    set_auto = markets["theodore"].get("autoUpdate") is not True
-    markets["theodore"]["autoUpdate"] = True
+    market = record.get("marketplace")
+    if "theodore" not in markets:
+        markets["theodore"] = {"source": {"source": "url", "url": str(core.config().get("marketplace_url") or "")}, "autoUpdate": True}
+        market = {"created": True, "entry": json.loads(json.dumps(markets["theodore"]))}
+    else:
+        entry = markets["theodore"]
+        if market is None:              # the first change Theodore makes to an entry it did not create: remember what was there
+            market = {"created": False, "set_auto_update": entry.get("autoUpdate") is not True,
+                      "auto_update_prior": {"present": "autoUpdate" in entry, **({"value": entry["autoUpdate"]} if "autoUpdate" in entry else {})}}
+        entry["autoUpdate"] = True
     core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
-    core.write_json(record_path, {"rules": sorted(set(record.get("rules", []) + added)), "created_marketplace": created or record.get("created_marketplace", False),
-                                  "set_auto_update": set_auto or record.get("set_auto_update", False), "path": str(path)})
+    record.update({"rules": sorted(set(record.get("rules") or []) | set(added)), "created_keys": sorted(created), "marketplace": market,
+                   "file_created": file_created, "path": str(path)})
+    _save_host_record(record)
     return f"claude-code: automatic updates on and launcher allowed in {path}"
+
+
+def _legacy_marketplace(record: dict) -> dict | None:
+    """A record written by a client before round 7 (created_marketplace / set_auto_update, no prior value)."""
+    if record.get("created_marketplace"):
+        return {"created": True, "entry": None}
+    if record.get("set_auto_update"):
+        return {"created": False, "set_auto_update": True, "auto_update_prior": {"present": False}}
+    return None
+
+
+def _claude_settings_restore() -> tuple[str | None, list[str]]:
+    """Take back exactly what the record says Theodore added or changed: its rules, the marketplace entry it created
+    (only if nobody changed it since) or the autoUpdate value it changed (restored, unless changed since), and the
+    keys and the file it created, only when they hold nothing. Anything else, empty or not, stays. Returns (a problem
+    when the file could not be read or written, notes for what was left on purpose)."""
+    record = _host_record()
+    path = Path(record.get("path") or _claude_settings_path())
+    notes: list[str] = []
+    if not record or not path.exists():
+        return None, notes
+    settings = _load_settings(path)
+    if settings is None:
+        return f"settings not changed ({path} is not a valid JSON object)", notes
+    before = json.dumps(settings, sort_keys=True)
+    permissions = settings.get("permissions")
+    allow = permissions.get("allow") if isinstance(permissions, dict) else None
+    if isinstance(allow, list):
+        permissions["allow"] = [r for r in allow if r not in (record.get("rules") or [])]
+    markets = settings.get("extraKnownMarketplaces")
+    entry = markets.get("theodore") if isinstance(markets, dict) else None
+    market = record.get("marketplace") if "marketplace" in record else _legacy_marketplace(record)
+    if isinstance(entry, dict) and market:
+        if market.get("created"):
+            ours = market.get("entry") or {"source": {"source": "url", "url": str(core.config().get("marketplace_url") or "")}, "autoUpdate": True}
+            if entry == ours:
+                markets.pop("theodore", None)
+            else:
+                notes.append(f"the extraKnownMarketplaces.theodore entry in {path} was changed after Theodore created it, so it was left as it is")
+        elif market.get("set_auto_update"):
+            if entry.get("autoUpdate") is True:
+                prior = market.get("auto_update_prior") or {}
+                if prior.get("present"):
+                    entry["autoUpdate"] = prior.get("value")
+                else:
+                    entry.pop("autoUpdate", None)
+            else:
+                notes.append(f"extraKnownMarketplaces.theodore.autoUpdate in {path} was changed after Theodore set it, so it was left as it is")
+    for key in sorted(record.get("created_keys") or [], key=lambda k: -k.count(".")):        # the deepest first
+        parent, _, leaf = key.rpartition(".")
+        holder = settings.get(parent) if parent else settings
+        if isinstance(holder, dict) and holder.get(leaf, None) in ([], {}):
+            del holder[leaf]
+    try:
+        if record.get("file_created") and settings == {}:
+            path.unlink()
+        elif json.dumps(settings, sort_keys=True) != before:
+            core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
+    except OSError as exc:
+        return f"settings not changed ({path}: {exc.__class__.__name__})", notes
+    return None, notes
+
+
+def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) -> list[str]:
+    """Remove the plugin from each assistant; its marketplace only when Theodore added it (or when no record says);
+    then the settings Theodore recorded. Problems go to `left`; returns notes for what stays on purpose."""
+    record = _host_record()
+    notes: list[str] = []
+    for name, tool, key, plugin_args, market_args in (
+            ("claude-code", claude, "claude", ["plugin", "uninstall", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"]),
+            ("codex", codex, "codex", ["plugin", "remove", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"])):
+        if not tool:
+            continue
+        steps = [plugin_args]
+        if record.get(f"{key}_added_marketplace") is False:
+            notes.append(f"{name}: its theodore marketplace was there before Theodore and was kept")
+        else:
+            steps.append(market_args)
+        for args in steps:
+            problem = _unregistered([tool, *args])
+            if problem:
+                left.append(f"the {name} registration ({' '.join(args)}: {problem})")
+    problem, settings_notes = _claude_settings_restore()
+    if problem:
+        left.append(f"the Theodore entries in {_claude_settings_path()} ({problem})")
+    notes += settings_notes
+    return notes
 
 
 # --- the installer's plugin step ----------------------------------------------------------------------------------------
@@ -1085,30 +1213,25 @@ def _unregistered(command: list[str]) -> str | None:
 
 def _codex_leftovers() -> None:
     """What Codex keeps after Theodore is unregistered and that holds nothing: its empty plugin cache folder for
-    Theodore, and a configuration file of zero bytes. Anything with content stays."""
+    Theodore, and, when Theodore's registration created it, a configuration file left with zero bytes. Anything with
+    content, or that was there before, stays. Runs before the record is deleted with state/."""
     base = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     with contextlib.suppress(OSError):
         (base / "plugins" / "cache" / "theodore").rmdir()          # only when empty
-    with contextlib.suppress(OSError):
-        config = base / "config.toml"
-        if config.is_file() and not config.is_symlink() and config.stat().st_size == 0:
-            config.unlink()
+    if _host_record().get("codex_config_created"):
+        with contextlib.suppress(OSError):
+            config = _codex_config()
+            if config.is_file() and not config.is_symlink() and config.stat().st_size == 0:
+                config.unlink()
 
 
 def uninstall(keep_hosts: bool) -> int:
     home = core.home()
     left: list[str] = []
+    notes: list[str] = []
     if not keep_hosts:
-        claude, codex = shutil.which("claude"), shutil.which("codex")
-        for name, tool, commands_ in (("claude-code", claude, (["plugin", "uninstall", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"])),
-                                      ("codex", codex, (["plugin", "remove", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"]))):
-            for args in commands_ if tool else ():
-                problem = _unregistered([tool, *args])
-                if problem:
-                    left.append(f"the {name} registration ({' '.join(args)}: {problem})")
-        settings = _claude_settings(remove=True)
-        if "not changed" in settings or "not valid" in settings:
-            left.append(f"the two Theodore entries in {_claude_settings_path()} ({settings})")
+        notes = _unregister_hosts(shutil.which("claude"), shutil.which("codex"), left)
+        _codex_leftovers()
     for name in ("setup", "packs", "engine-update", "client-update", "libreoffice"):
         pid = int(Job(name).read().get("pid") or 0)
         if pid and pid != os.getpid() and Job(name).alive():
@@ -1124,8 +1247,6 @@ def uninstall(keep_hosts: bool) -> int:
             left.append(f"the render cache {cache}")
     for folder in specimens.sweep(everything=True):
         left.append(f"the specimen folder {folder}")
-    if not keep_hosts:
-        _codex_leftovers()
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
@@ -1140,7 +1261,7 @@ def uninstall(keep_hosts: bool) -> int:
         # run (by then without Theodore's Python: the launcher's or the installer's own uninstall) confirm it.
         print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed; its folders in {root} are deleted a few "
               f"seconds after this command ends, which is scheduled but not confirmed"
-              + (f"; also not removed: {'; '.join(left)}" if left else "") + ".\n"
+              + (f"; also not removed: {'; '.join(left)}" if left else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "") + ".\n"
               "NEXT: run the same command again in 15 seconds; it confirms the deletion (or removes what is left) and says so.\n"
               "TELL THE USER: Theodore is being removed from this computer; I am checking that its files are gone. Your decks were not touched.",
               flush=True)
@@ -1157,6 +1278,8 @@ def uninstall(keep_hosts: bool) -> int:
             except OSError:
                 pass
     what = f"its folders in {root} were deleted; {len(kept)} other item(s) there were not Theodore's and were left alone" if kept else f"{root} was deleted"
+    if notes:           # what was left on purpose because it was not Theodore's to take back
+        what += "; left as they are: " + "; ".join(notes)
     if left:          # say exactly what is still there, never "removed"
         print(f"THEODORE RETRY: Theodore's files were removed ({what}), but these could not be: {'; '.join(left)}.\n"
               "NEXT: tell the user what is left (each item above names the folder, the keychain item or the command); it can be removed by hand, "

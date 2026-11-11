@@ -1447,6 +1447,104 @@ class Hosts(ClientCase):
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(json.loads(settings.read_text()), original, "exactly as before, no empty key left")
 
+    # --- ruling 9: uninstall restores exactly what was there -----------------------------------------------------------
+    def settings_file(self, value=None) -> Path:
+        path = self.box.user_home / ".claude" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if value is not None:
+            path.write_text(json.dumps(value))
+        return path
+
+    def registering_tools(self, claude_markets: str = "", codex_markets: str = "") -> Path:
+        """claude that adds enabledPlugins to settings.json on install and takes its own entry back on uninstall (leaving
+        what it found), codex that creates an empty config.toml on add; both list marketplaces as given."""
+        bin_dir = self.box.tmp / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        log = self.box.tmp / "host-calls.log"
+        settings = self.settings_file()
+        edit = (f'"{sys.executable}" -c "import json,sys,os; p=sys.argv[1]; d=json.load(open(p)) if os.path.exists(p) else {{}}; '
+                f'e=d.setdefault(\'enabledPlugins\',{{}}); e.pop(\'theodore@theodore\',None) if sys.argv[2]==\'off\' else e.update({{\'theodore@theodore\':True}}); '
+                f'json.dump(d,open(p,\'w\'))" "{settings}"')
+        (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $*" >> "{log}"\ncase "$*" in\n'
+                                        f'"plugin list --json") echo "[]";;\n"plugin marketplace list") echo "{claude_markets}";;\n'
+                                        f'"plugin install"*) {edit} on;;\n"plugin uninstall"*) {edit} off;;\nesac\nexit 0\n')
+        codex_config = Path(self.box.env["CODEX_HOME"]) / "config.toml"
+        (bin_dir / "codex").write_text(f'#!/bin/sh\necho "codex $*" >> "{log}"\ncase "$*" in\n"plugin marketplace list") echo "{codex_markets}";;\n'
+                                       f'"plugin add"*) mkdir -p "{codex_config.parent}"; : >> "{codex_config}";;\nesac\nexit 0\n')
+        for name in ("claude", "codex"):
+            (bin_dir / name).chmod(0o755)
+        self.box.env["PATH"] = f"{bin_dir}{os.pathsep}{self.box.env['PATH']}"
+        plugin = self.box.home / "plugin"
+        (plugin / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
+        (plugin / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        return log
+
+    def test_a_prior_auto_update_false_is_restored_exactly(self):
+        self._fake_tools()
+        original = {"extraKnownMarketplaces": {"theodore": {"source": {"source": "github", "repo": "me/fork"}, "autoUpdate": False}},
+                    "permissions": {"allow": ["Bash(ls)"], "deny": []}, "model": "opus"}
+        path = self.settings_file(original)
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertIs(json.loads(path.read_text())["extraKnownMarketplaces"]["theodore"]["autoUpdate"], True)
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), original, "the user's own autoUpdate: false is back")
+
+    def test_an_entry_theodore_created_and_the_user_changed_is_left_and_said(self):
+        self._fake_tools()
+        path = self.settings_file({"theme": "dark"})
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        changed = json.loads(path.read_text())
+        changed["extraKnownMarketplaces"]["theodore"]["note"] = "mine"
+        path.write_text(json.dumps(changed))
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("changed after Theodore created it", first)
+        after = json.loads(path.read_text())
+        self.assertEqual(after["extraKnownMarketplaces"]["theodore"], changed["extraKnownMarketplaces"]["theodore"], "left as it is")
+        self.assertNotIn("permissions", after, "Theodore's rules and the keys it created still go")
+        self.assertEqual(after["theme"], "dark")
+
+    def test_user_authored_empty_structures_stay_and_a_file_theodore_created_goes(self):
+        self._fake_tools()
+        authored = {"enabledPlugins": {}, "permissions": {"allow": []}, "extraKnownMarketplaces": {}}
+        path = self.settings_file(authored)
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), authored, "never removes keys or empty structures it did not create")
+        path.unlink()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertTrue(path.exists())
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertFalse(path.exists(), "a settings file Theodore created, empty again, goes")
+
+    def test_what_registration_added_goes_and_what_was_there_stays(self):
+        log = self.registering_tools()
+        path = self.settings_file({"theme": "dark"})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("enabledPlugins", json.loads(path.read_text()))
+        self.assertTrue((Path(self.box.env["CODEX_HOME"]) / "config.toml").exists())
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), {"theme": "dark"}, "the key the registration created goes once empty")
+        self.assertFalse((Path(self.box.env["CODEX_HOME"]) / "config.toml").exists(), "the empty config the registration created goes")
+        calls = log.read_text().splitlines()
+        self.assertIn("claude plugin marketplace remove theodore", calls)
+        self.assertIn("codex plugin marketplace remove theodore", calls)
+
+    def test_marketplaces_and_keys_that_were_there_before_are_kept(self):
+        log = self.registering_tools(claude_markets="theodore (https://x.test/marketplace.json)", codex_markets="theodore  ~/.theodore/plugin")
+        codex_config = Path(self.box.env["CODEX_HOME"]) / "config.toml"
+        codex_config.parent.mkdir(parents=True, exist_ok=True)
+        codex_config.write_bytes(b"")
+        path = self.settings_file({"enabledPlugins": {"other@x": True}})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("was there before Theodore and was kept", first)
+        calls = log.read_text().splitlines()
+        self.assertNotIn("claude plugin marketplace remove theodore", calls)
+        self.assertNotIn("codex plugin marketplace remove theodore", calls)
+        self.assertIn("claude plugin uninstall theodore@theodore", calls, "the plugin itself is Theodore's and goes")
+        self.assertEqual(json.loads(path.read_text()), {"enabledPlugins": {"other@x": True}})
+        self.assertTrue(codex_config.exists(), "a config that was there before stays, even empty")
+
     def test_broken_settings_file_is_left_alone(self):
         self._fake_tools()
         settings = self.box.user_home / ".claude" / "settings.json"
@@ -1529,7 +1627,9 @@ class HostTest(ClientCase):
                 self.api.activation_codes.clear()
                 self.ready()
                 self.revoke()
-                result = self.client(*command)
+                work = self.box.tmp / "work"            # a working folder that does not hold the temporary folder (specimens)
+                work.mkdir()
+                result = self.client(*command, cwd=work)
                 self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
                 self.gone()
                 workspace = self.box.tmp / "ws"
@@ -1644,12 +1744,13 @@ class HostTest(ClientCase):
         (codex_home / "config.toml").write_bytes(b"")
         settings = Path(self.box.env["CLAUDE_CONFIG_DIR"]) / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
-        settings.write_text(json.dumps({"enabledPlugins": {}, "extraKnownMarketplaces": {}, "permissions": {"allow": []}, "theme": "dark"}))
+        authored = {"enabledPlugins": {}, "extraKnownMarketplaces": {}, "permissions": {"allow": []}, "theme": "dark"}
+        settings.write_text(json.dumps(authored))
         self.assertStatus(self.client("uninstall"), "OK", 0)
-        self.assertFalse((codex_home / "plugins" / "cache" / "theodore").exists())
+        self.assertFalse((codex_home / "plugins" / "cache" / "theodore").exists(), "Codex's empty cache folder for Theodore goes")
         self.assertTrue((codex_home / "plugins" / "cache" / "other").exists())
-        self.assertFalse((codex_home / "config.toml").exists(), "the 0-byte file goes")
-        self.assertEqual(json.loads(settings.read_text()), {"theme": "dark"})
+        self.assertTrue((codex_home / "config.toml").exists(), "a 0-byte config Theodore did not create stays (ruling 9)")
+        self.assertEqual(json.loads(settings.read_text()), authored, "empty structures Theodore did not create stay (ruling 9)")
 
     def test_uninstall_keeps_a_codex_config_and_settings_that_hold_something(self):
         self.ready()
@@ -1787,7 +1888,9 @@ class Revocation(ClientCase):
                 if prepare:
                     prepare()
                 self.api.revoke_all()
-                result = self.client(*command)
+                work = self.box.tmp / "work"            # a working folder that does not hold the temporary folder (specimens)
+                work.mkdir()
+                result = self.client(*command, cwd=work)
                 first, nxt, tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
                 self.assertEqual(sum(line.startswith("THEODORE ") for line in result.stdout.splitlines()), 1, result.stdout)
                 self.assertNotIn("=== THEODORE", result.stdout, "no guide text once revoked")

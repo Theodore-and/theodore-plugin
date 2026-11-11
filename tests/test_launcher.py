@@ -429,6 +429,26 @@ class Failures(LauncherCase):
             self.assertTrue(os.path.lexists(link) and (precious / "keep.txt").exists(), "a link is not followed")
         self.assertFalse(self.box.home.exists())
 
+    def test_uninstall_without_python_keeps_marketplaces_that_were_there_before(self):
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        (state / "host-settings.json").write_text(json.dumps({"claude_added_marketplace": False, "claude_registered": True,
+                                                              "codex_added_marketplace": False, "codex_registered": True}, indent=2) + "\n")
+        fake = self.box.tmp / "fakebin"
+        fake.mkdir()
+        log = self.box.tmp / "calls.log"
+        for name in ("claude", "codex"):
+            if IS_WINDOWS:
+                (fake / f"{name}.cmd").write_text(f'@echo off\r\n>>"{log}" echo {name} %*\r\nexit /b 0\r\n')
+            else:
+                (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\nexit 0\n')
+                (fake / name).chmod(0o755)
+        self.assertStatus(self.run_launcher("uninstall", env={"PATH": f"{fake}{os.pathsep}{self.box.env['PATH']}"}), "OK", 0)
+        calls = [line.strip() for line in log.read_text().splitlines()]
+        self.assertIn("claude plugin uninstall theodore@theodore", calls)
+        self.assertIn("codex plugin remove theodore@theodore", calls)
+        self.assertFalse([c for c in calls if "marketplace remove" in c], calls)
+
     def test_uninstall_without_python_reports_what_it_could_not_remove(self):
         fake = self.box.tmp / "failing tools"
         fake.mkdir()

@@ -86,7 +86,8 @@ and the reports and preferences you or your assistant file; never deck content, 
 "%LOCALAPPDATA%\Theodore\bin\theodore.cmd" uninstall  Windows
 ```
 
-This removes the plugin from Claude Code and Codex, takes back the two optional settings entries, and deletes
+This removes the plugin from Claude Code and Codex, takes back exactly what Theodore added or changed in their
+settings (recorded in `state/host-settings.json` when it made the change), and deletes
 the keychain item, the engine's render cache and every Theodore subfolder listed above (and the folder itself
 when nothing else is in it). What is left afterwards:
 
@@ -103,9 +104,11 @@ when nothing else is in it). What is left afterwards:
   the hour, and the uninstall (the launcher's and the installer's own included) removes every one, wherever `TMPDIR`
   pointed. When the temporary folder lies inside the working folder they go to `~/Library/Caches/Theodore/specimens`,
   `~/.cache/theodore/specimens` or `%LOCALAPPDATA%\Theodore\Cache\specimens` instead; never under the working folder.
-- In Codex's folder (`~/.codex`): nothing of Theodore's. The uninstall removes Codex's empty plugin cache folder
-  for Theodore and a configuration file of zero bytes; in Claude Code's `settings.json` it removes the keys that
-  are empty once Theodore's entries are gone (`enabledPlugins`, `extraKnownMarketplaces`, `permissions.allow`).
+- In the assistants' settings: what was there before. The uninstall removes Theodore's two permission rules, the
+  marketplace entry it created (left as it is, and said so, if you changed it since), restores an `autoUpdate` value
+  it changed (an explicit `false` included), removes a marketplace only if Theodore's registration added it, and
+  removes a key, an empty `config.toml` or a `settings.json` only if Theodore created it and it is empty again.
+  Anything you added, empty or not, stays. Codex's empty plugin cache folder for Theodore goes.
 - Your account at theodoreand.ai. Remove this device, or the account, in the portal.
 
 If the launcher is gone, deleting those subfolders and the keychain item by hand does the same.
