@@ -192,20 +192,56 @@ if "%JV:~0,1%"==" " set "JV=%JV:~1%"
 exit /b 0
 
 :remove_specimens
-rem Specimen folders: every one the client made is a line "<created epoch> <path>" in state\specimens.txt; they go
-rem with the uninstall, from that record and from the current roots, whatever TEMP was when they were made. Only
-rem folders named theodore-specimens-* that are real folders (not a junction or link) are removed. Result in SPLEFT.
+rem All of them (uninstall). Result in SPLEFT.
 set "SPLEFT="
-if exist "%HOME_DIR%\state\specimens.txt" for /f "usebackq tokens=1,*" %%A in ("%HOME_DIR%\state\specimens.txt") do call :remove_specimen "%%B"
-if defined TEMP for /d %%D in ("%TEMP%\theodore-specimens-*") do call :remove_specimen "%%~fD"
-if defined LOCALAPPDATA for /d %%D in ("%LOCALAPPDATA%\Theodore\Cache\specimens\theodore-specimens-*") do call :remove_specimen "%%~fD"
+call :ps_specimens all
 if defined LOCALAPPDATA rmdir "%LOCALAPPDATA%\Theodore\Cache\specimens" >nul 2>&1
 if defined LOCALAPPDATA rmdir "%LOCALAPPDATA%\Theodore\Cache" >nul 2>&1
 exit /b 0
 
-:remove_specimen
-set "SPN=%~nx1"
+:ps_specimens
+rem %1 all or expired. Specimen folders: every one the client made is a line "<created epoch> <path>" in
+rem state\specimens.txt (after a first line "#v2" the paths are encoded: %%25, %%0D, %%0A for "%%", CR and LF; a record
+rem without it is read as it is). Batch cannot decode that (a "%%" in a value is expanded again by CALL, and a
+rem substitution cannot search for "%%"), so PowerShell reads the record, as the client does, and removes the folders it
+rem names and those in today's roots: only real folders named theodore-specimens-*, never through a junction or link.
+rem What could not be removed is added to SPLEFT. Without PowerShell: plain paths only, and a record holding an encoded
+rem path is kept and named (Theodore's runtime, or PowerShell, removes it).
+set "PSOUT=%TEMP%\theodore-specimens-left-%RANDOM%%RANDOM%.txt"
+set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PWSH%" goto :ps_specimens_none
+set "THEODORE_SWEEP_HOME=%HOME_DIR%"
+set "THEODORE_SWEEP_MODE=%~1"
+set "THEODORE_SWEEP_OUT=%PSOUT%"
+"%PWSH%" -NoProfile -NonInteractive -Command "$now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $all=($env:THEODORE_SWEEP_MODE -eq 'all'); $d=@(); $r=Join-Path $env:THEODORE_SWEEP_HOME 'state\specimens.txt'; if(Test-Path -LiteralPath $r){$lines=@(Get-Content -LiteralPath $r -Encoding UTF8); $enc=($lines.Count -gt 0 -and $lines[0] -eq '#v2'); foreach($l in $lines){if($l -eq '#v2'){continue}; $p=$l.Split(' ',2); $t=0; if($p.Count -eq 2 -and [long]::TryParse($p[0],[ref]$t)){$x=$p[1]; if($enc){$x=[regex]::Replace($x,'%%(25|0[AaDd])',{param($m) [string][char][Convert]::ToInt32($m.Groups[1].Value,16)})}; if($all -or ($now-$t) -gt 3600 -or ($t-$now) -gt 60){$d+=$x}}}}; $roots=@($env:TEMP); if($env:LOCALAPPDATA){$roots+=Join-Path $env:LOCALAPPDATA 'Theodore\Cache\specimens'}; foreach($root in $roots){if($root -and (Test-Path -LiteralPath $root)){Get-ChildItem -LiteralPath $root -Directory -Filter 'theodore-specimens-*' -ErrorAction SilentlyContinue | Where-Object {$all -or $_.LastWriteTime -lt (Get-Date).AddHours(-1)} | ForEach-Object {$d+=$_.FullName}}}; $left=@(); foreach($x in $d){$i=Get-Item -LiteralPath $x -Force -ErrorAction SilentlyContinue; if($i -and $i.PSIsContainer -and $i.Name -like 'theodore-specimens-?*' -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)){Remove-Item -LiteralPath $x -Recurse -Force -ErrorAction SilentlyContinue; if(Test-Path -LiteralPath $x){$left+=$x}}}; $left | Out-File -LiteralPath $env:THEODORE_SWEEP_OUT -Encoding Default" <nul >nul 2>&1
+set "THEODORE_SWEEP_HOME="
+set "THEODORE_SWEEP_MODE="
+set "THEODORE_SWEEP_OUT="
+if exist "%PSOUT%" for /f "usebackq delims=" %%L in ("%PSOUT%") do (set "ONE=%%L" & call :specimen_left)
+if exist "%PSOUT%" del /q "%PSOUT%" >nul 2>&1
+exit /b 0
+:ps_specimens_none
+if /i not "%~1"=="all" exit /b 0
+if exist "%HOME_DIR%\state\specimens.txt" for /f "usebackq tokens=1,*" %%A in ("%HOME_DIR%\state\specimens.txt") do (set "ONE=%%B" & call :remove_one)
+if defined TEMP for /d %%D in ("%TEMP%\theodore-specimens-*") do (set "ONE=%%~fD" & call :remove_one)
+if defined LOCALAPPDATA for /d %%D in ("%LOCALAPPDATA%\Theodore\Cache\specimens\theodore-specimens-*") do (set "ONE=%%~fD" & call :remove_one)
+if exist "%HOME_DIR%\state\specimens.txt" "%SYS32%\findstr.exe" /c:"%%25" /c:"%%0A" /c:"%%0D" "%HOME_DIR%\state\specimens.txt" >nul 2>&1 && set "SPLEFT=%SPLEFT%; specimen folders recorded under an encoded path in %HOME_DIR%\state\specimens.txt (removing them needs PowerShell or Theodore's runtime)"
+exit /b 0
+:specimen_left
+set "SPLEFT=%SPLEFT%; the specimen folder %ONE%"
+exit /b 0
+:remove_one
+rem ONE: a path from the record or a root (read through a variable: CALL would expand a "%%" in it again).
+for %%N in ("%ONE%") do set "SPN=%%~nxN"
 if not "%SPN:~0,19%"=="theodore-specimens-" exit /b 0
+if "%SPN%"=="theodore-specimens-" exit /b 0
+if not exist "%ONE%\" exit /b 0
+for %%N in ("%ONE%") do set "SPA=%%~aN"
+if not "%SPA:l=%"=="%SPA%" exit /b 0
+rmdir /s /q "%ONE%" >nul 2>&1
+if exist "%ONE%\" set "SPLEFT=%SPLEFT%; the specimen folder %ONE%"
+exit /b 0
+
 if "%SPN%"=="theodore-specimens-" exit /b 0
 if not exist "%~1\" exit /b 0
 set "SPA=%~a1"
@@ -244,14 +280,9 @@ if exist "%ENVTMP%" del /q "%ENVTMP%" >nul 2>&1
 exit /b 0
 
 :sweep_specimens
-rem The expired specimen folders: recorded more than an hour ago (or dated ahead), or untouched for an hour. Batch has
-rem no clock in seconds, so PowerShell decides; without it the client sweeps once it runs. Only real folders named
-rem theodore-specimens-* are removed, never through a junction or link; the record is rewritten only by the client.
-set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
-if not exist "%PWSH%" exit /b 0
-set "THEODORE_SWEEP_HOME=%HOME_DIR%"
-"%PWSH%" -NoProfile -NonInteractive -Command "$now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $d=@(); $r=Join-Path $env:THEODORE_SWEEP_HOME 'state\specimens.txt'; if(Test-Path -LiteralPath $r){foreach($l in Get-Content -LiteralPath $r){$p=$l.Split(' ',2); $t=0; if($p.Count -eq 2 -and [long]::TryParse($p[0],[ref]$t) -and (($now-$t) -gt 3600 -or ($t-$now) -gt 60)){$d+=$p[1]}}}; $roots=@($env:TEMP); if($env:LOCALAPPDATA){$roots+=Join-Path $env:LOCALAPPDATA 'Theodore\Cache\specimens'}; foreach($root in $roots){if($root -and (Test-Path -LiteralPath $root)){Get-ChildItem -LiteralPath $root -Directory -Filter 'theodore-specimens-*' -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -lt (Get-Date).AddHours(-1)} | ForEach-Object {$d+=$_.FullName}}}; foreach($x in $d){$i=Get-Item -LiteralPath $x -Force -ErrorAction SilentlyContinue; if($i -and $i.PSIsContainer -and $i.Name -like 'theodore-specimens-?*' -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)){Remove-Item -LiteralPath $x -Recurse -Force -ErrorAction SilentlyContinue}}" <nul >nul 2>&1
-set "THEODORE_SWEEP_HOME="
+rem The expired ones (recorded more than an hour ago or dated ahead, or untouched for an hour), before the bootstrap.
+set "SPLEFT="
+call :ps_specimens expired
 exit /b 0
 
 :del_state_file

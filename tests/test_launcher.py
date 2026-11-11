@@ -548,6 +548,65 @@ class Failures(LauncherCase):
             ours = (launcher == self.box.launcher) == (winner == self.api.base)
             self.assertEqual(code, 74 if ours else 64, f"{launcher}: {out}")
 
+    def odd_roots(self) -> list[Path]:
+        roots = [self.box.tmp / "100%proof"]
+        if not IS_WINDOWS:
+            roots.append(self.box.tmp / "tmp\nwith a line feed %0A")
+        return roots
+
+    def record_odd_folders(self, age: int) -> list[Path]:
+        import time
+        from theodore_client import specimens as client_specimens
+        folders = []
+        for index, root in enumerate(self.odd_roots()):
+            folder = root / f"theodore-specimens-00000000000000a{index}"
+            folder.mkdir(parents=True)
+            (folder / "cover-01.jpg").write_bytes(b"jpeg")
+            folders.append(folder)
+        state = self.box.home / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        made = int(time.time()) - age
+        (state / "specimens.txt").write_text("#v2\n" + "".join(f"{made} {client_specimens._encode(f)}\n" for f in folders), newline="\n")
+        return folders
+
+    def test_bare_runs_read_the_encoded_record(self):
+        # Round 9 (review 4 and 13): a root with "%" and one with a line feed, TMPDIR changed since; the launcher's
+        # own sweep (bootstrap failing) and its own uninstall find them through the record.
+        temp = Path(self.box.env["TMPDIR"])
+        env = {"TEMP": str(temp), "TMP": str(temp)}
+        expired = self.record_odd_folders(age=3700)
+        dead = f"http://127.0.0.1:{closed_port()}/python.tar.gz"
+        self.box.write_launcher_json(**{self.python_key() + "_url": dead})
+        result = self.run_launcher("guide", "pptx", env=env)
+        self.assertIn(result.returncode, (67, 68), result.stdout + result.stderr)
+        for folder in expired:
+            self.assertFalse(folder.exists(), f"expired and recorded under an encoded path: removed ({folder!r})")
+        fresh = self.record_odd_folders(age=60)
+        self.assertStatus(self.run_launcher("uninstall", env=env), "OK", 0)
+        for folder in fresh:
+            self.assertFalse(folder.exists(), f"uninstall removes it through the record ({folder!r})")
+
+    @unittest.skipIf(IS_WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0), "a folder that cannot be removed (POSIX permissions)")
+    def test_an_ordinary_bare_run_survives_a_removal_that_fails(self):
+        # Round 9 (review 16): under set -u a failed removal in the sweep of an ordinary run must not end the launcher.
+        import time
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        locked = self.box.tmp / "locked root"
+        folder = locked / "theodore-specimens-0000000000000001"
+        folder.mkdir(parents=True)
+        (folder / "f").write_text("x")
+        (state / "specimens.txt").write_text(f"#v2\n{int(time.time()) - 3700} {folder}\n")
+        locked.chmod(0o555)
+        self.addCleanup(lambda: locked.chmod(0o755))
+        dead = f"http://127.0.0.1:{closed_port()}/python.tar.gz"
+        self.box.write_launcher_json(**{self.python_key() + "_url": dead})
+        result = self.run_launcher("guide", "pptx")
+        self.assertNotIn("unbound", result.stderr)
+        self.assertIn(result.returncode, (67, 68), result.stdout + result.stderr)
+        status_lines(result.stdout)
+        self.assertTrue(folder.exists())
+
     def test_uninstall_without_python_reports_what_it_could_not_remove(self):
         fake = self.box.tmp / "failing tools"
         fake.mkdir()

@@ -312,41 +312,64 @@ if [ "${1:-}" = "__bootstrap" ]; then
   exit $?
 fi
 
-# Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt (after a first
-# line "#v2"; a path holding "%" or a line break is written encoded, and such a name never exists as written, so it is
-# simply skipped here: the client decodes it). They go from that record and from the current roots, whatever TMPDIR
-# was when they were made: expired ones (an hour) at every run that reaches this launcher's own code, all of them at
-# uninstall. Only folders named theodore-specimens-*, real (not a link) and this user's own are removed; the record
-# itself is rewritten only by the client.
+# Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt. After a first
+# line "#v2" the paths are encoded (%25, %0D, %0A for "%", CR and LF) and decoded here as the client does; a record
+# without that line (round 7) is read as it is. They go from that record and from the current roots, whatever TMPDIR
+# was when they were made: the expired ones (an hour) at every run that reaches this launcher's own code, all of them
+# at uninstall. Only folders named theodore-specimens-*, real (not a link) and this user's own are removed; the record
+# itself is rewritten only by the client. Every variable below is set before use (the launcher runs under set -u).
+left= specimens_left=
 specimen_cache() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then echo "${HOME:-/nonexistent}/Library/Caches/Theodore/specimens"
   else echo "${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/theodore/specimens"; fi
+}
+specimen_decode() { # an encoded path, decoded, then "x" (command substitution would drop a trailing line feed)
+  printf '%s' "$1" | awk 'BEGIN { h = "0123456789ABCDEF"; ORS = "" }
+    { s = $0; o = ""
+      while ((i = index(s, "%")) > 0) {
+        o = o substr(s, 1, i - 1); a = index(h, toupper(substr(s, i + 1, 1))); b = index(h, toupper(substr(s, i + 2, 1)))
+        if (a && b) { o = o sprintf("%c", (a - 1) * 16 + b - 1); s = substr(s, i + 3) } else { o = o "%"; s = substr(s, i + 1) }
+      }
+      print o s }'
+  printf x
 }
 remove_specimen() {
   case "${1##*/}" in theodore-specimens-?*) ;; *) return 0 ;; esac
   [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 0
   rm -rf "$1" 2>/dev/null
-  [ -e "$1" ] && left="$left; the specimen folder $1" && specimens_left=1
+  if [ -e "$1" ]; then left="$left; the specimen folder $1"; specimens_left=1; fi
+  return 0
+}
+remove_recorded() { # all | expired: the folders the record names
+  reg="$HOME_DIR/state/specimens.txt"
+  [ -f "$reg" ] || return 0
+  now=$(date +%s 2>/dev/null) || now=
+  encoded= first=1
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -n "$first" ]; then
+      first=
+      if [ "$line" = "#v2" ]; then encoded=1; continue; fi
+    fi
+    t=${line%% *} path=${line#* }
+    case "$t" in ''|*[!0-9]*) continue ;; esac
+    if [ -n "$encoded" ]; then path=$(specimen_decode "$path"); path=${path%x}; fi
+    if [ "$1" = expired ]; then
+      [ -n "$now" ] || return 0
+      [ $((now - t)) -gt 3600 ] || [ $((t - now)) -gt 60 ] || continue
+    fi
+    remove_specimen "$path"
+  done < "$reg"
   return 0
 }
 remove_specimens() { # all of them (uninstall)
-  if [ -f "$HOME_DIR/state/specimens.txt" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do remove_specimen "${line#* }"; done < "$HOME_DIR/state/specimens.txt"
-  fi
+  remove_recorded all
   sc=$(specimen_cache)
   for d in "${TMPDIR:-/tmp}"/theodore-specimens-* "$sc"/theodore-specimens-*; do remove_specimen "${d%/}"; done
   rmdir "$sc" 2>/dev/null && rmdir "${sc%/*}" 2>/dev/null
   return 0
 }
 sweep_specimens() { # the expired ones: recorded more than an hour ago (or dated ahead), or untouched for an hour
-  now=$(date +%s 2>/dev/null) || return 0
-  if [ -f "$HOME_DIR/state/specimens.txt" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-      t=${line%% *}
-      case "$t" in ''|*[!0-9]*) continue ;; esac
-      if [ $((now - t)) -gt 3600 ] || [ $((t - now)) -gt 60 ]; then remove_specimen "${line#* }"; fi
-    done < "$HOME_DIR/state/specimens.txt"
-  fi
+  remove_recorded expired
   for root in "${TMPDIR:-/tmp}" "$(specimen_cache)"; do
     [ -d "$root" ] || continue
     find "$root" -maxdepth 1 -type d -name 'theodore-specimens-?*' -mmin +60 2>/dev/null | while IFS= read -r d; do remove_specimen "$d"; done
