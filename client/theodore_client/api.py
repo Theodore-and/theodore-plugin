@@ -134,6 +134,36 @@ def _network_error(exc: Exception) -> NetworkError:
     return NetworkError(text, "NETWORK")
 
 
+# Through a proxy, a new connection can take far longer than a direct one: ChatGPT Work's proxy spends 7 to 10 s on
+# every TLS set-up (curl alike). The short waits meant for a direct line (a heartbeat's 2 s, doctor's 5 s) are raised
+# to this when a proxy carries the request.
+PROXIED_MIN_TIMEOUT = 25.0
+
+
+def _proxied(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        proxies = urllib.request.getproxies()
+        return bool(proxies.get(parts.scheme.lower())) and not urllib.request.proxy_bypass(parts.hostname or "")
+    except Exception:       # noqa: BLE001  a malformed proxy setting: urllib reports it when the request is made
+        return False
+
+
+def _timeout(url: str, timeout: float) -> float:
+    return max(timeout, PROXIED_MIN_TIMEOUT) if timeout < PROXIED_MIN_TIMEOUT and _proxied(url) else timeout
+
+
+# A cloud sandbox's proxy refusing our hosts (claude.ai answers CONNECT with 403) or a sandbox without DNS (ChatGPT's
+# ordinary chat): the user can change the first, and should move to Work mode for the second.
+_SANDBOX_BLOCKED = re.compile(r"Tunnel connection failed: 403|\b403 Forbidden|name resolution|Name or service not known|"
+                              r"nodename nor servname|getaddrinfo failed|No address associated|Connection refused", re.I)
+
+
+def sandbox_blocked(detail: str) -> bool:
+    """True in a cloud sandbox whose network refused or could not resolve our hosts."""
+    return core.cloud_sandbox() and bool(_SANDBOX_BLOCKED.search(detail or ""))
+
+
 DEFAULT_LIMIT = 8 << 20          # an API answer (manifest, guide part, list) is far smaller
 ERROR_LIMIT = 64 << 10           # an error answer is a short JSON object
 DOWNLOAD_LIMIT = 2 << 30         # a download without a published size (none is larger than LibreOffice)
@@ -165,7 +195,7 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
-        with _opener(redirects).open(req, timeout=timeout) as resp:
+        with _opener(redirects).open(req, timeout=_timeout(url, timeout)) as resp:
             return resp.status, resp.headers, _read_bounded(resp, DEFAULT_LIMIT if limit is None else limit)
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
@@ -248,7 +278,7 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
     digest, done = hashlib.sha256(), 0
     bound = size or DOWNLOAD_LIMIT
     try:
-        with _opener(redirects).open(req, timeout=timeout) as resp, open(part, "wb") as out:
+        with _opener(redirects).open(req, timeout=_timeout(url, timeout)) as resp, open(part, "wb") as out:
             total = size or int(resp.headers.get("Content-Length") or 0)
             while True:
                 block = resp.read(1 << 18)
@@ -321,6 +351,8 @@ def setup_failed(cause: str, detail: str) -> Status:
         "DISK": "Theodore could not write its files. The disk may be full or the folder protected.",
         "HASH_MISMATCH": "A Theodore download arrived damaged. I am trying again.",
     }
+    if cause == "NETWORK" and sandbox_blocked(detail):
+        return Status("SETUP_FAILED", f"cause {cause}: {detail}", core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
     return Status("SETUP_FAILED", f"cause {cause}: {detail}", nexts[cause], tells[cause])
 
 
@@ -328,6 +360,9 @@ def offline(error: NetworkError, what: str) -> Status:
     if error.cause in ("TLS_INTERCEPT", "PROXY_AUTH"):
         failed = setup_failed(error.cause, f"{what}: {error.detail}")
         return Status("OFFLINE", failed.summary, failed.next_step, failed.tell_user)
+    if sandbox_blocked(error.detail):
+        return Status("OFFLINE", f"{what}: the Theodore service could not be reached ({error.detail}).",
+                      core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
     return Status("OFFLINE", f"{what}: the Theodore service could not be reached ({error.detail}).",
                   "check the internet connection, then run the same command again.",
                   "Theodore could not reach its service. Please check the internet connection.")

@@ -305,7 +305,13 @@ class Failures(LauncherCase):
         result = self.run_launcher("guide", "deck-design", env={"THEODORE_EPHEMERAL": "1"})
         first, nxt, tell = self.assertStatus(result, "CONNECTOR_REQUIRED", 74)
         self.assertIn("connector", nxt)
-        self.assertIn("Customize > Plugins > Theodore > Connectors", tell)
+        if IS_WINDOWS:      # theodore.cmd: no cloud sandbox runs Windows; its wording is unchanged
+            self.assertIn("Customize > Plugins > Theodore > Connectors", tell)
+        else:               # the setting the user changes in Claude, and where ChatGPT has a network
+            self.assertIn("run ", nxt)
+            self.assertIn('Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add '
+                          'theodoreand.ai and *.theodoreand.ai', tell)
+            self.assertIn("ChatGPT Work mode", tell)
         self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
 
     def test_sandbox_with_a_route_bootstraps_normally(self):

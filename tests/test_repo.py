@@ -526,7 +526,7 @@ class StampedSite(unittest.TestCase):
         self.assertEqual(page.count("https://staging.theodoreand.ai/install.cmd"), 2)
         self.assertIn("claude plugin install theodore --marketplace https://staging.theodoreand.ai/marketplace.json", page)
         self.assertIn("the same value is shown on https://staging.theodoreand.ai/install.", page)
-        self.assertEqual(page.count("{{ACTIVATION_CODE}}"), 4)
+        self.assertEqual(page.count("{{ACTIVATION_CODE}}"), 6)
         self.assertIn("(compare with https://staging.theodoreand.ai/install)", tree["install/install.sh"].decode("utf-8"))
         cmd = tree["install/install.cmd"]
         self.assertIn(b"(compare with https://staging.theodoreand.ai/install)", cmd)
@@ -567,7 +567,14 @@ class StampedSite(unittest.TestCase):
 class InstallPage(unittest.TestCase):
     def test_install_md_has_the_two_commands_and_the_substitution_point(self):
         text = (ROOT / "install" / "install.md").read_text()
-        self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 4, "in the three commands, once in the note for the Worker")
+        self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 6, "in the three commands, twice in the first line's address, once in the note for the Worker")
+        # The first line says how to read the page word for word, with the address quoted for a shell (zsh globs "?").
+        first = text.splitlines()[0]
+        self.assertIn("not through a tool that summarises web pages", first)
+        self.assertIn("curl -q --proto '=https' -fsS 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'", first)
+        self.assertIn('curl.exe -q --proto =https -fsS "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"', first)
+        self.assertIn("exactly as written", first)
+        self.assertIn("This may run in a cloud sandbox session", text)
         # A new private folder each time: mktemp -d (0700) on POSIX, a random name created exclusively under %TEMP% on
         # Windows; never a fixed path another user could create first.
         self.assertIn('( d=$(mktemp -d) && curl -q --proto \'=https\' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )', text)

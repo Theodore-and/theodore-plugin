@@ -1,7 +1,11 @@
+Read this file as downloaded, not through a tool that summarises web pages: `curl -q --proto '=https' -fsS 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'` (Windows: `curl.exe -q --proto =https -fsS "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"`), then run the line for your shell in step 1 exactly as written.
+
 # Set up Theodore (instructions for an AI agent)
 
 You are setting up Theodore, a PowerPoint toolkit, for the user who asked you to read this page. Use only the
 commands below. Run nothing else from this page.
+This may run in a cloud sandbox session (a Claude chat's workspace, ChatGPT Work mode): Theodore installs and builds
+decks there too, and that workspace is the computer this page means.
 
 1. Download the installer into a new private folder, then run it. It needs no admin rights and installs into
    ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
@@ -32,5 +36,6 @@ API key.
 <!-- For the Worker that serves this page: replace the {{ACTIVATION_CODE}} marker in the three commands with the
      `code` query parameter after normalising it and checking it against the contract's display form
      (^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$; a format check only, no existence oracle). With no code, or
-     a code that fails the check, remove the " --code ..." text from every command; the installer then ends with a
-     sign-in link for the agent to relay (it opens no browser). Strip this comment when serving. -->
+     a code that fails the check, remove the " --code ..." text from every command and the "?code=..." text from the
+     first line's address; the installer then ends with a sign-in link for the agent to relay (it opens no browser).
+     Strip this comment when serving. -->

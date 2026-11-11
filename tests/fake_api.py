@@ -163,6 +163,7 @@ class FakeApi:
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
         self.heartbeats: list[dict] = []
+        self.activations: list[dict] = []             # /v1/device/activate bodies, without the code
         self.refreshes = 0
         api = self
 
@@ -409,6 +410,7 @@ class FakeApi:
             if not entry or entry["used"]:
                 return self._device_error(h, "invalid_grant")
             entry["used"] = True
+            self.activations.append({k: v for k, v in body.items() if k != "code"})
             return self._send(h, 200, self._bundle(body))
         # everything below needs the installation bearer
         installation_id = self._installation(h)

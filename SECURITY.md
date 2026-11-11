@@ -36,7 +36,9 @@ pages). LibreOffice, when Theodore fetches it, comes unmodified from The Documen
 The installation credential, the installation id, the computer's name (shown to you in the portal's Devices
 page), operating system and processor type, the client, plugin and engine versions, the update channel, the
 names of the instructions and section requested, and the name of the assistant when it can be told (for example
-"claude-code").
+"claude-code"; "claude-web" or "chatgpt" for a Claude or ChatGPT cloud workspace, whose device entry ends by itself
+after 7 days without use). The assistant is told from the variables it sets for the programs it starts; no other
+part of your environment is sent.
 
 ## What is never sent
 

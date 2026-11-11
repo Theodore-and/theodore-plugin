@@ -509,12 +509,25 @@ if [ -z "$PLAT" ] || [ -z "$ARCH" ]; then
     "Theodore's PowerPoint engine does not run on this kind of computer yet (it supports macOS, Windows x64 and Linux x64 or arm64 with glibc)."
 fi
 
+# An assistant's cloud sandbox (a Claude chat, Cowork, Claude Code on the web, ChatGPT Work or its ordinary chat): the
+# client's core.cloud_sandbox() makes the same test.
+in_sandbox() {
+  [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] ||
+    { [ -n "${CLAUDE_CODE_REMOTE:-}" ] && [ "${CLAUDE_CODE_REMOTE:-}" != false ] && [ "${CLAUDE_CODE_REMOTE:-}" != 0 ]; } ||
+    [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ]
+}
+SANDBOX_TELL='This workspace'"'"'s network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT'"'"'s ordinary chat has no internet access; ChatGPT Work mode does.'
+
 failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes it, exits 68
   cause=$(sed -n 1p "$B/failed"); detail=$(sed -n 2p "$B/failed")
   rm -f "$B/failed"
   case "$cause" in
     NETWORK) next="check the internet connection, then run $RUN again."
-             tell="Theodore could not download its files. Please check the internet connection." ;;
+             tell="Theodore could not download its files. Please check the internet connection."
+             if in_sandbox; then
+               next="this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below, then run $RUN again once they have changed it; do not retry before."
+               tell=$SANDBOX_TELL
+             fi ;;
     TLS_INTERCEPT) next="this network inspects HTTPS with a certificate this computer does not trust. Ask the user to have their IT team install the company root certificate, or to try another network; then run $RUN again."
              tell="This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate." ;;
     PROXY_AUTH) next="the network proxy asks for a sign-in. Ask the user to sign in to the proxy (opening any website in a browser usually does it), then run $RUN again."
@@ -556,12 +569,12 @@ claim_environment                                   # the folder is this service
 foreign && refuse_foreign
 
 # A sandbox that loses its files and cannot reach the download host has no use for a bootstrap: say so at once.
-if [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then
+if in_sandbox; then
   probe=$(jget "$CONF" stage1_client_url)
-  if ! { command -v curl >/dev/null 2>&1 && curl -q -sS -I --proto "$(proto "$probe")" --connect-timeout 5 -m 10 -o /dev/null "$probe" 2>/dev/null; }; then
-    status CONNECTOR_REQUIRED 74 "this environment cannot reach Theodore's download host and does not keep files between sessions." \
-      "call the Theodore connector's guide tool instead (skill deck-design). If no Theodore connector is available, say so; do not retry this command here." \
-      "In this environment Theodore works through its connector. You can connect it at Customize > Plugins > Theodore > Connectors."
+  if ! { command -v curl >/dev/null 2>&1 && curl -q -sS -I --proto "$(proto "$probe")" --connect-timeout 10 -m 30 -o /dev/null "$probe" 2>/dev/null; }; then
+    status CONNECTOR_REQUIRED 74 "this cloud workspace cannot reach Theodore's download host (its network refuses or cannot resolve it)." \
+      "tell the user the setting below; once they have changed it, run $RUN again. Until then, if a Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design); if none is, say so and do not retry this command here." \
+      "$SANDBOX_TELL"
   fi
 fi
 

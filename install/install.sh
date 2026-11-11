@@ -27,8 +27,8 @@ PIN_API_BASE="https://api.theodoreand.ai"
 PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
-PIN_CLIENT_VERSION="0.3.2"
-PIN_CLIENT="client/client-0.3.2.tar 0cf3339e4ab8945a7528153c499853ff410a03d7c9c520ee024087f815da8813"
+PIN_CLIENT_VERSION="0.3.3"
+PIN_CLIENT="client/client-0.3.3.tar 105838ad289aa1fff8b76e42550f5ca8f25927f643f95a990f4b4b34dd688d90"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -219,9 +219,29 @@ fetch() { # url dest what
   # a 407 status, never the digits of a port in the URL curl quotes (127.0.0.1:64071)
   { grep -qx 407 "$WORK/http" || grep -Eq '(^|[^0-9:])407([^0-9]|$)' "$WORK/err"; } 2>/dev/null && cause=PROXY_AUTH
   case "$(cat "$WORK/http" 2>/dev/null)" in 3??) detail="it answered with a redirect, which is not followed" ;; *) detail="curl exit $rc, HTTP $(cat "$WORK/http" 2>/dev/null)" ;; esac
+  if [ "$cause" = NETWORK ] && in_sandbox; then
+    status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail); this cloud workspace's network refuses or cannot resolve it." \
+      "tell the user the setting below, then run the same installer line again once they have changed it; do not retry before." \
+      "This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under \"Use the internet while making files\" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does."
+  fi
   status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail)." \
     "if the download host is blocked, register the plugin directly instead (step 2 of the install page); otherwise check the connection and run the installer again." \
     "Theodore's installer could not download its files. I will try the direct route."
+}
+# An assistant's cloud sandbox (the launcher's in_sandbox and the client's core.cloud_sandbox make the same test).
+in_sandbox() {
+  [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] ||
+    { [ -n "${CLAUDE_CODE_REMOTE:-}" ] && [ "${CLAUDE_CODE_REMOTE:-}" != false ] && [ "${CLAUDE_CODE_REMOTE:-}" != 0 ]; } ||
+    [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ]
+}
+# The assistant running this installer, as the client's core.host_name() tells it ("installer" when unknown).
+host_of() {
+  if { [ -n "${CLAUDE_CODE_REMOTE:-}" ] && [ "${CLAUDE_CODE_REMOTE:-}" != false ] && [ "${CLAUDE_CODE_REMOTE:-}" != 0 ]; } ||
+     [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ]; then echo claude-web
+  elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}${CLAUDE_PLUGIN_ROOT:-}" ]; then echo claude-code
+  elif [ "$PLAT" = linux ] && [ -n "${CODEX_NETWORK_PROXY_ACTIVE:-}" ] && { [ -n "${CODEX_PROXY_CERT:-}" ] || [ -d /opt/codex/runtimes ]; }; then echo chatgpt
+  elif [ -n "${CODEX_HOME:-}${CODEX_SANDBOX:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_VERSION:-}" ]; then echo codex
+  else echo installer; fi
 }
 checked() { # file sha what: delete and stop on a mismatch
   [ "$(sha256_of "$1")" = "$2" ] && return 0
@@ -233,8 +253,8 @@ checked() { # file sha what: delete and stop on a mismatch
 # --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer --------------------------
 if [ -n "$CODE" ]; then
   name=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-60)
-  body=$(printf '{"code":"%s","device_name":"%s","platform":"%s","arch":"%s","host":"installer","client_version":"%s"}' \
-    "$CODE" "${name:-computer}" "$PLAT" "$ARCH" "$PIN_CLIENT_VERSION")
+  body=$(printf '{"code":"%s","device_name":"%s","platform":"%s","arch":"%s","host":"%s","client_version":"%s"}' \
+    "$CODE" "${name:-computer}" "$PLAT" "$ARCH" "$(host_of)" "$PIN_CLIENT_VERSION")
   pending="$HOME_DIR/state/activation.pending"
   ( umask 077; : > "$pending" )
   http=$(printf '%s' "$body" | curl -q -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$pending" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$API_BASE/v1/device/activate" 2>/dev/null) || http=000

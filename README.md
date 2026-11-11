@@ -150,7 +150,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | 71 | OFFLINE | The service cannot be reached and the offline period has ended, or the command needs the network |
 | 72 | UPDATE_REQUIRED | The engine or the plugin must update first |
 | 73 | BLOCKED_BY_POLICY | Paused by the publisher, blocked by the computer's policy, or automatic reports are off |
-| 74 | CONNECTOR_REQUIRED | A cloud sandbox that cannot reach Theodore: use the Theodore connector |
+| 74 | CONNECTOR_REQUIRED | A cloud sandbox that cannot reach Theodore: the user allows its sites (Claude) or uses the connector |
 | 75 | RETRY | Busy or rate-limited; try again shortly |
 | 78 | INTERNAL | A bug; `theodore doctor` and `theodore report` help us fix it |
 

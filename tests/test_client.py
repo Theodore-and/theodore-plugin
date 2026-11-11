@@ -2203,3 +2203,179 @@ class Internals(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- 0.3.3: the host each assistant is reported as, proxies, cloud sandboxes ------------------------------------------
+
+import http.server         # noqa: E402
+import socketserver        # noqa: E402
+import threading           # noqa: E402
+import urllib.request as _urlreq   # noqa: E402
+from unittest import mock  # noqa: E402
+
+
+class _Proxy(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+def _start_proxy(delay: float = 0.0, refuse: bool = False):
+    """A local HTTP proxy. `delay`: seconds it waits before each request, as a slow sandbox proxy does. `refuse`: it
+    answers CONNECT (and anything else) with 403, as claude.ai's proxy does for a host off its allow list."""
+    seen: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _refuse(self):
+            body = b"Host not in allowlist\n"
+            self.send_response(403, "Forbidden")
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_CONNECT(self):
+            seen.append(f"CONNECT {self.path}")
+            self._refuse()
+
+        def _forward(self):
+            seen.append(f"{self.command} {self.path}")
+            time.sleep(delay)
+            if refuse:
+                return self._refuse()
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else None
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("proxy-connection", "connection", "host")}
+            req = _urlreq.Request(self.path, data=data, method=self.command, headers=headers)
+            opener = _urlreq.build_opener(_urlreq.ProxyHandler({}))
+            try:
+                resp = opener.open(req, timeout=30)
+                status, rheaders, body = resp.status, resp.headers, resp.read()
+            except _urlreq.HTTPError as exc:     # type: ignore[attr-defined]
+                status, rheaders, body = exc.code, exc.headers, exc.read()
+            self.send_response(status)
+            for k, v in rheaders.items():
+                if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                    self.send_header(k, v)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = do_HEAD = _forward
+
+    server = _Proxy(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}", seen
+
+
+class HostAndCloud(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
+        from theodore_client import core
+        self.core = core
+
+    def host(self, env: dict, linux: bool = False, opt_codex: bool = False) -> str:
+        real_is_dir = Path.is_dir
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", "linux" if linux else "darwin"), \
+                mock.patch.object(Path, "is_dir", lambda p: (opt_codex and str(p) == "/opt/codex/runtimes") or
+                                  (str(p) not in ("/opt/codex/runtimes", "/mnt/skills", "/mnt/user-data", "/home/oai") and real_is_dir(p))):
+            return self.core.host_name()
+
+    def test_each_assistant_is_reported_as_itself(self):
+        self.assertEqual(self.host({}), "other")
+        # Claude Code on this computer: its Bash tool, a skill's load command and the plugin's MCP server
+        self.assertEqual(self.host({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}), "claude-code")
+        self.assertEqual(self.host({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}), "claude-code")
+        self.assertEqual(self.host({"CLAUDE_PLUGIN_ROOT": "/x/plugins/cache/theodore/theodore/0.3.3"}), "claude-code")
+        # a Claude cloud session (claude.ai chat, Cowork, Claude Code on the web), as CLOUD's inventory shows it
+        self.assertEqual(self.host({"CLAUDE_CODE_REMOTE": "true", "CLAUDE_CODE_ENTRYPOINT": "remote_cowork",
+                                    "CLAUDE_CODE_SESSION_ORIGIN": "claude_ai_chat", "CLAUDECODE": "1"}, linux=True), "claude-web")
+        self.assertEqual(self.host({"CLAUDE_CODE_REMOTE": "true"}, linux=True), "claude-web")
+        self.assertEqual(self.host({"CLAUDE_CODE_REMOTE": "false", "CLAUDECODE": "1"}), "claude-code")
+        # Codex on this computer: npm and other installs (the variables Codex 0.160.1 sets for the commands it runs)
+        self.assertEqual(self.host({"CODEX_MANAGED_BY_NPM": "1", "CODEX_THREAD_ID": "t"}), "codex")
+        self.assertEqual(self.host({"CODEX_THREAD_ID": "t", "CODEX_VERSION": "0.160.1"}), "codex")
+        # ChatGPT Work / a Codex cloud task: a Codex runtime behind OpenAI's proxy on Linux
+        work = {"CODEX_NETWORK_PROXY_ACTIVE": "1", "CODEX_PROXY_CERT": "/usr/local/share/ca-certificates/x.crt", "CODEX_THREAD_ID": "t"}
+        self.assertEqual(self.host(work, linux=True), "chatgpt")
+        self.assertEqual(self.host({"CODEX_NETWORK_PROXY_ACTIVE": "1"}, linux=True, opt_codex=True), "chatgpt")
+        self.assertEqual(self.host({"CODEX_NETWORK_PROXY_ACTIVE": "1", "CODEX_THREAD_ID": "t"}, linux=True), "codex",
+                         "a local Codex with its network proxy on is still local without OpenAI's runtime")
+        self.assertEqual(self.host({"THEODORE_HOST": "Cowork!", "CLAUDECODE": "1"}), "cowork", "an explicit host wins")
+        self.assertEqual(self.core.CLOUD_HOSTS, ("claude-web", "chatgpt"))
+
+    def test_the_plugin_mcp_server_needs_no_host_setting(self):
+        # Claude Code 2.1.292 passes CLAUDECODE, CLAUDE_CODE_ENTRYPOINT and CLAUDE_PLUGIN_ROOT to the plugin's MCP
+        # server and to a skill's load command (probed in a clean home); .mcp.json sets no THEODORE_HOST, which would
+        # hide a cloud session.
+        mcp = json.loads((Path(__file__).resolve().parents[1] / "plugins" / "theodore" / ".mcp.json").read_text())
+        self.assertNotIn("THEODORE_HOST", json.dumps(mcp))
+
+
+class ProxiesAndSandboxes(ClientCase):
+    def test_a_slow_proxy_is_given_time(self):
+        """ChatGPT Work's proxy takes 7 to 10 s to set up each connection; doctor's own wait is 5 s and a heartbeat's
+        2 s. Through a proxy the client waits at least PROXIED_MIN_TIMEOUT."""
+        self.sign_in()
+        self.client("guide", "pptx")
+        proxy, url, seen = _start_proxy(delay=6.0)
+        self.addCleanup(proxy.shutdown)
+        env = {"HTTP_PROXY": url, "http_proxy": url, "NO_PROXY": "", "no_proxy": ""}
+        result = self.client("doctor", env=env, timeout=120)
+        self.assertIn(f"{self.api.base} reachable", result.stdout)
+        self.assertTrue(any("/v1/keys" in line for line in seen), seen)
+        # without a proxy the short waits stay short
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
+        from theodore_client import api
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": url, "https_proxy": url, "NO_PROXY": "", "no_proxy": ""}, clear=True):
+            self.assertEqual(api._timeout("https://api.theodoreand.ai/v1/keys", 2.0), api.PROXIED_MIN_TIMEOUT)
+            self.assertEqual(api._timeout("https://api.theodoreand.ai/v1/keys", 60.0), 60.0)
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": url, "NO_PROXY": "api.theodoreand.ai"}, clear=True):
+            self.assertEqual(api._timeout("https://api.theodoreand.ai/v1/keys", 2.0), 2.0)
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(_urlreq, "getproxies", lambda: {}):
+            self.assertEqual(api._timeout("https://api.theodoreand.ai/v1/keys", 2.0), 2.0)
+
+    def test_a_sandbox_proxy_that_refuses_our_hosts_names_the_setting(self):
+        """claude.ai's proxy answers CONNECT with 403 for a site off the allow list: in a cloud sandbox the status
+        names the setting in Claude and says where ChatGPT has a network; elsewhere it stays the plain network text."""
+        proxy, url, seen = _start_proxy(refuse=True)
+        self.addCleanup(proxy.shutdown)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
+        from theodore_client import api
+        env = {"HTTPS_PROXY": url, "https_proxy": url, "NO_PROXY": "", "no_proxy": "", "THEODORE_HOME": os.environ.get("THEODORE_HOME", "")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(api.NetworkError) as caught:
+                api.request("GET", "https://api.theodoreand.ai/v1/keys", timeout=5)
+        self.assertIn("403", caught.exception.detail)
+        self.assertEqual(seen, ["CONNECT api.theodoreand.ai:443"])
+        from theodore_client import core
+        self.enterContext(mock.patch.object(core, "site_base", lambda: "https://theodoreand.ai"))
+        with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": "1"}):
+            status = api.offline(caught.exception, "sign-in could not start")
+            failed = api.setup_failed("NETWORK", f"the plugin could not be downloaded ({caught.exception.detail})")
+        self.assertEqual(status.name, "OFFLINE")
+        for s in (status, failed):
+            self.assertIn('Allowed websites add theodoreand.ai and *.theodoreand.ai', s.tell_user)
+            self.assertIn("ChatGPT Work mode", s.tell_user)
+            self.assertIn("do not retry before", s.next_step)
+        with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": ""}), \
+                mock.patch.object(Path, "is_dir", lambda p: False):
+            plain = api.offline(caught.exception, "sign-in could not start")
+        self.assertNotIn("Allowed websites", plain.tell_user)
+        # a sandbox without DNS (ChatGPT's ordinary chat) gets the same text; a plain timeout in a sandbox does not
+        with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": "1"}):
+            self.assertIn("Allowed websites", api.offline(api.NetworkError("[Errno -3] Temporary failure in name resolution"), "x").tell_user)
+            self.assertNotIn("Allowed websites", api.offline(api.NetworkError("timed out"), "x").tell_user)
+
+    def test_device_sign_in_in_a_cloud_workspace_explains_the_approval(self):
+        result = self.client("login", "--start", env={"THEODORE_EPHEMERAL": "1"})
+        _first, nxt, tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
+        self.assertIn("this chat's workspace", tell)
+        self.assertIn("press Approve", tell)
+        url = re.search(r"open (\S+) and", nxt).group(1)
+        self.assertIn(url, tell)
+        plain = self.client("login", "--start")
+        self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])

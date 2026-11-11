@@ -65,6 +65,8 @@ class Installer(unittest.TestCase):
         # the code is redeemed before any large download
         paths = [r["path"] for r in self.api.requests]
         self.assertLess(paths.index("/v1/device/activate"), min(i for i, p in enumerate(paths) if p.startswith("/dl/runtime/")))
+        # the assistant running the installer, as the client tells it (the test home sets CODEX_HOME); install.cmd says "installer"
+        self.assertEqual(self.api.activations[0]["host"], "installer" if IS_WINDOWS else "codex")
         self.assertFalse((home / "state" / "activation.pending").exists(), "the pending answer was moved into the credential store")
         self.assertTrue((home / "state" / "credentials").exists())
         self.assertEqual(json.loads((home / "engines" / "current.json").read_text())["version"], "1.0.0-rc.3")

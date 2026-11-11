@@ -156,17 +156,71 @@ def windows_on_arm() -> bool:
         return False
 
 
+def _flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() not in ("", "0", "false", "no")
+
+
+def _claude_cloud() -> bool:
+    """A Claude cloud session: a claude.ai chat, Cowork or the desktop app's chat (each a fresh machine), or Claude
+    Code on the web."""
+    return _flag("CLAUDE_CODE_REMOTE") or os.environ.get("CLAUDE_CODE_SESSION_ORIGIN") == "claude_ai_chat" \
+        or (os.environ.get("CLAUDE_CODE_ENTRYPOINT") or "").startswith("remote")
+
+
+def _chatgpt_cloud() -> bool:
+    """ChatGPT's Work mode or a Codex cloud task: a Codex runtime on a Linux machine of OpenAI's, behind its proxy."""
+    return sys.platform.startswith("linux") and _flag("CODEX_NETWORK_PROXY_ACTIVE") \
+        and (bool(os.environ.get("CODEX_PROXY_CERT")) or Path("/opt/codex/runtimes").is_dir())
+
+
 def host_name() -> str:
-    """The assistant that called us, as far as the environment says (sent as `host`)."""
+    """The assistant that called us, as far as the environment says (sent as `host`).
+
+    claude-code: Claude Code on this computer, from its Bash tool, a skill's load command or the plugin's MCP server
+    (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_PLUGIN_ROOT). claude-web: a Claude cloud session. codex: Codex on this
+    computer (the variables Codex sets for the commands it runs). chatgpt: ChatGPT Work or a Codex cloud task."""
     import re
     explicit = re.sub(r"[^a-z0-9-]", "", (os.environ.get("THEODORE_HOST") or "").lower())[:32].lstrip("-")
     if explicit:
         return explicit
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+    if _claude_cloud():
+        return "claude-web"
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT") or os.environ.get("CLAUDE_PLUGIN_ROOT"):
         return "claude-code"
-    if os.environ.get("CODEX_HOME") or os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_MANAGED_BY_NPM"):
+    if _chatgpt_cloud():
+        return "chatgpt"
+    if any(os.environ.get(name) for name in ("CODEX_HOME", "CODEX_SANDBOX", "CODEX_MANAGED_BY_NPM", "CODEX_THREAD_ID",
+                                             "CODEX_SESSION_ID", "CODEX_VERSION")):
         return "codex"
     return "other"
+
+
+# Hosts that run Theodore on a machine of the assistant's own (a cloud sandbox), never on the user's computer.
+CLOUD_HOSTS = ("claude-web", "chatgpt")
+
+
+def cloud_sandbox() -> bool:
+    """This process runs in an assistant's cloud sandbox (also ChatGPT's ordinary chat, whose sandbox has no network,
+    and any environment that says so with THEODORE_EPHEMERAL). The same test as the launcher's."""
+    return bool(os.environ.get("THEODORE_EPHEMERAL")) or _claude_cloud() or _chatgpt_cloud() \
+        or any(Path(p).is_dir() for p in ("/mnt/skills", "/mnt/user-data", "/home/oai"))
+
+
+# What the user changes when a cloud sandbox cannot reach Theodore's sites (installers and launcher say the same).
+SANDBOX_NETWORK_NEXT = ("this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below, then "
+                        "run the same command again once they have changed it; do not retry before.")
+
+
+def sandbox_network_tell() -> str:
+    try:
+        host = (urlparse(site_base()).hostname or "").lower()
+    except Status:
+        host = ""
+    root = ".".join(host.split(".")[-2:]) or host
+    sites = f"{host} and *.{root}" if host else "Theodore's website and its subdomains"
+    return (f"This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and "
+            f"under \"Use the internet while making files\" > Allowed websites add {sites}, then try again. "
+            "ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does.")
 
 
 # --- data directory ------------------------------------------------------------------------------------------------------
