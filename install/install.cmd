@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.1"
-set "PIN_CLIENT=client/client-0.2.1.tar 492b91c2542c07115a5a8e73e1984dc128bec1a633591d1437b40a79af07f775"
+set "PIN_CLIENT=client/client-0.2.1.tar e846b177f68259400b97051627956bb3ff7f78919ed1e1b5172ffbcc3f38f0f2"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -83,9 +83,22 @@ rem documented to remove (Theodore's own folders and the engine's render cache) 
 set "LEFTOVER="
 call :remove_specimens
 if defined SPLEFT set "LEFTOVER=%SPLEFT%"
-for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1
+rem In state\, the records a later uninstall still needs stay: settings to take back (they need Theodore's runtime),
+rem specimen folders that could not be removed.
+set "SETTINGS_LEFT="
+set "REC=%HOME_DIR%\state\host-settings.json"
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" /c:"\"created_keys\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
+if defined SETTINGS_LEFT set "LEFTOVER=%LEFTOVER%; Theodore's changes to the Claude Code settings.json, which need Theodore's runtime to take back exactly: what it added and the values before are kept in %REC%. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
+set "OWNED_DIRS=client runtime engines packs tools state logs staging plugin plugin.partial bin"
+if defined SETTINGS_LEFT set "OWNED_DIRS=client runtime engines packs tools logs staging plugin plugin.partial bin"
+if defined SPLEFT set "OWNED_DIRS=client runtime engines packs tools logs staging plugin plugin.partial bin"
+if not "%OWNED_DIRS%"=="%OWNED_DIRS: state =%" goto :left_state_done
+for /d %%D in ("%HOME_DIR%\state\*") do rmdir /s /q "%%~fD" >nul 2>&1
+for %%F in ("%HOME_DIR%\state\*") do call :del_state_file "%%~fF"
+:left_state_done
+for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
-for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=%LEFTOVER%; Theodore's folders in %HOME_DIR%"
+for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=%LEFTOVER%; Theodore's folders in %HOME_DIR%"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\pptx-runtime"
 if exist "%HOME_DIR%" rmdir "%HOME_DIR%" >nul 2>&1
 if defined LEFTOVER goto :uninstall_left
@@ -99,19 +112,9 @@ rem A Theodore folder belongs to one service, the one it was set up for (state\e
 rem reuse a folder of another. Uninstalling is the way out, so it is allowed.
 set "MY_API=%API_BASE%"
 if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
-set "HOME_API="
-if exist "%HOME_DIR%\state\environment" for /f "usebackq delims=" %%L in ("%HOME_DIR%\state\environment") do if not defined HOME_API set "HOME_API=%%L"
-if exist "%HOME_DIR%\state\environment" goto :env_compare
-if not exist "%HOME_DIR%\bin\launcher.json" goto :install
-for /f "usebackq tokens=1,* delims=:" %%A in (`%SYS32%\findstr.exe /c:"\"api_base\"" "%HOME_DIR%\bin\launcher.json" 2^>nul`) do if not defined HOME_API set "HOME_API=%%B"
-if not defined HOME_API goto :install
-set "HOME_API=%HOME_API:"=%"
-if "%HOME_API:~-1%"=="," set "HOME_API=%HOME_API:~0,-1%"
-if "%HOME_API:~0,1%"==" " set "HOME_API=%HOME_API:~1%"
-:env_compare
-if not defined HOME_API goto :install
-if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
-if /i "%HOME_API%"=="%MY_API%" goto :install
+call :read_home_api
+if not defined FOREIGN goto :install
+:foreign_install
 echo THEODORE USAGE: the Theodore folder %HOME_DIR% belongs to the Theodore service at %HOME_API%, but this installer is for %MY_API%; a folder is never shared between two services.
 echo NEXT: do not retry. Tell the user: to install this build, set THEODORE_HOME to a separate folder for it and run the installer again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
 echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
@@ -135,7 +138,11 @@ if not defined ARCH goto :no_curl
 if not exist "%HOME_DIR%\staging" mkdir "%HOME_DIR%\staging" 2>nul
 if not exist "%HOME_DIR%\state" mkdir "%HOME_DIR%\state" 2>nul
 if not exist "%HOME_DIR%\staging" goto :not_writable
-if not exist "%HOME_DIR%\state\environment" (>"%HOME_DIR%\state\environment" echo %MY_API%)
+rem Claim the folder for this service in one exclusive step, then check: of two installers of different services
+rem racing on one empty folder, one wins and the other refuses.
+call :claim_env
+call :read_home_api
+if defined FOREIGN goto :foreign_install
 rem state\ holds the activation answer (the installation secret) for a minute: only this user may read it, whatever
 rem folder THEODORE_HOME points at. Inheritance is cut and the current user alone gets access, before anything is written.
 set "SID="
@@ -301,6 +308,40 @@ set "SPA=%~a1"
 if not "%SPA:l=%"=="%SPA%" exit /b 0
 rmdir /s /q "%~1" >nul 2>&1
 if exist "%~1\" set "SPLEFT=%SPLEFT%; the specimen folder %~1"
+exit /b 0
+
+:read_home_api
+rem The service this folder belongs to (state\environment; a folder from before the record: its stable launcher.json).
+rem Sets HOME_API, and FOREIGN when it is not this installer's.
+set "HOME_API="
+set "FOREIGN="
+if exist "%HOME_DIR%\state\environment" for /f "usebackq delims=" %%L in ("%HOME_DIR%\state\environment") do if not defined HOME_API set "HOME_API=%%L"
+if exist "%HOME_DIR%\state\environment" goto :read_home_api_compare
+if not exist "%HOME_DIR%\bin\launcher.json" exit /b 0
+for /f "usebackq tokens=1,* delims=:" %%A in (`%SYS32%\findstr.exe /c:"\"api_base\"" "%HOME_DIR%\bin\launcher.json" 2^>nul`) do if not defined HOME_API set "HOME_API=%%B"
+if not defined HOME_API exit /b 0
+set "HOME_API=%HOME_API:"=%"
+if "%HOME_API:~-1%"=="," set "HOME_API=%HOME_API:~0,-1%"
+if "%HOME_API:~0,1%"==" " set "HOME_API=%HOME_API:~1%"
+:read_home_api_compare
+if not defined HOME_API exit /b 0
+if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
+if /i not "%HOME_API%"=="%MY_API%" set "FOREIGN=1"
+exit /b 0
+
+:claim_env
+rem The record is written whole beside its place and renamed into it; a rename never replaces an existing file.
+if exist "%HOME_DIR%\state\environment" exit /b 0
+set "ENVTMP=%HOME_DIR%\state\.environment.%RANDOM%%RANDOM%"
+(>"%ENVTMP%" echo %MY_API%) 2>nul
+if exist "%ENVTMP%" ren "%ENVTMP%" environment >nul 2>&1
+if exist "%ENVTMP%" del /q "%ENVTMP%" >nul 2>&1
+exit /b 0
+
+:del_state_file
+if /i "%~nx1"=="host-settings.json" if defined SETTINGS_LEFT exit /b 0
+if /i "%~nx1"=="specimens.txt" if defined SPLEFT exit /b 0
+del /f /q "%~1" >nul 2>&1
 exit /b 0
 
 :make_work

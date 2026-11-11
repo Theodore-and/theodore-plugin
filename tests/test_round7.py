@@ -573,6 +573,7 @@ class SpecimenRegistry(unittest.TestCase):
         with self.world() as (specimens, home, dirs):
             one, two = specimens.make_folder(), specimens.make_folder()
             lines = (home / "state" / "specimens.txt").read_text().splitlines()
+            self.assertEqual(lines.pop(0), "#v2", "the encoded format says so on its first line")
             self.assertEqual(len(lines), 2)
             for line, folder in zip(lines, (one, two)):
                 made, path = line.split(" ", 1)
@@ -608,6 +609,29 @@ class SpecimenRegistry(unittest.TestCase):
             self.assertTrue((precious / "keep.txt").exists())
             if link:
                 self.assertTrue(os.path.lexists(link))
+
+    @unittest.skipIf(os.name == "nt", "Windows paths cannot hold a line feed")
+    def test_a_path_with_a_line_feed_is_recorded_and_found_again(self):
+        import tempfile
+        with self.world() as (specimens, home, dirs):
+            odd = dirs["tmp-a"].parent / "tmp\nwith a line feed %0A"
+            odd.mkdir()
+            with mock.patch.object(tempfile, "tempdir", str(odd)):
+                folder = specimens.make_folder()
+            self.assertEqual(folder.parent, odd)
+            self.assertEqual([path for _made, path in specimens._read_registry()], [folder])
+            self.age(specimens, folder, 3601)
+            self.assertEqual(specimens.sweep(), [])          # TMPDIR is back to tmp-a: only the record finds it
+            self.assertFalse(folder.exists())
+
+    def test_the_round_7_record_format_is_still_read(self):
+        with self.world() as (specimens, home, dirs):
+            folder = dirs["tmp-b"] / "theodore-specimens-0123456789abcdef"
+            folder.mkdir()
+            (home / "state" / "specimens.txt").write_text(f"1700000000 {folder}\n")
+            self.assertEqual(specimens._read_registry(), [(1700000000.0, folder)])
+            self.assertEqual(specimens.sweep(), [])
+            self.assertFalse(folder.exists())
 
     def test_never_under_the_working_folder_even_when_it_holds_the_temporary_folder_or_the_home(self):
         with self.world() as (specimens, home, dirs):
@@ -654,6 +678,54 @@ class Round8Keychain(unittest.TestCase):
             self.assertTrue((home / "state" / "keychain-revoked").exists(), "the tombstone stays while the item may exist")
             clock["offset"] += 86401
             self.assertIsNone(credentials.load(), "the old keychain credential never loads again")
+
+
+class Round8Environment(unittest.TestCase):
+    """Round 8 (review 6): claiming a folder is one exclusive step; a credential belongs to one service."""
+
+    def test_of_many_builds_racing_on_an_empty_folder_exactly_one_service_wins(self):
+        with client_home() as home:
+            (home / "bin" / "launcher.json").unlink()          # an empty folder: no record, no stable copy
+            (home / "state").mkdir()
+            outcomes = {}
+            start = threading.Barrier(8)
+
+            def build(name, base):          # what check_environment does with its own stamp: claim, then read back
+                start.wait(10)
+                core._claim_environment(base)
+                outcomes[name] = ("ok" if core.home_environment() == base else "USAGE", base)
+            threads = [threading.Thread(target=build, args=(f"b{i}", f"https://api.{'staging' if i % 2 else 'prod'}.example.test")) for i in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+            winner = (home / "state" / "environment").read_text().strip()
+            for name, (result, base) in outcomes.items():
+                self.assertEqual(result, "ok" if base == winner else "USAGE", (name, base, winner))
+            self.assertEqual(len(outcomes), 8)
+
+    def test_a_credential_of_another_service_is_never_loaded(self):
+        import subprocess
+        from theodore_client import credentials
+        items = {}
+
+        def security(command, **kwargs):
+            if command[1] == "-i":
+                account = kwargs["input"].split('-a "', 1)[1].split('"', 1)[0]
+                items[account] = kwargs["input"].split('-w "', 1)[1].split('"', 1)[0]
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if command[1] == "find-generic-password":
+                account = command[command.index("-a") + 1]
+                return subprocess.CompletedProcess(command, 0 if account in items else 44, items.get(account, "") + "\n", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        for store in ("file", "keychain"):
+            with self.subTest(store=store), client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": store}), \
+                    mock.patch.object(subprocess, "run", side_effect=security):
+                core.home().ensure()
+                credentials.store("inst-prod", "secret-prod")
+                self.assertEqual(credentials.load()["installation_secret"], "secret-prod")
+                with mock.patch.object(core, "running_stamp", return_value={"api_base": "https://api.staging.example.test"}):
+                    self.assertIsNone(credentials.load(), "a staging build never loads the production credential")
 
 
 class Round8Refusals(unittest.TestCase):
@@ -710,7 +782,7 @@ class Round8Refusals(unittest.TestCase):
             self.assertNotIn(secret, log)
             self.assertNotIn("a1a1a1a1", log)
             printed = io.StringIO()
-            refused = api.ApiError(400, "invalid_grant", "code WXYZ-9876 is not valid")
+            refused = api.ApiError(400, "invalid_grant", "code WXYZ-9876 is not valid")         # the value login_code registered
             with mock.patch.object(api, "call_json", side_effect=api.ApiError(422, "validation_failed", "bad code=WXYZ-9876 for installation_secret: " + secret)), \
                     mock.patch("sys.stdout", new=printed):
                 core.emit(account.login_code("WXYZ-9876"))

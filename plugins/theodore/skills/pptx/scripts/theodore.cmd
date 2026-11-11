@@ -43,20 +43,11 @@ set "MY_API=%JV%"
 if "%~1"=="__bootstrap" goto :env_ok
 if not defined MY_API goto :env_ok
 if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
-set "HOME_API="
-if exist "%HOME_DIR%\state\environment" for /f "usebackq delims=" %%L in ("%HOME_DIR%\state\environment") do if not defined HOME_API set "HOME_API=%%L"
-if exist "%HOME_DIR%\state\environment" goto :env_compare
-rem A folder from before the record: its stable copy says.
-if not exist "%HOME_DIR%\bin\launcher.json" goto :env_ok
-call :jget api_base "%HOME_DIR%\bin\launcher.json"
-set "HOME_API=%JV%"
-:env_compare
-if not defined HOME_API goto :env_ok
-if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
-if /i "%HOME_API%"=="%MY_API%" goto :env_ok
-set "FOREIGN=1"
+call :read_env
+if not defined FOREIGN call :claim_env
+if not defined FOREIGN call :read_env
 rem Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.
-if /i not "%~1"=="uninstall" goto :foreign_home
+if defined FOREIGN if /i not "%~1"=="uninstall" goto :foreign_home
 :env_ok
 
 rem --- 2. one stable copy in <home>\bin: newer wins ---------------------------------------------------------------
@@ -85,6 +76,8 @@ if defined READY goto :run_client
 
 rem --- not installed yet -------------------------------------------------------------------------------------------
 if /i "%~1"=="uninstall" goto :uninstall_bare
+rem Expired specimen folders go before the bootstrap starts, so also when it fails (the client sweeps once it runs).
+call :sweep_specimens
 set "ARCH="
 if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" set "ARCH=x64"
 if /i "%PROCESSOR_ARCHITEW6432%"=="AMD64" set "ARCH=x64"
@@ -104,6 +97,10 @@ if not exist "%B%" mkdir "%B%" 2>nul
 ( >"%B%\.write-test" echo x ) 2>nul
 if not exist "%B%\.write-test" goto :not_writable
 del /q "%B%\.write-test" >nul 2>&1
+rem The folder is this service's from here on, or another's: then refuse.
+call :claim_env
+call :read_env
+if defined FOREIGN goto :foreign_home
 
 if not defined THEODORE_EPHEMERAL goto :start_job
 call :jget stage1_client_url "%CONF%"
@@ -212,6 +209,53 @@ set "SPA=%~a1"
 if not "%SPA:l=%"=="%SPA%" exit /b 0
 rmdir /s /q "%~1" >nul 2>&1
 if exist "%~1\" set "SPLEFT=%SPLEFT%; the specimen folder %~1"
+exit /b 0
+
+:read_env
+rem The service this folder belongs to (state\environment; a folder from before the record: its stable copy says).
+rem Sets HOME_API, and FOREIGN when it is not this launcher's.
+set "HOME_API="
+set "FOREIGN="
+if exist "%HOME_DIR%\state\environment" for /f "usebackq delims=" %%L in ("%HOME_DIR%\state\environment") do if not defined HOME_API set "HOME_API=%%L"
+if exist "%HOME_DIR%\state\environment" goto :read_env_compare
+if not exist "%HOME_DIR%\bin\launcher.json" exit /b 0
+call :jget api_base "%HOME_DIR%\bin\launcher.json"
+set "HOME_API=%JV%"
+:read_env_compare
+if not defined HOME_API exit /b 0
+if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
+if /i not "%HOME_API%"=="%MY_API%" set "FOREIGN=1"
+exit /b 0
+
+:claim_env
+rem One exclusive step: the record is written whole beside its place and renamed into it; a rename never replaces an
+rem existing file, so of two builds racing on an empty folder one wins and the other reads its record and refuses.
+if not defined MY_API exit /b 0
+if exist "%HOME_DIR%\state\environment" exit /b 0
+if exist "%HOME_DIR%\bin\launcher.json" exit /b 0
+if not exist "%HOME_DIR%\state" exit /b 0
+set "ENVTMP=%HOME_DIR%\state\.environment.%RANDOM%%RANDOM%"
+(>"%ENVTMP%" echo %MY_API%) 2>nul
+if exist "%ENVTMP%" ren "%ENVTMP%" environment >nul 2>&1
+if exist "%ENVTMP%" del /q "%ENVTMP%" >nul 2>&1
+exit /b 0
+
+:sweep_specimens
+rem The expired specimen folders: recorded more than an hour ago (or dated ahead), or untouched for an hour. Batch has
+rem no clock in seconds, so PowerShell decides; without it the client sweeps once it runs. Only real folders named
+rem theodore-specimens-* are removed, never through a junction or link; the record is rewritten only by the client.
+set "PWSH=%SYS32%\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PWSH%" exit /b 0
+set "THEODORE_SWEEP_HOME=%HOME_DIR%"
+"%PWSH%" -NoProfile -NonInteractive -Command "$now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $d=@(); $r=Join-Path $env:THEODORE_SWEEP_HOME 'state\specimens.txt'; if(Test-Path -LiteralPath $r){foreach($l in Get-Content -LiteralPath $r){$p=$l.Split(' ',2); $t=0; if($p.Count -eq 2 -and [long]::TryParse($p[0],[ref]$t) -and (($now-$t) -gt 3600 -or ($t-$now) -gt 60)){$d+=$p[1]}}}; $roots=@($env:TEMP); if($env:LOCALAPPDATA){$roots+=Join-Path $env:LOCALAPPDATA 'Theodore\Cache\specimens'}; foreach($root in $roots){if($root -and (Test-Path -LiteralPath $root)){Get-ChildItem -LiteralPath $root -Directory -Filter 'theodore-specimens-*' -ErrorAction SilentlyContinue | Where-Object {$_.LastWriteTime -lt (Get-Date).AddHours(-1)} | ForEach-Object {$d+=$_.FullName}}}; foreach($x in $d){$i=Get-Item -LiteralPath $x -Force -ErrorAction SilentlyContinue; if($i -and $i.PSIsContainer -and $i.Name -like 'theodore-specimens-?*' -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)){Remove-Item -LiteralPath $x -Recurse -Force -ErrorAction SilentlyContinue}}" <nul >nul 2>&1
+set "THEODORE_SWEEP_HOME="
+exit /b 0
+
+:del_state_file
+rem In state\, the records still needed by a later uninstall stay: settings to take back, specimen folders to remove.
+if /i "%~nx1"=="host-settings.json" if defined SETTINGS_LEFT exit /b 0
+if /i "%~nx1"=="specimens.txt" if defined SPLEFT exit /b 0
+del /f /q "%~1" >nul 2>&1
 exit /b 0
 
 :self_copy
@@ -559,24 +603,39 @@ rem Theodore's Python is not there: do what the client's uninstall does, as far 
 rem left. The DPAPI credential is a file in state\, which goes with the folders.
 set "LEFT="
 set "UOUT=%TEMP%\theodore-uninstall-%RANDOM%%RANDOM%.txt"
-rem A marketplace that was there before Theodore registered (the record says so) is not Theodore's to remove.
+rem A registration or marketplace that was there before Theodore's own (the record says so) is not Theodore's to remove.
 set "REC=%HOME_DIR%\state\host-settings.json"
+set "KEEP_CLAUDE_PLUGIN="
+set "KEEP_CODEX_PLUGIN="
 set "KEEP_CLAUDE_MARKET="
 set "KEEP_CODEX_MARKET="
+set "NOTES="
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"claude_registered\": false" "%REC%" >nul 2>&1 && set "KEEP_CLAUDE_PLUGIN=1"
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"codex_registered\": false" "%REC%" >nul 2>&1 && set "KEEP_CODEX_PLUGIN=1"
 if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"claude_added_marketplace\": false" "%REC%" >nul 2>&1 && set "KEEP_CLAUDE_MARKET=1"
 if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"codex_added_marketplace\": false" "%REC%" >nul 2>&1 && set "KEEP_CODEX_MARKET=1"
-where claude >nul 2>&1 && call :unreg claude-code claude plugin uninstall theodore@theodore
+if defined KEEP_CLAUDE_PLUGIN set "NOTES=%NOTES%; the Claude Code plugin registration was there before Theodore's installer and was kept"
+if defined KEEP_CODEX_PLUGIN set "NOTES=%NOTES%; the Codex plugin registration was there before Theodore's installer and was kept"
+if not defined KEEP_CLAUDE_PLUGIN (where claude >nul 2>&1 && call :unreg claude-code claude plugin uninstall theodore@theodore)
 if not defined KEEP_CLAUDE_MARKET (where claude >nul 2>&1 && call :unreg claude-code claude plugin marketplace remove theodore)
-where codex >nul 2>&1 && call :unreg codex codex plugin remove theodore@theodore
+if not defined KEEP_CODEX_PLUGIN (where codex >nul 2>&1 && call :unreg codex codex plugin remove theodore@theodore)
 if not defined KEEP_CODEX_MARKET (where codex >nul 2>&1 && call :unreg codex codex plugin marketplace remove theodore)
 del /q "%UOUT%" >nul 2>&1
+rem Settings Theodore changed cannot be taken back exactly without its Python: the record of what was there is kept.
 set "SETTINGS_LEFT="
-if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
-if defined SETTINGS_LEFT set "LEFT=%LEFT%; two Theodore entries in the Claude Code settings.json, the extraKnownMarketplaces.theodore autoUpdate and the two Bash rules for the launcher under permissions.allow"
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" /c:"\"created_keys\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
+if defined SETTINGS_LEFT set "LEFT=%LEFT%; Theodore's changes to the Claude Code settings.json, which need Theodore's runtime to take back exactly: what it added and the values before are kept in %REC%. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
 call :remove_specimens
 if defined SPLEFT set "LEFT=%LEFT%%SPLEFT%"
+set "OWNED_DIRS=client runtime engines packs tools state logs staging plugin plugin.partial bin"
+if defined SETTINGS_LEFT set "OWNED_DIRS=client runtime engines packs tools logs staging plugin plugin.partial bin"
+if defined SPLEFT set "OWNED_DIRS=client runtime engines packs tools logs staging plugin plugin.partial bin"
+if not "%OWNED_DIRS%"=="%OWNED_DIRS: state =%" goto :bare_state_done
+for /d %%D in ("%HOME_DIR%\state\*") do rmdir /s /q "%%~fD" >nul 2>&1
+for %%F in ("%HOME_DIR%\state\*") do call :del_state_file "%%~fF"
+:bare_state_done
 if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
 if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\pptx-runtime"
 rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this file
 rem may be inside one of them: delete, then report what is still there (if defined and call echo run late enough).
-(for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (client runtime engines packs tools state logs staging plugin plugin.partial bin) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
+(for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)

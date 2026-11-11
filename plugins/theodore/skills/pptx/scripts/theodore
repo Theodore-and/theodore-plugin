@@ -109,22 +109,40 @@ num() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
 
 # --- 1b. a Theodore folder belongs to one service: the one it was set up for (state/environment, one line) ---------
 MY_API=$(jget "$CONF" api_base); MY_API=${MY_API%/}
-HOME_API=
-if [ -f "$HOME_DIR/state/environment" ]; then
-  HOME_API=$(head -n 1 "$HOME_DIR/state/environment" 2>/dev/null | tr -d '\r')
-elif [ -f "$HOME_DIR/bin/launcher.json" ]; then        # a folder from before the record: its stable copy says
-  HOME_API=$(jget "$HOME_DIR/bin/launcher.json" api_base)
-fi
-HOME_API=${HOME_API%/}
-FOREIGN=
-if [ -n "$HOME_API" ] && [ -n "$MY_API" ] && [ "$HOME_API" != "$MY_API" ]; then
-  FOREIGN=1
-  # Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.
-  [ "${1:-}" = uninstall ] || status USAGE 64 "this Theodore folder ($HOME_DIR) belongs to the Theodore service at $HOME_API, but this launcher is stamped for $MY_API; a folder is never shared between two services." \
+home_api() {
+  if [ -f "$HOME_DIR/state/environment" ]; then
+    head -n 1 "$HOME_DIR/state/environment" 2>/dev/null | tr -d '\r'
+  elif [ -f "$HOME_DIR/bin/launcher.json" ]; then        # a folder from before the record: its stable copy says
+    jget "$HOME_DIR/bin/launcher.json" api_base
+  fi
+}
+foreign() { HOME_API=$(home_api); HOME_API=${HOME_API%/}; [ -n "$HOME_API" ] && [ -n "$MY_API" ] && [ "$HOME_API" != "$MY_API" ]; }
+refuse_foreign() {
+  status USAGE 64 "this Theodore folder ($HOME_DIR) belongs to the Theodore service at $HOME_API, but this launcher is stamped for $MY_API; a folder is never shared between two services." \
     "do not retry. Tell the user: to use this build, set THEODORE_HOME to a separate folder for it and run the same command again, or first remove the other installation with: \"$HOME_DIR/bin/theodore\" uninstall" \
     "Theodore found an installation for another Theodore service ($HOME_API) in $HOME_DIR. To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first."
+}
+# Claiming a folder is one exclusive step: the record is written whole beside its place and hard-linked into it, which
+# fails when one is already there (two installers or launchers of different services racing on an empty folder: one
+# wins, the other then reads the winner's record and refuses).
+claim_environment() {
+  [ -n "$MY_API" ] && [ -d "$HOME_DIR/state" ] && [ ! -e "$HOME_DIR/state/environment" ] || return 0
+  tmp="$HOME_DIR/state/.environment.$$"
+  if printf '%s\n' "$MY_API" > "$tmp" 2>/dev/null; then
+    ln "$tmp" "$HOME_DIR/state/environment" 2>/dev/null || ( set -C; cat "$tmp" > "$HOME_DIR/state/environment" ) 2>/dev/null
+  fi
+  rm -f "$tmp"
+  return 0
+}
+FOREIGN=
+if foreign; then
+  FOREIGN=1
+  # Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.
+  [ "${1:-}" = uninstall ] || refuse_foreign
+else
+  claim_environment
+  foreign && { FOREIGN=1; [ "${1:-}" = uninstall ] || refuse_foreign; }
 fi
-record_environment() { [ -n "$MY_API" ] && [ -z "$FOREIGN" ] && [ -d "$HOME_DIR/state" ] && [ ! -s "$HOME_DIR/state/environment" ] && printf '%s\n' "$MY_API" > "$HOME_DIR/state/environment" 2>/dev/null; return 0; }
 
 
 # --- 2. one stable copy in <home>/bin: newer wins --------------------------------------------------------------
@@ -233,7 +251,7 @@ fetch() { # url dest; on failure sets CAUSE and DETAIL
 # --- 4b. the bootstrap job (runs detached; started below) --------------------------------------------------------
 bootstrap_job() {
   mkdir -p "$B" "$HOME_DIR/staging" "$HOME_DIR/runtime" "$HOME_DIR/client" "$HOME_DIR/logs" || exit 1
-  record_environment
+  claim_environment
   echo $$ > "$B/pid"
   rm -f "$B/failed"
   fail() { printf '%s\n%s\n' "$1" "$2" > "$B/failed"; rm -f "$B/pid" "$B/phase"; exit 1; }
@@ -291,14 +309,12 @@ if [ "${1:-}" = "__bootstrap" ]; then
   exit $?
 fi
 
-if stage1_ready; then
-  run_client "$@"
-fi
-
-# --- not installed yet ----------------------------------------------------------------------------------------------
-# Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt; they go with
-# the uninstall, from that record and from the current roots, whatever TMPDIR was when they were made. Only folders
-# named theodore-specimens-*, real (not a link) and this user's own are removed.
+# Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt (after a first
+# line "#v2"; a path holding "%" or a line break is written encoded, and such a name never exists as written, so it is
+# simply skipped here: the client decodes it). They go from that record and from the current roots, whatever TMPDIR
+# was when they were made: expired ones (an hour) at every run that reaches this launcher's own code, all of them at
+# uninstall. Only folders named theodore-specimens-*, real (not a link) and this user's own are removed; the record
+# itself is rewritten only by the client.
 specimen_cache() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then echo "${HOME:-/nonexistent}/Library/Caches/Theodore/specimens"
   else echo "${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/theodore/specimens"; fi
@@ -307,10 +323,10 @@ remove_specimen() {
   case "${1##*/}" in theodore-specimens-?*) ;; *) return 0 ;; esac
   [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 0
   rm -rf "$1" 2>/dev/null
-  [ -e "$1" ] && left="$left; the specimen folder $1"
+  [ -e "$1" ] && left="$left; the specimen folder $1" && specimens_left=1
   return 0
 }
-remove_specimens() {
+remove_specimens() { # all of them (uninstall)
   if [ -f "$HOME_DIR/state/specimens.txt" ]; then
     while IFS= read -r line || [ -n "$line" ]; do remove_specimen "${line#* }"; done < "$HOME_DIR/state/specimens.txt"
   fi
@@ -319,6 +335,27 @@ remove_specimens() {
   rmdir "$sc" 2>/dev/null && rmdir "${sc%/*}" 2>/dev/null
   return 0
 }
+sweep_specimens() { # the expired ones: recorded more than an hour ago (or dated ahead), or untouched for an hour
+  now=$(date +%s 2>/dev/null) || return 0
+  if [ -f "$HOME_DIR/state/specimens.txt" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      t=${line%% *}
+      case "$t" in ''|*[!0-9]*) continue ;; esac
+      if [ $((now - t)) -gt 3600 ] || [ $((t - now)) -gt 60 ]; then remove_specimen "${line#* }"; fi
+    done < "$HOME_DIR/state/specimens.txt"
+  fi
+  for root in "${TMPDIR:-/tmp}" "$(specimen_cache)"; do
+    [ -d "$root" ] || continue
+    find "$root" -maxdepth 1 -type d -name 'theodore-specimens-?*' -mmin +60 2>/dev/null | while IFS= read -r d; do remove_specimen "$d"; done
+  done
+  return 0
+}
+
+if stage1_ready; then
+  run_client "$@"           # the client sweeps expired specimen folders itself, first thing
+fi
+
+# --- not installed yet ----------------------------------------------------------------------------------------------
 if [ "${1:-}" = "uninstall" ]; then
   # Theodore's Python is not there (never installed, or removed by something else): the launcher does what the
   # client's uninstall does, as far as sh can, and says what it could not do.
@@ -330,35 +367,45 @@ if [ "${1:-}" = "uninstall" ]; then
     printf '%s' "$out" | grep -qiE 'not found|not installed|no such|does not exist|unknown plugin|unknown marketplace|not registered' && return 0
     left="$left; the $name registration ($(printf '%s' "$out" | tail -n 1 | cut -c1-120))"
   }
-  # A marketplace that was there before Theodore registered (the record says so) is not Theodore's to remove.
+  # A registration or marketplace that was there before Theodore's own (the record says so) is not Theodore's to remove.
   rec="$HOME_DIR/state/host-settings.json"
-  kept_market() { grep -q "\"$1_added_marketplace\": false" "$rec" 2>/dev/null; }
+  notes=
+  not_ours() { grep -q "\"$1\": false" "$rec" 2>/dev/null; }
   if command -v claude >/dev/null 2>&1; then
-    unreg claude-code claude plugin uninstall theodore@theodore
-    kept_market claude || unreg claude-code claude plugin marketplace remove theodore
+    if not_ours claude_registered; then notes="$notes; the Claude Code plugin registration was there before Theodore's installer and was kept (claude plugin uninstall theodore@theodore removes it)"
+    else unreg claude-code claude plugin uninstall theodore@theodore; fi
+    not_ours claude_added_marketplace || unreg claude-code claude plugin marketplace remove theodore
   fi
   if command -v codex >/dev/null 2>&1; then
-    unreg codex codex plugin remove theodore@theodore
-    kept_market codex || unreg codex codex plugin marketplace remove theodore
+    if not_ours codex_registered; then notes="$notes; the Codex plugin registration was there before Theodore's installer and was kept"
+    else unreg codex codex plugin remove theodore@theodore; fi
+    not_ours codex_added_marketplace || unreg codex codex plugin marketplace remove theodore
   fi
-  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update)":' "$rec" 2>/dev/null; then
-    settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$HOME_DIR/state/host-settings.json" | head -n 1)
-    left="$left; two Theodore entries in ${settings:-the Claude Code settings.json} (the extraKnownMarketplaces.theodore autoUpdate and the two Bash(...theodore...) rules under permissions.allow)"
+  # Settings Theodore changed cannot be taken back exactly without its Python: the record of what was there is kept.
+  keep_settings=
+  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys)":' "$rec" 2>/dev/null; then
+    keep_settings=1
+    settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$rec" | head -n 1)
+    left="$left; Theodore's changes to ${settings:-the Claude Code settings.json}, which need Theodore's runtime to take back exactly: what it added and the values before are kept in $rec. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
   fi
   security=/usr/bin/security extra=
   # Test seams (a keychain file, a stand-in for security), honoured only against a loopback API.
   case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) extra=${THEODORE_TEST_KEYCHAIN:-}; security=${THEODORE_TEST_SECURITY:-$security} ;; esac
   if { [ "$(uname -s 2>/dev/null)" = Darwin ] || [ "$security" != /usr/bin/security ]; } && [ -x "$security" ]; then
-    account="installation-$(printf '%s' "${HOME_DIR%/}" | sha256_of_stdin | cut -c1-12)"
-    # A keychain that shows a system dialog never answers: 10 seconds, then it is stopped and named as left.
-    "$security" delete-generic-password -a "$account" -s ai.theodoreand.theodore ${extra:+"$extra"} >/dev/null 2>&1 </dev/null &
-    spid=$!
-    ( sleep 10; kill "$spid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
-    dog=$!
-    wait "$spid"
-    src=$?
-    kill "$dog" 2>/dev/null
-    case $src in 0|44) ;; *) left="$left; the sign-in item in the login keychain (service ai.theodoreand.theodore)" ;; esac
+    # The item of this folder and service (the client's name for it), then that of a client before round 8 (folder only).
+    for account in "installation-$(printf '%s\n%s' "${HOME_DIR%/}" "$MY_API" | sha256_of_stdin | cut -c1-12)" \
+                   "installation-$(printf '%s' "${HOME_DIR%/}" | sha256_of_stdin | cut -c1-12)"; do
+      # A keychain that shows a system dialog never answers: 10 seconds, then it is stopped (killed two seconds later
+      # if it ignores that) and named as left.
+      "$security" delete-generic-password -a "$account" -s ai.theodoreand.theodore ${extra:+"$extra"} >/dev/null 2>&1 </dev/null &
+      spid=$!
+      ( sleep 10; kill "$spid" 2>/dev/null; sleep 2; kill -9 "$spid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+      dog=$!
+      wait "$spid"
+      src=$?
+      kill "$dog" 2>/dev/null
+      case $src in 0|44) ;; *) left="$left; the sign-in item in the login keychain (service ai.theodoreand.theodore)"; break ;; esac
+    done
   fi
   remove_specimens
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
@@ -368,19 +415,33 @@ if [ "${1:-}" = "uninstall" ]; then
   fi
   rm -rf "$cache" 2>/dev/null
   [ -e "$cache" ] && left="$left; the render cache $cache"
-  # Only Theodore's own subfolders: the folder may hold things that are not Theodore's.
+  # Only Theodore's own subfolders: the folder may hold things that are not Theodore's. In state/, the records still
+  # needed (settings to take back, specimen folders to remove) stay.
   for d in bin client runtime engines packs tools state logs staging plugin plugin.partial; do
+    if [ "$d" = state ] && { [ -n "$keep_settings" ] || [ -n "${specimens_left:-}" ]; }; then
+      for f in "$HOME_DIR/state"/* "$HOME_DIR/state"/.[!.]*; do
+        [ -e "$f" ] || continue
+        case "${f##*/}" in
+          host-settings.json) [ -n "$keep_settings" ] && continue ;;
+          specimens.txt) [ -n "${specimens_left:-}" ] && continue ;;
+        esac
+        rm -rf "$f" 2>/dev/null
+      done
+      continue
+    fi
     rm -rf "${HOME_DIR:?}/$d" 2>/dev/null
     [ -e "$HOME_DIR/$d" ] && left="$left; $HOME_DIR/$d"
   done
   rmdir "$HOME_DIR" 2>/dev/null
   if [ -n "$left" ]; then
-    status RETRY 75 "Theodore was not fully installed, and these could not be removed: ${left#; }." \
-      "tell the user what is left (each item above is a folder or a keychain item); it can be removed by hand." \
+    status RETRY 75 "Theodore was not fully installed, and these could not be removed: ${left#; }${notes:+; left as they are: ${notes#; }}." \
+      "tell the user what is left (each item above says what it is and how it can be removed)." \
       "Theodore is mostly removed, but these pieces could not be: ${left#; }. Your decks were not touched."
   fi
-  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed." "nothing to do." "Theodore is uninstalled."
+  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed${notes:+; left as they are: ${notes#; }}." "nothing to do." "Theodore is uninstalled."
 fi
+
+[ "${1:-}" = "__bootstrap" ] || sweep_specimens         # before the bootstrap: also when it fails or cannot start
 
 if [ -z "$PLAT" ] || [ -z "$ARCH" ]; then
   status UNSUPPORTED_PLATFORM 69 "Theodore's engine has no build for $OS $MACHINE." \
@@ -431,6 +492,8 @@ if ! mkdir -p "$B" 2>/dev/null || ! ( : > "$B/.write-test" ) 2>/dev/null; then
     "Theodore could not create its folder ($HOME_DIR). It may be protected."
 fi
 rm -f "$B/.write-test"
+claim_environment                                   # the folder is this service's from here on, or another's: then refuse
+foreign && refuse_foreign
 
 # A sandbox that loses its files and cannot reach the download host has no use for a bootstrap: say so at once.
 if [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || [ -n "${CLAUDE_CODE_REMOTE:-}" ]; then

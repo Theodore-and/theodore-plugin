@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.1"
-PIN_CLIENT="client/client-0.2.1.tar 492b91c2542c07115a5a8e73e1984dc128bec1a633591d1437b40a79af07f775"
+PIN_CLIENT="client/client-0.2.1.tar e846b177f68259400b97051627956bb3ff7f78919ed1e1b5172ffbcc3f38f0f2"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -67,18 +67,20 @@ done
 
 # A Theodore folder belongs to one service, the one it was set up for (state/environment): this installer does not
 # reuse a folder of another. Uninstalling is the way out, so it is allowed.
-HOME_API=
-if [ -f "$HOME_DIR/state/environment" ]; then
-  HOME_API=$(head -n 1 "$HOME_DIR/state/environment" 2>/dev/null | tr -d '\r')
-elif [ -f "$HOME_DIR/bin/launcher.json" ]; then
-  HOME_API=$(sed -n 's/^[[:space:]]*"api_base"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME_DIR/bin/launcher.json" 2>/dev/null | head -n 1)
-fi
-HOME_API=${HOME_API%/}
-if [ -z "$UNINSTALL" ] && [ -n "$HOME_API" ] && [ "$HOME_API" != "${API_BASE%/}" ]; then
+home_api() {
+  if [ -f "$HOME_DIR/state/environment" ]; then
+    head -n 1 "$HOME_DIR/state/environment" 2>/dev/null | tr -d '\r'
+  elif [ -f "$HOME_DIR/bin/launcher.json" ]; then
+    sed -n 's/^[[:space:]]*"api_base"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME_DIR/bin/launcher.json" 2>/dev/null | head -n 1
+  fi
+}
+foreign() { HOME_API=$(home_api); HOME_API=${HOME_API%/}; [ -n "$HOME_API" ] && [ "$HOME_API" != "${API_BASE%/}" ]; }
+refuse_foreign() {
   status USAGE 64 "the Theodore folder $HOME_DIR belongs to the Theodore service at $HOME_API, but this installer is for ${API_BASE%/}; a folder is never shared between two services." \
     "do not retry. Tell the user: to install this build, set THEODORE_HOME to a separate folder for it and run the installer again, or first remove the other installation with: \"$HOME_DIR/bin/theodore\" uninstall" \
     "Theodore found an installation for another Theodore service ($HOME_API) in $HOME_DIR. To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first."
-fi
+}
+[ -z "$UNINSTALL" ] && foreign && refuse_foreign
 
 # Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt; they go with
 # the uninstall, from that record and from the current roots, whatever TMPDIR was when they were made. Only folders
@@ -111,6 +113,10 @@ if [ -n "$UNINSTALL" ]; then
   left=
   remove_specimens
   [ -n "$left" ] || rm -f "$HOME_DIR/state/specimens.txt" 2>/dev/null
+  rec="$HOME_DIR/state/host-settings.json"
+  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys)":' "$rec" 2>/dev/null; then
+    left="$left; Theodore's changes to the Claude Code settings.json, which need Theodore's runtime to take back exactly: what it added and the values before are kept in $rec. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
+  fi
   rmdir "$HOME_DIR/state" "$HOME_DIR" 2>/dev/null
   [ -z "$left" ] || status RETRY 75 "Theodore is not installed in $HOME_DIR, but these could not be removed: ${left#; }." \
     "tell the user what is left; each item is a folder that can be deleted by hand." "A few of Theodore's temporary files could not be removed: ${left#; }."
@@ -143,10 +149,19 @@ if [ "$PLAT" = linux ] && (ldd --version 2>&1 | grep -qi musl); then PLAT=; fi
   "do not retry. Use the deck-design skill with the host's own slide tools, or the Theodore connector if one is connected." \
   "Theodore's PowerPoint engine does not run on this kind of computer yet (it supports macOS, Windows x64 and Linux x64 or arm64 with glibc)."
 mkdir -p "$HOME_DIR/staging" "$HOME_DIR/state" 2>/dev/null && chmod 700 "$HOME_DIR/state" 2>/dev/null &&
-  { [ -s "$HOME_DIR/state/environment" ] || printf '%s\n' "${API_BASE%/}" > "$HOME_DIR/state/environment"; } &&
   WORK=$(mktemp -d "$HOME_DIR/staging/install.XXXXXX" 2>/dev/null) ||
   status SETUP_FAILED 68 "cause DISK: $HOME_DIR is not writable." "make $HOME_DIR writable (or set THEODORE_HOME), then run the installer again." \
     "Theodore could not create its folder ($HOME_DIR)."
+# Claim the folder for this service in one exclusive step (written whole beside its place, then hard-linked in, which
+# fails when a record is there), then check: two installers of different services racing on one empty folder cannot
+# both pass.
+if [ ! -e "$HOME_DIR/state/environment" ]; then
+  printf '%s\n' "${API_BASE%/}" > "$HOME_DIR/state/.environment.$$" 2>/dev/null &&
+    { ln "$HOME_DIR/state/.environment.$$" "$HOME_DIR/state/environment" 2>/dev/null ||
+      ( set -C; cat "$HOME_DIR/state/.environment.$$" > "$HOME_DIR/state/environment" ) 2>/dev/null; }
+  rm -f "$HOME_DIR/state/.environment.$$"
+fi
+foreign && { rm -rf "$WORK"; refuse_foreign; }
 # The installer's own files live in one private folder (mktemp -d makes it 0700) and go when it ends, whatever happens.
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; exit 130' INT TERM HUP

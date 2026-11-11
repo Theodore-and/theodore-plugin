@@ -94,8 +94,9 @@ _SECRET_PATTERNS = [
     re.compile(r"\bsec-[A-Za-z0-9_-]{16,}"),                                              # an installation secret
     re.compile(r"(?i)\b(installation_secret|entitlement_token|access_token|refresh_token|device_code|activation_code|"
                r"secret|token|password|authorization)(\\?[\"']?\s*[=:]\s*\\?[\"']?)[^\s\"',;&}]+"),
-    re.compile(r"(?i)(\bcode\s*[=:]\s*[\"']?)[A-Z0-9]{4}-[A-Z0-9]{4}\b"),                    # an activation code given as code=
 ]
+# An activation code is caught by its value (login_code registers it); the device user code in a sign-in link is meant
+# to be shown and is left alone.
 
 
 def register_secret(value: str | None) -> None:
@@ -318,6 +319,8 @@ def check_environment(command: str | None) -> None:
     own = str(running_stamp().get("api_base") or "").strip().rstrip("/")
     if not own:
         return
+    if not environment_path().exists() and not (home().bin / "launcher.json").exists() and home().state.is_dir():
+        _claim_environment(own)
     theirs = home_environment()
     if theirs and theirs != own:
         if command == "uninstall":
@@ -328,9 +331,26 @@ def check_environment(command: str | None) -> None:
                      f"command again, or first remove the other installation with: \"{home().bin / ('theodore.cmd' if IS_WINDOWS else 'theodore')}\" uninstall",
                      f"Theodore found an installation for another Theodore service ({theirs}) in {home().root}. To use this one, give it "
                      f"its own folder (THEODORE_HOME) or uninstall the other first.")
-    if not read_text(environment_path()) and home().state.is_dir():
+    if not environment_path().exists() and home().state.is_dir():          # a folder from before the record, ours
+        _claim_environment(own)
+
+
+def _claim_environment(own: str) -> None:
+    """Record the folder's service in one exclusive step: written whole beside its place, then linked (POSIX) or
+    renamed (Windows, which refuses to replace) into it, which fails when a record is already there. The caller reads
+    the record afterwards, so of two builds racing on an empty folder one wins and the other refuses."""
+    tmp = environment_path().with_name(f".environment.{os.getpid()}.{threading.get_ident()}")
+    try:
+        tmp.write_text(own + "\n", encoding="utf-8")
+        if IS_WINDOWS:
+            os.rename(tmp, environment_path())
+        else:
+            os.link(tmp, environment_path())
+    except OSError:
+        pass
+    finally:
         with contextlib.suppress(OSError):
-            write_atomic(environment_path(), own + "\n", 0o644)
+            tmp.unlink()
 
 
 def site_base() -> str:

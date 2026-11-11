@@ -1,5 +1,6 @@
 """Deck-design specimen sheets. They are the publisher's images: fetched one at a time when the assistant asks,
-held in a private temporary folder of this run for at most an hour, and never put in Theodore's folder or in a deck's.
+held in a private temporary folder of this run, removed by the first Theodore run after an hour (there is no background
+process) and by the uninstall, and never put in Theodore's folder or in a deck's.
 
 `theodore specimen <file>...` fetches into a new folder <root>/theodore-specimens-XXXXXXXX (the current user's
 alone), where <root> is the system's temporary folder or, when that lies inside the working folder, the user's cache
@@ -70,19 +71,40 @@ def registry() -> Path:
     return core.home().state / "specimens.txt"
 
 
+# The record's format: a first line "#v2", then "<created epoch> <path>" per folder, the path with "%", carriage return
+# and line feed written as %25, %0D and %0A (so any path fits on one line). A record without the first line is the
+# round 7 format (paths as they are) and is still read. The launchers' shell and batch readers need no decoding: they
+# remove only folders that exist under the name as written, and an encoded name never does.
+REGISTRY_HEADER = "#v2"
+
+
+def _encode(path: Path) -> str:
+    return str(path).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _decode(text: str) -> str:
+    return re.sub(r"%(25|0[ADad])", lambda m: {"25": "%", "0A": "\n", "0D": "\r"}[m.group(1).upper()], text)
+
+
 def _read_registry() -> list[tuple[float, Path]]:
+    raw = ""
+    with contextlib.suppress(OSError):
+        raw = registry().read_text(encoding="utf-8")
+    lines = raw.split("\n")
+    encoded = bool(lines) and lines[0].rstrip("\r") == REGISTRY_HEADER
     entries = []
-    for line in core.read_text(registry()).splitlines():
-        made, _, path = line.strip().partition(" ")
+    for line in lines[1:] if encoded else lines:
+        line = line.rstrip("\r") if encoded else line.strip()
+        made, _, path = line.partition(" ")
         with contextlib.suppress(ValueError):
             if path:
-                entries.append((float(made), Path(path)))
+                entries.append((float(made), Path(_decode(path) if encoded else path)))
     return entries
 
 
 def _write_registry(entries: list[tuple[float, Path]]) -> None:
     if entries:
-        core.write_atomic(registry(), "".join(f"{int(made)} {path}\n" for made, path in entries), 0o600)
+        core.write_atomic(registry(), REGISTRY_HEADER + "\n" + "".join(f"{int(made)} {_encode(path)}\n" for made, path in entries), 0o600)
     else:
         core.remove_tree(registry())
 

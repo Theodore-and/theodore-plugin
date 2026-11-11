@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
-from support import RUNTIME_ID, IS_WINDOWS, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
+from support import cmd_command, RUNTIME_ID, IS_WINDOWS, FakeApi, Sandbox, engine_zip, fake_runtime_parts, pack_zip, status_lines
 
 
 def closed_port() -> int:
@@ -380,7 +380,8 @@ class Failures(LauncherCase):
                          "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
             self.assertIn(expected, calls)
         self.assertFalse(cache.exists())
-        self.assertFalse(self.box.home.exists())
+        self.assertEqual([p.relative_to(self.box.home).as_posix() for p in self.box.home.rglob("*")], ["state", "state/host-settings.json"],
+                         "only the record of the settings it could not take back stays (round 8)")
         if keychain:
             found = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "ai.theodoreand.theodore", str(keychain)], capture_output=True)
             self.assertNotEqual(found.returncode, 0, "the keychain item is gone")
@@ -449,6 +450,100 @@ class Failures(LauncherCase):
         self.assertIn("claude plugin uninstall theodore@theodore", calls)
         self.assertIn("codex plugin remove theodore@theodore", calls)
         self.assertFalse([c for c in calls if "marketplace remove" in c], calls)
+
+    @unittest.skipIf(IS_WINDOWS, "the sh launcher's own uninstall")
+    def test_a_keychain_call_that_ignores_sigterm_is_killed(self):
+        # Round 8 (review 8): started with SIGTERM ignored, the stand-in for security inherits that; it is killed after
+        # the bounded wait instead of holding the uninstall.
+        (self.box.home / "state").mkdir(parents=True)
+        stubborn = self.box.tmp / "stubborn-security"
+        stubborn.write_text("#!/bin/sh\ntrap '' TERM\nsleep 120\n")
+        stubborn.chmod(0o755)
+        import subprocess
+        import time
+        began = time.monotonic()
+        command = ["/bin/sh", "-c", 'trap "" TERM; exec /bin/sh "$0" uninstall', str(self.box.launcher)]
+        result = subprocess.run(command, env={**self.box.env, "THEODORE_TEST_SECURITY": str(stubborn)}, capture_output=True, text=True,
+                                timeout=90, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+        took = time.monotonic() - began
+        self.assertLess(took, 45, f"the uninstall waited {took:.0f} s")
+        self.assertEqual(result.returncode, 75, result.stdout)
+        self.assertIn("keychain", status_lines(result.stdout)[0])
+
+    def test_uninstall_without_python_keeps_the_settings_record_and_says_how_to_restore(self):
+        # Round 8 (review 9): without Theodore's Python the settings cannot be taken back exactly; the record of what
+        # was there stays, and the status says where it is and what to do. A registration that was there before stays.
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        record = state / "host-settings.json"
+        record.write_text(json.dumps({"claude_registered": False, "claude_added_marketplace": False, "rules": ["Bash(x *)"],
+                                      "marketplace": {"created": False, "set_auto_update": True, "auto_update_prior": {"present": True, "value": False}},
+                                      "path": str(self.box.user_home / ".claude" / "settings.json")}, indent=2) + "\n")
+        (state / "credentials").write_text("{}")
+        fake = self.box.tmp / "fakebin"
+        fake.mkdir()
+        log = self.box.tmp / "calls.log"
+        for name in ("claude", "codex"):
+            if IS_WINDOWS:
+                (fake / f"{name}.cmd").write_text(f'@echo off\r\n>>"{log}" echo {name} %*\r\nexit /b 0\r\n')
+            else:
+                (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\nexit 0\n')
+                (fake / name).chmod(0o755)
+        first, nxt, _t = self.assertStatus(self.run_launcher("uninstall", env={"PATH": f"{fake}{os.pathsep}{self.box.env['PATH']}"}), "RETRY", 75)
+        self.assertIn(str(record), first)
+        self.assertIn("install Theodore again and run its uninstall", first)
+        self.assertTrue(record.exists(), "the record of what was there before is kept")
+        self.assertEqual(sorted(p.name for p in state.iterdir()), ["host-settings.json"], "everything else in state goes")
+        calls = [line.strip() for line in log.read_text().splitlines()] if log.exists() else []
+        self.assertFalse([c for c in calls if c.startswith("claude plugin")], calls)
+
+    def test_an_ordinary_run_sweeps_expired_specimen_folders_even_when_the_bootstrap_fails(self):
+        # Round 8 (review 4): before the bootstrap, so also when it cannot start (here: the download host is dead).
+        import time
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        old_root = self.box.tmp / "an old TMPDIR"
+        temp = Path(self.box.env["TMPDIR"])
+        expired, fresh = old_root / "theodore-specimens-0000000000000001", old_root / "theodore-specimens-0000000000000002"
+        untouched, recent = temp / "theodore-specimens-0000000000000003", temp / "theodore-specimens-0000000000000004"
+        for folder in (expired, fresh, untouched, recent):
+            folder.mkdir(parents=True)
+            (folder / "cover-01.jpg").write_bytes(b"jpeg")
+        hour_ago = time.time() - 3700
+        os.utime(untouched, (hour_ago, hour_ago))
+        now = int(time.time())
+        (state / "specimens.txt").write_text(f"#v2\n{now - 3700} {expired}\n{now - 60} {fresh}\n")
+        dead = f"http://127.0.0.1:{closed_port()}/python.tar.gz"
+        self.box.write_launcher_json(**{self.python_key() + "_url": dead})
+        result = self.run_launcher("guide", "pptx", env={"TEMP": str(temp), "TMP": str(temp)})
+        self.assertIn(result.returncode, (67, 68), result.stdout)
+        self.assertFalse(expired.exists(), "recorded more than an hour ago: removed")
+        self.assertFalse(untouched.exists(), "untouched for an hour in today's temporary folder: removed")
+        self.assertTrue(fresh.exists() and recent.exists(), "recent ones stay")
+
+    def test_of_launchers_of_two_services_racing_on_an_empty_folder_one_wins(self):
+        # Round 8 (review 6): the claim is one exclusive step; the losers read the winner's record and refuse.
+        import shutil
+        import subprocess
+        dead = f"http://127.0.0.1:{closed_port()}"
+        self.box.write_launcher_json(stage1_client_url=f"{dead}/client.tar")
+        other = self.box.tmp / "staging build" / "skills" / "pptx" / "scripts"
+        shutil.copytree(self.box.launcher.parent, other)
+        config = (other / "launcher.json").read_text().replace(self.api.base, "https://api.staging.example.test")
+        (other / "launcher.json").write_text(config.replace("https://api.staging.example.test/dl/client", f"{dead}/client"))
+        launchers = [self.box.launcher if i % 2 == 0 else other / self.box.launcher.name for i in range(8)]
+        env = {**self.box.env, "THEODORE_EPHEMERAL": "1"}
+        procs = []
+        for launcher in launchers:
+            command = cmd_command(str(launcher), "version") if IS_WINDOWS else ["/bin/sh", str(launcher), "version"]
+            procs.append((launcher, subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                                     stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))))
+        results = [(launcher, proc.communicate(timeout=120)[0], proc.returncode) for launcher, proc in procs]
+        winner = (self.box.home / "state" / "environment").read_text().strip()
+        self.assertIn(winner, (self.api.base, "https://api.staging.example.test"))
+        for launcher, out, code in results:
+            ours = (launcher == self.box.launcher) == (winner == self.api.base)
+            self.assertEqual(code, 74 if ours else 64, f"{launcher}: {out}")
 
     def test_uninstall_without_python_reports_what_it_could_not_remove(self):
         fake = self.box.tmp / "failing tools"

@@ -304,6 +304,25 @@ class Specimen(ClientCase):
         self.assertStatus(self.client("uninstall"), "OK", 0)
         self.assertEqual(self.folders(), [])
 
+    def test_a_folder_uninstall_could_not_remove_keeps_its_record(self):
+        # Round 8 (review 12): the record of a folder that could not be removed survives the removal of state/, so a
+        # later uninstall finds it although TMPDIR changed.
+        path = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        self.temp.chmod(0o555)                     # the folder cannot be removed from its parent
+        self.addCleanup(lambda: self.temp.chmod(0o755))
+        other = self.box.tmp / "another-tmp"
+        other.mkdir()
+        first, _n, _t = self.assertStatus(self.client("uninstall", env={"TMPDIR": str(other)}), "RETRY", 75)
+        self.assertIn(str(path.parent), first)
+        record = self.box.home / "state" / "specimens.txt"
+        self.assertTrue(record.exists(), "the record of what is left survives")
+        self.assertIn(str(path.parent), record.read_text())
+        self.assertEqual(sorted(p.name for p in (self.box.home / "state").iterdir()), ["specimens.txt"])
+        self.temp.chmod(0o755)
+        self.assertStatus(self.box.run_launcher("uninstall", env={"TMPDIR": str(other)}), "OK", 0)
+        self.assertFalse(path.parent.exists(), "found again from the record and removed")
+        self.assertFalse(self.box.home.exists())
+
     def test_the_guide_names_the_sheets_and_says_how_to_look_at_one(self):
         text = "# Covers\n\n![Cover](specimens/cover-01.jpg) and [the grid](specimens/Grid_2.b.jpg)\n\n## Next\n\nMore.\n"
         self.api.guides["deck-design"]["covers"] = text
@@ -492,6 +511,9 @@ class Entitlement(ClientCase):
         config["api_base"] = "https://api.invalid.example"
         (self.box.home / "bin" / "launcher.json").write_text(json.dumps(config))
         (self.box.home / "state" / "environment").write_text(config["api_base"] + "\n")      # the folder is that service's
+        credential = json.loads((self.box.home / "state" / "credentials").read_text())
+        credential["api_base"] = config["api_base"]                                          # and so is its credential
+        (self.box.home / "state" / "credentials").write_text(json.dumps(credential))
         result = self.client("pptx", "version", env={"THEODORE_TEST_CLOCK_OFFSET": str(30 * DAY)})
         self.assertEqual(result.returncode, 0, result.stdout)        # the offset did not expire the token
 
@@ -1545,6 +1567,47 @@ class Hosts(ClientCase):
         self.assertIn("claude plugin uninstall theodore@theodore", calls, "the plugin itself is Theodore's and goes")
         self.assertEqual(json.loads(path.read_text()), {"enabledPlugins": {"other@x": True}})
         self.assertTrue(codex_config.exists(), "a config that was there before stays, even empty")
+
+    def test_a_registration_that_was_there_before_is_recorded_as_not_ours_and_kept(self):
+        # Round 8 (review 9): the plugin was already registered when Theodore's installer ran.
+        log = self.registering_tools(claude_markets="theodore (https://x.test/marketplace.json)")
+        claude = self.box.tmp / "fakebin" / "claude"
+        claude.write_text(claude.read_text().replace('"plugin list --json") echo "[]";;', '"plugin list --json") echo \'[{"id": "theodore@theodore"}]\';;'))
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        record = json.loads((self.box.home / "state" / "host-settings.json").read_text())
+        self.assertIs(record["claude_registered"], False)
+        self.assertIs(record["claude_added_marketplace"], False)
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("was there before Theodore's installer and was kept", first)
+        calls = log.read_text().splitlines()
+        self.assertNotIn("claude plugin uninstall theodore@theodore", calls)
+        self.assertNotIn("claude plugin marketplace remove theodore", calls)
+
+    def test_a_restored_record_goes_and_never_claims_a_file_the_user_made_later(self):
+        # Round 8 (review 11): apply, take back, the user makes their own settings file, apply and take back again.
+        self._fake_tools()
+        path = self.settings_file()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertFalse(path.exists(), "the file Theodore created is gone again")
+        self.assertFalse((self.box.home / "state" / "host-settings.json").exists(), "the record goes once everything is taken back")
+        mine = {"permissions": {"allow": []}, "extraKnownMarketplaces": {}}
+        path.write_text(json.dumps(mine))
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertTrue(path.exists(), "the user's own file stays")
+        self.assertEqual(json.loads(path.read_text()), mine)
+
+    def test_a_created_file_the_user_rewrote_is_not_deleted(self):
+        self._fake_tools()
+        path = self.settings_file()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        data = json.loads(path.read_text())
+        time.sleep(0.05)
+        path.write_text(json.dumps(data, indent=4))         # the user's editor rewrote it (same content, a new file)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertTrue(path.exists(), "no longer the file Theodore left: it stays, emptied of Theodore's entries")
+        self.assertEqual(json.loads(path.read_text()), {})
 
     def test_broken_settings_file_is_left_alone(self):
         self._fake_tools()

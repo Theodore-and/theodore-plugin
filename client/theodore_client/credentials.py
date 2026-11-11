@@ -68,8 +68,18 @@ def _security(arguments: list[str], command: str | None = None):
         return None
 
 
+def _service_base() -> str:
+    return str(core.running_stamp().get("api_base") or "").strip().rstrip("/")
+
+
 def _account() -> str:
-    # One item per data directory, so a second data directory (a test home) never collides with the real one.
+    """One item per Theodore folder and service: a staging build can never read a production credential, even in a
+    folder a production installation left behind. The launchers' bare uninstall computes the same name."""
+    return "installation-" + hashlib.sha256(f"{core.home().root}\n{_service_base()}".encode("utf-8")).hexdigest()[:12]
+
+
+def _legacy_account() -> str:
+    """The name a client before round 8 used (the folder alone): never read, only deleted."""
     return "installation-" + hashlib.sha256(str(core.home().root).encode("utf-8")).hexdigest()[:12]
 
 
@@ -143,6 +153,9 @@ def _keychain_delete() -> bool:
     else:
         done = _security(["delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()])
         gone = done is not None and done.returncode in (0, 44)
+        if gone:                    # the item of a client before round 8, if any: it goes too
+            legacy = _security(["delete-generic-password", "-a", _legacy_account(), "-s", SERVICE, *_keychain_args()])
+            gone = legacy is not None and legacy.returncode in (0, 44)
     if gone:
         core.remove_tree(_tombstone())
         core.remove_tree(_holds_marker())
@@ -154,7 +167,8 @@ def _keychain_delete() -> bool:
 
 def store(installation_id: str, installation_secret: str) -> str:
     """Save the credential. Returns the backend that holds it."""
-    payload = json.dumps({"installation_id": installation_id, "installation_secret": installation_secret}, separators=(",", ":"))
+    payload = json.dumps({"installation_id": installation_id, "installation_secret": installation_secret,
+                          "api_base": _service_base()}, separators=(",", ":"))
     kind = backend()
     if kind == "keychain":
         if _keychain_store(payload):
@@ -196,7 +210,9 @@ def load() -> dict | None:
         return None
     if isinstance(value, dict) and value.get("installation_id") and value.get("installation_secret"):
         core.register_secret(value["installation_secret"])
-        return value
+        if value.get("api_base") and str(value["api_base"]).rstrip("/") != _service_base():
+            return None             # another service's credential (a folder it left behind): never used here
+        return {"installation_id": value["installation_id"], "installation_secret": value["installation_secret"]}
     return None
 
 

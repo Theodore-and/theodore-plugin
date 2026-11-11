@@ -922,6 +922,8 @@ def hosts(action: str, apply: bool) -> int:
             code, out = _run([claude, "plugin", "list", "--json"])
             if code == 0 and '"theodore@theodore"' in out:
                 lines.append("claude-code: already registered")
+                record.setdefault("claude_registered", False)          # there before Theodore's own: not ours to remove
+                record.setdefault("claude_added_marketplace", False)
             else:
                 settings_path = _claude_settings_path()
                 before_file, before = settings_path.exists(), _load_settings(settings_path) or {}
@@ -942,6 +944,8 @@ def hosts(action: str, apply: bool) -> int:
                     record["path"] = str(settings_path)
                     record["created_keys"] = sorted(set(record.get("created_keys") or []) | {k for k in after if k not in before})
                     record["file_created"] = bool(record.get("file_created")) or (not before_file and settings_path.exists())
+                    if record["file_created"]:
+                        record["file_identity"] = _identity(settings_path)
         else:
             lines.append("claude-code: not found on this computer")
         if codex:
@@ -950,6 +954,9 @@ def hosts(action: str, apply: bool) -> int:
             else:
                 config_before = _codex_config().exists()
                 market_before = _listed([codex, "plugin", "marketplace", "list"])
+                if _listed([codex, "plugin", "list"], "theodore@theodore"):
+                    record.setdefault("codex_registered", False)       # there before Theodore's own: not ours to remove
+                    record.setdefault("codex_added_marketplace", False)
                 _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
                 code, out = _run([codex, "plugin", "add", "theodore@theodore"])
                 lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
@@ -1029,6 +1036,8 @@ def _claude_settings_apply() -> str:
     core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
     record.update({"rules": sorted(set(record.get("rules") or []) | set(added)), "created_keys": sorted(created), "marketplace": market,
                    "file_created": file_created, "path": str(path)})
+    if file_created:
+        record["file_identity"] = _identity(path)
     _save_host_record(record)
     return f"claude-code: automatic updates on and launcher allowed in {path}"
 
@@ -1042,7 +1051,17 @@ def _legacy_marketplace(record: dict) -> dict | None:
     return None
 
 
-def _claude_settings_restore() -> tuple[str | None, list[str]]:
+def _identity(path: Path) -> list | None:
+    """Which file this is (inode, modification time, size): a settings file Theodore created is deleted only while it is
+    still the file Theodore (or its registration) left, never one the user made or rewrote since."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return [info.st_ino, info.st_mtime_ns, info.st_size]
+
+
+def _claude_settings_restore(file_ours: bool = False) -> tuple[str | None, list[str]]:
     """Take back exactly what the record says Theodore added or changed: its rules, the marketplace entry it created
     (only if nobody changed it since) or the autoUpdate value it changed (restored, unless changed since), and the
     keys and the file it created, only when they hold nothing. Anything else, empty or not, stays. Returns (a problem
@@ -1085,7 +1104,7 @@ def _claude_settings_restore() -> tuple[str | None, list[str]]:
         if isinstance(holder, dict) and holder.get(leaf, None) in ([], {}):
             del holder[leaf]
     try:
-        if record.get("file_created") and settings == {}:
+        if record.get("file_created") and file_ours and settings == {}:
             path.unlink()
         elif json.dumps(settings, sort_keys=True) != before:
             core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
@@ -1099,12 +1118,21 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) ->
     then the settings Theodore recorded. Problems go to `left`; returns notes for what stays on purpose."""
     record = _host_record()
     notes: list[str] = []
+    problems_before = len(left)
+    settings_path = Path(record.get("path") or _claude_settings_path())
+    # Still the settings file Theodore created and last wrote? Decided before the assistants' own unregistration,
+    # which rewrites the file.
+    file_ours = bool(record.get("file_created")) and record.get("file_identity") == _identity(settings_path)
     for name, tool, key, plugin_args, market_args in (
             ("claude-code", claude, "claude", ["plugin", "uninstall", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"]),
             ("codex", codex, "codex", ["plugin", "remove", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"])):
         if not tool:
             continue
-        steps = [plugin_args]
+        steps = []
+        if record.get(f"{key}_registered") is False:
+            notes.append(f"{name}: its Theodore plugin registration was there before Theodore's installer and was kept")
+        else:
+            steps.append(plugin_args)
         if record.get(f"{key}_added_marketplace") is False:
             notes.append(f"{name}: its theodore marketplace was there before Theodore and was kept")
         else:
@@ -1113,10 +1141,13 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) ->
             problem = _unregistered([tool, *args])
             if problem:
                 left.append(f"the {name} registration ({' '.join(args)}: {problem})")
-    problem, settings_notes = _claude_settings_restore()
+    problem, settings_notes = _claude_settings_restore(file_ours)
     if problem:
         left.append(f"the Theodore entries in {_claude_settings_path()} ({problem})")
     notes += settings_notes
+    _codex_leftovers()                      # reads the record: before it goes
+    if len(left) == problems_before:        # everything taken back: the record has done its job (a stale one could
+        core.remove_tree(_host_record_path())   # later claim a settings file the user made)
     return notes
 
 
@@ -1231,7 +1262,6 @@ def uninstall(keep_hosts: bool) -> int:
     notes: list[str] = []
     if not keep_hosts:
         notes = _unregister_hosts(shutil.which("claude"), shutil.which("codex"), left)
-        _codex_leftovers()
     for name in ("setup", "packs", "engine-update", "client-update", "libreoffice"):
         pid = int(Job(name).read().get("pid") or 0)
         if pid and pid != os.getpid() and Job(name).alive():
@@ -1245,14 +1275,21 @@ def uninstall(keep_hosts: bool) -> int:
         core.remove_tree(cache)
         if cache.exists():
             left.append(f"the render cache {cache}")
-    for folder in specimens.sweep(everything=True):
-        left.append(f"the specimen folder {folder}")
+    specimens_left = specimens.sweep(everything=True)
+    for folder in specimens_left:
+        left.append(f"the specimen folder {folder} (its record is kept in {specimens.registry()}; running uninstall again retries it)")
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
         # One string, not a list: Python would escape the inner quotes as \" and cmd does not read that escape (a
         # path with a space was never removed). /s makes cmd strip exactly the outer pair of quotes.
-        removals = " & ".join(f'rmdir /s /q "{root / name}"' for name in core.OWNED)
+        def removal(name: str) -> str:
+            if name == "state" and specimens_left:          # keep only the record of folders still to remove
+                state = root / name
+                return (f'(for /d %D in ("{state}\\*") do rmdir /s /q "%D") & '
+                        f'(for %F in ("{state}\\*") do if /i not "%~nxF"=="{specimens.registry().name}" del /f /q "%F")')
+            return f'rmdir /s /q "{root / name}"'
+        removals = " & ".join(removal(name) for name in core.OWNED)
         line = f'ping -n 6 127.0.0.1 >nul & {removals} & rmdir "{root}"'
         subprocess.Popen(f'cmd /d /s /c "{line}"', creationflags=0x00000008 | 0x08000000,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1268,6 +1305,11 @@ def uninstall(keep_hosts: bool) -> int:
         return 75
     else:
         for name in core.OWNED:
+            if name == "state" and specimens_left:          # the record of folders still to remove survives (it is read again)
+                for child in (root / name).iterdir() if (root / name).is_dir() else []:
+                    if child.name != specimens.registry().name:
+                        core.remove_tree(child)
+                continue
             core.remove_tree(root / name)
             if (root / name).exists():
                 left.append(f"{root / name}")
