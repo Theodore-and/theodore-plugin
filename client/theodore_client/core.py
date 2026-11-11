@@ -38,7 +38,7 @@ class Status(Exception):
         return EXIT[self.name]
 
     def render(self) -> str:
-        one = lambda text: " ".join(str(text).split())
+        one = lambda text: " ".join(scrub_secrets(str(text)).split())
         lines = f"THEODORE {self.name}: {one(self.summary)}\nNEXT: {one(self.next_step)}"
         return f"{lines}\nTELL THE USER: {NOTHING_TO_TELL if self.tell_user is None else one(self.tell_user)}"
 
@@ -47,37 +47,71 @@ NOTHING_TO_TELL = "nothing; do not mention this to the user."
 
 
 def emit(status: Status) -> int:
-    """Print a status. Once this process has learned that the device was revoked, every status printed is the
-    sign-in block instead (account.revoked_status), whatever else happened afterwards."""
-    global _REVOKED_EMITTED
-    if _REVOKED and not getattr(status, "revocation", False):
+    """Print a status. Once this process has learned that the device was revoked or the account suspended, every
+    status printed is that refusal's block instead (account.refusal_status, which cannot raise), once, whatever else
+    happened afterwards."""
+    global _REFUSAL_EMITTED
+    if _REFUSAL and not getattr(status, "refusal", False):
         from . import account          # imported here: account imports this module
-        status = account.revoked_status()
-    if getattr(status, "revocation", False):
-        if _REVOKED_EMITTED:
+        status = account.refusal_status()
+    if getattr(status, "refusal", False):
+        if _REFUSAL_EMITTED:
             return status.code
-        _REVOKED_EMITTED = True
+        _REFUSAL_EMITTED = True
     print(status.render(), flush=True)
     return status.code
 
 
-# --- revocation: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------
+# --- refusals: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------
+# ("revoked", code): the device was signed out (401); credential and licence are deleted.
+# ("suspended", code): the account is suspended or its plan inactive (403); the licence is deleted, the credential is
+# kept (a suspension can be lifted), and no command runs until the service says otherwise.
 
-_REVOKED: str | None = None
-_REVOKED_EMITTED = False
-
-
-def mark_revoked(code: str) -> None:
-    global _REVOKED
-    _REVOKED = code
+_REFUSAL: tuple[str, str] | None = None
+_REFUSAL_EMITTED = False
 
 
-def revoked() -> bool:
-    return _REVOKED is not None
+def mark_refused(kind: str, code: str) -> None:
+    global _REFUSAL
+    if _REFUSAL is None or (kind == "revoked" and _REFUSAL[0] != "revoked"):
+        _REFUSAL = (kind, code)
 
 
-def revocation_emitted() -> bool:
-    return _REVOKED_EMITTED
+def refusal() -> tuple[str, str] | None:
+    return _REFUSAL
+
+
+def refused() -> bool:
+    return _REFUSAL is not None
+
+
+# --- secrets never reach a log or a printed line ------------------------------------------------------------------------
+
+_SECRETS: set[str] = set()
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"),           # a JWS (the licence token)
+    re.compile(r"\bsec-[A-Za-z0-9_-]{16,}"),                                              # an installation secret
+    re.compile(r"(?i)\b(installation_secret|entitlement_token|access_token|refresh_token|device_code|activation_code|"
+               r"secret|token|password|authorization)(\\?[\"']?\s*[=:]\s*\\?[\"']?)[^\s\"',;&}]+"),
+    re.compile(r"(?i)(\bcode\s*[=:]\s*[\"']?)[A-Z0-9]{4}-[A-Z0-9]{4}\b"),                    # an activation code given as code=
+]
+
+
+def register_secret(value: str | None) -> None:
+    """A secret this process holds (installation secret, licence token, activation code): never printed or logged."""
+    if value and len(value) >= 6:
+        _SECRETS.add(value)
+
+
+def scrub_secrets(text: str) -> str:
+    """Every line printed (Status.render) and logged (log) passes here: the secrets this process holds and anything
+    shaped like one (a bearer, a licence token, an installation secret, name=value credentials) become [redacted]."""
+    for value in sorted(_SECRETS, key=len, reverse=True):
+        text = text.replace(value, "[redacted]")
+    for pattern in _SECRET_PATTERNS:          # the name and its separator stay, the value goes
+        text = pattern.sub(lambda m: "".join(m.groups()) + "[redacted]", text)
+    return text
 
 
 def usage(summary: str, next_step: str = "") -> Status:
@@ -587,7 +621,7 @@ class Job:
         self.update(done=True, percent=100, phase="done")
 
     def fail(self, cause: str, detail: str) -> None:
-        self.update(failed={"cause": cause, "detail": detail[:300]})
+        self.update(failed={"cause": cause, "detail": scrub_secrets(detail)[:300]})
 
     def clear(self) -> None:
         with contextlib.suppress(OSError):
@@ -623,7 +657,7 @@ def log(message: str) -> None:
     with contextlib.suppress(OSError):
         home().logs.mkdir(parents=True, exist_ok=True)
         with open(home().logs / "client.log", "a", encoding="utf-8") as handle:
-            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {message}\n")
+            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {scrub_secrets(message)}\n")
 
 
 def user_agent() -> str:

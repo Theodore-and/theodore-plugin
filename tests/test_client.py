@@ -1940,6 +1940,36 @@ class Environments(ClientCase):
         self.assertIn("running-build.example.test/app/plan", tell)
 
 
+class Suspension(Revocation):
+    """Round 8, ruling 5: a suspended account (403 account_suspended) goes through the same central handler: every
+    command that learns it ends with NO_ENTITLEMENT 70, prints no instructions, and deletes the licence. The credential
+    is kept on purpose (the contract's 403: the installation is still valid and a suspension can be lifted)."""
+
+    def test_every_command_that_contacts_the_service(self):
+        report = ["report", "--kind", "bug", "--title", "A title", "--details", "Some details"]
+        table = [(["update", "--check"], None), (["prefs", "list"], None), (report + ["--origin", "user_requested"], None),
+                 (report, self.switch_unknown), (["guide", "deck-design"], None), (["guide", "pptx"], None),
+                 (["guide", "pptx", "--part", "2"], self.heartbeat_due), (["setup", "--job"], None), (["specimen", "cover-01.jpg"], None)]
+        self.api.publish_engine("1.0.1", engine_zip("1.0.1", skill_text=self.LONG))
+        for command, prepare in table:
+            with self.subTest(command=" ".join(command), prepare=getattr(prepare, "__name__", None)):
+                self.fresh()
+                self.api.specimens = {"cover-01.jpg": JPEG}
+                if prepare:
+                    prepare()
+                self.api.account_state = "suspended"
+                work = self.box.tmp / "work"
+                work.mkdir()
+                result = self.client(*command, cwd=work)
+                first, _nxt, _tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+                self.assertEqual(sum(line.startswith("THEODORE ") for line in result.stdout.splitlines()), 1, result.stdout)
+                self.assertNotIn("=== THEODORE", result.stdout, "no instructions after a suspension")
+                self.assertIn("suspended", first)
+                self.assertTrue((self.box.home / "state" / "credentials").exists(), "the credential is kept: a suspension can be lifted")
+                self.assertFalse((self.box.home / "state" / "entitlement.json").exists(), "the stored licence is deleted")
+                self.api.account_state = "active"
+
+
 class Internals(unittest.TestCase):
     def test_ed25519_rfc8032_vectors(self):
         from theodore_client import ed25519

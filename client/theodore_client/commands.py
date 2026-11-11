@@ -79,7 +79,7 @@ def _end_line(skill: str, name: str, body: str, part: int, total: int, next_comm
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
                     header_lines: list[str], next_command: str) -> None:
-    if core.revoked():          # a revoked device gets no instructions, whichever call learned it
+    if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
     out += header_lines

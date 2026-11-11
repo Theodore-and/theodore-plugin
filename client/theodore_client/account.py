@@ -75,6 +75,7 @@ def decode_claims(token: str) -> dict:
 def stored_token() -> tuple[str | None, dict]:
     env = os.environ.get(ENTITLEMENT_ENV)
     token = env or core.read_json(_token_path()).get(ENTITLEMENT_FILE_KEY)
+    core.register_secret(token)
     return (token, decode_claims(token)) if token else (None, {})
 
 
@@ -138,6 +139,8 @@ def device_metadata() -> dict:
 
 def _adopt(bundle: dict) -> None:
     """Store what both sign-in routes return: {installation_id, installation_secret, entitlement_token}."""
+    core.register_secret(bundle.get("installation_secret"))
+    core.register_secret(bundle.get("entitlement_token"))
     if not all(bundle.get(k) for k in ("installation_id", "installation_secret", "entitlement_token")):
         raise core.internal("the sign-in answer from the Theodore API is incomplete.")
     core.home().ensure()
@@ -286,26 +289,58 @@ def login_start(reason: str = "this computer is not signed in to Theodore.", ope
                   tell)
 
 
-_REVOKED_STATUS: Status | None = None
+_REFUSAL_STATUS: Status | None = None
+
+
+def refusal_status() -> Status:
+    """The one answer of a command that learned, on any authenticated call, that the device was revoked or the account
+    suspended (core.refusal). It cannot raise: whatever fails while it is built, a fixed block is answered."""
+    global _REFUSAL_STATUS
+    if _REFUSAL_STATUS is None:
+        kind, code = core.refusal() or ("revoked", "unauthenticated")
+        try:
+            built = revoked_status() if kind == "revoked" else suspended_status(code)
+        except BaseException:           # noqa: BLE001  the central handler never fails
+            built = _static_sign_in(kind)
+        built.refusal = True
+        _REFUSAL_STATUS = built
+    return _REFUSAL_STATUS
+
+
+_REVOKED_REASON = ("this device was signed out of Theodore (from the portal, or its sign-in is no longer valid); "
+                   "its stored sign-in and licence were deleted.")
+
+
+def _static_sign_in(kind: str) -> Status:
+    if kind != "revoked":
+        return Status("NO_ENTITLEMENT", "the Theodore account is suspended or its plan is not active; the stored licence was deleted.",
+                      "do not retry. Tell the user to check their Theodore account.", "Your Theodore account is not active at the moment.")
+    return Status("SIGN_IN_REQUIRED", _REVOKED_REASON, f"run {quoted_launcher()} login --start and follow what it prints.",
+                  "Theodore was signed out on this computer and needs a one-time sign-in again.")
 
 
 def revoked_status() -> Status:
-    """The one answer of a command that learned the device was revoked (its credential and licence are already
-    deleted): SIGN_IN_REQUIRED with the sign-in link, or, when a new sign-in cannot be started, what to do once the
-    connection is back. Never opens a browser."""
-    global _REVOKED_STATUS
-    if _REVOKED_STATUS is None:
-        reason = ("this device was signed out of Theodore (from the portal, or its sign-in is no longer valid); "
-                  "its stored sign-in and licence were deleted.")
-        started = login_start(reason)
-        if started.name != "SIGN_IN_REQUIRED":
-            started = Status("SIGN_IN_REQUIRED", reason,
-                             f"a new sign-in could not be started because the Theodore service could not be reached ({started.summary}). "
-                             f"When the connection is back, run {quoted_launcher()} login --start and follow what it prints.",
-                             "Theodore was signed out on this computer and needs a new sign-in; I will start it once the internet connection is back.")
-        started.revocation = True
-        _REVOKED_STATUS = started
-    return _REVOKED_STATUS
+    """SIGN_IN_REQUIRED with the sign-in link, or, when a new sign-in cannot be started, what to do once the connection
+    is back. Never opens a browser."""
+    try:
+        started = login_start(_REVOKED_REASON)
+    except Exception as exc:        # noqa: BLE001  an answer too large, a broken one: the fixed block, with why
+        started = core.internal(f"{exc.__class__.__name__}")
+    if started.name != "SIGN_IN_REQUIRED":
+        started = Status("SIGN_IN_REQUIRED", _REVOKED_REASON,
+                         f"a new sign-in could not be started ({started.summary}). "
+                         f"When the connection is back, run {quoted_launcher()} login --start and follow what it prints.",
+                         "Theodore was signed out on this computer and needs a new sign-in; I will start it once the internet connection is back.")
+    return started
+
+
+def suspended_status(code: str) -> Status:
+    """The account is suspended or its plan inactive (403): the licence is deleted, the credential kept (a suspension
+    can be lifted; a deleted account's installations are revoked, which is the 401 route)."""
+    return Status("NO_ENTITLEMENT", f"the Theodore service refused this account ({code}): it is suspended or its plan is not active. "
+                                    "The stored licence was deleted; nothing runs until the account is active again.",
+                  f"do not retry. Tell the user; they can check their account at {core.site_url('/app/plan')}.",
+                  f"Your Theodore account is not active at the moment. You can check it at {core.site_name('/app/plan')}.")
 
 
 def signed_in_status(claims: dict) -> Status:
@@ -351,6 +386,7 @@ def login_finish(wait_seconds: float) -> Status:
 def login_code(code: str) -> Status:
     """Redeem a one-time activation code from the portal. The code is never printed or logged."""
     code = code.strip().upper()
+    core.register_secret(code)
     if not re.match(ACTIVATION_CODE_PATTERN, code):
         return core.usage("the activation code must look like ABCD-1234.",
                           f"use the code exactly as it appears in the sentence the user pasted, or run {quoted_launcher()} login --start.")

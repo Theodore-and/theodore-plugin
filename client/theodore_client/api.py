@@ -170,10 +170,14 @@ def _signed_out(http_status: int, code: str) -> None:
     account that is refused (403) loses the stored licence. Automatic reports being off is not a refusal of the account."""
     from . import account, credentials
     if code in DELETE_CREDENTIAL_ON:
-        core.mark_revoked(code)          # the command ends with the sign-in block, whatever it does next (core.emit, cli.main)
+        core.mark_refused("revoked", code)      # the command ends with the sign-in block, whatever it does next (core.emit, cli.main)
         credentials.delete()
         account.delete_token()
         core.log(f"signed out by the service ({code}): credential and licence deleted")
+    elif code in ("account_suspended", "entitlement_inactive"):
+        core.mark_refused("suspended", code)    # the same, central: nothing runs or prints after it; the credential stays
+        account.delete_token()
+        core.log(f"account refused by the service ({code}): licence deleted, credential kept")
     elif code in DELETE_TOKEN_ON or (http_status == 403 and code != "auto_reports_disabled"):
         account.delete_token()
 

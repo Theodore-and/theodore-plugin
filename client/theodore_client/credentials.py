@@ -138,8 +138,8 @@ def _keychain_delete() -> bool:
     """True when no item is left: deleted, or there was none (security exits 44 for "not found"). A keychain left
     alone after a timeout cannot confirm it: True only when no credential was ever stored there (no holds marker).
     A deletion that is not confirmed leaves the tombstone, so the old item is never used again."""
-    if _keychain_skipped():
-        gone = not _holds_marker().exists()
+    if _keychain_skipped():         # nothing can be confirmed: an item known or suspected to be there stays tombstoned
+        gone = not _holds_marker().exists() and not _tombstone().exists()
     else:
         done = _security(["delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()])
         gone = done is not None and done.returncode in (0, 44)
@@ -195,6 +195,7 @@ def load() -> dict | None:
     except ValueError:
         return None
     if isinstance(value, dict) and value.get("installation_id") and value.get("installation_secret"):
+        core.register_secret(value["installation_secret"])
         return value
     return None
 

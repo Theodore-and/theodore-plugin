@@ -485,5 +485,99 @@ class SpecimenRegistry(unittest.TestCase):
             self.assertEqual([p.name for p in (dirs["cache"] / "specimens").iterdir()], [folder.name])
 
 
+class Round8Keychain(unittest.TestCase):
+    def test_a_repeated_deletion_never_drops_the_tombstone_while_the_item_may_exist(self):
+        # An upgraded installation: an old keychain item, a fallback file, no keychain-holds marker. The deletion after
+        # a revocation times out; a second deletion (the keychain now left alone) must keep the tombstone.
+        import io
+        import subprocess
+        from theodore_client import credentials
+        keychain = {"item": "c2VjcmV0"}
+        clock = {"offset": 0.0}
+
+        def security(command, **kwargs):
+            if command[1] == "delete-generic-password":
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+            if command[1] == "find-generic-password":
+                return subprocess.CompletedProcess(command, 0, '{"installation_id":"old","installation_secret":"old-secret"}', "")
+            raise AssertionError(command)
+        real_now = core.now
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), \
+                mock.patch.object(subprocess, "run", side_effect=security), mock.patch("sys.stderr", new=io.StringIO()), \
+                mock.patch.object(core, "now", side_effect=lambda: real_now() + clock["offset"]):
+            core.home().ensure()
+            (home / "state" / "credentials").write_text('{"installation_id":"new","installation_secret":"file-secret"}')
+            self.assertFalse(credentials.delete())
+            self.assertTrue((home / "state" / "keychain-revoked").exists())
+            self.assertFalse(credentials.delete(), "still not confirmed")
+            self.assertTrue((home / "state" / "keychain-revoked").exists(), "the tombstone stays while the item may exist")
+            clock["offset"] += 86401
+            self.assertIsNone(credentials.load(), "the old keychain credential never loads again")
+
+
+class Round8Refusals(unittest.TestCase):
+    """Round 8, rulings 10 and 14: secrets never reach a printed line or the log; the central refusal handler cannot raise."""
+
+    def setUp(self):
+        core._REFUSAL, core._REFUSAL_EMITTED, account._REFUSAL_STATUS = None, False, None
+        self.addCleanup(lambda: setattr(core, "_REFUSAL", None))
+        self.addCleanup(lambda: setattr(core, "_REFUSAL_EMITTED", False))
+        self.addCleanup(lambda: setattr(account, "_REFUSAL_STATUS", None))
+
+    def test_the_handler_answers_the_fixed_block_when_starting_a_sign_in_fails(self):
+        import io
+        from theodore_client import cli, commands
+        with client_home():
+            core.home().ensure()
+            core.mark_refused("revoked", "installation_revoked")
+            out = io.StringIO()
+
+            def broken(*a, **k):
+                raise api.TooLarge(1 << 20)
+            with mock.patch.object(api, "call_json", side_effect=broken), mock.patch.object(commands, "version", side_effect=broken), \
+                    mock.patch("sys.stdout", new=out):
+                code = cli.main(["version"])
+            self.assertEqual(code, 65)
+            lines = [l for l in out.getvalue().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 3, out.getvalue())
+            self.assertTrue(lines[0].startswith("THEODORE SIGN_IN_REQUIRED: "), lines[0])
+            self.assertIn("login --start", lines[1])
+
+    def test_a_suspension_is_answered_centrally_too(self):
+        import io
+        with client_home():
+            core.mark_refused("suspended", "account_suspended")
+            out = io.StringIO()
+            with mock.patch("sys.stdout", new=out):
+                self.assertEqual(core.emit(core.Status("OK", "fine", "go on", "ok")), 70)
+                self.assertEqual(core.emit(core.Status("OK", "again", "go on", "ok")), 70)
+            self.assertEqual(out.getvalue().count("THEODORE NO_ENTITLEMENT"), 1, "once")
+
+    def test_server_diagnostics_are_scrubbed_before_log_or_print(self):
+        import io
+        from theodore_client import commands, credentials, install
+        secret = "sec-" + "a1" * 20
+        with client_home() as home:
+            core.home().ensure()
+            credentials.store("inst-1", secret)
+            echo = api.ApiError(500, "internal_error", f"lookup failed for installation_secret={secret} and Bearer {secret}")
+            with mock.patch.object(install, "install_runtime", return_value="rt"), \
+                    mock.patch.object(install, "fetch_channel_manifest", side_effect=echo):
+                self.assertEqual(commands.setup_job(), 0)
+            log = (home / "logs" / "client.log").read_text()
+            self.assertIn("setup: engine not installed yet", log)
+            self.assertNotIn(secret, log)
+            self.assertNotIn("a1a1a1a1", log)
+            printed = io.StringIO()
+            refused = api.ApiError(400, "invalid_grant", "code WXYZ-9876 is not valid")
+            with mock.patch.object(api, "call_json", side_effect=api.ApiError(422, "validation_failed", "bad code=WXYZ-9876 for installation_secret: " + secret)), \
+                    mock.patch("sys.stdout", new=printed):
+                core.emit(account.login_code("WXYZ-9876"))
+                core.emit(api.status_from(refused, "activation"))
+            self.assertNotIn("WXYZ-9876", printed.getvalue())
+            self.assertNotIn(secret, printed.getvalue())
+            self.assertIn("[redacted]", printed.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
