@@ -10,6 +10,8 @@ Theodore is in beta. Accounts: https://theodoreand.ai
 ## Install
 
 The simplest way is the sentence on your Get started page at theodoreand.ai, pasted into your assistant.
+On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load Theodore's skills: install it from
+git-scm.com first. Without it Claude Code runs commands in PowerShell, and the skills cannot load.
 By hand:
 
 | Assistant | Command |

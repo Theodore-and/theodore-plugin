@@ -8,6 +8,9 @@ Theodore's runtime in your user folder (`~/.theodore`, or `%LOCALAPPDATA%\Theodo
 130 MB to download before the first deck, about 560 to 670 MB on disk with the asset packs, no admin rights), signs this computer in to your Theodore account, and prints the skill's
 instructions. It has no hooks and installs nothing system-wide.
 
+On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load these skills; install it from
+git-scm.com first.
+
 - Accounts and the one-step installer: https://theodoreand.ai
 - What it sends: sign-in, licence refresh, update checks, design-guidance fetches and the reports and preferences you
   or your assistant file; never deck content, file names or folder paths.
