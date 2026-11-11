@@ -328,6 +328,49 @@ class ReportSwitch(unittest.TestCase):
                 self.assertEqual((code, asked, sent), (73, 1, []), "off, no answer or no connection: nothing is sent")
 
 
+class Round8ReportSwitch(unittest.TestCase):
+    """Round 8 (review 2): a refresh never restores a stale ON over an OFF another process recorded meanwhile."""
+
+    def run_race(self, switch, pause_in: str):
+        from theodore_client import credentials
+        with client_home() as home:
+            core.home().ensure()
+            credentials.store("inst-1", "secret-1")
+            account.save_token(AGENT_TOKEN, auto_reports=True)            # a fresh ON
+            reached, go = threading.Event(), threading.Event()
+            answer = {"entitlement_token": AGENT_TOKEN, **({"auto_report_enabled": switch} if switch is not None else {})}
+            real_write = core.write_json
+
+            def network(*a, **k):
+                if pause_in == "network":
+                    reached.set()
+                    go.wait(3.0)
+                return answer
+
+            def writing(path, value, mode=0o644):
+                if pause_in == "write" and threading.current_thread().name == "A" and Path(path).name == "entitlement.json" and not reached.is_set():
+                    reached.set()
+                    go.wait(3.0)
+                return real_write(path, value, mode)
+            with mock.patch.object(api, "call_json", side_effect=network), mock.patch.object(core, "write_json", side_effect=writing):
+                a = threading.Thread(target=lambda: account.refresh(timeout=1), name="A")
+                a.start()
+                self.assertTrue(reached.wait(10))
+                b = threading.Thread(target=account.remember_automatic_reports_off, name="B")
+                b.start()
+                b.join(1.5)
+                go.set()
+                a.join(30)
+                b.join(30)
+            return json.loads((home / "state" / "entitlement.json").read_text())["auto_reports"]
+
+    def test_an_off_recorded_during_the_refresh_wins(self):
+        for switch, pause_in in ((None, "write"), (None, "network"), (True, "network")):
+            with self.subTest(switch=switch, pause_in=pause_in):
+                record = self.run_race(switch, pause_in)
+                self.assertIs(record["enabled"], False, record)
+
+
 class BoundedBodies(unittest.TestCase):
     """Ruling 3: every answer body is read up to a bound, success or error (errors at 64 KiB); a longer one is refused."""
 

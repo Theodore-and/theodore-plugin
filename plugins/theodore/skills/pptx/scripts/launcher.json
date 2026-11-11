@@ -10,7 +10,7 @@
   "stage1_runtime_id": "b77f7d4ca2d43955",
   "stage1_client_version": "0.2.1",
   "stage1_client_url": "https://dl.theodoreand.ai/client/client-0.2.1.tar",
-  "stage1_client_sha256": "d99e20b2147c6e4ec432ac89f65284389b83f4d98713d5cb0b2605b504208336",
+  "stage1_client_sha256": "872d27c17234d07e95f050bcc00f9638b20dbd1888b1c78763c873770590dcb5",
   "stage1_client_size": 368640,
   "stage1_python_darwin_arm64_url": "https://dl.theodoreand.ai/runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
   "stage1_python_darwin_arm64_sha256": "353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e",

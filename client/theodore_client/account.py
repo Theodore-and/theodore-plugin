@@ -79,18 +79,22 @@ def stored_token() -> tuple[str | None, dict]:
     return (token, decode_claims(token)) if token else (None, {})
 
 
-def save_token(token: str, release: dict | None = None, auto_reports: bool | None = None) -> None:
+def save_token(token: str, release: dict | None = None, auto_reports: bool | None = None, asked_at: float | None = None) -> None:
     """Store the token. What is known about automatic reports is kept with it: the server's answer when it gives
-    one, otherwise what was known before."""
-    old = core.read_json(_token_path())
-    record = {ENTITLEMENT_FILE_KEY: token, "saved_at": int(time.time())}
-    if release:
-        record["release"] = release
-    if auto_reports is not None:
-        record["auto_reports"] = {"enabled": bool(auto_reports), "source": "server", "at": int(core.now())}
-    elif isinstance(old.get("auto_reports"), dict):
-        record["auto_reports"] = old["auto_reports"]
-    core.write_json(_token_path(), record, 0o600)
+    one, otherwise what was known before. Read and written under the `entitlement` lock; an "on" from a refresh asked
+    at `asked_at` never replaces an "off" recorded after that moment (a refusal another process learned meanwhile)."""
+    with core.lock("entitlement", timeout=30):
+        old = core.read_json(_token_path())
+        known = old.get("auto_reports") if isinstance(old.get("auto_reports"), dict) else None
+        record = {ENTITLEMENT_FILE_KEY: token, "saved_at": int(time.time())}
+        if release:
+            record["release"] = release
+        newer_off = bool(known and known.get("enabled") is False and asked_at is not None and float(known.get("at") or 0) >= int(asked_at))
+        if auto_reports is not None and not (auto_reports and newer_off):
+            record["auto_reports"] = {"enabled": bool(auto_reports), "source": "server", "at": int(core.now())}
+        elif known:
+            record["auto_reports"] = known
+        core.write_json(_token_path(), record, 0o600)
 
 
 AGENT_REPORTS_FEATURE = "agent-reports"
@@ -117,10 +121,11 @@ def automatic_reports() -> tuple[bool, str]:
 
 def remember_automatic_reports_off() -> None:
     path = _token_path()
-    record = core.read_json(path)
-    if record:
-        record["auto_reports"] = {"enabled": False, "source": "refused", "at": int(core.now())}
-        core.write_json(path, record, 0o600)
+    with core.lock("entitlement", timeout=30):
+        record = core.read_json(path)
+        if record:
+            record["auto_reports"] = {"enabled": False, "source": "refused", "at": int(core.now())}
+            core.write_json(path, record, 0o600)
 
 
 def delete_token() -> None:
@@ -172,6 +177,7 @@ def refresh(timeout: float = 20.0) -> dict:
     body = {"client_version": __version__, "plugin_version": core.plugin_version(), "host": core.host_name()}
     if engine:
         body["engine_version"] = engine
+    asked_at = core.now()
     try:
         answer = api.call_json("licence_refresh", bearer=cred["installation_secret"], body=body, timeout=timeout)
     except api.ApiError as error:
@@ -185,7 +191,7 @@ def refresh(timeout: float = 20.0) -> dict:
         raise core.internal("the licence refresh answer has no entitlement token.")
     release = answer.get("release") or {}
     switch = answer.get("auto_report_enabled", release.get("auto_report_enabled"))
-    save_token(token, release, switch if isinstance(switch, bool) else None)
+    save_token(token, release, switch if isinstance(switch, bool) else None, asked_at)
     if release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine):
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
         from . import install          # imported here: install imports this module
