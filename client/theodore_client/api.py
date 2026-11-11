@@ -68,10 +68,34 @@ class RedirectRefused(urllib.error.URLError):
     pass
 
 
+class _BoundedBody:
+    """The body of a redirect answer, which urllib reads in full before following it: read here up to ERROR_LIMIT,
+    and refused (TooLarge) when longer."""
+
+    def __init__(self, fp):
+        self._fp = fp
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            data = self._fp.read(ERROR_LIMIT + 1) or b""
+            if len(data) > ERROR_LIMIT:
+                raise TooLarge(ERROR_LIMIT)
+            return data
+        return self._fp.read(min(n, ERROR_LIMIT + 1))
+
+    def __getattr__(self, name):
+        return getattr(self._fp, name)
+
+
 class _Redirects(urllib.request.HTTPRedirectHandler):
     """A redirect is followed only on the origin it started from (engine and pack downloads may answer 302 to a
     short-lived URL on the same host). One to another host, another port or from HTTPS to HTTP is refused, so
-    neither a credential nor the download itself can be sent elsewhere."""
+    neither a credential nor the download itself can be sent elsewhere. The redirect's own body is bounded too."""
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        return super().http_error_302(req, _BoundedBody(fp), code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         newurl = urllib.parse.urljoin(req.full_url, newurl)

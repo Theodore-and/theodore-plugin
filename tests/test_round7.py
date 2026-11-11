@@ -428,6 +428,35 @@ class BoundedBodies(unittest.TestCase):
                     api.request("GET", "https://api.example.test/v1/x")
             self.assertTrue(all(0 <= n <= api.DEFAULT_LIMIT + 1 for n in body.asked), body.asked)
 
+    def test_the_body_of_a_followed_redirect_is_bounded_too(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        sizes = {"/small": 100, "/large": 64 * 1024 + 1}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path in sizes:
+                    body = b"x" * sizes[self.path]
+                    self.send_response(302)
+                    self.send_header("Location", "/end")
+                else:
+                    body = b"ok"
+                    self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with client_home():
+            self.assertEqual(api.request("GET", base + "/small")[2], b"ok")
+            with self.assertRaises(api.TooLarge):
+                api.request("GET", base + "/large")
+
     def test_a_download_stops_at_its_size_and_its_error_body_is_bounded(self):
         with client_home() as home:
             dest = home / "staging" / "file.bin"
