@@ -675,6 +675,9 @@ def doctor(as_json: bool) -> int:
             f"{info['version']}" if info["status"] == "ready" else f"{info['status']} ({info['percent']}%)")
     for name in ("claude", "codex"):
         add("ok", f"assistant {name}", shutil.which(name) or "not found on PATH")
+    if core.IS_WINDOWS and shutil.which("claude") and not claude_git_bash():
+        add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
+            "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
     final = _doctor_verdict(checks, snap, home)
     if as_json:         # the same verdict, as the exit code and in the document
         print(json.dumps({"checks": [{"level": l, "name": n, "detail": d} for l, n, d in checks], "snapshot": snap,
@@ -683,6 +686,28 @@ def doctor(as_json: bool) -> int:
     for level, name, detail in checks:
         print(f"{level.upper():4}  {name}: {detail}")
     return core.emit(final)
+
+
+def claude_git_bash() -> str | None:
+    """The Git Bash Claude Code would use on Windows, found the way it looks: its setting, then Git's folder from the
+    `git` on PATH, then the usual install folders. None when there is none (Claude Code then uses PowerShell)."""
+    settings = core.read_json(_claude_settings_path())
+    configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or ((settings.get("env") or {}) if isinstance(settings, dict) else {}).get("CLAUDE_CODE_GIT_BASH_PATH")
+    candidates = [Path(configured)] if configured else []
+    git = shutil.which("git")
+    if git:
+        candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
+    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramW6432"),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs") if os.environ.get("LOCALAPPDATA") else None):
+        if base:
+            candidates.append(Path(base) / "Git" / "bin" / "bash.exe")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
 
 
 def _doctor_verdict(checks: list, snap: dict, home) -> Status:
@@ -706,6 +731,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     if "renderer" in warned:
         notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
                      else "Slide previews need LibreOffice, which is not installed.")
+    if "claude git bash" in warned:
+        notes.append("Claude Code on this computer needs Git for Windows (git-scm.com) to load Theodore's skills; install it, then start a new session.")
     if "processor" in warned:
         notes.append("This computer runs Windows on ARM, so Theodore uses its x64 build through Windows' emulation, which is slower.")
     if "service" in warned:

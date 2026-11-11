@@ -700,3 +700,40 @@ class WindowsRenderer(unittest.TestCase):
         self.assertIn('call "%T%" tools install libreoffice --background --if-needed >nul 2>&1', text)
         self.assertNotIn("tools install libreoffice --background >nul", text)
 
+
+class ClaudeGitBash(unittest.TestCase):
+    """Windows' Claude Code loads Theodore's skills through Git Bash; doctor says so when it would find none."""
+
+    def test_git_bash_is_found_where_claude_code_looks_and_its_absence_is_a_doctor_note(self):
+        from theodore_client import commands
+        with client_home() as home:
+            claude_dir = home / "user" / ".claude"
+            git_root = home / "Git"
+            (git_root / "cmd").mkdir(parents=True)
+            (git_root / "cmd" / "git.exe").write_text("")
+            env = {"CLAUDE_CONFIG_DIR": str(claude_dir), "ProgramFiles": str(home / "pf"), "ProgramFiles(x86)": str(home / "pf86"),
+                   "ProgramW6432": str(home / "pf"), "LOCALAPPDATA": str(home / "lad")}
+            which = lambda name: str(git_root / "cmd" / "git.exe") if name == "git" else None
+            with mock.patch.dict(os.environ, env), mock.patch.object(commands.shutil, "which", side_effect=which):
+                os.environ.pop("CLAUDE_CODE_GIT_BASH_PATH", None)
+                self.assertIsNone(commands.claude_git_bash(), "git.exe without bin/bash.exe beside it")
+                (git_root / "bin").mkdir()
+                (git_root / "bin" / "bash.exe").write_text("")
+                self.assertEqual(commands.claude_git_bash(), str((git_root / "bin" / "bash.exe").resolve()))
+            with mock.patch.dict(os.environ, env), mock.patch.object(commands.shutil, "which", return_value=None):
+                self.assertIsNone(commands.claude_git_bash())
+                user_install = home / "lad" / "Programs" / "Git" / "bin"
+                user_install.mkdir(parents=True)
+                (user_install / "bash.exe").write_text("")
+                self.assertEqual(commands.claude_git_bash(), str(user_install / "bash.exe"), "a per-user Git for Windows")
+                user_install.joinpath("bash.exe").unlink()
+                claude_dir.mkdir(parents=True)
+                custom = home / "tools" / "bash.exe"
+                custom.parent.mkdir()
+                custom.write_text("")
+                (claude_dir / "settings.json").write_text(json.dumps({"env": {"CLAUDE_CODE_GIT_BASH_PATH": str(custom)}}))
+                self.assertEqual(commands.claude_git_bash(), str(custom), "the path set in Claude Code's settings")
+            verdict = commands._doctor_verdict([("warn", "claude git bash", "not found")],
+                                               {"engine": "1.0.0", "plan": "beta", "runtime_ready": True, "signed_in": True}, core.home())
+            self.assertEqual(verdict.name, "OK")
+            self.assertIn("Git for Windows", verdict.tell_user)
