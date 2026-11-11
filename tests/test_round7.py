@@ -403,7 +403,7 @@ class SpecimenRegistry(unittest.TestCase):
         from theodore_client import specimens
         base = Path(tempfile.mkdtemp(prefix="theodore-r7-")).resolve()
         elsewhere = Path(tempfile.mkdtemp(prefix="theodore-r7-cache-")).resolve()      # not under the working folder's parent
-        dirs = {name: base / name for name in ("tmp-a", "tmp-b", "work", "user")}
+        dirs = {name: base / name for name in ("tmp-a", "tmp-b", "work", "user", "local", "local/Temp")}
         dirs["cache"] = elsewhere / "cache"
         for path in dirs.values():
             path.mkdir()
@@ -412,7 +412,8 @@ class SpecimenRegistry(unittest.TestCase):
         cache = dirs["cache"] / "specimens"
         try:
             with client_home() as home, mock.patch.object(specimens, "cache_root", return_value=cache), \
-                    mock.patch.object(tempfile, "tempdir", str(dirs["tmp-a"])), mock.patch.object(Path, "home", return_value=dirs["user"]):
+                    mock.patch.object(tempfile, "tempdir", str(dirs["tmp-a"])), mock.patch.object(Path, "home", return_value=dirs["user"]), \
+                    mock.patch.dict(os.environ, {"LOCALAPPDATA": str(dirs["local"])}):      # Windows' second temporary root
                 core.home().ensure()
                 yield specimens, home, dirs
         finally:
