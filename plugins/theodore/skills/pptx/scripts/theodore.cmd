@@ -98,9 +98,13 @@ call :job_alive
 if not errorlevel 1 goto :progress_status
 
 if not exist "%B%" mkdir "%B%" 2>nul
-( >"%B%\.write-test" echo x ) 2>nul
-if not exist "%B%\.write-test" goto :not_writable
-del /q "%B%\.write-test" >nul 2>&1
+rem Several launchers may start at once and batch has no process id: a name of its own, written again once if another
+rem launcher that drew the same name removed it in between.
+set "WT=%B%\.write-test.%RANDOM%%RANDOM%"
+( >"%WT%" echo x ) 2>nul
+if not exist "%WT%" ( >"%WT%" echo x ) 2>nul
+if not exist "%WT%" goto :not_writable
+del /q "%WT%" >nul 2>&1
 rem The folder is this service's from here on, or another's: then refuse.
 call :claim_env
 call :read_env

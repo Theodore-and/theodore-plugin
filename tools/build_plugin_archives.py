@@ -10,7 +10,7 @@
                                      publish step signs these exact bytes with the manifest key and uploads
                                      plugin/latest.json = {"manifest": <that text>, "signature", "kid"}; the
                                      installer trusts nothing else (an unsigned latest.txt is no longer made or read)
-  plugin-build.json                  version, file names, sizes and sha256 (what the lead registers)
+  plugin-build.json                  version, file names, sizes and sha256 (what the release step registers)
 
 Usage: python3 tools/build_plugin_archives.py --out <dir> [--root <marketplace tree>] [--release]
 

@@ -5,7 +5,7 @@
 | Component | Where | Licence |
 | --- | --- | --- |
 | truststore 0.10.5, by Seth Michael Larson | `client/truststore/` (unmodified copy of the PyPI wheel's package; shipped inside the client archive) | MIT, text in `client/truststore/LICENSE` |
-| deck-design stub skill | `plugins/theodore/skills/deck-design/` | The guidance this skill loads is a derivative of Impeccable by Paul Bakaus (https://github.com/pbakaus/impeccable), Apache-2.0; `LICENSE` and `NOTICE` are in that folder |
+| deck-design loader | `plugins/theodore/skills/deck-design/` | The guidance it loads is a derivative of Impeccable by Paul Bakaus (https://github.com/pbakaus/impeccable), Apache-2.0; `LICENSE` and `NOTICE` are in that folder |
 | Ed25519 verification | `client/theodore_client/ed25519.py` | Written for this project after the algorithm description in RFC 8032 (section 5.1); no third-party code |
 
 Fetched on request and never redistributed by Theodore: LibreOffice (MPL-2.0), downloaded unmodified from The

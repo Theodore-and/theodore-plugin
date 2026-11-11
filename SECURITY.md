@@ -20,7 +20,7 @@ installer's are in `install/`.
 | Sign-in | An activation code or a browser approval, once per computer | once |
 | Licence refresh | Renews the signed licence | at most once per 12 hours, when you use Theodore |
 | Update check | Asks which engine, client and asset-pack versions are current | at most once per 6 hours, when the pptx instructions are loaded |
-| Design guidance | Each time the deck-design skill is used; it is never stored on disk | each use |
+| Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
 | Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private temporary folder, removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
@@ -35,7 +35,7 @@ pages). LibreOffice, when Theodore fetches it, comes unmodified from The Documen
 
 The installation credential, the installation id, the computer's name (shown to you in the portal's Devices
 page), operating system and processor type, the client, plugin and engine versions, the update channel, the
-names of the skill and section requested, and the name of the assistant when it can be told (for example
+names of the instructions and section requested, and the name of the assistant when it can be told (for example
 "claude-code").
 
 ## What is never sent

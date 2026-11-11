@@ -26,7 +26,7 @@ IS_WINDOWS = os.name == "nt"
 class Status(Exception):
     """A three-line message for the assistant and the exit code that goes with it.
 
-    tell_user is None only for automatic problem reports, which are silent by the owner's decision: the third line
+    tell_user is None only for automatic problem reports, which are silent by design: the third line
     then says there is nothing to tell the user. Every status is three lines."""
 
     def __init__(self, name: str, summary: str, next_step: str, tell_user: str | None):

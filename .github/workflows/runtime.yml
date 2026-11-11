@@ -1,7 +1,7 @@
 # Builds and smoke-tests the runtime bundle for the five platforms from the public lock files in runtime/locks/.
 #
 # No secrets and no publishing step: the bundles and the combined index are uploaded as workflow artifacts only.
-# Publishing them to R2 and registering the runtime with the backend is the lead's manual step.
+# Publishing them to R2 and registering the runtime with the backend is a manual release step.
 # The engine is private and never enters this repository or its CI: the smoke test runs without --engine.
 name: runtime
 

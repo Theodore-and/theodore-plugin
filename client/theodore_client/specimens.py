@@ -73,7 +73,7 @@ def registry() -> Path:
 
 # The record's format: a first line "#v2", then "<created epoch> <path>" per folder, the path with "%", carriage return
 # and line feed written as %25, %0D and %0A (so any path fits on one line). A record without the first line is the
-# round 7 format (paths as they are) and is still read. The launchers' shell and batch readers need no decoding: they
+# First format (paths as they are) and is still read. The launchers' shell and batch readers need no decoding: they
 # remove only folders that exist under the name as written, and an encoded name never does.
 REGISTRY_HEADER = "#v2"
 

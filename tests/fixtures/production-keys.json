@@ -1,0 +1,22 @@
+{
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "kZoG4NCwf2BRQZ680I9lZiyfLUtZzjamL_Hx7CRoHO8",
+      "kid": "ent-production-20261111-c0c0e4ef",
+      "use": "sig",
+      "alg": "EdDSA",
+      "purpose": "entitlement"
+    },
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk",
+      "kid": "man-production-20261111-7792324a",
+      "use": "sig",
+      "alg": "EdDSA",
+      "purpose": "manifest"
+    }
+  ]
+}

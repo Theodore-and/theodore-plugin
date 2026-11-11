@@ -1,14 +1,14 @@
 # Theodore
 
 Build, edit and translate PowerPoint decks in the assistant you already use, with a consultant's design
-method. Skills: `theodore:pptx` and `theodore:deck-design`.
+method: `theodore:pptx` for PowerPoint files and `theodore:deck-design` for deck design.
 
-This plugin is a loader. It holds two stub skills and a launcher; on first use the launcher sets up
+This plugin is a loader. It holds two small loaders and a launcher; on first use the launcher sets up
 Theodore's runtime in your user folder (`~/.theodore`, or `%LOCALAPPDATA%\Theodore` on Windows; about 100 to
-130 MB to download before the first deck, about 560 to 670 MB on disk with the asset packs, no admin rights), signs this computer in to your Theodore account, and prints the skill's
+130 MB to download before the first deck, about 560 to 670 MB on disk with the asset packs, no admin rights), signs this computer in to your Theodore account, and prints the
 instructions. It has no hooks and installs nothing system-wide.
 
-On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load these skills; install it from
+On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load Theodore; install it from
 git-scm.com first.
 
 - Accounts and the one-step installer: https://theodoreand.ai

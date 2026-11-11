@@ -138,7 +138,7 @@ ENGINE_REFUSALS = {
     "entitlement_expired": "OFFLINE",
     "entitlement_not_yet_valid": "NO_ENTITLEMENT",
     "entitlement_clock_rollback": "NO_ENTITLEMENT",
-    # state/ is missing, or state/engine-clock.json cannot be read or written (lane P, round 2): signing in again
+    # State/ is missing, or state/engine-clock.json cannot be read or written (entitlement_state_unavailable): signing in again
     # recreates state/.
     "entitlement_state_unavailable": "NO_ENTITLEMENT",
 }

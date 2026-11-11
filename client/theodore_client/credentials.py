@@ -83,7 +83,7 @@ def _account_for(service: str) -> str:
 
 
 def _legacy_account() -> str:
-    """The name a client before round 8 used (the folder alone): never read, only deleted."""
+    """The name an earlier client used (the folder alone): never read, only deleted."""
     return "installation-" + hashlib.sha256(str(core.home().root).encode("utf-8")).hexdigest()[:12]
 
 
@@ -156,7 +156,7 @@ def _keychain_delete() -> bool:
         gone = not _holds_marker().exists() and not _tombstone().exists()
     else:
         # This build's item, the item of the service the folder records (another service's folder being uninstalled),
-        # and the item of a client before round 8.
+        # And the item of an earlier client.
         accounts = [_account()]
         recorded = core.home_environment()
         if recorded and recorded != _service_base():
@@ -178,7 +178,7 @@ def _keychain_delete() -> bool:
 
 
 def _migrate_legacy_item() -> str | None:
-    """A sign-in kept by a client before round 8 (the item named by the folder alone) is moved, not stranded, but only
+    """A sign-in kept by an earlier client (the item named by the folder alone) is moved, not stranded, but only
     when this folder's recorded service is this build's: then it can only be this service's credential. Write the new
     item, read it back, then delete the old one; if the move fails the credential is still used for this run. With
     another service's record it is never read."""

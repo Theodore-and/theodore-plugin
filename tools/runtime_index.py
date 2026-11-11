@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combine the per-platform runtime bundles into runtime-<id>.json, the index the lead registers from.
+"""Combine the per-platform runtime bundles into runtime-<id>.json, the index the release step registers.
 
 Usage: python3 tools/runtime_index.py <bundles dir> [--out <dir>] [--platforms darwin-arm64,...]
 

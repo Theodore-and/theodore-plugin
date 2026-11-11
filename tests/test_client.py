@@ -305,7 +305,7 @@ class Specimen(ClientCase):
         self.assertEqual(self.folders(), [])
 
     def test_a_folder_uninstall_could_not_remove_keeps_its_record(self):
-        # Round 8 (review 12): the record of a folder that could not be removed survives the removal of state/, so a
+        # The record of a folder that could not be removed survives the removal of state/, so a
         # later uninstall finds it although TMPDIR changed.
         path = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
         self.temp.chmod(0o555)                     # the folder cannot be removed from its parent
@@ -998,7 +998,7 @@ class Engine(ClientCase):
         self.assertIn("date and time", nxt)
         marker.write_text("entitlement_untrusted")
         self.assertStatus(self.client("pptx", "apply", "x"), "NO_ENTITLEMENT", 70)
-        marker.write_text("entitlement_state_unavailable")             # the ninth code (lane P, round 2)
+        marker.write_text("entitlement_state_unavailable")             # the ninth code
         first, nxt, _t = self.assertStatus(self.client("pptx", "apply", "x"), "NO_ENTITLEMENT", 70)
         self.assertIn("entitlement_state_unavailable", first)
         self.assertIn("login --start", nxt)
@@ -1470,7 +1470,7 @@ class Hosts(ClientCase):
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(json.loads(settings.read_text()), original, "exactly as before, no empty key left")
 
-    # --- ruling 9: uninstall restores exactly what was there -----------------------------------------------------------
+    # --- uninstall restores exactly what was there -----------------------------------------------------------
     def settings_file(self, value=None) -> Path:
         path = self.box.user_home / ".claude" / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1569,7 +1569,7 @@ class Hosts(ClientCase):
         self.assertTrue(codex_config.exists(), "a config that was there before stays, even empty")
 
     def test_a_registration_that_was_there_before_is_recorded_as_not_ours_and_kept(self):
-        # Round 8 (review 9): the plugin was already registered when Theodore's installer ran.
+        # The plugin was already registered when Theodore's installer ran.
         log = self.registering_tools(claude_markets="theodore (https://x.test/marketplace.json)")
         claude = self.box.tmp / "fakebin" / "claude"
         claude.write_text(claude.read_text().replace('"plugin list --json") echo "[]";;', '"plugin list --json") echo \'[{"id": "theodore@theodore"}]\';;'))
@@ -1584,7 +1584,7 @@ class Hosts(ClientCase):
         self.assertNotIn("claude plugin marketplace remove theodore", calls)
 
     def test_a_restored_record_goes_and_never_claims_a_file_the_user_made_later(self):
-        # Round 8 (review 11): apply, take back, the user makes their own settings file, apply and take back again.
+        # Apply, take back, the user makes their own settings file, apply and take back again.
         self._fake_tools()
         path = self.settings_file()
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
@@ -1610,7 +1610,7 @@ class Hosts(ClientCase):
         self.assertEqual(json.loads(path.read_text()), {})
 
     def test_not_ours_survives_register_unregister_and_uninstall(self):
-        # Round 9 (review 9): pre-existing registrations -> register -> unregister -> register again -> uninstall: the
+        # Pre-existing registrations -> register -> unregister -> register again -> uninstall: the
         # registrations that were there before are never removed, for Claude Code and for Codex.
         log = self.registering_tools(claude_markets="theodore (https://x.test/marketplace.json)", codex_markets="theodore  ~/.theodore/plugin")
         claude = self.box.tmp / "fakebin" / "claude"
@@ -1630,7 +1630,7 @@ class Hosts(ClientCase):
             self.assertNotIn(removal, calls)
 
     def test_a_created_file_the_user_replaced_with_an_empty_one_is_theirs(self):
-        # Round 9 (review 11): Theodore creates settings, the user replaces them with {}, settings are applied again,
+        # Theodore creates settings, the user replaces them with {}, settings are applied again,
         # then taken back: the user's file stays.
         self._fake_tools()
         path = self.settings_file()
@@ -1846,8 +1846,8 @@ class HostTest(ClientCase):
         self.assertStatus(self.client("uninstall"), "OK", 0)
         self.assertFalse((codex_home / "plugins" / "cache" / "theodore").exists(), "Codex's empty cache folder for Theodore goes")
         self.assertTrue((codex_home / "plugins" / "cache" / "other").exists())
-        self.assertTrue((codex_home / "config.toml").exists(), "a 0-byte config Theodore did not create stays (ruling 9)")
-        self.assertEqual(json.loads(settings.read_text()), authored, "empty structures Theodore did not create stay (ruling 9)")
+        self.assertTrue((codex_home / "config.toml").exists(), "a 0-byte config Theodore did not create stays")
+        self.assertEqual(json.loads(settings.read_text()), authored, "empty structures Theodore did not create stay")
 
     def test_uninstall_keeps_a_codex_config_and_settings_that_hold_something(self):
         self.ready()
@@ -1934,7 +1934,7 @@ class HostTest(ClientCase):
 
 
 class Revocation(ClientCase):
-    """Ruling 5: whatever command learns that this device was revoked clears the credential and the licence and ends
+    """Whatever command learns that this device was revoked clears the credential and the licence and ends
     with SIGN_IN_REQUIRED 65 and the sign-in block, whatever else happened afterwards; nothing else is printed."""
 
     LONG = "".join(f"line {i:05d} " + "x" * 80 + "\n" for i in range(400))      # two parts
@@ -2007,7 +2007,7 @@ class Revocation(ClientCase):
 
 
 class Environments(ClientCase):
-    """Ruling 6, in the client: a build stamped for another service refuses this folder; printed links come from the
+    """A build stamped for another service refuses this folder; printed links come from the
     running build's stamp."""
 
     def skill(self, **overrides) -> dict:
@@ -2037,7 +2037,7 @@ class Environments(ClientCase):
 
 
 class Suspension(Revocation):
-    """Round 8, ruling 5: a suspended account (403 account_suspended) goes through the same central handler: every
+    """A suspended account (403 account_suspended) goes through the same central handler: every
     command that learns it ends with NO_ENTITLEMENT 70, prints no instructions, and deletes the licence. The credential
     is kept on purpose (the contract's 403: the installation is still valid and a suspension can be lifted)."""
 

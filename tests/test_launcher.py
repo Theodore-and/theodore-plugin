@@ -297,7 +297,7 @@ class Failures(LauncherCase):
         self.assertFalse(any((self.box.home / d).exists() for d in ("runtime", "client", "staging", "logs")), "nothing is downloaded")
         state = self.box.home / "state"
         self.assertEqual(sorted(p.name for p in state.iterdir()) if state.exists() else [], ["environment"],
-                         "only the folder's claim for this service is written (round 8)")
+                         "only the folder's claim for this service is written")
 
     def test_sandbox_without_a_route_asks_for_the_connector(self):
         dead = f"http://127.0.0.1:{closed_port()}"
@@ -384,7 +384,7 @@ class Failures(LauncherCase):
             self.assertIn(expected, calls)
         self.assertFalse(cache.exists())
         self.assertEqual([p.relative_to(self.box.home).as_posix() for p in self.box.home.rglob("*")], ["state", "state/host-settings.json"],
-                         "only the record of the settings it could not take back stays (round 8)")
+                         "only the record of the settings it could not take back stays")
         if keychain:
             found = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "ai.theodoreand.theodore", str(keychain)], capture_output=True)
             self.assertNotEqual(found.returncode, 0, "the keychain item is gone")
@@ -456,7 +456,7 @@ class Failures(LauncherCase):
 
     @unittest.skipIf(IS_WINDOWS, "the sh launcher's own uninstall")
     def test_a_keychain_call_that_ignores_sigterm_is_killed(self):
-        # Round 8 (review 8): started with SIGTERM ignored, the stand-in for security inherits that; it is killed after
+        # Started with SIGTERM ignored, the stand-in for security inherits that; it is killed after
         # the bounded wait instead of holding the uninstall.
         (self.box.home / "state").mkdir(parents=True)
         stubborn = self.box.tmp / "stubborn-security"
@@ -474,7 +474,7 @@ class Failures(LauncherCase):
         self.assertIn("keychain", status_lines(result.stdout)[0])
 
     def test_uninstall_without_python_keeps_the_settings_record_and_says_how_to_restore(self):
-        # Round 8 (review 9): without Theodore's Python the settings cannot be taken back exactly; the record of what
+        # Without Theodore's Python the settings cannot be taken back exactly; the record of what
         # was there stays, and the status says where it is and what to do. A registration that was there before stays.
         state = self.box.home / "state"
         state.mkdir(parents=True)
@@ -501,7 +501,7 @@ class Failures(LauncherCase):
         self.assertFalse([c for c in calls if c.startswith("claude plugin")], calls)
 
     def test_an_ordinary_run_sweeps_expired_specimen_folders_even_when_the_bootstrap_fails(self):
-        # Round 8 (review 4): before the bootstrap, so also when it cannot start (here: the download host is dead).
+        # Before the bootstrap, so also when it cannot start (here: the download host is dead).
         import time
         state = self.box.home / "state"
         state.mkdir(parents=True)
@@ -534,7 +534,7 @@ class Failures(LauncherCase):
         self.test_of_launchers_of_two_services_racing_on_an_empty_folder_one_wins()
 
     def test_of_launchers_of_two_services_racing_on_an_empty_folder_one_wins(self):
-        # Round 8 (review 6): the claim is one exclusive step; the losers read the winner's record and refuse.
+        # The claim is one exclusive step; the losers read the winner's record and refuse.
         import shutil
         import subprocess
         dead = f"http://127.0.0.1:{closed_port()}"
@@ -579,7 +579,7 @@ class Failures(LauncherCase):
         return folders
 
     def test_bare_runs_read_the_encoded_record(self):
-        # Round 9 (review 4 and 13): a root with "%" and one with a line feed, TMPDIR changed since; the launcher's
+        # A root with "%" and one with a line feed, TMPDIR changed since; the launcher's
         # own sweep (bootstrap failing) and its own uninstall find them through the record.
         temp = Path(self.box.env["TMPDIR"])
         env = {"TEMP": str(temp), "TMP": str(temp)}
@@ -597,7 +597,7 @@ class Failures(LauncherCase):
 
     @unittest.skipIf(IS_WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0), "a folder that cannot be removed (POSIX permissions)")
     def test_an_ordinary_bare_run_survives_a_removal_that_fails(self):
-        # Round 9 (review 16): under set -u a failed removal in the sweep of an ordinary run must not end the launcher.
+        # Under set -u a failed removal in the sweep of an ordinary run must not end the launcher.
         import time
         state = self.box.home / "state"
         state.mkdir(parents=True)
@@ -618,7 +618,7 @@ class Failures(LauncherCase):
 
     @unittest.skipIf(IS_WINDOWS, "Windows keeps the credential in a DPAPI file in state, removed with the folder")
     def test_uninstall_of_another_services_folder_deletes_that_services_keychain_item(self):
-        # Round 9 (review 17): service A's folder, its runtime gone, uninstalled by service B's launcher.
+        # Service A's folder, its runtime gone, uninstalled by service B's launcher.
         import hashlib
         state = self.box.home / "state"
         state.mkdir(parents=True)
@@ -775,7 +775,7 @@ class Generations(LauncherCase):
 
 
 class Environments(LauncherCase):
-    """Ruling 6: a Theodore folder records the service it belongs to; a launcher stamped for another refuses it."""
+    """A Theodore folder records the service it belongs to; a launcher stamped for another refuses it."""
 
     STAGING = "https://api.staging.example.test"
 

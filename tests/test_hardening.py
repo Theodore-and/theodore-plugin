@@ -1,4 +1,4 @@
-"""Round 3 hardening, in process where the behaviour is a pure function of the client's state: signing keys,
+"""Hardening, in process where the behaviour is a pure function of the client's state: signing keys,
 credentials leaving their origin, redirects, pack metadata, persisted restrictions, credential storage."""
 
 from __future__ import annotations

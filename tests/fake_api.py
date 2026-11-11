@@ -133,7 +133,7 @@ class FakeApi:
         self.grace_seconds = 7 * 86400
         self.account_state = "active"     # or "suspended" / "inactive"
         self.auto_reports = True
-        self.refresh_carries_report_switch = True    # the refresh answer names the user's switch (lane G2 adds it to the contract)
+        self.refresh_carries_report_switch = True    # the refresh answer names the user's switch
         self.engine: dict | None = None   # {version, sha256, size, runtime_id, min_client, revoked: [], kind}
         self.engine_files: dict[str, bytes] = {}
         self.engine_redirect = None       # "same": 302 to /dl/private/... on this origin; "other": the same on localhost

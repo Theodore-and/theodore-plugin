@@ -1,4 +1,4 @@
-"""Round 7, in process: the update state machine under one lock (forced interleavings), the report switch, bounded
+"""In process: the update state machine under one lock (forced interleavings), the report switch, bounded
 answers, specimen folders, revocation, environment isolation, keychain tombstones and host settings."""
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ class Pause:
 
 
 class UpdateStateMachine(unittest.TestCase):
-    """Ruling 1: one lock covers accepting a document, activating, the pending activation and the reset."""
+    """One lock covers accepting a document, activating, the pending activation and the reset."""
 
     @contextlib.contextmanager
     def patched(self, fetches: dict, pause: Pause | None = None):
@@ -208,7 +208,7 @@ class UpdateStateMachine(unittest.TestCase):
             self.assertEqual(snapshot(), before, "no write without the lock")
 
     def test_a_reset_between_reading_the_floor_and_clearing_it_is_not_undone(self):
-        # Round 8 (review 1): A reads an old reset's floor and decides its newer document may clear it; B resets
+        # A reads an old reset's floor and decides its newer document may clear it; B resets
         # again (engine 3 is the floor) and returns; A must not clear B's floor and activate engine 2.
         from theodore_client import install
         with client_home():
@@ -283,7 +283,7 @@ AGENT_TOKEN = "x." + b64u(json.dumps({"feat": ["agent-reports"], "exp": 99999999
 
 
 class ReportSwitch(unittest.TestCase):
-    """Ruling 2: a cached switch, on or off, older than an hour or dated ahead of the clock is unknown: the client asks
+    """A cached switch, on or off, older than an hour or dated ahead of the clock is unknown: the client asks
     again and sends nothing unless the fresh answer says on."""
 
     def cache(self, home: Path, enabled: bool, age: float, source: str = "server") -> None:
@@ -329,7 +329,7 @@ class ReportSwitch(unittest.TestCase):
 
 
 class Round8ReportSwitch(unittest.TestCase):
-    """Round 8 (review 2): a refresh never restores a stale ON over an OFF another process recorded meanwhile."""
+    """A refresh never restores a stale ON over an OFF another process recorded meanwhile."""
 
     def run_race(self, switch, pause_in: str):
         from theodore_client import credentials
@@ -372,7 +372,7 @@ class Round8ReportSwitch(unittest.TestCase):
 
 
 class BoundedBodies(unittest.TestCase):
-    """Ruling 3: every answer body is read up to a bound, success or error (errors at 64 KiB); a longer one is refused."""
+    """Every answer body is read up to a bound, success or error (errors at 64 KiB); a longer one is refused."""
 
     class Body:
         """An answer of `size` bytes that records how much was asked for (never more than it holds is produced)."""
@@ -475,7 +475,7 @@ class BoundedBodies(unittest.TestCase):
 
 
 class KeychainTombstone(unittest.TestCase):
-    """Ruling 5: a keychain deletion that fails or times out after a revocation leaves a local tombstone: the old item
+    """A keychain deletion that fails or times out after a revocation leaves a local tombstone: the old item
     is never read again, and its deletion is retried on later runs."""
 
     def test_a_credential_whose_deletion_failed_never_loads_again(self):
@@ -534,7 +534,7 @@ class KeychainTombstone(unittest.TestCase):
 
 
 class SpecimenRegistry(unittest.TestCase):
-    """Ruling 4: every specimen folder is recorded in the Theodore home; the sweeps work from the record and from the
+    """Every specimen folder is recorded in the Theodore home; the sweeps work from the record and from the
     current roots; a folder is never put under the working folder, whatever it contains."""
 
     @contextlib.contextmanager
@@ -681,7 +681,7 @@ class Round8Keychain(unittest.TestCase):
 
 
 class Round8Environment(unittest.TestCase):
-    """Round 8 (review 6): claiming a folder is one exclusive step; a credential belongs to one service."""
+    """Claiming a folder is one exclusive step; a credential belongs to one service."""
 
     def test_of_many_builds_racing_on_an_empty_folder_exactly_one_service_wins(self):
         with client_home() as home:
@@ -734,7 +734,7 @@ class Round8Environment(unittest.TestCase):
 
 
 class Round9KeychainMigration(unittest.TestCase):
-    """Round 9 (review 15): a sign-in kept under the pre-round-8 keychain name is moved to the per-service item when
+    """A sign-in kept under the older keychain name is moved to the per-service item when
     the folder's recorded service is this build's, and never read otherwise; a cached licence keeps working offline."""
 
     def keychain(self, items: dict):
@@ -809,7 +809,7 @@ class Round9ForeignDelete(unittest.TestCase):
 
 
 class Round8Refusals(unittest.TestCase):
-    """Round 8, rulings 10 and 14: secrets never reach a printed line or the log; the central refusal handler cannot raise."""
+    """Secrets never reach a printed line or the log; the central refusal handler cannot raise."""
 
     def setUp(self):
         core._REFUSAL, core._REFUSAL_EMITTED, account._REFUSAL_STATUS = None, False, None
@@ -847,7 +847,7 @@ class Round8Refusals(unittest.TestCase):
             self.assertEqual(out.getvalue().count("THEODORE NO_ENTITLEMENT"), 1, "once")
 
     def test_a_pending_device_code_never_reaches_a_printed_line(self):
-        # Round 9 (review 10): a login --finish whose error echoes the pending device code, which this process did not
+        # A login --finish whose error echoes the pending device code, which this process did not
         # receive: it was read from disk.
         import io
         from theodore_client import cli

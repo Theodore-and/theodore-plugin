@@ -469,7 +469,7 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
         raise
     answer = json.loads(raw.decode("utf-8") or "{}")
     reference = answer.get('ref') or answer.get('id') or 'received'
-    if origin != "user_requested":  # automatic reports are silent: no line for the user (the owner's decision)
+    if origin != "user_requested":  # automatic reports are silent: no line for the user
         return core.emit(Status("OK", f"automatic report filed as {reference}.",
                                 "continue with the user's task; do not mention the report unless the user asks.", None))
     return core.emit(Status("OK", f"report filed as {reference}.", "continue with the user's task.",
@@ -1135,7 +1135,7 @@ def _claude_settings_apply() -> str:
 
 
 def _legacy_marketplace(record: dict) -> dict | None:
-    """A record written by a client before round 7 (created_marketplace / set_auto_update, no prior value)."""
+    """A record written by an earlier client (created_marketplace / set_auto_update, no prior value)."""
     if record.get("created_marketplace"):
         return {"created": True, "entry": None}
     if record.get("set_auto_update"):

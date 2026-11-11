@@ -89,7 +89,7 @@ class Handshake(McpCase):
 
 
 INDEX = {"version": "g1", "sections": [{"name": "craft"}, {"name": "forms"}, {"name": "../bad"}],
-         "specimens": [{"file": "cover-01.jpg"}, {"file": "keys-and-locators.jpg"}, {"file": "nope.png"}]}
+         "specimens": [{"file": "cover-01.jpg"}, {"file": "rules-and-ledgers.jpg"}, {"file": "nope.png"}]}
 
 
 class Listing(McpCase):
@@ -101,11 +101,11 @@ class Listing(McpCase):
         server = self.server()
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["enum"], ["craft", "forms"])
-        self.assertEqual(tools["specimen"]["inputSchema"]["properties"]["file"]["enum"], ["cover-01.jpg", "keys-and-locators.jpg"])
+        self.assertEqual(tools["specimen"]["inputSchema"]["properties"]["file"]["enum"], ["cover-01.jpg", "rules-and-ledgers.jpg"])
         self.assertEqual([t["description"] for t in tools.values()],
                          ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.", "Returns one specimen sheet as an image."])
         listing = server.call("list", skill="deck-design")["content"][0]["text"]
-        self.assertEqual(listing, "SKILL.md\nreferences/craft.md\nreferences/forms.md\nspecimens/cover-01.jpg\nspecimens/keys-and-locators.jpg\n")
+        self.assertEqual(listing, "SKILL.md\nreferences/craft.md\nreferences/forms.md\nspecimens/cover-01.jpg\nspecimens/rules-and-ledgers.jpg\n")
 
     def test_a_new_guide_version_refreshes_the_index_and_says_so(self):
         self.sign_in()

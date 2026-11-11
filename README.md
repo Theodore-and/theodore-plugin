@@ -1,8 +1,8 @@
 # Theodore plugin
 
 Theodore builds, edits and translates PowerPoint decks inside the AI assistant you already use (Claude Code,
-Codex and others), with a consultant's design method. This repository is the small public part: two stub
-skills, a launcher, an installer and the client that keeps Theodore's runtime and engine current on your
+Codex and others), with a consultant's design method. This repository is the small public part: two small
+loaders, a launcher, an installer and the client that keeps Theodore's runtime and engine current on your
 computer. It holds no engine code and no design instructions; those are delivered to signed-in accounts.
 
 Theodore is in beta. Accounts: https://theodoreand.ai
@@ -10,8 +10,8 @@ Theodore is in beta. Accounts: https://theodoreand.ai
 ## Install
 
 The simplest way is the sentence on your Get started page at theodoreand.ai, pasted into your assistant.
-On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load Theodore's skills: install it from
-git-scm.com first. Without it Claude Code runs commands in PowerShell, and the skills cannot load.
+On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load Theodore: install it from
+git-scm.com first. Without it Claude Code runs commands in PowerShell, and Theodore cannot load.
 By hand:
 
 | Assistant | Command |
@@ -20,7 +20,7 @@ By hand:
 | Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d` |
 | Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!""` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
-| Codex only | Run the installer above: it registers Codex from its own copy of the plugin. By hand afterwards: `codex plugin marketplace add ~/.theodore/plugin` (Windows: `codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"`) then `codex plugin add theodore@theodore`. Once the plugin repository is public: `codex plugin marketplace add Theodore-and/theodore-plugin` then the same second command |
+| Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` (the installer above registers Codex from its own copy, the same as `codex plugin marketplace add ~/.theodore/plugin`) |
 
 No admin rights, no Homebrew, winget, pip or npm. Supported: macOS 13.5 or later (Apple silicon and Intel),
 Windows 10 version 1803 or later (x64), Linux x64 and arm64 with glibc 2.28 or later.
@@ -120,12 +120,12 @@ If the launcher is gone, deleting those subfolders and the keychain item by hand
 
 ## How it works
 
-1. A stub skill (`plugins/theodore/skills/pptx/SKILL.md`, `skills/deck-design/SKILL.md`) triggers as usual
+1. A small loader (`plugins/theodore/skills/pptx/SKILL.md`, `skills/deck-design/SKILL.md`) triggers as usual
    and tells the assistant to run the launcher beside it.
 2. The launcher (`theodore`, POSIX sh; `theodore.cmd`, batch) finds `~/.theodore`. On first use it downloads
    Python and the client (stage 1), each checked against a SHA-256 pinned in `launcher.json`, then hands over.
 3. The client downloads the rest of the runtime against a signed manifest, signs the computer in (activation
-   code or browser approval), installs the engine and prints the skill's instructions.
+   code or browser approval), installs the engine and prints the instructions.
    The deck-design text is fetched at each use and never stored. Its specimen images are not shipped either:
    `theodore specimen <file>` fetches one into a private temporary folder. Nothing runs in the background, so the
    folder is removed by the first Theodore command run after it is an hour old, and at the latest by the uninstall.
@@ -146,7 +146,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | 67 | SETUP_IN_PROGRESS | A download is still running; run the same command again |
 | 68 | SETUP_FAILED | Cause NETWORK, TLS_INTERCEPT, PROXY_AUTH, DISK or HASH_MISMATCH |
 | 69 | UNSUPPORTED_PLATFORM | No engine build for this computer |
-| 70 | NO_ENTITLEMENT | The account's plan does not include the skill |
+| 70 | NO_ENTITLEMENT | The account's plan does not include this part of Theodore |
 | 71 | OFFLINE | The service cannot be reached and the offline period has ended, or the command needs the network |
 | 72 | UPDATE_REQUIRED | The engine or the plugin must update first |
 | 73 | BLOCKED_BY_POLICY | Paused by the publisher, blocked by the computer's policy, or automatic reports are off |
@@ -161,7 +161,7 @@ Commands: `theodore help`.
 ```
 .claude-plugin/marketplace.json     marketplace for Claude Code
 .agents/plugins/marketplace.json    marketplace for Codex
-plugins/theodore/                   the plugin: manifests, two stub skills, the launcher in each skill folder
+plugins/theodore/                   the plugin: manifests, two small loaders, the launcher beside each
 install/                            install.sh, install.cmd, install.md (the page an assistant reads)
 client/                             the client (theodore_client) and the vendored truststore module
 runtime/locks/                      the open-source dependency locks and the Python and Node pins
@@ -196,8 +196,10 @@ The tests need only Python 3.11 or later; they never touch your real home, keych
 `plugins/theodore/skills/deck-design/scripts/` is generated: edit the files under `skills/pptx/scripts/` and
 run `tools/sync_launchers.py`. `theodore.cmd` and `install.cmd` must keep CRLF line endings, `theodore` LF
 (`.gitattributes` enforces both).
+The repository is the production build: `tools/sync_launchers.py --keys <keys.json>` stamps the service's public
+manifest key into `launcher.json` and the installers, so rotating that key is a commit; staging is stamped in a copy.
 
 ## Licence
 
-See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The deck-design skill is a
+See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The deck-design guidance is a
 derivative of Impeccable by Paul Bakaus (Apache-2.0); see `plugins/theodore/skills/deck-design/NOTICE`.

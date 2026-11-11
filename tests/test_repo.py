@@ -193,15 +193,26 @@ class GeneratedFiles(unittest.TestCase):
     def test_a_release_build_refuses_the_placeholder_key_and_takes_stamped_keys(self):
         import build_plugin_archives
         import sync_launchers
-        self.assertEqual(json.loads((SCRIPTS / "launcher.json").read_text())["manifest_key_1_kid"], "manifest-unset",
-                         "the repository carries the placeholder; keys are stamped per environment at release")
+        config = json.loads((SCRIPTS / "launcher.json").read_text())
+        production = json.loads((FIXTURES / "production-keys.json").read_text())
+        manifest = [k for k in production["keys"] if k["purpose"] == "manifest"][0]
+        self.assertEqual((config["manifest_key_1_kid"], config["manifest_key_1_x"]), (manifest["kid"], manifest["x"]),
+                         "the repository is the production build: it carries the production manifest public key")
+        self.assertEqual((config["api_base"], config["dl_base"], config["site_base"]),
+                         ("https://api.theodoreand.ai", "https://dl.theodoreand.ai", "https://theodoreand.ai"))
+        self.assertEqual(build_plugin_archives.build(Path(tempfile.mkdtemp()) / "out", release=True)["version"],
+                         json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())["version"])
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(SystemExit) as refused:
-                build_plugin_archives.build(Path(tmp) / "out", release=True)
-            self.assertIn("placeholder manifest key", str(refused.exception))
             tree = Path(tmp) / "tree"
             for rel in (".claude-plugin", ".agents", "plugins"):
                 shutil.copytree(ROOT / rel, tree / rel)
+            for skill in ("pptx", "deck-design"):          # a tree with the placeholder key is refused by a release build
+                path = tree / "plugins" / "theodore" / "skills" / skill / "scripts" / "launcher.json"
+                text = path.read_text().replace(manifest["kid"], "manifest-unset").replace(manifest["x"], "A" * 43)
+                path.write_text(text)
+            with self.assertRaises(SystemExit) as refused:
+                build_plugin_archives.build(Path(tmp) / "out", tree, release=True)
+            self.assertIn("placeholder manifest key", str(refused.exception))
             sys.path.insert(0, str(ROOT / "tests"))
             from fake_api import b64u, public_key
             real = b64u(public_key(hashlib.sha256(b"release check").digest()))
@@ -539,8 +550,8 @@ class StampedSite(unittest.TestCase):
             text = path.read_text()
             github = [line for line in text.splitlines() if "codex plugin marketplace add Theodore-and/theodore-plugin" in line]
             self.assertTrue(github, path.name)
-            for line in github:
-                self.assertIn("nce the plugin repository is public", line, f"{path.name}: the GitHub form only behind 'once public'")
+            for line in github:          # the repository is public and is the production build: the GitHub form is plain
+                self.assertNotIn("nce the plugin repository is public", line, path.name)
             self.assertIn("plugin", text)
             self.assertRegex(text, r"codex plugin marketplace add [\"~%]", f"{path.name}: the local marketplace the installer keeps")
 

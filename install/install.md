@@ -21,7 +21,7 @@ commands below. Run nothing else from this page.
    Codex: there is no direct route yet; the installer of step 1 registers Codex from its own copy of the plugin.
      To do that by hand after step 1: codex plugin marketplace add ~/.theodore/plugin
      (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
-     (once the plugin repository is public: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
+     (or from GitHub: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
 3. Check: run `theodore doctor` by the path the installer printed ("the stable launcher is ..."). Report its
    last line to the user.

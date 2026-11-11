@@ -334,7 +334,7 @@ fi
 
 # Specimen folders: every one the client made is a line "<created epoch> <path>" in state/specimens.txt. After a first
 # line "#v2" the paths are encoded (%25, %0D, %0A for "%", CR and LF) and decoded here as the client does; a record
-# without that line (round 7) is read as it is. They go from that record and from the current roots, whatever TMPDIR
+# Without that line (the first format) is read as it is. They go from that record and from the current roots, whatever TMPDIR
 # was when they were made: the expired ones (an hour) at every run that reaches this launcher's own code, all of them
 # at uninstall. Only folders named theodore-specimens-*, real (not a link) and this user's own are removed; the record
 # itself is rewritten only by the client. Every variable below is set before use (the launcher runs under set -u).
@@ -446,7 +446,7 @@ if [ "${1:-}" = "uninstall" ]; then
   case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) extra=${THEODORE_TEST_KEYCHAIN:-}; security=${THEODORE_TEST_SECURITY:-$security} ;; esac
   if { [ "$(uname -s 2>/dev/null)" = Darwin ] || [ "$security" != /usr/bin/security ]; } && [ -x "$security" ]; then
     # The item of this folder and its service (the client's name for it): the service the folder records, which for a
-    # folder of another service is not this launcher's; then this launcher's own; then that of a client before round 8
+    # Folder of another service is not this launcher's; then this launcher's own; then that of an earlier client
     # (folder only).
     svc=$MY_API
     [ -n "$FOREIGN" ] && [ -n "${HOME_API:-}" ] && svc=$HOME_API
@@ -545,11 +545,11 @@ progress_status() {
 [ -f "$B/failed" ] && ! job_alive && failed_status
 job_alive && progress_status
 
-if ! mkdir -p "$B" 2>/dev/null || ! ( : > "$B/.write-test" ) 2>/dev/null; then
+if ! mkdir -p "$B" 2>/dev/null || ! ( : > "$B/.write-test.$$" ) 2>/dev/null; then
   status SETUP_FAILED 68 "cause DISK: $HOME_DIR is not writable." "make $HOME_DIR writable (or set THEODORE_HOME to a writable folder), then run $RUN again." \
     "Theodore could not create its folder ($HOME_DIR). It may be protected."
 fi
-rm -f "$B/.write-test"
+rm -f "$B/.write-test.$$"
 claim_environment                                   # the folder is this service's from here on, or another's: then refuse
 foreign && refuse_foreign
 
