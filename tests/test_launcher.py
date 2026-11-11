@@ -294,7 +294,10 @@ class Failures(LauncherCase):
         first, nxt, _t = self.assertStatus(result, "UNSUPPORTED_PLATFORM", 69)
         self.assertIn("SunOS sparc64", first)
         self.assertIn("do not retry", nxt)
-        self.assertFalse((self.box.home / "state").exists(), "nothing is downloaded or written")
+        self.assertFalse(any((self.box.home / d).exists() for d in ("runtime", "client", "staging", "logs")), "nothing is downloaded")
+        state = self.box.home / "state"
+        self.assertEqual(sorted(p.name for p in state.iterdir()) if state.exists() else [], ["environment"],
+                         "only the folder's claim for this service is written (round 8)")
 
     def test_sandbox_without_a_route_asks_for_the_connector(self):
         dead = f"http://127.0.0.1:{closed_port()}"

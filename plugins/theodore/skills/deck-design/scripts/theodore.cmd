@@ -44,6 +44,9 @@ if "%~1"=="__bootstrap" goto :env_ok
 if not defined MY_API goto :env_ok
 if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
 call :read_env
+rem A new folder is claimed here, before step 2 copies anything into bin\: a racing launcher of another service then
+rem finds the record, never a stable copy written by a launcher that has not claimed the folder.
+if not defined FOREIGN if not exist "%HOME_DIR%\state\environment" if not exist "%HOME_DIR%\bin\launcher.json" mkdir "%HOME_DIR%\state" 2>nul
 if not defined FOREIGN call :claim_env
 if not defined FOREIGN call :read_env
 rem Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.

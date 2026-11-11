@@ -140,6 +140,9 @@ if foreign; then
   # Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.
   [ "${1:-}" = uninstall ] || refuse_foreign
 else
+  # A new folder is claimed here, before step 2 copies anything into bin/: a racing launcher of another service then
+  # finds the record, never a stable copy written by a launcher that has not claimed the folder.
+  [ -e "$HOME_DIR/state/environment" ] || [ -f "$HOME_DIR/bin/launcher.json" ] || mkdir -p "$HOME_DIR/state" 2>/dev/null
   claim_environment
   foreign && { FOREIGN=1; [ "${1:-}" = uninstall ] || refuse_foreign; }
 fi
