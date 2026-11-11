@@ -299,20 +299,67 @@ class Failures(LauncherCase):
         self.assertEqual(sorted(p.name for p in state.iterdir()) if state.exists() else [], ["environment"],
                          "only the folder's claim for this service is written")
 
-    def test_sandbox_without_a_route_asks_for_the_connector(self):
+    def _record(self, name, result):
+        out = os.environ.get("THEODORE_STATUS_SAMPLES")
+        if out:
+            with open(out, "a", encoding="utf-8") as fh:
+                fh.write(f"## {name}\n{result.stdout.strip()}\n\n")
+
+    @unittest.skipIf(IS_WINDOWS, "theodore.cmd: no cloud sandbox runs Windows; its wording is unchanged")
+    def test_a_sandbox_with_no_network_at_all_is_told_the_engine_cannot_run_there(self):
+        """ChatGPT's ordinary chat: no proxy, nothing resolves or connects. The only CONNECTOR_REQUIRED left."""
         dead = f"http://127.0.0.1:{closed_port()}"
         self.box.write_launcher_json(stage1_client_url=f"{dead}/client.tar")
         result = self.run_launcher("guide", "deck-design", env={"THEODORE_EPHEMERAL": "1"})
+        self._record("ChatGPT ordinary chat (no network at all)", result)
         first, nxt, tell = self.assertStatus(result, "CONNECTOR_REQUIRED", 74)
-        self.assertIn("connector", nxt)
-        if IS_WINDOWS:      # theodore.cmd: no cloud sandbox runs Windows; its wording is unchanged
-            self.assertIn("Customize > Plugins > Theodore > Connectors", tell)
-        else:               # the setting the user changes in Claude, and where ChatGPT has a network
-            self.assertIn("run ", nxt)
-            self.assertIn('Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add '
-                          'theodoreand.ai and *.theodoreand.ai', tell)
-            self.assertIn("ChatGPT Work mode", tell)
+        self.assertIn("no internet access at all", first)
+        self.assertIn("do not retry here", nxt)
+        self.assertIn("Work mode can install and run Theodore", tell)
+        self.assertNotIn("Allowed websites", tell)
         self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
+
+    @unittest.skipIf(IS_WINDOWS, "theodore.cmd: no cloud sandbox runs Windows; its wording is unchanged")
+    def test_a_claude_sandbox_that_blocks_our_hosts_names_the_setting_and_says_retrying_is_right(self):
+        dead = f"http://127.0.0.1:{closed_port()}"
+        self.box.write_launcher_json(stage1_client_url=f"{dead}/client.tar")
+        # a Claude cloud session whose proxy refuses the host: here the connection fails, the session is Claude's
+        result = self.run_launcher("guide", "deck-design", env={"CLAUDE_CODE_REMOTE": "true", "CLAUDE_CODE_SESSION_ORIGIN": "claude_ai_chat"})
+        self._record("Claude sandbox, theodoreand.ai not allowed", result)
+        first, nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
+        self.assertIn("cause NETWORK", first)
+        self.assertIn("running ", nxt)
+        self.assertIn("again is right (not before)", nxt)
+        self.assertIn('Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add '
+                      'theodoreand.ai and *.theodoreand.ai', tell)
+        self.assertIn("ChatGPT Work mode does", tell)
+        # the same through a proxy that answers 403 for the host, in any sandbox
+        import http.server, threading
+        class Refuse(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def _r(self):
+                self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers()
+            do_HEAD = do_GET = do_CONNECT = _r
+        proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Refuse)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.shutdown)
+        url = f"http://127.0.0.1:{proxy.server_address[1]}"
+        self.box.write_launcher_json(stage1_client_url="http://198.51.100.7/client.tar")
+        result = self.run_launcher("guide", "deck-design", env={"THEODORE_EPHEMERAL": "1", "http_proxy": url, "HTTPS_PROXY": url, "no_proxy": "", "NO_PROXY": ""})
+        first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
+        self.assertIn("Allowed websites", tell)
+        self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
+
+    @unittest.skipIf(IS_WINDOWS, "a POSIX sh launcher test")
+    def test_a_flag_set_to_no_is_not_a_sandbox(self):
+        """The client's truth rule: CLAUDE_CODE_REMOTE=no (or 0, false, empty) is a user's own computer."""
+        dead = f"http://127.0.0.1:{closed_port()}"
+        self.box.write_launcher_json(stage1_client_url=f"{dead}/client.tar")
+        for value in ("no", "NO", "0", "false", ""):
+            result = self.run_launcher("guide", "deck-design", env={"CLAUDE_CODE_REMOTE": value, "THEODORE_BOOTSTRAP_WAIT": "1"})
+            self.assertNotIn("CONNECTOR_REQUIRED", result.stdout, value)
+            self.assertNotIn("Allowed websites", result.stdout, value)
+            self.box.wait_jobs()
 
     def test_sandbox_with_a_route_bootstraps_normally(self):
         result = self.run_launcher("version", env={"THEODORE_EPHEMERAL": "1"})

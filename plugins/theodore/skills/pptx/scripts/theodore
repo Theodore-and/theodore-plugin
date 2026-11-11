@@ -509,12 +509,19 @@ if [ -z "$PLAT" ] || [ -z "$ARCH" ]; then
     "Theodore's PowerPoint engine does not run on this kind of computer yet (it supports macOS, Windows x64 and Linux x64 or arm64 with glibc)."
 fi
 
-# An assistant's cloud sandbox (a Claude chat, Cowork, Claude Code on the web, ChatGPT Work or its ordinary chat): the
-# client's core.cloud_sandbox() makes the same test.
+# The client's truth rule for a flag (core._flag): empty, 0, false and no (any case) are false, anything else is true.
+truthy() {
+  case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' ')" in ''|0|false|no) return 1 ;; *) return 0 ;; esac
+}
+# A Claude cloud session (core._claude_cloud): a claude.ai chat, Cowork, the desktop app's chat, Claude Code on the web.
+claude_cloud() {
+  truthy "${CLAUDE_CODE_REMOTE:-}" || [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ] ||
+    case "${CLAUDE_CODE_ENTRYPOINT:-}" in remote*) true ;; *) false ;; esac
+}
+# An assistant's cloud sandbox (a Claude chat, Cowork, Claude Code on the web, ChatGPT's ordinary chat): the client's
+# core.cloud_sandbox() makes the same test.
 in_sandbox() {
-  [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] ||
-    { [ -n "${CLAUDE_CODE_REMOTE:-}" ] && [ "${CLAUDE_CODE_REMOTE:-}" != false ] && [ "${CLAUDE_CODE_REMOTE:-}" != 0 ]; } ||
-    [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ]
+  [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || claude_cloud
 }
 SANDBOX_TELL='This workspace'"'"'s network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT'"'"'s ordinary chat has no internet access; ChatGPT Work mode does.'
 
@@ -525,7 +532,7 @@ failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes
     NETWORK) next="check the internet connection, then run $RUN again."
              tell="Theodore could not download its files. Please check the internet connection."
              if in_sandbox; then
-               next="this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below, then run $RUN again once they have changed it; do not retry before."
+               next="this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once they have changed it, running $RUN again is right (not before)."
                tell=$SANDBOX_TELL
              fi ;;
     TLS_INTERCEPT) next="this network inspects HTTPS with a certificate this computer does not trust. Ask the user to have their IT team install the company root certificate, or to try another network; then run $RUN again."
@@ -568,12 +575,22 @@ rm -f "$B/.write-test.$$"
 claim_environment                                   # the folder is this service's from here on, or another's: then refuse
 foreign && refuse_foreign
 
-# A sandbox that loses its files and cannot reach the download host has no use for a bootstrap: say so at once.
-if in_sandbox; then
+# In a cloud sandbox, find out at once whether the download host can be reached, instead of a bootstrap that fails later.
+# - No network at all (ChatGPT's ordinary chat: no proxy, no name resolution): the engine can never run there.
+# - A network that refuses or cannot resolve Theodore's sites (claude.ai until they are allowed): the user can change it.
+# Without curl the probe is skipped and the bootstrap's own download (wget) says what happens.
+if in_sandbox && command -v curl >/dev/null 2>&1; then
   probe=$(jget "$CONF" stage1_client_url)
-  if ! { command -v curl >/dev/null 2>&1 && curl -q -sS -I --proto "$(proto "$probe")" --connect-timeout 10 -m 30 -o /dev/null "$probe" 2>/dev/null; }; then
-    status CONNECTOR_REQUIRED 74 "this cloud workspace cannot reach Theodore's download host (its network refuses or cannot resolve it)." \
-      "tell the user the setting below; once they have changed it, run $RUN again. Until then, if a Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design); if none is, say so and do not retry this command here." \
+  curl -q -fsS -I --proto "$(proto "$probe")" --connect-timeout 10 -m 30 -o /dev/null "$probe" 2>/dev/null
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 6 ] || [ "$rc" -eq 7 ] && [ -z "${HTTPS_PROXY:-}${https_proxy:-}${ALL_PROXY:-}${all_proxy:-}" ] && ! claude_cloud; then
+      status CONNECTOR_REQUIRED 74 "this workspace has no internet access at all (no proxy, and $(printf '%s' "$probe" | sed 's#^[a-z]*://##; s#/.*##') cannot be resolved or reached), so Theodore's engine cannot run here." \
+        "do not retry here. If a Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design); tell the user that ChatGPT Work mode can install and run Theodore." \
+        "This chat has no internet access, so Theodore's engine cannot run in it. In ChatGPT, Work mode can install and run Theodore."
+    fi
+    status SETUP_FAILED 68 "cause NETWORK: this cloud workspace's network refuses or cannot resolve Theodore's download host (curl exit $rc)." \
+      "tell the user the setting below; once they have changed it, running $RUN again is right (not before)." \
       "$SANDBOX_TELL"
   fi
 fi

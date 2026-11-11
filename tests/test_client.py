@@ -2360,7 +2360,7 @@ class ProxiesAndSandboxes(ClientCase):
         for s in (status, failed):
             self.assertIn('Allowed websites add theodoreand.ai and *.theodoreand.ai', s.tell_user)
             self.assertIn("ChatGPT Work mode", s.tell_user)
-            self.assertIn("do not retry before", s.next_step)
+            self.assertIn("running the same command again is right (not before)", s.next_step)
         with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": ""}), \
                 mock.patch.object(Path, "is_dir", lambda p: False):
             plain = api.offline(caught.exception, "sign-in could not start")

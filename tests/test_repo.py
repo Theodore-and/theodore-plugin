@@ -593,3 +593,51 @@ class InstallPage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostParity(unittest.TestCase):
+    """install.sh's host_of and the launcher's sandbox test use the client's truth rule (core._flag: empty, 0, false,
+    no are false), so a user's own computer is never labelled claude-web or chatgpt."""
+
+    CASES = [
+        {}, {"CLAUDE_CODE_REMOTE": "true"}, {"CLAUDE_CODE_REMOTE": "no", "CLAUDECODE": "1"}, {"CLAUDE_CODE_REMOTE": "NO"},
+        {"CLAUDE_CODE_REMOTE": "0", "CODEX_THREAD_ID": "t"}, {"CLAUDE_CODE_REMOTE": "False"}, {"CLAUDE_CODE_REMOTE": "1"},
+        {"CLAUDE_CODE_SESSION_ORIGIN": "claude_ai_chat"}, {"CLAUDE_CODE_ENTRYPOINT": "remote_cowork"},
+        {"CLAUDE_CODE_ENTRYPOINT": "cli"}, {"CLAUDE_PLUGIN_ROOT": "/p"},
+        {"CODEX_NETWORK_PROXY_ACTIVE": "1", "CODEX_PROXY_CERT": "/c.crt"},
+        {"CODEX_NETWORK_PROXY_ACTIVE": "0", "CODEX_PROXY_CERT": "/c.crt"},
+        {"CODEX_NETWORK_PROXY_ACTIVE": "no", "CODEX_PROXY_CERT": "/c.crt", "CODEX_THREAD_ID": "t"},
+        {"CODEX_MANAGED_BY_NPM": "1"}, {"THEODORE_HOST": "Cowork!"},
+    ]
+
+    @staticmethod
+    def functions(path: Path, names) -> str:
+        text = path.read_text()
+        out = []
+        for name in names:
+            m = re.search(rf"^{name}\(\) {{\n.*?^}}\n", text, re.M | re.S)
+            assert m, (path, name)
+            out.append(m.group(0))
+        return "".join(out)
+
+    def test_install_sh_reports_the_host_the_client_would(self):
+        import shutil
+        sys.path.insert(0, str(ROOT / "client"))
+        from theodore_client import core
+        from unittest import mock
+        sh = shutil.which("sh")
+        defs = self.functions(ROOT / "install" / "install.sh", ("truthy", "claude_cloud", "host_of"))
+        for env in self.CASES:
+            done = subprocess.run([sh, "-c", defs + "PLAT=linux; host_of"], env={"PATH": "/usr/bin:/bin", **env},
+                                  capture_output=True, text=True)
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", "linux"):
+                want = core.host_name()
+            self.assertEqual(done.stdout.strip(), "installer" if want == "other" else want, env)
+
+    def test_the_launcher_sandbox_test_uses_the_same_rule(self):
+        import shutil
+        sh = shutil.which("sh")
+        defs = self.functions(ROOT / "plugins" / "theodore" / "skills" / "pptx" / "scripts" / "theodore", ("truthy", "claude_cloud"))
+        for value, cloud in (("true", True), ("1", True), ("yes", True), ("no", False), ("0", False), ("false", False), ("", False), ("No", False)):
+            done = subprocess.run([sh, "-c", defs + "claude_cloud"], env={"PATH": "/usr/bin:/bin", "CLAUDE_CODE_REMOTE": value})
+            self.assertEqual(done.returncode == 0, cloud, value)

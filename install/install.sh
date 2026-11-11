@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.3"
-PIN_CLIENT="client/client-0.3.3.tar 6645e0428dfe0e098f2f7606e9f0a8117db0b8342e05ef5f33fe2d23cf184212"
+PIN_CLIENT="client/client-0.3.3.tar c27709f1b87010bce24d48cbdb82821bbf81806c873eafe15bafddbc5b742db3"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -221,25 +221,33 @@ fetch() { # url dest what
   case "$(cat "$WORK/http" 2>/dev/null)" in 3??) detail="it answered with a redirect, which is not followed" ;; *) detail="curl exit $rc, HTTP $(cat "$WORK/http" 2>/dev/null)" ;; esac
   if [ "$cause" = NETWORK ] && in_sandbox; then
     status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail); this cloud workspace's network refuses or cannot resolve it." \
-      "tell the user the setting below, then run the same installer line again once they have changed it; do not retry before." \
+      "tell the user the setting below; once they have changed it, running the same installer line again is right (not before)." \
       "This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under \"Use the internet while making files\" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does."
   fi
   status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail)." \
     "if the download host is blocked, register the plugin directly instead (step 2 of the install page); otherwise check the connection and run the installer again." \
     "Theodore's installer could not download its files. I will try the direct route."
 }
+# The client's truth rule for a flag (core._flag): empty, 0, false and no (any case) are false, anything else is true.
+truthy() {
+  case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' ')" in ''|0|false|no) return 1 ;; *) return 0 ;; esac
+}
+# A Claude cloud session (core._claude_cloud).
+claude_cloud() {
+  truthy "${CLAUDE_CODE_REMOTE:-}" || [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ] ||
+    case "${CLAUDE_CODE_ENTRYPOINT:-}" in remote*) true ;; *) false ;; esac
+}
 # An assistant's cloud sandbox (the launcher's in_sandbox and the client's core.cloud_sandbox make the same test).
 in_sandbox() {
-  [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] ||
-    { [ -n "${CLAUDE_CODE_REMOTE:-}" ] && [ "${CLAUDE_CODE_REMOTE:-}" != false ] && [ "${CLAUDE_CODE_REMOTE:-}" != 0 ]; } ||
-    [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ]
+  [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || claude_cloud
 }
 # The assistant running this installer, as the client's core.host_name() tells it ("installer" when unknown).
 host_of() {
-  if { [ -n "${CLAUDE_CODE_REMOTE:-}" ] && [ "${CLAUDE_CODE_REMOTE:-}" != false ] && [ "${CLAUDE_CODE_REMOTE:-}" != 0 ]; } ||
-     [ "${CLAUDE_CODE_SESSION_ORIGIN:-}" = claude_ai_chat ]; then echo claude-web
+  explicit=$(printf '%s' "${THEODORE_HOST:-}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-' | cut -c1-32 | sed 's/^-*//')
+  if [ -n "$explicit" ]; then echo "$explicit"
+  elif claude_cloud; then echo claude-web
   elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}${CLAUDE_PLUGIN_ROOT:-}" ]; then echo claude-code
-  elif [ "$PLAT" = linux ] && [ -n "${CODEX_NETWORK_PROXY_ACTIVE:-}" ] && { [ -n "${CODEX_PROXY_CERT:-}" ] || [ -d /opt/codex/runtimes ]; }; then echo chatgpt
+  elif [ "$PLAT" = linux ] && truthy "${CODEX_NETWORK_PROXY_ACTIVE:-}" && { [ -n "${CODEX_PROXY_CERT:-}" ] || [ -d /opt/codex/runtimes ]; }; then echo chatgpt
   elif [ -n "${CODEX_HOME:-}${CODEX_SANDBOX:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_VERSION:-}" ]; then echo codex
   else echo installer; fi
 }

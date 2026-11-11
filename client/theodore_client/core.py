@@ -207,8 +207,8 @@ def cloud_sandbox() -> bool:
 
 
 # What the user changes when a cloud sandbox cannot reach Theodore's sites (installers and launcher say the same).
-SANDBOX_NETWORK_NEXT = ("this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below, then "
-                        "run the same command again once they have changed it; do not retry before.")
+SANDBOX_NETWORK_NEXT = ("this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once "
+                        "they have changed it, running the same command again is right (not before).")
 
 
 def sandbox_network_tell() -> str:
