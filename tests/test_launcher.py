@@ -385,6 +385,24 @@ class Failures(LauncherCase):
             found = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "ai.theodoreand.theodore", str(keychain)], capture_output=True)
             self.assertNotEqual(found.returncode, 0, "the keychain item is gone")
 
+    @unittest.skipIf(IS_WINDOWS, "the sh launcher's own uninstall; Windows keeps the credential in a DPAPI file in state")
+    def test_uninstall_without_python_gives_the_keychain_ten_seconds(self):
+        (self.box.home / "state").mkdir(parents=True)
+        hang = self.box.tmp / "hanging-security"
+        started = self.box.tmp / "security-started"
+        hang.write_text(f'#!/bin/sh\necho "$*" > "{started}"\nexec sleep 120\n')
+        hang.chmod(0o755)
+        import time
+        began = time.monotonic()
+        result = self.run_launcher("uninstall", env={"THEODORE_TEST_SECURITY": str(hang)}, timeout=60)
+        took = time.monotonic() - began
+        self.assertTrue(started.exists(), "the keychain was asked")
+        self.assertIn("delete-generic-password", started.read_text())
+        first, _n, _t = self.assertStatus(result, "RETRY", 75)
+        self.assertIn("keychain", first, "a keychain that did not answer is named as left")
+        self.assertLess(took, 30, f"the uninstall waited {took:.0f} s for the keychain")
+        self.assertFalse(self.box.home.exists(), "everything else is still removed")
+
     def test_uninstall_without_python_reports_what_it_could_not_remove(self):
         fake = self.box.tmp / "failing tools"
         fake.mkdir()

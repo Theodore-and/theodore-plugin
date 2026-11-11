@@ -319,12 +319,22 @@ if [ "${1:-}" = "uninstall" ]; then
     settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$HOME_DIR/state/host-settings.json" | head -n 1)
     left="$left; two Theodore entries in ${settings:-the Claude Code settings.json} (the extraKnownMarketplaces.theodore autoUpdate and the two Bash(...theodore...) rules under permissions.allow)"
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ] && [ -x /usr/bin/security ]; then
+  security=/usr/bin/security extra=
+  # Test seams (a keychain file, a stand-in for security), honoured only against a loopback API.
+  case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) extra=${THEODORE_TEST_KEYCHAIN:-}; security=${THEODORE_TEST_SECURITY:-$security} ;; esac
+  if { [ "$(uname -s 2>/dev/null)" = Darwin ] || [ "$security" != /usr/bin/security ]; } && [ -x "$security" ]; then
     account="installation-$(printf '%s' "${HOME_DIR%/}" | sha256_of_stdin | cut -c1-12)"
-    extra=
-    case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) extra=${THEODORE_TEST_KEYCHAIN:-} ;; esac
-    /usr/bin/security delete-generic-password -a "$account" -s ai.theodoreand.theodore ${extra:+"$extra"} >/dev/null 2>&1
-    case $? in 0|44) ;; *) left="$left; the sign-in item in the login keychain (service ai.theodoreand.theodore)" ;; esac
+    # A keychain that shows a system dialog never answers: 10 seconds, then it is stopped and named as left.
+    "$security" delete-generic-password -a "$account" -s ai.theodoreand.theodore ${extra:+"$extra"} >/dev/null 2>&1 </dev/null &
+    spid=$!
+    ( sleep 10; kill "$spid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+    dog=$!
+    wait "$spid"
+    src=$?
+    kill "$dog" 2>/dev/null
+    case $src in 0|44) ;; *) left="$left; the sign-in item in the login keychain (service ai.theodoreand.theodore)" ;; esac
+  fi
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     cache="${HOME:-/nonexistent}/Library/Caches/pptx-runtime"
   else
     cache="${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/pptx-runtime"
