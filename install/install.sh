@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.2"
-PIN_CLIENT="client/client-0.3.2.tar 6f5e02ddf2c13d20bf83d8dfa95285489367231bc4570b4d6e79acebceaa061f"
+PIN_CLIENT="client/client-0.3.2.tar e4b8f60751933342437d4cc0ed7a2c3fff7f0defed3abf2112cb7094185dcf30"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -147,7 +147,7 @@ if [ -n "$UNINSTALL" ]; then
   remove_specimens
   [ -n "$left" ] || rm -f "$HOME_DIR/state/specimens.txt" 2>/dev/null
   rec="$HOME_DIR/state/host-settings.json"
-  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys)":' "$rec" 2>/dev/null; then
+  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys|git_bash)":' "$rec" 2>/dev/null; then
     left="$left; Theodore's changes to the Claude Code settings.json, which need Theodore's runtime to take back exactly: what it added and the values before are kept in $rec. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
   fi
   rmdir "$HOME_DIR/state" "$HOME_DIR" 2>/dev/null

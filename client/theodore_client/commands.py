@@ -945,8 +945,10 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
 
 
 def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) -> int:
+    if name == "git":
+        return _tools_git(if_needed)
     if name != "libreoffice":
-        raise core.usage(f"unknown tool '{name}'. The only tool is: libreoffice.")
+        raise core.usage(f"unknown tool '{name}'. The tools are: libreoffice, git.")
     if if_needed and not install.needs_libreoffice():      # the Windows installer's call: only when nothing can render
         return core.emit(Status("OK", "LibreOffice is not needed here: a converter is available or none is fetched on this system.",
                                 "nothing to do.", "Nothing to install."))
@@ -973,6 +975,52 @@ def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) ->
     if job:
         job.finish()
     return core.emit(Status("OK", f"LibreOffice is installed at {binary}.", "nothing to do.", "LibreOffice is installed for Theodore's slide previews."))
+
+
+def needs_git_bash() -> bool:
+    """Claude Code on Windows with no Git Bash where it looks: it would run Theodore's skill commands in PowerShell."""
+    return core.IS_WINDOWS and bool(shutil.which("claude")) and claude_git_bash() is None
+
+
+def _tools_git(if_needed: bool) -> int:
+    """Git Bash for Claude Code on Windows: PortableGit into Theodore's folder, and Claude Code pointed at it through
+    the setting its documentation names (env.CLAUDE_CODE_GIT_BASH_PATH in its user settings). Recorded, so the
+    uninstall takes it back; a value the user set is never replaced."""
+    if if_needed and not needs_git_bash():
+        return core.emit(Status("OK", "Git Bash is not needed here: Claude Code is not on this computer or already finds a Git Bash.",
+                                "nothing to do.", "Nothing to install."))
+    bash = install.install_git()
+    line = _claude_git_bash_apply(bash)
+    print(line)
+    return core.emit(Status("OK", f"Git Bash (PortableGit {install.git_pin()['version']}) is in {bash.parent.parent}; {line}.",
+                            "continue; a new Claude Code session uses it.",
+                            "Theodore added Git Bash for Claude Code (PortableGit, in Theodore's folder) so its skills can load; "
+                            "uninstalling Theodore takes it back."))
+
+
+def _claude_git_bash_apply(bash: Path) -> str:
+    path = _claude_settings_path()
+    settings = _load_settings(path)
+    if settings is None:
+        return f"claude-code: settings not changed ({path} is not a valid JSON object)"
+    env = settings.get("env", {})
+    if not isinstance(env, dict):
+        return f"claude-code: settings not changed ({path} has env in another shape than expected)"
+    if env.get("CLAUDE_CODE_GIT_BASH_PATH") and env.get("CLAUDE_CODE_GIT_BASH_PATH") != str(bash):
+        return f"claude-code: CLAUDE_CODE_GIT_BASH_PATH is already set in {path}; left as it is"
+    record = _host_record()
+    created = set(record.get("created_keys") or [])
+    file_created = bool(record.get("file_created")) or not path.exists()
+    if "env" not in settings:
+        created.add("env")
+    settings.setdefault("env", {})["CLAUDE_CODE_GIT_BASH_PATH"] = str(bash)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
+    record.update({"git_bash": str(bash), "created_keys": sorted(created), "file_created": file_created, "path": str(path)})
+    if file_created:
+        record["file_identity"] = _identity(path)
+    _save_host_record(record)
+    return f"claude-code: Git Bash set in {path}"
 
 
 # --- assistants on this machine ------------------------------------------------------------------------------------------------
@@ -1202,6 +1250,12 @@ def _claude_settings_restore(file_ours: bool = False) -> tuple[str | None, list[
     allow = permissions.get("allow") if isinstance(permissions, dict) else None
     if isinstance(allow, list):
         permissions["allow"] = [r for r in allow if r not in (record.get("rules") or [])]
+    env = settings.get("env")
+    if record.get("git_bash") and isinstance(env, dict):
+        if env.get("CLAUDE_CODE_GIT_BASH_PATH") == record["git_bash"]:
+            env.pop("CLAUDE_CODE_GIT_BASH_PATH")
+        elif "CLAUDE_CODE_GIT_BASH_PATH" in env:
+            notes.append(f"env.CLAUDE_CODE_GIT_BASH_PATH in {path} was changed after Theodore set it, so it was left as it is")
     markets = settings.get("extraKnownMarketplaces")
     entry = markets.get("theodore") if isinstance(markets, dict) else None
     market = record.get("marketplace") if "marketplace" in record else _legacy_marketplace(record)

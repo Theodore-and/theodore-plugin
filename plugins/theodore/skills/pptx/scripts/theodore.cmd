@@ -670,7 +670,7 @@ if not defined KEEP_CODEX_MARKET (where codex >nul 2>&1 && call :unreg codex cod
 del /q "%UOUT%" >nul 2>&1
 rem Settings Theodore changed cannot be taken back exactly without its Python: the record of what was there is kept.
 set "SETTINGS_LEFT="
-if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" /c:"\"created_keys\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" /c:"\"created_keys\":" /c:"\"git_bash\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
 if defined SETTINGS_LEFT set "LEFT=%LEFT%; Theodore's changes to the Claude Code settings.json, which need Theodore's runtime to take back exactly: what it added and the values before are kept in %REC%. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
 call :remove_specimens
 if defined SPLEFT set "LEFT=%LEFT%%SPLEFT%"

@@ -21,7 +21,7 @@ HELP = """Theodore client commands (run through the launcher):
   update [--check | --apply | --rollback | --channel C | --pin V | --unpin | --reset-state]
   report --kind bug|feedback --title T --details D [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
   prefs add "<text>" | list | remove <id>
-  packs install <pack>|--all [--background]    packs status     tools install libreoffice [--background]
+  packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
   hosts register | unregister | settings [--apply]          activate --grant - | --grant-file F          uninstall
 """
 

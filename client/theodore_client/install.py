@@ -1233,6 +1233,81 @@ LIBREOFFICE_PINS = {
 }
 
 
+# Git for Windows' PortableGit, unmodified, as its project publishes it: the Git Bash Claude Code needs on Windows to run
+# a skill's injected command (without it Claude Code uses PowerShell, and Theodore's skills cannot load). Tried first
+# from Theodore's download host (<dl_base>/tools/<file name>), then from the project's release. Only for Claude Code on
+# Windows when it finds no Git Bash. A release manifest may carry newer pins under tools.git.<platform>-<arch>.
+GIT_PINS = {
+    "win32-x64": {"version": "2.56.0.windows.4", "size": 60087472,
+                  "url": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.4/PortableGit-2.56.0.4-64-bit.7z.exe",
+                  "sha256": "b1f3e52216e2ed6882d1bebfd4d3fdf319bec40d2edbbf9fd26ec4fd3fce7ed1"},
+}
+
+
+def git_pin() -> dict | None:
+    key = "-".join(core.platform_arch())
+    override = (update_state().get("tools") or {}).get("git", {}).get(key)
+    return override or GIT_PINS.get(key)
+
+
+def theodore_git_bash() -> Path | None:
+    bash = core.home().tools / "git" / "bin" / "bash.exe"
+    return bash if bash.is_file() else None
+
+
+def install_git(job: Job | None = None) -> Path:
+    """Fetch PortableGit (pinned) and unpack it into <home>/tools/git with its own self-extractor: no admin rights,
+    nothing registered, nothing outside Theodore's folder. Returns its bin/bash.exe."""
+    pin = git_pin()
+    if not pin:
+        raise Status("UNSUPPORTED_PLATFORM", "Theodore fetches Git Bash only for Claude Code on Windows x64.",
+                     "ask the user to install Git for Windows from https://git-scm.com/downloads/win.",
+                     "Please install Git for Windows (git-scm.com) so Claude Code can load Theodore's skills.")
+    home = core.home()
+    existing = theodore_git_bash()
+    if existing and core.read_text(home.tools / "git" / ".version") == pin["version"]:
+        return existing
+    name = Path(urlparse(pin["url"]).path).name
+    archive = home.staging / name
+    failure: Status | None = None
+    sources = [f"{core.config()['dl_base'].rstrip('/')}/tools/{name}", pin["url"]]
+    if archive.is_file() and core.sha256_file(archive) == pin["sha256"]:
+        sources = []                        # already here from an interrupted run, and it is the pinned file
+    for source in dict.fromkeys(sources):
+        try:
+            api.download(source, archive, sha256=pin["sha256"], size=int(pin.get("size") or 0) or None,
+                         progress=(lambda pct: job.progress("downloading Git Bash", pct)) if job else None, timeout=120)
+            failure = None
+            break
+        except api.NetworkError as error:
+            failure = api.setup_failed(error.cause, f"Git Bash (PortableGit) could not be downloaded ({error.detail})")
+        except api.ApiError as error:
+            failure = api.setup_failed("NETWORK", f"Git Bash (PortableGit) could not be downloaded (HTTP {error.http_status})")
+        except Status as status:
+            failure = status
+    if failure is not None:
+        raise failure
+    target, partial = home.tools / "git", home.tools / "git.partial"
+    core.remove_tree(partial)
+    partial.mkdir(parents=True)
+    if job:
+        job.progress("unpacking Git Bash")
+    try:       # a 7-Zip self-extractor: -y answers yes, -o names the folder; no window
+        subprocess.run([str(archive), "-y", f"-o{partial}"], check=True, capture_output=True, timeout=900,
+                       stdin=subprocess.DEVNULL, creationflags=0x08000000 if IS_WINDOWS else 0)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        core.remove_tree(partial)
+        raise api.setup_failed("DISK", f"Git Bash (PortableGit) could not be unpacked: {exc}") from None
+    if not (partial / "bin" / "bash.exe").is_file():
+        core.remove_tree(partial)
+        raise api.setup_failed("DISK", "Git Bash (PortableGit) was unpacked but bin\\bash.exe is missing")
+    core.write_atomic(partial / ".version", pin["version"] + "\n", 0o644)
+    core.remove_tree(target)
+    os.rename(partial, target)
+    core.remove_tree(archive)
+    return target / "bin" / "bash.exe"
+
+
 def libreoffice_pin() -> dict | None:
     key = "-".join(core.platform_arch())
     override = (update_state().get("tools") or {}).get("libreoffice", {}).get(key)
@@ -1327,11 +1402,144 @@ def libreoffice_app_local_runtime(image: Path) -> None:
     Microsoft's redistributable, soffice then fails to start (STATUS_DLL_NOT_FOUND). Copies beside the program are
     found first by the loader and touch nothing outside Theodore's folder.
     """
-    source, program = image / "System64", image / "program"
-    if not source.is_dir() or not program.is_dir():
+    source = image / "System64"
+    program = next((p for p in (image / "program", image / "LibreOffice" / "program") if p.is_dir()), None)
+    if not source.is_dir() or program is None:
         return
     for dll in sorted(source.glob("*.dll")):
-        shutil.copy2(dll, program / dll.name)
+        if pe_machine(dll) in (None, 0x8664):          # only x64 copies (an unpack without the service may mix others in)
+            shutil.copy2(dll, program / dll.name)
+
+
+def pe_machine(path: Path) -> int | None:
+    """The machine field of a Windows executable's PE header (0x8664 x64, 0x14c x86, 0xaa64 ARM64), None if unreadable."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(4096)
+        offset = int.from_bytes(head[0x3C:0x40], "little")
+        if head[:2] != b"MZ" or head[offset:offset + 4] != b"PE\0\0":
+            return None
+        return int.from_bytes(head[offset + 4:offset + 6], "little")
+    except (OSError, ValueError):
+        return None
+
+
+def msi_unpack(archive: Path, target: Path) -> int:
+    """Unpack an MSI package into `target` without the Windows Installer service: its tables and its embedded cabinet
+    are read with msi.dll's database functions (in this process), the cabinet is expanded with Windows' expand.exe,
+    and each file is moved to the folder the Directory table gives it (source names, as an administrative install
+    lays them out). Components meant only for ARM64 computers are left out, and where two files still land on one
+    path the x64 one is kept. Returns the number of files placed."""
+    import ctypes
+    from ctypes import wintypes
+    msi = ctypes.WinDLL("msi")
+    handle = ctypes.c_ulong
+
+    def check(code: int, what: str) -> None:
+        if code != 0:
+            raise OSError(f"msi.dll {what} failed ({code})")
+
+    def query(database, sql: str, fields: int, stream_to: Path | None = None) -> list[list[str]]:
+        view, rows = handle(), []
+        check(msi.MsiDatabaseOpenViewW(database, ctypes.c_wchar_p(sql), ctypes.byref(view)), "OpenView")
+        try:
+            check(msi.MsiViewExecute(view, handle(0)), "Execute")
+            while True:
+                record = handle()
+                code = msi.MsiViewFetch(view, ctypes.byref(record))
+                if code == 259:                     # ERROR_NO_MORE_ITEMS
+                    break
+                check(code, "Fetch")
+                try:
+                    if stream_to is not None:
+                        with open(stream_to, "wb") as out:
+                            buffer = ctypes.create_string_buffer(1 << 20)
+                            while True:
+                                size = wintypes.DWORD(len(buffer))
+                                check(msi.MsiRecordReadStream(record, 1, buffer, ctypes.byref(size)), "ReadStream")
+                                if not size.value:
+                                    break
+                                out.write(buffer.raw[:size.value])
+                        continue
+                    row = []
+                    for field in range(1, fields + 1):
+                        size = wintypes.DWORD(0)
+                        msi.MsiRecordGetStringW(record, field, ctypes.c_wchar_p(""), ctypes.byref(size))
+                        size.value += 1
+                        text = ctypes.create_unicode_buffer(size.value)
+                        check(msi.MsiRecordGetStringW(record, field, text, ctypes.byref(size)), "GetString")
+                        row.append(text.value)
+                    rows.append(row)
+                finally:
+                    msi.MsiCloseHandle(record)
+        finally:
+            msi.MsiCloseHandle(view)
+        return rows
+
+    database = handle()
+    check(msi.MsiOpenDatabaseW(ctypes.c_wchar_p(str(archive)), ctypes.c_wchar_p(0), ctypes.byref(database)), "OpenDatabase")
+    work = target.parent / (target.name + ".cab")
+    core.remove_tree(work)
+    work.mkdir(parents=True)
+    try:
+        directories = {d: (parent, default) for d, parent, default in query(database, "SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`", 3)}
+        rows = query(database, "SELECT `Component`, `Directory_`, `Condition` FROM `Component`", 3)
+        components = {c: d for c, d, _cond in rows}
+        # Components installed only on ARM64 computers (their runtime DLLs share names and folders with the x64 ones,
+        # and ARM64X builds even carry the x64 machine field): this unpack is for x64.
+        arm64_only = {c for c, _d, cond in rows if re.search(r'=\s*"ARM64"', cond or "")}
+        files = query(database, "SELECT `File`, `Component_`, `FileName` FROM `File`", 3)
+        cabinets = [c[1:] for _d, c in query(database, "SELECT `DiskId`, `Cabinet` FROM `Media`", 2) if c.startswith("#")]
+        if not cabinets:
+            raise OSError("the package carries no embedded cabinet")
+        expanded = work / "files"
+        expanded.mkdir()
+        for name in cabinets:
+            if not re.match(r"^[A-Za-z0-9._-]{1,72}$", name):
+                raise OSError(f"unexpected cabinet name {name!r}")
+            cab = work / name
+            query(database, f"SELECT `Data` FROM `_Streams` WHERE `Name`='{name}'", 1, stream_to=cab)
+            system = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+            subprocess.run([str(system / "expand.exe"), str(cab), "-F:*", str(expanded)], check=True, capture_output=True,
+                           stdin=subprocess.DEVNULL, creationflags=0x08000000)
+            cab.unlink()
+    finally:
+        msi.MsiCloseHandle(database)
+
+    paths: dict[str, Path] = {}
+
+    def folder(directory: str) -> Path:
+        if directory not in paths:
+            parent, default = directories[directory]
+            source = default.split(":")[-1].split("|")[-1]
+            if not parent or parent == directory:
+                paths[directory] = target
+            else:
+                base = folder(parent)
+                paths[directory] = base if source in (".", "") else base / source
+        return paths[directory]
+
+    placed = 0
+    for key, component, name in files:
+        found = expanded / key
+        if not found.is_file():
+            continue
+        if component in arm64_only:
+            found.unlink()
+            continue
+        destination = folder(components[component]) / name.split("|")[-1]
+        if target.resolve() not in destination.resolve().parents:
+            raise OSError(f"{key}: a path outside the target")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() and pe_machine(destination) == 0x8664 and pe_machine(found) != 0x8664:
+            found.unlink()
+            continue
+        os.replace(found, destination)
+        placed += 1
+    core.remove_tree(work)
+    if not placed:
+        raise OSError("no file of the package could be placed")
+    return placed
 
 
 def install_libreoffice(job: Job | None = None) -> Path:
@@ -1384,7 +1592,15 @@ def install_libreoffice(job: Job | None = None) -> Path:
                 subprocess.run(["/usr/bin/hdiutil", "detach", str(mount), "-force"], capture_output=True)
                 core.remove_tree(mount)
         elif IS_WINDOWS:  # an administrative install only copies files: no elevation, nothing registered
-            subprocess.run(["msiexec", "/a", str(archive), "/qn", f"TARGETDIR={partial}"], check=True, capture_output=True)
+            try:
+                subprocess.run(["msiexec", "/a", str(archive), "/qn", f"TARGETDIR={partial}"], check=True, capture_output=True)
+            except subprocess.CalledProcessError as exc:
+                # The Windows Installer service can refuse a session (1601: access denied to the service, seen for a
+                # standard user in network and batch logons). The package is then unpacked without the service.
+                core.log(f"libreoffice: msiexec /a returned {exc.returncode}; unpacking the package without Windows Installer")
+                core.remove_tree(partial)
+                partial.mkdir(parents=True)
+                msi_unpack(archive, partial)
             libreoffice_app_local_runtime(partial)
             (partial / archive.name).unlink(missing_ok=True)     # the image keeps a copy of the package (about 350 MB)
         else:

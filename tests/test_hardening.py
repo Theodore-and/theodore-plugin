@@ -660,6 +660,45 @@ class WindowsRenderer(unittest.TestCase):
             self.assertEqual((program / "vcruntime140.dll").read_bytes(), b"x64")
             self.assertFalse((home / "tools" / "libreoffice" / "LibreOffice_26.2.7_Win_x86-64.msi").exists())
 
+    @staticmethod
+    def pe(machine: int) -> bytes:
+        head = bytearray(512)
+        head[:2], head[0x3C:0x40] = b"MZ", (0x80).to_bytes(4, "little")
+        head[0x80:0x84], head[0x84:0x86] = b"PE\0\0", machine.to_bytes(2, "little")
+        return bytes(head)
+
+    def test_only_x64_runtime_dlls_go_beside_the_program(self):
+        from theodore_client import install
+        with client_home() as home:
+            image = home / "image"
+            (image / "System64").mkdir(parents=True)
+            (image / "program").mkdir()
+            for name, machine in (("vcruntime140.dll", 0x8664), ("msvcp140.dll", 0xAA64), ("concrt140.dll", 0x14C)):
+                (image / "System64" / name).write_bytes(self.pe(machine))
+            self.assertEqual(install.pe_machine(image / "System64" / "msvcp140.dll"), 0xAA64)
+            self.assertIsNone(install.pe_machine(home / "bin" / "launcher.json"))
+            install.libreoffice_app_local_runtime(image)
+            self.assertEqual(sorted(p.name for p in (image / "program").iterdir()), ["vcruntime140.dll"])
+
+    def test_a_refused_windows_installer_falls_back_to_the_unpack_without_the_service(self):
+        from theodore_client import install
+        unpacked = []
+
+        def refused(command, **_kwargs):
+            raise install.subprocess.CalledProcessError(1601, command)
+
+        def unpack(archive, target):
+            (target / "program").mkdir(parents=True)
+            (target / "program" / "soffice.exe").write_bytes(b"exe")
+            unpacked.append(Path(archive).name)
+            return 1
+
+        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), \
+                mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"msi"))), \
+                mock.patch.object(install.subprocess, "run", side_effect=refused), mock.patch.object(install, "msi_unpack", side_effect=unpack):
+            self.assertEqual(install.install_libreoffice(), home / "tools" / "libreoffice" / "program" / "soffice.exe")
+            self.assertEqual(unpacked, ["LibreOffice_26.2.7_Win_x86-64.msi"])
+
     def test_a_rendering_call_with_no_converter_fetches_libreoffice_and_says_so(self):
         from theodore_client import install
         with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True) as spawn, \
@@ -737,3 +776,43 @@ class ClaudeGitBash(unittest.TestCase):
                                                {"engine": "1.0.0", "plan": "beta", "runtime_ready": True, "signed_in": True}, core.home())
             self.assertEqual(verdict.name, "OK")
             self.assertIn("Git for Windows", verdict.tell_user)
+
+    def test_portable_git_is_fetched_set_for_claude_code_and_taken_back(self):
+        from theodore_client import commands, install
+        pin = {"version": "2.56.0.windows.4", "url": "https://github.example.test/PortableGit-2.56.0.4-64-bit.7z.exe", "sha256": "0" * 64, "size": 10}
+
+        def extract(command, **_kwargs):                # the self-extractor: <archive> -y -o<folder>
+            target = Path(command[2][2:])
+            (target / "bin").mkdir(parents=True)
+            (target / "bin" / "bash.exe").write_bytes(b"bash")
+            return mock.Mock(returncode=0)
+
+        with client_home() as home:
+            claude_dir = home / "user" / ".claude"
+            claude_dir.mkdir(parents=True)
+            settings = claude_dir / "settings.json"
+            settings.write_text(json.dumps({"enabledPlugins": {"theodore@theodore": True}}))
+            env = {"CLAUDE_CONFIG_DIR": str(claude_dir), "ProgramFiles": str(home / "pf"), "LOCALAPPDATA": str(home / "lad")}
+            with mock.patch.dict(os.environ, env), mock.patch.object(core, "IS_WINDOWS", True), \
+                    mock.patch.object(commands.shutil, "which", side_effect=lambda n: r"C:\claude.exe" if n == "claude" else None), \
+                    mock.patch.object(install, "git_pin", return_value=pin), \
+                    mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"sfx"))), \
+                    mock.patch.object(install.subprocess, "run", side_effect=extract), mock.patch("builtins.print"):
+                self.assertTrue(commands.needs_git_bash())
+                self.assertEqual(commands.tools("git", False, False, if_needed=True), 0)
+                bash = home / "tools" / "git" / "bin" / "bash.exe"
+                self.assertEqual(json.loads(settings.read_text())["env"], {"CLAUDE_CODE_GIT_BASH_PATH": str(bash)})
+                self.assertEqual(commands.claude_git_bash(), str(bash))
+                self.assertFalse(commands.needs_git_bash(), "Claude Code now finds it")
+                self.assertEqual(commands.tools("git", False, False, if_needed=True), 0)      # nothing more to do
+                problem, _notes = commands._claude_settings_restore()
+                self.assertIsNone(problem)
+                self.assertEqual(json.loads(settings.read_text()), {"enabledPlugins": {"theodore@theodore": True}}, "env was Theodore's: gone")
+                settings.write_text(json.dumps({"env": {"CLAUDE_CODE_GIT_BASH_PATH": r"D:\mine\bash.exe"}}))
+                self.assertIn("already set", commands._claude_git_bash_apply(bash))
+                self.assertEqual(json.loads(settings.read_text())["env"]["CLAUDE_CODE_GIT_BASH_PATH"], r"D:\mine\bash.exe")
+
+    def test_the_installer_asks_for_git_bash_only_through_if_needed(self):
+        text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
+        self.assertIn('call "%T%" tools install git --if-needed', text)
+        self.assertIn('/c:"\\"git_bash\\":"', text, "an uninstall without the runtime knows a setting is left to take back")
