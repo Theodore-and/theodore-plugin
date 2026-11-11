@@ -63,20 +63,30 @@ class Stubs(unittest.TestCase):
             self.assertEqual((live["name"], live["description"]), (mine["name"], mine["description"]), skill)
 
     def test_body_is_the_loader_text(self):
+        flat = lambda text: " ".join(text.split())
         for skill in ("pptx", "deck-design"):
             body = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[1]
+            # The host injects the instructions as the skill's body (Claude Code's !`...`), first thing in the body.
+            self.assertTrue(body.startswith(f'\n!`sh "${{CLAUDE_SKILL_DIR}}/scripts/theodore" skill {skill}`\n'), body[:120])
+            self.assertEqual(body.count("!`"), 1)
             self.assertIn(f'sh "<skill folder>/scripts/theodore" guide {skill}', body)
             self.assertIn(f'- Windows PowerShell:       & "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body)
             self.assertIn(f'- Windows cmd:              "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body,
                           "cmd has no call operator: its line must not start with &")
             self.assertNotIn("PowerShell or cmd", body)
+            self.assertIn(f"If no {skill} instructions appear above this line", flat(body))
             self.assertIn("`=== END`", body)
-            self.assertIn("A first line starting `THEODORE ` is a status", body)
-            self.assertIn("Never substitute another slide tool silently.", body)
-            self.assertIn("Give sub-agents the same command.", body)
+            self.assertIn("A first line starting `THEODORE ` is a status", flat(body))
+            self.assertIn("Never substitute another slide tool silently.", flat(body))
+            self.assertIn("Give sub-agents the same command.", flat(body))
             self.assertLess(len(body), 2500, "the stub stays small")
-        self.assertIn("use the\n   deck-design skill with the host's own slide tools", (PLUGIN / "skills" / "pptx" / "SKILL.md").read_text())
-        self.assertIn("Customize > Plugins > Theodore > Connectors", (PLUGIN / "skills" / "deck-design" / "SKILL.md").read_text())
+        self.assertIn("use the deck-design skill with the host's own slide tools", flat((PLUGIN / "skills" / "pptx" / "SKILL.md").read_text()))
+        deck = (PLUGIN / "skills" / "deck-design" / "SKILL.md").read_text()
+        self.assertIn("Customize > Plugins > Theodore > Connectors", deck)
+        self.assertIn('call the Theodore `guide` tool with skill "deck-design"', flat(deck))
+        allowed = frontmatter(deck)["allowed-tools"]
+        for tool in ("mcp__plugin_theodore_theodore__guide", "mcp__plugin_theodore_theodore__specimen"):
+            self.assertIn(tool, allowed, "the names Claude Code gives the plugin's tools")
 
     def test_no_instruction_text_or_engine_code_is_in_the_repository(self):
         for path in repo_files(PLUGIN):
@@ -333,9 +343,9 @@ class HostLimits(unittest.TestCase):
         self.assertEqual(set(codex["plugins"][0]["policy"]), {"installation", "authentication"})
         # The local MCP server (theodore mcp), registered for Claude Code (.mcp.json) and for Codex (mcp.json, named by plugin.json).
         self.assertEqual(json.loads((PLUGIN / ".mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "sh", "args": ["${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "mcp"]}}})
+                         {"mcpServers": {"theodore": {"command": "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "args": ["mcp"]}}})
         self.assertEqual(json.loads((PLUGIN / "mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "sh", "args": ["./skills/pptx/scripts/theodore", "mcp"], "cwd": "."}}})
+                         {"mcpServers": {"theodore": {"command": "./skills/pptx/scripts/theodore", "args": ["mcp"], "cwd": "."}}})
         self.assertEqual(portable["mcpServers"], "./mcp.json")
 
     @unittest.skipUnless(shutil.which("claude"), "the claude CLI is not installed")

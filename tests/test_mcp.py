@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
-from support import CLIENT_DIR, IS_WINDOWS, ClientCase, FakeApi, Sandbox
+from support import CLIENT_DIR, IS_WINDOWS, RUNTIME_ID, ClientCase, FakeApi, Sandbox, cmd_command, engine_zip, fake_runtime_parts
 
 JPEG = b"\xff\xd8\xff\xe0" + b"sheet bytes " * 50 + b"\xff\xd9"
 ENTRY = "# Deck design\n\nENTRY-MARKER é—“quoted”\n" + "".join(f"line {i:05d} " + "x" * 70 + "\n" for i in range(800))
@@ -168,8 +168,79 @@ class Specimen(McpCase):
         self.assertTrue(text.startswith("THEODORE RETRY: "), text)
 
 
+class SkillBody(ClientCase):
+    """`theodore skill <name>`: the instructions as a skill file's body, injected by the host; always exit 0."""
+
+    def body(self, name: str, env: dict | None = None):
+        result = self.client("skill", name, env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        return result.stdout
+
+    def test_signed_out_and_unknown_are_statuses_with_exit_0(self):
+        out = self.body("deck-design")
+        self.assertTrue(out.startswith("THEODORE SIGN_IN_REQUIRED: "), out)
+        self.assertEqual(len(out.splitlines()), 3)
+        self.assertTrue(self.body("xlsx").startswith("THEODORE USAGE: "))
+
+    def test_deck_design_is_the_whole_entry_without_front_matter_or_framing(self):
+        self.sign_in()
+        text = "# Deck design\n\nENTRY \u2014 body\n" + "line\n" * 2000
+        self.api.guides["deck-design"][""] = "---\nname: deck-design\ndescription: x\n---\n\n" + text
+        self.api.guide_whole_tail = {"": "\nLINK MECHANICS.\nLICENCE LINE.\n"}
+        out = self.body("deck-design", env={"CLAUDECODE": "1"})
+        self.assertEqual(out, text + "\nLINK MECHANICS.\nLICENCE LINE.\n")
+        self.assertNotIn("=== ", out)
+        self.assertEqual(self.api.guide_queries[-1], {"form": "whole", "bindings": "tool"}, "Claude Code has the tool: its wording")
+        self.body("deck-design")
+        self.assertEqual(self.api.guide_queries[-1], {"form": "whole"}, "elsewhere the launcher's wording")
+
+    def test_an_entry_past_the_limit_is_cut_on_a_line_with_a_pointer(self):
+        self.sign_in()
+        self.api.guides["deck-design"][""] = "".join(f"line {i:05d} " + "y" * 60 + "\n" for i in range(600))
+        out = self.body("deck-design", env={"CLAUDECODE": "1"})
+        self.assertLessEqual(len(out), 28000)
+        self.assertTrue(out.endswith('[The rest of this document: call the Theodore guide tool with skill "deck-design"]\n'), out[-200:])
+        self.assertTrue(out.split("\n[The rest")[0].endswith("y\n"), "cut at a line end")
+
+    def test_pptx_is_the_engine_manual_with_the_bindings(self):
+        self.ready()
+        out = self.body("pptx")
+        launcher = f'"{self.box.home / "bin" / "theodore"}"'
+        self.assertTrue(out.startswith(f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>\n"), out[:200])
+        self.assertIn(f"# PPTX Skill\n\nFake manual for engine {self.ENGINE_VERSION}.\n", out)
+        self.assertNotIn("name: pptx", out, "the engine file's front matter is not part of the body")
+        self.assertNotIn("=== ", out)
+
+
+@unittest.skipUnless(os.environ.get("THEODORE_LIVE_HOME"), "set THEODORE_LIVE_HOME to a signed-in Theodore folder to check the published entry")
+class PublishedEntrySize(unittest.TestCase):
+    def test_the_published_entry_stays_well_under_the_injection_limit(self):
+        home = Path(os.environ["THEODORE_LIVE_HOME"])
+        client = home / "client" / (home / "client" / "current.txt").read_text().strip()
+        python = home / "runtime" / (home / "runtime" / "current.txt").read_text().strip() / "python" / "bin" / "python3"
+        done = subprocess.run([str(python), "-I", str(client), "skill", "deck-design"], capture_output=True, text=True, timeout=120,
+                              env={**os.environ, "THEODORE_HOME": str(home), "CLAUDECODE": "1"})
+        self.assertFalse(done.stdout.startswith("THEODORE "), done.stdout[:300])
+        self.assertLess(len(done.stdout), 26000, "the deck-design entry nears the ~30,000-character limit of injected skill content")
+
+
 @unittest.skipIf(IS_WINDOWS, "POSIX launcher")
 class ThroughTheLauncher(unittest.TestCase):
+    def test_skill_before_setup_is_a_status_with_exit_0(self):
+        api = FakeApi().start()
+        self.addCleanup(api.stop)
+        box = Sandbox(api)
+        self.addCleanup(box.close)
+        done = subprocess.run(["/bin/sh", str(box.launcher), "skill", "deck-design"], env={**box.env, "THEODORE_BOOTSTRAP_WAIT": "1"},
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(done.stdout.startswith("THEODORE "), done.stdout)
+        self.assertEqual(done.stderr, "")
+        box.write_launcher_json(manifest_key_1_kid="manifest-unset")              # even a refusal to start exits 0
+        done = subprocess.run(["/bin/sh", str(box.launcher), "skill", "pptx"], env=box.env, capture_output=True, text=True, timeout=120)
+        self.assertEqual((done.returncode, done.stdout[:18]), (0, "THEODORE INTERNAL:"))
+
     def test_before_setup_standard_output_stays_clean(self):
         api = FakeApi().start()
         self.addCleanup(api.stop)
@@ -179,6 +250,42 @@ class ThroughTheLauncher(unittest.TestCase):
                               input=b"", capture_output=True, timeout=120)
         self.assertEqual(done.stdout, b"", "the protocol stream gets no status")
         self.assertIn(b"THEODORE ", done.stderr)
+
+
+@unittest.skipUnless(IS_WINDOWS, "the batch launcher")
+class WindowsLauncher(unittest.TestCase):
+    """What Claude Code on Windows spawns from the plugin's .mcp.json: the extensionless launcher path, which Windows
+    resolves to theodore.cmd beside it."""
+
+    def setUp(self):
+        self.api = FakeApi().start()
+        self.addCleanup(self.api.stop)
+        self.api.publish_runtime(RUNTIME_ID, fake_runtime_parts())
+        self.api.publish_engine("1.0.0-rc.3", engine_zip("1.0.0-rc.3"))
+        self.box = Sandbox(self.api)
+        self.addCleanup(self.box.close)
+
+    def _mcp(self, env=None):
+        command = cmd_command(str(self.box.launcher.with_suffix("")), "mcp")      # no extension, as the host spawns it
+        return subprocess.Popen(command, env={**self.box.env, **(env or {})}, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, cwd=str(self.box.tmp))
+
+    def test_before_setup_standard_output_stays_clean_then_the_server_answers(self):
+        proc = self._mcp({"THEODORE_BOOTSTRAP_WAIT": "1"})
+        out, err = proc.communicate(b"", timeout=600)
+        self.assertNotIn(b"THEODORE ", out, "the protocol stream gets no status")
+        self.box.wait_jobs(600)
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600).returncode, 0)
+        proc = self._mcp()
+        message = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
+        listing = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        out, _err = proc.communicate((json.dumps(message) + "\n" + json.dumps(listing) + "\n").encode(), timeout=300)
+        answers = [json.loads(line) for line in out.decode().splitlines() if line.strip()]
+        self.assertEqual([a["id"] for a in answers], [1, 2], out)
+        self.assertEqual(answers[0]["result"]["serverInfo"]["name"], "theodore")
+        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "specimen"])
 
 
 if __name__ == "__main__":

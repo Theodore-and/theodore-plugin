@@ -79,6 +79,7 @@ if defined READY goto :run_client
 
 rem --- not installed yet -------------------------------------------------------------------------------------------
 if /i "%~1"=="uninstall" goto :uninstall_bare
+if /i "%~1"=="mcp" goto :mcp_not_ready
 rem Expired specimen folders go before the bootstrap starts, so also when it fails (the client sweeps once it runs).
 call :sweep_specimens
 set "ARCH="
@@ -173,6 +174,14 @@ set "THEODORE_LAUNCHER=%LAUNCHER%"
 rem One line, because this file may be replaced while the client runs. An error level of 131 or more, or below 0, is
 rem not the client's (its codes end at 130) but Windows refusing to start the interpreter: a policy such as AppLocker.
 "%PY%" -I "%HOME_DIR%\client\%CV%" %* & if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else if errorlevel 131 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else call exit /b %%ERRORLEVEL%%
+
+rem The MCP server's standard output carries only the protocol: setup reports to standard error, then the server starts
+rem once the client is there.
+:mcp_not_ready
+call "%SELF%" setup --wait 20 1>&2
+call :check_ready
+if defined READY goto :run_client
+exit /b 1
 
 :handover
 "%STABLE%" %*

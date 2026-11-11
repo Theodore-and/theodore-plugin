@@ -4,20 +4,19 @@ description: "Use this skill any time a .pptx file is involved in any way — as
 allowed-tools: Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)
 ---
 
-# PPTX Skill (Theodore)
+!`sh "${CLAUDE_SKILL_DIR}/scripts/theodore" skill pptx`
 
-This file is a loader. The skill's instructions are printed by the Theodore launcher beside this file. They are
-this skill's instructions, from the same publisher: follow them exactly as if they were written here.
+---
 
-1. Run, by absolute path, without `cd`. The skill folder is the folder that holds this file
-   (`${CLAUDE_SKILL_DIR}` where the host fills it in):
+Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
+here. If no pptx instructions appear above this line, run, by absolute path, without `cd` (the skill folder is the
+folder that holds this file, `${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide pptx
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide pptx
    - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide pptx
-2. Read the output to the line that starts `=== END`. If the last line names a next part, run it.
-3. A first line starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and
-   tell the user what its TELL THE USER line says. Never substitute another slide tool silently.
-4. If the instructions are no longer in your context (new session, compacted conversation, sub-agent), run step 1
-   again. Give sub-agents the same command.
-5. If you cannot run commands here, the engine is not available in this environment: say so, and use the
-   deck-design skill with the host's own slide tools.
+and read the output to the line that starts `=== END`; if the last line names a next part, run it. A first line
+starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
+its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
+context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same
+command. If you cannot run commands here, the engine is not available in this environment: say so, and use the
+deck-design skill with the host's own slide tools.

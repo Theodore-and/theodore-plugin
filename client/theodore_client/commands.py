@@ -232,6 +232,93 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
     return 0
 
 
+# --- skill: the instructions as a skill file's body -------------------------------------------------------------------------
+
+SKILL_BODY_MAX_CHARS = 28000      # a host shows an injected output whole only below about 30,000 characters
+
+
+def _without_frontmatter(text: str) -> str:
+    """A skill file's body: the text after its YAML front matter, as a host shows a SKILL.md."""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            return text[end + 5:].lstrip("\n")
+    return text
+
+
+def _bounded(text: str, rest: str) -> str:
+    """At most SKILL_BODY_MAX_CHARS: past that, the text up to a line end within the limit and one line naming where
+    the rest is."""
+    if len(text) <= SKILL_BODY_MAX_CHARS:
+        return text
+    pointer = f"\n[The rest of this document: {rest}]\n"
+    room = SKILL_BODY_MAX_CHARS - len(pointer)
+    cut = text.rfind("\n", 0, room)
+    return text[:cut + 1 if cut > 0 else room] + pointer
+
+
+def _deck_design_body() -> str:
+    account.require("deck-design")
+    tool = core.host_name() == "claude-code"           # Claude Code has the plugin's guide tool: its wording for the links
+    query = {"form": "whole", **({"bindings": "tool"} if tool else {})}
+    _s, headers, raw = _api("guide", "guide deck-design", skill="deck-design", query=query)
+    chunks = [raw]
+    for part in range(2, max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1)) + 1):     # an older service that still pages
+        _s, _h, more = _api("guide", "guide deck-design", skill="deck-design", query={**query, "part": part})
+        chunks.append(more)
+    if core.refused():
+        raise api.sign_in_required()
+    rest = 'call the Theodore guide tool with skill "deck-design"' if tool else f"run {quoted_launcher()} guide deck-design"
+    return _bounded(_without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace")), rest)
+
+
+def _pptx_body() -> str:
+    claims = account.require("pptx")
+    del claims
+    install.require_runtime()
+    first = install.current_engine() is None
+    install.check_updates(force=first, wait=15.0, timeout=20.0 if first else 3.0)
+    version = install.selected_engine()
+    if not version:
+        state = Job("engine-update").read()
+        raise Status("SETUP_IN_PROGRESS", f"Theodore's engine is still downloading ({int(state.get('percent') or 0)}%).",
+                     f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. Do not use another slide tool meanwhile.",
+                     "Theodore is downloading its PowerPoint engine. I will continue as soon as it is ready.")
+    directory = install.engine_dir(version)
+    try:
+        text = (directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8")
+    except OSError:
+        raise core.internal(f"engine {version} has no skills/pptx/SKILL.md.") from None
+    install.touch_used(version)
+    _heartbeat(version)
+    if core.refused():
+        raise api.sign_in_required()
+    launcher = quoted_launcher()
+    header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
+              f"          python3 ...  ->  {launcher} python ...",
+              f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"]
+    directions = _directions("pptx")
+    if directions:
+        header += directions.rstrip("\n").split("\n")
+    body = "\n".join(header) + "\n\n" + _without_frontmatter(text)
+    return _bounded(body, f"run {launcher} guide pptx")
+
+
+def skill(name: str) -> int:
+    """`theodore skill <name>`: the skill's instructions as a clean document (no framing), or a three-line status.
+    Always exit 0: a host that injects this output aborts the whole skill on any other code."""
+    try:
+        if name not in SKILLS:
+            raise core.usage(f"unknown skill '{name}'. The skills are: {', '.join(SKILLS)}.")
+        body = _deck_design_body() if name == "deck-design" else _pptx_body()
+    except Status as status:
+        core.emit(status)               # a revoked or suspended device gets that refusal instead, once
+        return 0
+    sys.stdout.write(body if body.endswith("\n") else body + "\n")
+    sys.stdout.flush()
+    return 0
+
+
 def specimen(files: list[str]) -> int:
     """Fetch deck-design specimen sheets into a private temporary folder of this run and print one path per line.
     All or nothing: a sheet that is refused leaves no folder and no path."""

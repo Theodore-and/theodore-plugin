@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "theodore": {
-      "command": "sh",
+      "command": "./skills/pptx/scripts/theodore",
       "args": [
-        "./skills/pptx/scripts/theodore",
         "mcp"
       ],
       "cwd": "."

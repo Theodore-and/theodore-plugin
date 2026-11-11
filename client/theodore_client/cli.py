@@ -12,6 +12,7 @@ from .core import Status
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
   specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
+  skill <pptx|deck-design>       the skill's instructions as a skill file's body (always exits 0)
   mcp                            serve the guide and specimen tools to the assistant (MCP over standard input and output)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --open | --finish --wait S | --code XXXX-XXXX]    logout    whoami
@@ -47,6 +48,8 @@ def _parser() -> argparse.ArgumentParser:
     lg.add_argument("--wait", type=float, default=0.0)
     lg.add_argument("--code")
     sub.add_parser("mcp", add_help=False)
+    sk = sub.add_parser("skill", add_help=False)
+    sk.add_argument("name")
     sub.add_parser("logout", add_help=False)
     sub.add_parser("whoami", add_help=False)
     st = sub.add_parser("status", add_help=False)
@@ -120,6 +123,8 @@ def _dispatch(argv: list[str]) -> int:
     cmd = args.command
     if cmd == "guide":
         return commands.guide(args.skill, args.section, args.part, args.license)
+    if cmd == "skill":
+        return commands.skill(args.name)
     if cmd == "specimen":
         return commands.specimen(args.files)
     if cmd == "login":
@@ -181,6 +186,13 @@ def main(argv: list[str] | None = None) -> int:
             account.register_disk_secrets()
         specimens.sweep()
         return mcp.serve(blocked=blocked)
+    if argv[:1] == ["skill"]:       # injected into a skill by the host: whatever happens, exit 0 with something to act on
+        code = _main(argv)
+        return 0 if code != 130 else code
+    return _main(argv)
+
+
+def _main(argv: list[str]) -> int:
     try:
         core.check_environment(argv[0] if argv else None)      # before anything touches the folder
     except Status as status:

@@ -14,6 +14,14 @@
 
 set -u
 
+# `skill <name>` prints a skill's instructions as a skill file's body, for a host that injects a command's output into
+# the skill (Claude Code's !`...`). There a non-zero exit aborts the whole skill, so this mode always exits 0 and
+# whatever it says (the document, or a three-line status) goes to standard output.
+if [ "${1:-}" = skill ] && [ -z "${THEODORE_SKILL_WRAPPED:-}" ]; then
+  THEODORE_SKILL_WRAPPED=1 sh "$0" "$@" 2>&1
+  exit 0
+fi
+
 status() { # name code summary next tell
   printf 'THEODORE %s: %s\nNEXT: %s\nTELL THE USER: %s\n' "$1" "$3" "$4" "$5"
   exit "$2"
@@ -394,8 +402,13 @@ if stage1_ready; then
 fi
 
 # --- not installed yet ----------------------------------------------------------------------------------------------
-# The MCP server's standard output carries only the protocol: before setup, whatever this launcher says goes to stderr.
-[ "${1:-}" = mcp ] && exec 1>&2
+# The MCP server's standard output carries only the protocol: setup reports to standard error, then the server starts
+# once the client is there.
+if [ "${1:-}" = mcp ]; then
+  sh "$SELF" setup --wait 20 >&2
+  stage1_ready && run_client "$@"
+  exit 1
+fi
 if [ "${1:-}" = "uninstall" ]; then
   # Theodore's Python is not there (never installed, or removed by something else): the launcher does what the
   # client's uninstall does, as far as sh can, and says what it could not do.
