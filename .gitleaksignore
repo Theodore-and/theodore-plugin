@@ -4,5 +4,5 @@
 # When the snapshot is regenerated the value and the commit change: add the new fingerprint here in that commit.
 085fbc9d5e100af3b07b980051737797a7df7914:tests/fixtures/contract-v1.json:generic-api-key:134
 tests/fixtures/contract-v1.json:generic-api-key:134
-c342ba919cea0f1a46eec73cc94a9a134e83b1a5:tests/fixtures/contract-v1.json:generic-api-key:135
+5fa41113db18e524988ae5f477333530bb5cb529:tests/fixtures/contract-v1.json:generic-api-key:135
 tests/fixtures/contract-v1.json:generic-api-key:135

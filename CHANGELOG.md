@@ -15,6 +15,8 @@
 - The device sign-in in a cloud workspace says why each chat's workspace is approved once, with the one-click link.
 - install.md: its first line says to read it as downloaded with curl (quoted address), then run the line for the
   shell exactly; one line says it may run in a cloud sandbox session.
+- Windows (lane WIN): asset packs come back for a catalogue call; LibreOffice is fetched when nothing can render
+  (about 350 MB, in the background) and the deck waits for it; doctor says when Claude Code has no Git Bash.
 - Launcher generation 8.
 
 ## 0.3.2
