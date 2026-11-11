@@ -88,6 +88,14 @@ class Stubs(unittest.TestCase):
         for tool in ("mcp__plugin_theodore_theodore__guide", "mcp__plugin_theodore_theodore__specimen"):
             self.assertIn(tool, allowed, "the names Claude Code gives the plugin's tools")
 
+    def test_the_client_compiles_without_a_warning(self):
+        """A warning goes to standard error, which a host that injects a command's output puts into the skill's text."""
+        import warnings
+        for path in sorted((ROOT / "client").rglob("*.py")):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
     def test_no_instruction_text_or_engine_code_is_in_the_repository(self):
         for path in repo_files(PLUGIN):
             self.assertNotIn(path.suffix, (".py", ".js", ".mjs", ".ps1"), f"{path}: the plugin carries no program but the launcher")

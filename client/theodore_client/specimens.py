@@ -1,4 +1,4 @@
-"""Deck-design specimen sheets. They are the publisher's images: fetched one at a time when the assistant asks,
+r"""Deck-design specimen sheets. They are the publisher's images: fetched one at a time when the assistant asks,
 held in a private temporary folder of this run, removed by the first Theodore run after an hour (there is no background
 process) and by the uninstall, and never put in Theodore's folder or in a deck's.
 
@@ -114,7 +114,7 @@ def _within(path: Path, parent: Path) -> bool:
 
 
 def _usable(root: Path) -> bool:
-    """Never inside the folder the assistant works in (whatever it holds, the user's home included), never inside a
+    r"""Never inside the folder the assistant works in (whatever it holds, the user's home included), never inside a
     deck (a folder holding .pptx-state), never inside Theodore's folder (the cache root that Windows keeps under
     %LOCALAPPDATA%\Theodore\Cache is the one exception: it is made for this)."""
     with contextlib.suppress(OSError, RuntimeError):
