@@ -167,7 +167,10 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     specimens.sweep()       # specimen sheets older than an hour go before anything else is done
     try:
-        return _dispatch(argv)
+        code = _dispatch(argv)
+        if core.revoked():          # learned on the way and not answered yet (a job, a swallowed refusal)
+            return core.emit(account.revoked_status())
+        return code
     except Status as status:
         return core.emit(status)
     except api.TooLarge as exc:

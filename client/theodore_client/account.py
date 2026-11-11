@@ -285,6 +285,28 @@ def login_start(reason: str = "this computer is not signed in to Theodore.", ope
                   tell)
 
 
+_REVOKED_STATUS: Status | None = None
+
+
+def revoked_status() -> Status:
+    """The one answer of a command that learned the device was revoked (its credential and licence are already
+    deleted): SIGN_IN_REQUIRED with the sign-in link, or, when a new sign-in cannot be started, what to do once the
+    connection is back. Never opens a browser."""
+    global _REVOKED_STATUS
+    if _REVOKED_STATUS is None:
+        reason = ("this device was signed out of Theodore (from the portal, or its sign-in is no longer valid); "
+                  "its stored sign-in and licence were deleted.")
+        started = login_start(reason)
+        if started.name != "SIGN_IN_REQUIRED":
+            started = Status("SIGN_IN_REQUIRED", reason,
+                             f"a new sign-in could not be started because the Theodore service could not be reached ({started.summary}). "
+                             f"When the connection is back, run {quoted_launcher()} login --start and follow what it prints.",
+                             "Theodore was signed out on this computer and needs a new sign-in; I will start it once the internet connection is back.")
+        started.revocation = True
+        _REVOKED_STATUS = started
+    return _REVOKED_STATUS
+
+
 def signed_in_status(claims: dict) -> Status:
     return Status("OK", f"this computer is signed in to Theodore (plan {claims.get('plan', 'unknown')}).",
                   "run the command you were running before the sign-in.",

@@ -47,8 +47,37 @@ NOTHING_TO_TELL = "nothing; do not mention this to the user."
 
 
 def emit(status: Status) -> int:
+    """Print a status. Once this process has learned that the device was revoked, every status printed is the
+    sign-in block instead (account.revoked_status), whatever else happened afterwards."""
+    global _REVOKED_EMITTED
+    if _REVOKED and not getattr(status, "revocation", False):
+        from . import account          # imported here: account imports this module
+        status = account.revoked_status()
+    if getattr(status, "revocation", False):
+        if _REVOKED_EMITTED:
+            return status.code
+        _REVOKED_EMITTED = True
     print(status.render(), flush=True)
     return status.code
+
+
+# --- revocation: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------
+
+_REVOKED: str | None = None
+_REVOKED_EMITTED = False
+
+
+def mark_revoked(code: str) -> None:
+    global _REVOKED
+    _REVOKED = code
+
+
+def revoked() -> bool:
+    return _REVOKED is not None
+
+
+def revocation_emitted() -> bool:
+    return _REVOKED_EMITTED
 
 
 def usage(summary: str, next_step: str = "") -> Status:

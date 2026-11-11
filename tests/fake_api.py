@@ -119,6 +119,7 @@ class FakeApi:
         self.lock = threading.RLock()
         self.clock_offset = 0.0
         self.down = False                 # True: every request gets a dropped connection
+        self.drop_paths: set[str] = set()  # these paths get a dropped connection (one route offline, the rest up)
         self.fail_with = None             # (http status, error code) for every authenticated /v1 call
         self.requests: list[dict] = []    # {method, path, auth} of every request, for assertions
         self.files: dict[str, bytes | Path] = {}      # /dl/<key> -> content
@@ -334,7 +335,7 @@ class FakeApi:
             body = {}
         with self.lock:
             self.requests.append({"method": method, "path": path, "auth": bool(h.headers.get("Authorization")), "query": query})
-        if self.down:
+        if self.down or path in self.drop_paths:
             h.close_connection = True
             try:
                 h.connection.close()

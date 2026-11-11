@@ -79,6 +79,8 @@ def _end_line(skill: str, name: str, body: str, part: int, total: int, next_comm
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
                     header_lines: list[str], next_command: str) -> None:
+    if core.revoked():          # a revoked device gets no instructions, whichever call learned it
+        raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
     out += header_lines
     out.append(f"--- {name} ---")
@@ -123,6 +125,7 @@ def _guide_pptx(part: int) -> int:
     except OSError:
         raise core.internal(f"engine {version} has no skills/pptx/SKILL.md.") from None
     install.touch_used(version)
+    _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
     parts = split_parts(text)
     if part > len(parts):
         raise core.usage(f"guide pptx has {len(parts)} part(s); there is no part {part}.")
@@ -137,7 +140,6 @@ def _guide_pptx(part: int) -> int:
             header += directions.rstrip("\n").split("\n")
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
                     f"{launcher} guide pptx --part {part + 1}")
-    _heartbeat(version)
     return 0
 
 

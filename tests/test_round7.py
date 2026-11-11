@@ -333,5 +333,64 @@ class BoundedBodies(unittest.TestCase):
             self.assertTrue(all(0 <= n <= 64 * 1024 + 1 for n in body.asked), body.asked)
 
 
+class KeychainTombstone(unittest.TestCase):
+    """Ruling 5: a keychain deletion that fails or times out after a revocation leaves a local tombstone: the old item
+    is never read again, and its deletion is retried on later runs."""
+
+    def test_a_credential_whose_deletion_failed_never_loads_again(self):
+        import io
+        import subprocess
+        from theodore_client import credentials
+        keychain = {"item": None}
+        calls = []
+        behaviour = {"delete": "hang"}
+        clock = {"offset": 0.0}
+
+        def security(command, **kwargs):
+            verb = command[1] if command[1] != "-i" else "add"
+            calls.append(verb)
+            if verb == "add":
+                keychain["item"] = kwargs["input"].split('-w "', 1)[1].split('"', 1)[0]
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if verb == "find-generic-password":
+                return subprocess.CompletedProcess(command, 0 if keychain["item"] else 44, (keychain["item"] or "") + "\n", "")
+            if verb == "delete-generic-password":
+                if behaviour["delete"] == "hang":
+                    raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+                if behaviour["delete"] == "fail":
+                    return subprocess.CompletedProcess(command, 1, "", "SecKeychainItemDelete: denied")
+                keychain["item"] = None
+                return subprocess.CompletedProcess(command, 0, "", "")
+            raise AssertionError(command)
+        real_now = core.now
+        with client_home() as home, mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "keychain"}), \
+                mock.patch.object(subprocess, "run", side_effect=security), mock.patch("sys.stderr", new=io.StringIO()), \
+                mock.patch.object(core, "now", side_effect=lambda: real_now() + clock["offset"]):
+            core.home().ensure()
+            self.assertEqual(credentials.store("inst-1", "secret-1"), "keychain")
+            self.assertEqual(credentials.load()["installation_secret"], "secret-1")
+            for failure in ("hang", "fail"):
+                with self.subTest(failure=failure):
+                    behaviour["delete"] = failure
+                    if failure == "fail":
+                        self.assertEqual(credentials.store("inst-2", "secret-2"), "keychain")
+                        self.assertEqual(credentials.load()["installation_secret"], "secret-2", "a new sign-in replaces the tombstone")
+                    self.assertFalse(credentials.delete(), "the item could not be confirmed deleted")
+                    self.assertTrue((home / "state" / "keychain-revoked").exists())
+                    self.assertIsNotNone(keychain["item"], "the item is still in the keychain")
+                    clock["offset"] += 86401              # past the day the keychain is left alone after a timeout
+                    calls.clear()
+                    self.assertIsNone(credentials.load(), "the old credential is unusable from then on")
+                    self.assertNotIn("find-generic-password", calls, "the old item is not even read")
+                    self.assertIn("delete-generic-password", calls, "its deletion is retried")
+            behaviour["delete"] = "ok"
+            clock["offset"] += 86401
+            self.assertIsNone(credentials.load())
+            self.assertIsNone(keychain["item"], "the retried deletion removed it")
+            self.assertFalse((home / "state" / "keychain-revoked").exists(), "the tombstone goes once the item is gone")
+            self.assertEqual(credentials.store("inst-3", "secret-3"), "keychain")
+            self.assertEqual(credentials.load()["installation_secret"], "secret-3")
+
+
 if __name__ == "__main__":
     unittest.main()

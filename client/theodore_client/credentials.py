@@ -30,6 +30,19 @@ def _skip_marker() -> Path:
     return core.home().state / "keychain-unavailable"
 
 
+def _tombstone() -> Path:
+    """The keychain item of this home holds a credential that must not be used again (it was revoked or signed out,
+    and deleting the item failed or timed out). While it exists the item is never read, and every load tries to delete
+    it again; a successful keychain store replaces the item and removes the tombstone."""
+    return core.home().state / "keychain-revoked"
+
+
+def _holds_marker() -> Path:
+    """Written when a credential is stored in the keychain, removed when its deletion is confirmed: whether an item of
+    ours may be there, which a keychain that does not answer cannot tell."""
+    return core.home().state / "keychain-holds"
+
+
 def _keychain_skipped() -> bool:
     try:
         return 0 <= core.now() - _skip_marker().stat().st_mtime <= KEYCHAIN_SKIP_S
@@ -122,12 +135,21 @@ def _keychain_load() -> str | None:
 
 
 def _keychain_delete() -> bool:
-    """True when no item is left: deleted, or there was none (security exits 44 for "not found"). A keychain that
-    did not answer when the credential was saved holds no item of ours: nothing to delete."""
+    """True when no item is left: deleted, or there was none (security exits 44 for "not found"). A keychain left
+    alone after a timeout cannot confirm it: True only when no credential was ever stored there (no holds marker).
+    A deletion that is not confirmed leaves the tombstone, so the old item is never used again."""
     if _keychain_skipped():
-        return True
-    done = _security(["delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()])
-    return done is not None and done.returncode in (0, 44)
+        gone = not _holds_marker().exists()
+    else:
+        done = _security(["delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain_args()])
+        gone = done is not None and done.returncode in (0, 44)
+    if gone:
+        core.remove_tree(_tombstone())
+        core.remove_tree(_holds_marker())
+    else:
+        with contextlib.suppress(OSError):
+            core.write_atomic(_tombstone(), str(int(core.now())), 0o600)
+    return gone
 
 
 def store(installation_id: str, installation_secret: str) -> str:
@@ -136,6 +158,8 @@ def store(installation_id: str, installation_secret: str) -> str:
     kind = backend()
     if kind == "keychain":
         if _keychain_store(payload):
+            core.write_atomic(_holds_marker(), str(int(core.now())), 0o600)
+            core.remove_tree(_tombstone())          # the item now holds this credential, not the revoked one
             core.remove_tree(_file())
             return "keychain"
         kind = "file"  # locked or unavailable keychain (for example an SSH session): fall back to the 0600 file
@@ -151,8 +175,13 @@ def load() -> dict | None:
     # The file wins when it exists: a successful keychain store deletes it, so a file beside a keychain item is
     # always the newer credential (saved while the keychain was locked).
     raw: str | None = None
-    if backend() == "keychain" and not _file().exists():
+    if backend() == "keychain" and _tombstone().exists():
+        _keychain_delete()          # retried on every run until it is confirmed; the item is never read meanwhile
+    elif backend() == "keychain" and not _file().exists():
         raw = _keychain_load()
+        if raw and not _holds_marker().exists():          # stored by a client from before the marker
+            with contextlib.suppress(OSError):
+                core.write_atomic(_holds_marker(), str(int(core.now())), 0o600)
     if raw is None and _file().exists():
         try:
             data = _file().read_bytes()

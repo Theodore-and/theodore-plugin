@@ -1722,6 +1722,77 @@ class HostTest(ClientCase):
         self.assertEqual(self.state("engines/current.json")["version"], self.ENGINE_VERSION)
 
 
+class Revocation(ClientCase):
+    """Ruling 5: whatever command learns that this device was revoked clears the credential and the licence and ends
+    with SIGN_IN_REQUIRED 65 and the sign-in block, whatever else happened afterwards; nothing else is printed."""
+
+    LONG = "".join(f"line {i:05d} " + "x" * 80 + "\n" for i in range(400))      # two parts
+
+    def fresh(self):
+        self.box.close()
+        self.box = Sandbox(self.api)
+        self.box.install_client_directly()
+        self.api.installations.clear()
+        self.api.activation_codes.clear()
+        self.api.drop_paths = set()
+        self.ready()
+
+    def heartbeat_due(self):
+        path = self.box.home / "state" / "update.json"
+        state = json.loads(path.read_text())
+        state["last_heartbeat"] = 0
+        state["last_check"] = state["last_attempt"] = int(time.time())
+        path.write_text(json.dumps(state))
+
+    def switch_unknown(self):
+        path = self.box.home / "state" / "entitlement.json"
+        record = json.loads(path.read_text())
+        record.pop("auto_reports", None)
+        path.write_text(json.dumps(record))
+
+    def offline_sign_in(self):
+        self.api.drop_paths = {"/v1/device/code"}
+
+    def test_every_command_that_contacts_the_service(self):
+        report = ["report", "--kind", "bug", "--title", "A title", "--details", "Some details"]
+        table = [
+            (["update", "--check"], None), (["update", "--apply"], None), (["update", "--reset-state"], None),
+            (["prefs", "list"], None), (["prefs", "add", "Use British spelling"], None), (["prefs", "remove", "p1"], None),
+            (["packs", "install", "--all"], None), (report + ["--origin", "user_requested"], None),
+            (report, self.switch_unknown),                                   # automatic: the licence refresh learns it
+            (["specimen", "cover-01.jpg"], None), (["guide", "deck-design"], None), (["guide", "deck-design", "craft"], None),
+            (["guide", "pptx"], None), (["guide", "pptx", "--part", "2"], self.heartbeat_due),     # only the heartbeat asks
+            (["setup", "--job"], None),
+            (["prefs", "list"], self.offline_sign_in),                       # and the new sign-in cannot start
+        ]
+        self.api.publish_engine("1.0.1", engine_zip("1.0.1", skill_text=self.LONG))
+        for command, prepare in table:
+            with self.subTest(command=" ".join(command), prepare=getattr(prepare, "__name__", None)):
+                self.fresh()
+                self.api.specimens = {"cover-01.jpg": JPEG}
+                self.api.guides["deck-design"]["craft"] = "## Craft\n"
+                if prepare:
+                    prepare()
+                self.api.revoke_all()
+                result = self.client(*command)
+                first, nxt, tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
+                self.assertEqual(sum(line.startswith("THEODORE ") for line in result.stdout.splitlines()), 1, result.stdout)
+                self.assertNotIn("=== THEODORE", result.stdout, "no guide text once revoked")
+                self.assertNotIn(str(self.box.env["TMPDIR"]), result.stdout, "no specimen path once revoked")
+                self.assertIn("signed out", first)
+                if prepare == self.offline_sign_in:
+                    self.assertIn("could not be reached", nxt)
+                    self.assertIn("login --start", nxt)
+                else:
+                    self.assertIn("/device?code=", nxt)
+                self.assertFalse((self.box.home / "state" / "credentials").exists(), "the credential is deleted")
+                self.assertFalse((self.box.home / "state" / "entitlement.json").exists(), "the stored licence is deleted")
+                self.api.drop_paths = set()
+                workspace = self.box.tmp / "ws"
+                workspace.mkdir()
+                self.assertStatus(self.client("pptx", "start", str(workspace)), "SIGN_IN_REQUIRED", 65)
+
+
 class Internals(unittest.TestCase):
     def test_ed25519_rfc8032_vectors(self):
         from theodore_client import ed25519

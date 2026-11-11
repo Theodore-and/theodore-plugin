@@ -128,11 +128,17 @@ plugin registrations, and names anything it could not remove (it then ends with 
 after the client has exited, so the first run says the removal is scheduled, not confirmed (`RETRY`); running the
 installer with `--uninstall` again confirms it, and answers `RETRY` while any of those folders or the render cache remains. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
 portal's Devices page. The next command on that computer that reaches the Theodore service, whichever it is (loading
-the instructions, an update check, a report, a preference, a specimen, the hourly "in use" note), is refused: the
-client deletes the stored sign-in and the stored licence at once and answers that a sign-in is required, and from
-then on no command runs, the engine included. Loading the pptx instructions always asks the service. A computer that
-stays offline cannot learn of the revoke: by design it keeps working from its stored licence until that licence
-expires, at most 7 days after its last refresh.
+the instructions, a licence refresh, an update check, a report, automatic or not, a preference, a specimen, the setup
+job, the hourly "in use" note), is refused: the client deletes the stored sign-in and the stored licence at once, and
+that command ends with `SIGN_IN_REQUIRED` and the sign-in link, whatever else it did or failed to do afterwards (it
+prints no instructions once it knows; when even a new sign-in cannot be started, it says so and what to run once the
+connection is back). From then on no command runs, the engine included. Which call reaches the service: the first
+part of the pptx instructions always asks for its directions; later parts (`guide pptx --part 2` and on) contact the
+service only when the licence refresh (12 hours), the update check (6 hours) or the "in use" note (an hour) is due,
+and when one is, it is made before any text is printed. If the macOS keychain cannot delete the revoked item (it fails
+or does not answer), the client leaves a marker in `state/` that makes that item unusable from then on, never reads it
+again and retries the deletion at each later run. A computer that stays offline cannot learn of the revoke: by design
+it keeps working from its stored licence until that licence expires, at most 7 days after its last refresh.
 
 ## Reporting a vulnerability
 
