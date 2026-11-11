@@ -537,7 +537,7 @@ class InstallPage(unittest.TestCase):
         self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 4, "in the three commands, once in the note for the Worker")
         # A new private folder each time: mktemp -d (0700) on POSIX, a random name created exclusively under %TEMP% on
         # Windows; never a fixed path another user could create first.
-        self.assertIn('( d=$(mktemp -d) && curl -q --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )', text)
+        self.assertIn('( d=$(mktemp -d) && curl -q --proto \'=https\' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )', text)
         self.assertIn('New-Item -ItemType Directory -Path $d -ErrorAction Stop', text)
         self.assertIn('mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\\install.cmd" --code {{ACTIVATION_CODE}}', text)
         for path in (ROOT / "install" / "install.md", ROOT / "README.md"):
