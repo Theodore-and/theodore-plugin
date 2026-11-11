@@ -365,7 +365,7 @@ class Round6(unittest.TestCase):
             install.accept_fresh("channel", self.manifest(now - 60, two), "release manifest")
             answer = []
             worker = threading.Thread(target=lambda: answer.append(install.activate_checked("2.0.0", now - 60, "test")))
-            with core.lock("activate", timeout=10):
+            with core.lock(install.UPDATE_LOCK, timeout=10):
                 worker.start()
                 worker.join(1.0)
                 self.assertTrue(worker.is_alive(), "the check must wait for the activate lock")

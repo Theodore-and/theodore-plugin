@@ -190,10 +190,8 @@ def refresh(timeout: float = 20.0) -> dict:
     save_token(token, release, switch if isinstance(switch, bool) else None)
     if release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine):
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
-        update_path = core.home().state / "update.json"
-        state = core.read_json(update_path)
-        state["last_check"] = state["last_attempt"] = 0
-        core.write_json(update_path, state)
+        from . import install          # imported here: install imports this module
+        install.save_update_state(last_check=0, last_attempt=0)
     return answer
 
 

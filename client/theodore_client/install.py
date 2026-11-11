@@ -243,10 +243,22 @@ def update_state() -> dict:
     return core.read_json(core.home().state / "update.json")
 
 
+# One lock for everything that decides which engine is current: accepting a signed document (the replay times), the
+# update state (pending download, floor, restrictions), activating an engine and the reset. Whoever holds it reads
+# the state afresh; whoever cannot have it within the bound gets RETRY and writes nothing.
+UPDATE_LOCK = "update-state"
+UPDATE_LOCK_TIMEOUT_S = 60.0
+
+
+def update_lock():
+    return core.lock(UPDATE_LOCK, timeout=UPDATE_LOCK_TIMEOUT_S)
+
+
 def save_update_state(**fields) -> None:
-    state = update_state()
-    state.update(fields)
-    core.write_json(core.home().state / "update.json", state)
+    with update_lock():
+        state = update_state()
+        state.update(fields)
+        core.write_json(core.home().state / "update.json", state)
 
 
 def pins() -> dict:
@@ -568,7 +580,7 @@ def accept_fresh(kind: str, manifest: dict, what: str) -> None:
         raise StaleDocument(f"the {what} is dated {manifest.get('server_time')}, more than a day ahead of this computer's clock "
                             f"({time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(core.now()))}); it was not applied", future=True)
     path = core.home().state / "manifest-times.json"
-    with core.lock("manifest-times", timeout=30):
+    with update_lock():
         seen = core.read_json(path)
         newest = float(seen.get(kind) or 0)
         if when < newest:
@@ -584,14 +596,16 @@ def accept_fresh(kind: str, manifest: dict, what: str) -> None:
 def reset_update_state(reason: str) -> None:
     """Forget the replay times and the stored restrictions (a clock that was wrong, a document from the future).
     The engine and client installed now become the floor: until a document issued after this moment says otherwise,
-    nothing older is installed."""
-    core.remove_tree(core.home().state / "manifest-times.json")
-    state = update_state()
-    state.pop("restrictions", None)
-    state.pop("pending", None)          # a download chosen by a document from before the reset is not activated
-    state["last_check"] = state["last_attempt"] = 0
-    state["floor"] = {"engine": current_engine(), "client": __version__, "since": core.now(), "reason": reason}
-    core.write_json(core.home().state / "update.json", state)
+    nothing older is installed. Under the update lock: an activation decided before the reset finishes first (and the
+    engine it made current is the floor), or starts after it and sees the floor."""
+    with update_lock():
+        core.remove_tree(core.home().state / "manifest-times.json")
+        state = update_state()
+        state.pop("restrictions", None)
+        state.pop("pending", None)          # a download chosen by a document from before the reset is not activated
+        state["last_check"] = state["last_attempt"] = 0
+        state["floor"] = {"engine": current_engine(), "client": __version__, "since": core.now(), "reason": reason}
+        core.write_json(core.home().state / "update.json", state)
 
 
 def below_floor(version: str | None, issued: float) -> bool:
@@ -603,9 +617,11 @@ def below_floor(version: str | None, issued: float) -> bool:
 
 def activate_checked(version: str, issued: float, why: str) -> bool:
     """Make an engine current only if the document that chose it is still the newest accepted (or the newest chose the
-    same engine: setup and a guide may fetch one after the other), it is not below the floor and not forbidden: compare and activate under one lock, so two checks running at once cannot activate a
-    newer engine and then an older one. The loser does nothing. True when the engine is current afterwards."""
-    with core.lock("activate", timeout=60):
+    same engine: setup and a guide may fetch one after the other), it is not below the floor and not forbidden. The
+    update lock is held from the reads to the switch, and accepting a document and the reset take the same lock, so
+    nothing can change between the check and the activation. The loser does nothing. True when the engine is current
+    afterwards."""
+    with update_lock():
         seen = core.read_json(core.home().state / "manifest-times.json")
         newest = float(seen.get("channel") or 0)
         if issued < newest and version != seen.get("channel_engine"):
@@ -686,14 +702,18 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     the last verified manifest and enforced between checks too.
     """
     state = update_state()
-    pending = state.get("pending") or {}
-    if pending.get("version") and not Job("engine-update").alive():
+    if (state.get("pending") or {}).get("version") and not Job("engine-update").alive():
         # a download that outlasted an earlier guide: it applies now, at this guide, never in the middle of a build
         # only if the document that chose it is still the newest and the floor allows it (an older client's
-        # pending item carries no issue time: it counts as older than any document accepted since)
-        if core.read_json(engine_dir(pending["version"]) / ".theodore-engine.json").get("sha256") == pending.get("sha256"):
-            activate_checked(pending["version"], float(pending.get("issued") or 0), "pending update")
-        save_update_state(pending=None)
+        # pending item carries no issue time: it counts as older than any document accepted since). Read again
+        # under the lock: a reset in between has dropped it.
+        with update_lock():
+            pending = update_state().get("pending") or {}
+            if pending.get("version"):
+                if core.read_json(engine_dir(pending["version"]) / ".theodore-engine.json").get("sha256") == pending.get("sha256"):
+                    activate_checked(pending["version"], float(pending.get("issued") or 0), "pending update")
+                save_update_state(pending=None)
+        state = update_state()
     last = max(float(state.get("last_check") or 0), float(state.get("last_attempt") or 0))
     if not force and core.now() - last < UPDATE_CHECK_INTERVAL_S:
         enforce_restrictions(current_engine())
@@ -758,8 +778,10 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
                 job.spawn(["update", "--engine-job"])
             save_update_state(pending={"version": target, "sha256": engine.get("sha256"), "issued": issued})
             if job.wait(wait if current and not must else max(wait, 90.0)) and engine_installed(target):
-                activate_checked(target, issued, "update check")
-                save_update_state(pending=None)
+                with update_lock():
+                    activate_checked(target, issued, "update check")
+                    if (update_state().get("pending") or {}).get("version") == target:
+                        save_update_state(pending=None)
         if held and held != target:
             save_update_state(held=None)
     if must and current_engine() == current:

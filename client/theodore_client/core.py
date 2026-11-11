@@ -10,6 +10,7 @@ import re
 import platform as _platform
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -398,10 +399,26 @@ def version_key(version: str) -> tuple:
 
 # --- locks -----------------------------------------------------------------------------------------------------------------
 
+_HELD = threading.local()
+
+
 @contextlib.contextmanager
 def lock(name: str, timeout: float = 600.0):
-    """An exclusive lock file under state/lock, shared by every assistant session on the machine."""
+    """An exclusive lock file under state/lock, shared by every assistant session on the machine. A thread that
+    already holds it enters again (a locked step may call another that takes the same lock); any other thread or
+    process waits, and after `timeout` seconds gets RETRY: nothing guarded by the lock is written without it."""
     path = home().locks / f"{name}.lock"
+    key = str(path)
+    held = getattr(_HELD, "names", None)
+    if held is None:
+        held = _HELD.names = {}
+    if held.get(key):
+        held[key] += 1
+        try:
+            yield
+        finally:
+            held[key] -= 1
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a+")
     deadline = time.monotonic() + timeout
@@ -421,8 +438,12 @@ def lock(name: str, timeout: float = 600.0):
                     raise Status("RETRY", f"another Theodore process holds the {name} lock.",
                                  "run the same command again in 30 seconds.",
                                  "Theodore is busy finishing another step; I will retry shortly.")
-                time.sleep(0.2)
-        yield
+                time.sleep(0.05 if timeout < 5 else 0.2)
+        held[key] = 1
+        try:
+            yield
+        finally:
+            held.pop(key, None)
     finally:
         with contextlib.suppress(OSError):
             if IS_WINDOWS:
