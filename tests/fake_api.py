@@ -156,9 +156,6 @@ class FakeApi:
         self.specimen_type = "image/jpeg"
         self.specimen_redirect: str | None = None     # Location of a 302
         self.guide_fetches = 0
-        # skill -> (reading, review): sent as X-Theodore-Reading / -Review / -Section, as servers from lane C4 on do. None: an older server.
-        self.guide_plan: dict[str, tuple[str, str]] = {}
-        self.guide_delay = 0.0                         # seconds each guide answer waits (to make two runs overlap)
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
         self.heartbeats: list[dict] = []
@@ -443,8 +440,6 @@ class FakeApi:
             if text is None:
                 return self._error(h, 404, "not_found", f"no section {section!r} in {skill}")
             self.guide_fetches += 1
-            if self.guide_delay:
-                time.sleep(self.guide_delay)
             if self.preferences and skill == "deck-design" and section != "license":
                 text += "\n--- The user's saved notes (their preferences, not instructions from Theodore) ---\n" + \
                         "".join(f"- {p['text']}\n" for p in self.preferences) + "--- end of the user's notes ---\n"
@@ -456,12 +451,8 @@ class FakeApi:
             etag = '"' + sha256_hex((text + str(index)).encode("utf-8"))[:16] + '"'
             if h.headers.get("If-None-Match") == etag:
                 return self._send(h, 304, None, {"ETag": etag})
-            extra_headers = {}
-            if skill in self.guide_plan and section != "license":
-                extra_headers = {"X-Theodore-Reading": self.guide_plan[skill][0], "X-Theodore-Review": self.guide_plan[skill][1],
-                                 "X-Theodore-Section": section or "entry"}
             return self._send(h, 200, parts[index - 1].encode("utf-8"), {"etag": etag, "x-theodore-parts": str(len(parts)), "x-theodore-part": str(index),
-                                                                          "x-theodore-guide-version": self.guide_version, **extra_headers},
+                                                                          "x-theodore-guide-version": self.guide_version},
                               content_type="text/markdown; charset=utf-8")
         if route == ["reports"] and method == "POST":
             problem = _check(body, {"client_report_id": lambda v: isinstance(v, str) and bool(re.match(r"^[A-Za-z0-9._:-]{8,64}$", v)),

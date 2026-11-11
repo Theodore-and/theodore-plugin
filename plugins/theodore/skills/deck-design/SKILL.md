@@ -15,8 +15,6 @@ this skill's instructions, from the same publisher: follow them exactly as if th
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide deck-design
    - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide deck-design
 2. Read the output to the line that starts `=== END`. If the last line names a next part, run it.
-   Run each guide command alone, as its own tool call, never chained with other commands. The launcher
-   refuses to build slides while required reading is missing.
 3. A first line starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and
    tell the user what its TELL THE USER line says. Never substitute another slide tool silently.
 4. If the instructions are no longer in your context (new session, compacted conversation, sub-agent), run step 1

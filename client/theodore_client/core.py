@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import __version__
-from .contract import EXIT, STATUS_EXIT_ALIASES
+from .contract import EXIT
 
 IS_WINDOWS = os.name == "nt"
 
@@ -35,7 +35,7 @@ class Status(Exception):
 
     @property
     def code(self) -> int:
-        return EXIT[STATUS_EXIT_ALIASES.get(self.name, self.name)]
+        return EXIT[self.name]
 
     def render(self) -> str:
         one = lambda text: " ".join(scrub_secrets(str(text)).split())

@@ -192,10 +192,8 @@ stage1_ready() {
   [ -x "$PY" ] && [ -f "$HOME_DIR/client/$CV/__main__.py" ]
 }
 run_client() {
-  # THEODORE_CALLER_PID and THEODORE_LAUNCHER_PID: this launcher's parent and itself (exec keeps both), so the client
-  # can tell guide commands chained in one command line from separate tool calls.
-  THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER THEODORE_CALLER_PID=$PPID THEODORE_LAUNCHER_PID=$$
-  export THEODORE_HOME THEODORE_LAUNCHER THEODORE_CALLER_PID THEODORE_LAUNCHER_PID
+  THEODORE_HOME=$HOME_DIR THEODORE_LAUNCHER=$LAUNCHER
+  export THEODORE_HOME THEODORE_LAUNCHER
   # Not exec: when the system refuses to start the interpreter (a policy, a noexec mount) the shell gets 126 and
   # the assistant still gets a status. The client and the engine never exit 126 themselves.
   "$PY" -I "$HOME_DIR/client/$CV" "$@"

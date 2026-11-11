@@ -2140,6 +2140,12 @@ class Internals(unittest.TestCase):
                          '{"part":"client","sha256":"' + "b" * 64 + '","size":45,"url":"https://dl.theodoreand.ai/runtime/rt-0001/any/client.tar.xz","version":"0.1.0"}],'
                          '"platform":"darwin","runtime_id":"rt-0001","schema":"theodore-runtime-manifest@1","server_time":"2026-11-09T19:00:00.000Z"}')
 
+    def test_407_is_a_status_code_never_the_digits_of_a_port(self):
+        from theodore_client import api
+        self.assertEqual(api._network_error(OSError("Tunnel connection failed: 407 Proxy Authentication Required")).cause, "PROXY_AUTH")
+        self.assertEqual(api._network_error(OSError("[Errno 61] Connection refused (127.0.0.1:64071)")).cause, "NETWORK")
+        self.assertEqual(api._network_error(OSError("http://127.0.0.1:4070/x unreachable")).cause, "NETWORK")
+
     def test_exit_codes_are_the_frozen_ones(self):
         from theodore_client.contract import EXIT
         self.assertEqual(EXIT, {"OK": 0, "USAGE": 64, "SIGN_IN_REQUIRED": 65, "SIGN_IN_PENDING": 66, "SETUP_IN_PROGRESS": 67, "SETUP_FAILED": 68,
