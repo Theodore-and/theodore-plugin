@@ -259,7 +259,9 @@ def _bounded(text: str, rest: str) -> str:
 
 def _deck_design_body() -> str:
     account.require("deck-design")
-    tool = core.host_name() == "claude-code"           # Claude Code has the plugin's guide tool: its wording for the links
+    # Claude Code has the plugin's guide tool (its wording for the links), except on Windows, where the plugin cannot
+    # register its server (sh is not on the path Claude Code spawns from): there the launcher's wording.
+    tool = core.host_name() == "claude-code" and not core.IS_WINDOWS
     query = {"form": "whole", **({"bindings": "tool"} if tool else {})}
     _s, headers, raw = _api("guide", "guide deck-design", skill="deck-design", query=query)
     chunks = [raw]
