@@ -421,7 +421,8 @@ class Failures(LauncherCase):
             os.symlink(precious, link)
             lines.append(f"1700000000 {link}")
         (state / "specimens.txt").write_text("\n".join(lines) + "\n")
-        self.assertStatus(self.run_launcher("uninstall"), "OK", 0)
+        temp = self.box.env["TMPDIR"]            # batch reads %TEMP%, sh reads $TMPDIR: both name today's root
+        self.assertStatus(self.run_launcher("uninstall", env={"TEMP": temp, "TMP": temp}), "OK", 0)
         self.assertFalse(recorded.exists(), "a recorded folder goes, wherever it is")
         self.assertFalse(current.exists(), "a folder in the current temporary folder goes")
         self.assertTrue((precious / "keep.txt").exists(), "a recorded path that is not a specimen folder is never deleted")
