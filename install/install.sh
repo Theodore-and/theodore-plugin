@@ -10,7 +10,7 @@
 # What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
 # Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 # plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive it
-# names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 90 MB in all
+# names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 100 to 130 MB in all
 # before the first deck); registers the plugin in Claude Code and Codex when they are installed; starts the asset
 # packs (about 95 MB) and, on a Mac without LibreOffice, LibreOffice (about 300 MB) in the background; ends with
 # `theodore doctor`. Running it again is safe.
@@ -226,7 +226,7 @@ SCRIPTS="$HOME_DIR/plugin/plugins/theodore/skills/pptx/scripts"
 LAUNCHER="$SCRIPTS/theodore"
 
 # --- 4. runtime and engine now, so the first deck request does not wait --------------------------------------------
-say "downloading the rest of Theodore's runtime and its engine (about 90 MB in all); this is the long step"
+say "downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all); this is the long step"
 THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=1800 sh "$LAUNCHER" setup --wait 1800
 rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"

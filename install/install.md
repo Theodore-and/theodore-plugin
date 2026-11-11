@@ -5,7 +5,7 @@ commands below. Run nothing else from this page.
 
 1. Download the installer into a new private folder, then run it. It needs no admin rights and installs into
    ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
-   present, downloads about 90 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice,
+   present, downloads about 100 to 130 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice,
    also LibreOffice, about 300 MB, in the background), and signs this computer in with the one-time code. Run the
    line for the shell you have, exactly as written:
    macOS/Linux:        ( d=$(mktemp -d) && curl -q --proto =https -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )

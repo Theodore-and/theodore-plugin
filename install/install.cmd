@@ -10,7 +10,7 @@ rem
 rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
 rem Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 rem plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive
-rem it names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 90 MB in all
+rem it names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 100 to 130 MB in all
 rem before the first deck); registers the plugin in Claude Code and Codex when they are installed; starts the asset
 rem packs (about 95 MB) in the background; ends with "theodore doctor". Running it again is safe.
 rem
@@ -230,7 +230,7 @@ set "LAUNCHER=%SCRIPTS%\theodore.cmd"
 if not exist "%LAUNCHER%" goto :no_launcher
 
 rem --- 4. runtime and engine now, so the first deck request does not wait ------------------------------------------
-echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 90 MB in all); this is the long step
+echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all); this is the long step
 set "THEODORE_BOOTSTRAP_WAIT=1800"
 call "%LAUNCHER%" setup --wait 1800
 set "RC=%ERRORLEVEL%"

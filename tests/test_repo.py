@@ -447,8 +447,10 @@ class Documents(unittest.TestCase):
             for stale in ("120 MB", "82 MB", "380 MB", "about 80 MB"):
                 self.assertNotIn(stale, text, f"{path.name}: {stale}")
         readme = (ROOT / "README.md").read_text()
-        self.assertIn("about 90 MB is downloaded before the first deck", readme)
-        self.assertIn("about 550 MB on disk", readme)
+        self.assertIn("about 100 to 130 MB is downloaded before the first deck", readme)
+        self.assertIn("about 560 to 670 MB on disk", readme)
+        for path in (ROOT / "install" / "install.md", ROOT / "install" / "install.sh", PLUGIN / "README.md", SCRIPTS / "theodore"):
+            self.assertNotIn("90 MB", path.read_text(encoding="utf-8"), path.name)
         rows = {}
         for platform in ("macOS, Apple silicon", "macOS, Intel", "Windows x64", "Linux x64", "Linux arm64"):
             self.assertIn(f"| {platform} |", readme)
@@ -522,8 +524,9 @@ class StampedSite(unittest.TestCase):
 
     def test_readme_sizes_and_residue(self):
         text = (ROOT / "README.md").read_text()
-        self.assertIn("40 to 45 MB each", text)
-        self.assertNotIn("10 to 20 MB each", text)
+        self.assertIn("43 to 58 MB each (15 to 21 MB to download)", text)
+        self.assertNotIn("about 2.3 MB", text, "the engine download is the compiled build's, measured")
+        self.assertNotIn("github.com", (PLUGIN / "README.md").read_text(), "the plugin's README sends no one to the private repository")
         for word in ("pptx-soffice-profile", "theodore-pptx-locks", "theodore-specimens-"):
             self.assertIn(word, text)
 
