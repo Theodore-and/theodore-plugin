@@ -359,6 +359,8 @@ class Failures(LauncherCase):
         (state / "host-settings.json").write_text(json.dumps({"rules": ["Bash(x *)"], "path": str(settings)}, indent=2))
         cache = (self.box.user_home / "Library" / "Caches" / "pptx-runtime") if sys.platform == "darwin" else (self.box.user_home / ".cache" / "pptx-runtime")
         cache.mkdir(parents=True)
+        current = (self.box.user_home / "Library" / "Caches" / "Theodore") if sys.platform == "darwin" else (self.box.user_home / ".cache" / "theodore")
+        (current / "workspaces").mkdir(parents=True)          # the engine's render cache since 1.0.0-rc.4
         fake = self.box.tmp / "fakebin"
         fake.mkdir()
         log = self.box.tmp / "calls.log"
@@ -383,6 +385,7 @@ class Failures(LauncherCase):
                          "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
             self.assertIn(expected, calls)
         self.assertFalse(cache.exists())
+        self.assertFalse(current.exists())
         self.assertEqual([p.relative_to(self.box.home).as_posix() for p in self.box.home.rglob("*")], ["state", "state/host-settings.json"],
                          "only the record of the settings it could not take back stays")
         if keychain:

@@ -1414,11 +1414,15 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
 # --- uninstall -------------------------------------------------------------------------------------------------------------------
 
 def _render_cache_dirs() -> list[Path]:
+    """The engine's render caches: its current folder (Theodore) and the one engines before 1.0.0-rc.4 used."""
     if sys.platform == "darwin":
-        return [Path.home() / "Library" / "Caches" / "pptx-runtime"]
+        caches = Path.home() / "Library" / "Caches"
+        return [caches / "pptx-runtime", caches / "Theodore"]
     if core.IS_WINDOWS:
-        return [Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "pptx-runtime"]
-    return [Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "pptx-runtime"]
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return [local / "pptx-runtime", local / "Theodore" / "Cache"]
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return [cache / "pptx-runtime", cache / "theodore"]
 
 
 # An assistant that is on the computer but never had Theodore registered: nothing to remove, not a failure.

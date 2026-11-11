@@ -1414,13 +1414,16 @@ class StatusDoctorUninstall(ClientCase):
         workspace = self.box.tmp / "ws"
         workspace.mkdir()
         self.client("pptx", "start", str(workspace))
-        cache = self.box.user_home / "Library" / "Caches" / "pptx-runtime" if sys.platform == "darwin" else self.box.user_home / ".cache" / "pptx-runtime"
-        cache.mkdir(parents=True)
-        (cache / "x").write_text("1")
+        base = self.box.user_home / "Library" / "Caches" if sys.platform == "darwin" else self.box.user_home / ".cache"
+        caches = [base / "pptx-runtime", base / ("Theodore" if sys.platform == "darwin" else "theodore")]   # before rc.4, and now
+        for cache in caches:
+            (cache / "workspaces" / "k" / "renders").mkdir(parents=True)
+            (cache / "workspaces" / "k" / "renders" / "slide-1.jpg").write_text("1")
         result = self.client("uninstall")
         self.assertStatus(result, "OK", 0)
         self.assertFalse(self.box.home.exists())
-        self.assertFalse(cache.exists())
+        for cache in caches:
+            self.assertFalse(cache.exists(), cache)
         self.assertTrue((workspace / ".pptx-state" / "theodore-engine.json").exists(), "the user's workspaces are not touched")
 
 

@@ -683,6 +683,8 @@ for %%F in ("%HOME_DIR%\state\*") do call :del_state_file "%%~fF"
 :bare_state_done
 if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
 if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\pptx-runtime"
+if exist "%LOCALAPPDATA%\Theodore\Cache" rmdir /s /q "%LOCALAPPDATA%\Theodore\Cache" >nul 2>&1
+if exist "%LOCALAPPDATA%\Theodore\Cache" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\Theodore\Cache"
 rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this file
 rem may be inside one of them: delete, then report what is still there (if defined and call echo run late enough).
 (for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)

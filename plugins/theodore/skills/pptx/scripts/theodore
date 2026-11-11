@@ -467,12 +467,14 @@ if [ "${1:-}" = "uninstall" ]; then
   fi
   remove_specimens
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    cache="${HOME:-/nonexistent}/Library/Caches/pptx-runtime"
+    caches="${HOME:-/nonexistent}/Library/Caches/pptx-runtime ${HOME:-/nonexistent}/Library/Caches/Theodore"
   else
-    cache="${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/pptx-runtime"
+    caches="${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/pptx-runtime ${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/theodore"
   fi
-  rm -rf "$cache" 2>/dev/null
-  [ -e "$cache" ] && left="$left; the render cache $cache"
+  for cache in $caches; do       # the engine's render caches: before 1.0.0-rc.4 and now
+    rm -rf "$cache" 2>/dev/null
+    [ -e "$cache" ] && left="$left; the render cache $cache"
+  done
   # Only Theodore's own subfolders: the folder may hold things that are not Theodore's. In state/, the records still
   # needed (settings to take back, specimen folders to remove) stay.
   for d in bin client runtime engines packs tools state logs staging plugin plugin.partial; do
