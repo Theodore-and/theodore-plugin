@@ -12,7 +12,7 @@ from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
-                                 (one guide command per tool call: never chained, never redirected)
+                                 (one guide command per tool call, never chained)
   specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
   reading                        what the design method still requires before building (no guidance text)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python

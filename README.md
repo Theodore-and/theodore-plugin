@@ -127,7 +127,7 @@ If the launcher is gone, deleting those subfolders and the keychain item by hand
    The deck-design text is fetched at each use and never stored. Its specimen images are not shipped either:
    `theodore specimen <file>` fetches one into a private temporary folder. Nothing runs in the background, so the
    folder is removed by the first Theodore command run after it is an hour old, and at the latest by the uninstall.
-   Each guide command must run alone, never chained and never redirected, and the launcher refuses to build or
+   Each guide command must run alone, never chained with others, and the launcher refuses to build or
    change slides while the design method's required reading is missing (`theodore reading` says what is left).
 4. Every status is three lines the assistant can act on:
 
@@ -141,7 +141,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | --- | --- | --- |
 | 0 to 63 | | The engine's own exit code, passed through |
 | 64 | USAGE | Wrong command or argument |
-| 64 | OUTPUT_REDIRECTED, READING_REQUIRED | Guidance was redirected to a file; or required reading is missing, so nothing was built |
+| 64 | READING_REQUIRED | The design method's required reading is missing, so nothing was built |
 | 65 | SIGN_IN_REQUIRED | This computer is not signed in; the message carries the sign-in link |
 | 66 | SIGN_IN_PENDING | The browser approval has not happened yet |
 | 67 | SETUP_IN_PROGRESS | A download is still running; run the same command again |

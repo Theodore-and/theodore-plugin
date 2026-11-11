@@ -1,3 +1,3 @@
 """Theodore client: sign-in, entitlement, updates, guidance, reports and preferences for the local engine."""
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"

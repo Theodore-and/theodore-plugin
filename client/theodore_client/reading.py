@@ -5,15 +5,16 @@ rest to a file) hides most of the guidance when several guide commands run in on
 then builds without it. So:
 
 1. One guide print per command. A guide command that starts less than CHAIN_WINDOW_S seconds after another guide
-   command of the same caller finished (chained with ; or &&, or a loop) prints no guidance: ONE_AT_A_TIME. A run
-   that overlaps another (parallel tool calls) or comes from another caller is allowed. The caller is the shell
-   that runs the command line: its process group and the launcher's parent (POSIX), the launcher's parent and
-   grandparent (Windows). A host that keeps one shell for every tool call has one caller for all of them; there the
-   time window is what tells a chain from the next tool call. Guidance is also never printed into a regular file or
-   the null device (OUTPUT_REDIRECTED): that writes licensed text to disk or reads nothing.
-2. A record (state/reading.json, per installation, under the "reading" lock): for each printed part its skill,
-   section, part, total and time; the last required-reading plan the service sent (X-Theodore-Reading and
-   X-Theodore-Review); specimen fetches (counts only). No guidance text is ever written.
+   command run by the same shell command line finished (chained with ; or &&, or a loop) prints no guidance:
+   ONE_AT_A_TIME. The command line is identified by the shell that runs it: the launcher's parent process. A shell
+   that runs its last command by exec makes that command's launcher the shell itself, so a run whose own launcher
+   is the earlier run's parent is the same command line too. Each tool call of a host gets its own shell, so two
+   tool calls never match, however quickly they follow each other; a host that keeps one shell for every tool call
+   is told apart by the time window alone. A run that overlaps another (parallel tool calls) is always allowed.
+   Where the output goes is not checked: hosts capture output through pipes and through regular files alike.
+2. A record (state/reading.json, per installation, under the "reading" lock): for each part printed and flushed
+   without error its skill, section, part, total and time; the last required-reading plan the service sent
+   (X-Theodore-Reading and X-Theodore-Review); specimen fetches (counts only). No guidance text is ever written.
 3. The gate: when the deck-design entry was printed in the last WINDOW_S seconds (the design method is engaged)
    and the service named required sections, the engine commands that create or change slides (start, apply,
    finish) refuse (READING_REQUIRED) until the entry and every required section are printed in full within the
@@ -27,9 +28,9 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import stat
 import sys
 import time
+from pathlib import Path
 
 from . import core
 from .contract import HEADER_GUIDE_READING, HEADER_GUIDE_REVIEW, HEADER_GUIDE_SECTION
@@ -81,8 +82,11 @@ def chain_window() -> float:
     return CHAIN_WINDOW_S
 
 
-def _windows_parents() -> list[int]:
-    """The parent and grandparent process ids of this process (Windows), from a process snapshot."""
+_SHELLS = ("cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "sh.exe", "zsh.exe", "dash.exe")
+
+
+def _windows_ancestry() -> list[tuple[int, str]]:
+    """(pid, executable name) of this process's parent and grandparent (Windows), from a process snapshot."""
     import ctypes
     from ctypes import wintypes
 
@@ -101,100 +105,110 @@ def _windows_parents() -> list[int]:
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)          # TH32CS_SNAPPROCESS
     if not snapshot or snapshot == ctypes.c_void_p(-1).value:
         return []
-    parents: dict[int, int] = {}
+    table: dict[int, tuple[int, str]] = {}
     try:
         entry = ENTRY32()
         entry.dwSize = ctypes.sizeof(ENTRY32)
         ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
         while ok:
-            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            table[int(entry.th32ProcessID)] = (int(entry.th32ParentProcessID), str(entry.szExeFile).lower())
             ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
         kernel32.CloseHandle(snapshot)
     out, pid = [], os.getpid()
     for _ in range(2):
-        pid = parents.get(pid, 0)
-        if pid <= 4:
+        pid = table.get(pid, (0, ""))[0]
+        if pid <= 4 or pid not in table:
             break
-        out.append(pid)
+        out.append((pid, table[pid][1]))
     return out
 
 
-def caller_keys() -> list[str]:
-    """Who ran this command, as far as it can be told: a chained command shares at least one key with the one
-    before it."""
-    keys: list[str] = []
-    if core.IS_WINDOWS:
+_POSIX_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "busybox", "yash", "tcsh", "csh")
+
+
+def _posix_name(pid: int) -> str:
+    """The executable name of a process (POSIX), or "" when it cannot be told."""
+    with contextlib.suppress(OSError, ValueError):
+        return Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="replace").strip()
+    if sys.platform == "darwin":
         with contextlib.suppress(Exception):
-            parents = _windows_parents()
-            if len(parents) > 0:
-                keys.append(f"p:{parents[0]}")
-            if len(parents) > 1:
-                keys.append(f"gp:{parents[1]}")
-        return keys
-    with contextlib.suppress(OSError):
-        keys.append(f"pg:{os.getpgrp()}")
-    caller = os.environ.get("THEODORE_CALLER_PID", "")         # the launcher's parent: the shell running the line
-    if caller.isdigit() and int(caller) > 1:
-        keys.append(f"pp:{caller}")
-    return keys
-
-
-def _stdout_kind() -> str:
-    """"file" when standard output is a regular file, "null" when it is the null device, else "" (a pipe, a terminal)."""
-    try:
-        fd = sys.stdout.fileno()
-        info = os.fstat(fd)
-    except (AttributeError, OSError, ValueError):
-        return ""
-    if stat.S_ISREG(info.st_mode):
-        return "file"
-    if not core.IS_WINDOWS and stat.S_ISCHR(info.st_mode):
-        with contextlib.suppress(OSError):
-            null = os.stat(os.devnull)
-            if (info.st_rdev, info.st_ino) == (null.st_rdev, null.st_ino):
-                return "null"
+            import ctypes
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buf = ctypes.create_string_buffer(256)
+            if libproc.proc_name(ctypes.c_int(pid), buf, ctypes.c_uint32(256)) > 0:
+                return buf.value.decode("utf-8", "replace")
+    with contextlib.suppress(Exception):
+        import subprocess
+        done = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        return done.stdout.strip()
     return ""
 
 
+def _is_shell(name: str) -> bool:
+    base = os.path.basename(name.strip()).lstrip("-").lower()
+    return base in _POSIX_SHELLS or base in _SHELLS
+
+
+def command_line() -> tuple[int, int]:
+    """(caller, launcher): the process that stands for the command line, and the launcher that ran the client.
+
+    The launcher is the batch launcher's cmd.exe (Windows) or the sh launcher (POSIX, which passes its own pid and its
+    parent's; honoured only when that launcher is really our parent; run without it, the client itself). The caller
+    is the launcher's parent when that is a shell (a line of several commands: PowerShell, cmd, bash, sh, zsh), else
+    the launcher itself: a host that starts each tool call's shell, which then runs the launcher by exec or as
+    `cmd /c <launcher>`, has a non-shell parent shared by every tool call, which must not join them."""
+    if core.IS_WINDOWS:
+        try:
+            ancestry = _windows_ancestry()
+        except Exception:       # noqa: BLE001  no snapshot: no chain check
+            return 0, 0
+        if not ancestry:
+            return 0, 0
+        launcher = ancestry[0][0]
+        if len(ancestry) > 1 and _is_shell(ancestry[1][1]):
+            return ancestry[1][0], launcher
+        return launcher, launcher
+    caller, launcher = os.environ.get("THEODORE_CALLER_PID", ""), os.environ.get("THEODORE_LAUNCHER_PID", "")
+    if caller.isdigit() and launcher.isdigit() and int(launcher) == os.getppid():
+        parent, own = int(caller), int(launcher)
+    else:
+        parent, own = os.getppid(), os.getpid()
+    if parent > 1 and _is_shell(_posix_name(parent)):
+        return parent, own
+    return own, own
+
+
 def guard_guide(argv_text: str) -> None:
-    """Before a guide command prints anything: refuse a redirected output and a chained command."""
-    kind = _stdout_kind()
-    if kind:
-        where = "a file" if kind == "file" else "the null device"
-        raise Status("OUTPUT_REDIRECTED", f"guide output goes to {where}; Theodore's guidance is printed only to the tool's own output, "
-                                          "never written to disk or discarded.",
-                     f"run {quoted_launcher()} {argv_text} by itself, without > or any redirection, as its own tool call, and read all of it.",
-                     "I ran a Theodore command the wrong way; I am running it again correctly.")
+    """Before a guide command prints anything: refuse a guide command chained after another in one command line."""
     window = chain_window()
-    keys = set(caller_keys())
-    if window <= 0 or not keys:
+    caller, launcher = command_line()
+    if window <= 0 or caller <= 1:
         return
     for run in _load().get("runs") or []:
         try:
-            shared = keys & set(run.get("keys") or [])
-            end = float(run.get("end") or 0)
-        except (TypeError, ValueError):
+            before, end = int(run.get("caller") or 0), float(run.get("end") or 0)
+        except (TypeError, ValueError, AttributeError):
             continue
-        if shared and end <= STARTED and STARTED - end < window:
+        if before > 1 and before in (caller, launcher) and end <= STARTED and STARTED - end < window:
             raise Status("ONE_AT_A_TIME", "another guide command ran just before this one in the same shell command (chained with ; or &&, "
                                           "or a loop), so this one printed nothing: the host would cut the combined output and the reading would be lost.",
-                         f"run {quoted_launcher()} {argv_text} by itself as its own tool call (one guide command per call, never chained, "
-                         "never redirected) and read all of it, then the next one the same way.",
+                         f"run {quoted_launcher()} {argv_text} by itself as its own tool call (one guide command per call, never chained) "
+                         "and read all of it, then the next one the same way.",
                          "I am reading Theodore's guidance one part at a time so none of it is cut off.")
 
 
 def record_run() -> None:
-    """After every guide command, printed or refused: when it ended, and who ran it."""
-    keys = caller_keys()
-    if not keys:
+    """After every guide command, printed or refused: when it ended, and which command line ran it."""
+    caller, _launcher = command_line()
+    if caller <= 1:
         return
     with contextlib.suppress(Exception):
         with _locked():
             data = _load()
             now = time.time()
             runs = [r for r in data.get("runs") or [] if isinstance(r, dict) and now - float(r.get("end") or 0) < _RUNS_KEEP_S]
-            runs.append({"keys": keys, "end": now})
+            runs.append({"caller": caller, "end": now})
             data["runs"] = runs[-_RUNS_MAX:]
             _save(data)
 
@@ -325,13 +339,13 @@ def gate(verb: str) -> Status | None:
     if review:
         return Status("READING_REQUIRED", f"pptx finish refused: the design method is in use and {name}, the review to read after the first draft, "
                                           f"has not been read{partial}. Nothing was run.",
-                      f"run {command} by itself as its own tool call (never chained, never redirected), read all of it, revise the deck against it, "
+                      f"run {command} by itself as its own tool call (never chained), read all of it, revise the deck against it, "
                       "then run the same finish command again.",
                       f"Theodore's design method asks me to review the draft against its critique before finishing; I am doing that now. "
                       f"Reading counts for {WINDOW_TEXT} on this computer.")
     return Status("READING_REQUIRED", f"pptx {verb} refused: the design method is in use and {name} has not been read in full yet{partial}; "
                                       "no slide is built or changed before the required reading. Nothing was run.",
-                  f"run {command} by itself as its own tool call (never chained, never redirected) and read all of it, then follow its last line; "
+                  f"run {command} by itself as its own tool call (never chained) and read all of it, then follow its last line; "
                   f"when {quoted_launcher()} reading says nothing is missing, run the same pptx command again.",
                   f"Theodore's design method asks me to read its guidance before building slides; I am reading it now. "
                   f"Reading counts for {WINDOW_TEXT} on this computer.")
@@ -373,7 +387,7 @@ def status() -> Status:
         left = [k for k in before if _missing_part(sections, k)]
         return Status("READING_REQUIRED", f"still to read before drafting: {', '.join(left)}; after the first draft: {', '.join(review) or 'nothing'}. "
                                           f"Specimen sheets fetched: {sheets}.",
-                      f"run {_command(key, part)} by itself as its own tool call (never chained, never redirected) and read all of it.",
+                      f"run {_command(key, part)} by itself as its own tool call (never chained) and read all of it.",
                       f"Theodore's design method asks me to read its guidance before building slides; I am reading it now. "
                       f"Reading counts for {WINDOW_TEXT} on this computer.")
     after = _first_missing(sections, review)

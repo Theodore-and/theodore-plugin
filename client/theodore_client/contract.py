@@ -27,9 +27,8 @@ EXIT = {
     "INTERNAL": 78,
 }
 # Statuses that share a frozen exit code above (the table is the backend's launcher contract and does not grow):
-# ONE_AT_A_TIME means "run it again, alone" (as RETRY); OUTPUT_REDIRECTED and READING_REQUIRED mean "called the wrong
-# way or too early; nothing ran" (as USAGE).
-STATUS_EXIT_ALIASES = {"ONE_AT_A_TIME": "RETRY", "OUTPUT_REDIRECTED": "USAGE", "READING_REQUIRED": "USAGE"}
+# ONE_AT_A_TIME means "run it again, alone" (as RETRY); READING_REQUIRED means "called too early; nothing ran" (as USAGE).
+STATUS_EXIT_ALIASES = {"ONE_AT_A_TIME": "RETRY", "READING_REQUIRED": "USAGE"}
 SETUP_FAILED_CAUSES = ("NETWORK", "TLS_INTERCEPT", "PROXY_AUTH", "DISK", "HASH_MISMATCH")
 
 # --- routes on the API host (backend design section 5.4) ---------------------------------------------------------

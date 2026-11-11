@@ -107,26 +107,41 @@ class OneAtATime(ReadingCase):
     def test_another_caller_is_allowed(self):
         self.sign_in()
         env = {**self.box.env, **CHAIN}
-        for section, caller in (("forms", "4242"), ("worked-notes", "4343")):     # another shell, another process group
+        for section, caller in (("forms", "4242"), ("worked-notes", "4343")):     # another command line
             done = subprocess.run([sys.executable, "-I", str(CLIENT_DIR), "guide", "deck-design", section], env={**env, "THEODORE_CALLER_PID": caller},
                                   capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, start_new_session=True)
             self.assertEqual(done.returncode, 0, done.stdout)
 
-    def test_redirect_to_a_file_or_the_null_device_prints_no_guidance(self):
+    def test_stdout_a_regular_file_prints_and_records(self):
+        """Claude Code gives every command a regular file as its output: the guidance is printed there and counts."""
         self.sign_in()
-        out = self.box.tmp / "guide.txt"
-        done = self._shell(self._client_line("guide", "deck-design", "forms") + f" > {shlex.quote(str(out))}", env={"THEODORE_TEST_CHAIN_WINDOW": "0"})
-        self.assertEqual(done.returncode, 64)
+        out = self.box.tmp / "host output.txt"
+        with open(out, "w") as handle:
+            done = subprocess.run([sys.executable, "-I", str(CLIENT_DIR), "guide", "deck-design", "forms"], env={**self.box.env, **CHAIN},
+                                  stdout=handle, stderr=subprocess.PIPE, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        self.assertEqual(done.returncode, 0, done.stderr)
         text = out.read_text()
-        self.assertNotIn("FORMS-MARKER", text)
-        self.assertTrue(text.startswith("THEODORE OUTPUT_REDIRECTED: "), text)
-        self.assertIn("without > or any redirection", text)
-        done = self._shell(self._client_line("guide", "deck-design", "forms") + " > /dev/null", env={"THEODORE_TEST_CHAIN_WINDOW": "0"})
-        self.assertEqual(done.returncode, 64)
-        self.assertNotIn("forms", self.record().get("read", {}).get("deck-design", {}))
-        self.assertEqual(self.api.guide_fetches, 0)
-        piped = self._shell(self._client_line("guide", "deck-design", "forms") + " | cat", env={"THEODORE_TEST_CHAIN_WINDOW": "0"})
-        self.assertIn("FORMS-MARKER", piped.stdout, "a pipe is how hosts capture output: allowed")
+        self.assertIn("FORMS-MARKER", text)
+        self.assertTrue(text.splitlines()[-1].startswith("=== END theodore deck-design forms ("), text[-300:])
+        self.assertEqual(sorted(self.record()["read"]["deck-design"]["forms"]["parts"]), ["1"])
+
+    def test_quick_separate_tool_calls_are_never_joined(self):
+        """Each tool call gets its own shell (which may run the command by exec) and a file as output; however quickly
+        they follow each other, none is taken for a chain."""
+        self.sign_in()
+        sections = ["forms", "worked-notes", "critique", "evidence"]
+        for index, section in enumerate(sections):
+            line = self._client_line("guide", "deck-design", section)
+            if index % 2:
+                line += "; true"                   # a host wrapper that runs more after the command
+            out = self.box.tmp / f"call {index}.txt"
+            with open(out, "w") as handle:
+                done = subprocess.run(["/bin/sh", "-c", line], env={**self.box.env, **CHAIN}, stdout=handle, stderr=subprocess.PIPE, text=True,
+                                      timeout=120, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+            text = out.read_text()
+            self.assertNotIn("ONE_AT_A_TIME", text, section)
+            self.assertIn("=== END theodore deck-design " + section, text)
+        self.assertEqual(self.api.guide_fetches, len(sections))
 
 
 class Record(ReadingCase):
@@ -253,7 +268,7 @@ class Units(unittest.TestCase):
 
     def test_codes_stay_in_the_frozen_table(self):
         from theodore_client.core import Status
-        self.assertEqual([Status(n, "a", "b", "c").code for n in ("ONE_AT_A_TIME", "OUTPUT_REDIRECTED", "READING_REQUIRED")], [75, 64, 64])
+        self.assertEqual([Status(n, "a", "b", "c").code for n in ("ONE_AT_A_TIME", "READING_REQUIRED")], [75, 64])
 
     def test_plan_header_parsing(self):
         self.assertEqual(reading._plan_keys(" craft, forms ,,entry,bad key,craft"), ["craft", "forms"])
@@ -262,7 +277,7 @@ class Units(unittest.TestCase):
 
 
 class ThroughTheLauncher(unittest.TestCase):
-    """The real launcher (sh, or theodore.cmd from cmd and PowerShell): chains, redirection and the gate."""
+    """The real launcher (sh, or theodore.cmd from cmd and PowerShell): chains, output to a file, and the gate."""
 
     def setUp(self):
         self.api = FakeApi().start()
@@ -289,13 +304,13 @@ class ThroughTheLauncher(unittest.TestCase):
         if not IS_WINDOWS:
             parts = [" ".join(shlex.quote(a) for a in ["/bin/sh", self.launcher, "guide", "deck-design", *s]) for s in sections]
             line = "; ".join(parts) + (f" > {shlex.quote(redirect)}" if redirect else "")
-            return self._run(["/bin/sh", "-c", line], env=CHAIN if not redirect else None)
+            return self._run(["/bin/sh", "-c", line], env=CHAIN)
         if shell == "powershell":
             parts = [f"& '{self.launcher}' guide deck-design {' '.join(s)}" for s in sections]
             return self._run(["powershell.exe", "-NoProfile", "-Command", "; ".join(parts) + "; exit $LASTEXITCODE"], env=CHAIN)
         parts = [f'call "{self.launcher}" guide deck-design {" ".join(s)}'.rstrip() for s in sections]
         line = " & ".join(parts) + (f' > "{redirect}"' if redirect else "")
-        return self._run(f'cmd /d /s /c "{line}"', env=CHAIN if not redirect else None)
+        return self._run(f'cmd /d /s /c "{line}"', env=CHAIN)
 
     def test_three_guides_in_one_command_print_one(self):
         shells = ["default", "powershell"] if IS_WINDOWS else ["default"]
@@ -308,13 +323,14 @@ class ThroughTheLauncher(unittest.TestCase):
                 self.assertNotIn("FORMS-MARKER", done.stdout)
                 self.assertEqual(done.stdout.count("THEODORE ONE_AT_A_TIME: "), 2, done.stdout)
 
-    def test_redirect_and_gate(self):
+    def test_output_to_a_file_and_the_gate(self):
         out = self.box.tmp / "out file.txt"
         done = self._chain([["forms"]], redirect=str(out))
-        self.assertEqual(done.returncode, 64, done.stdout + done.stderr)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         text = out.read_text()
-        self.assertTrue(text.startswith("THEODORE OUTPUT_REDIRECTED: "), text)
-        self.assertNotIn("FORMS-MARKER", text)
+        self.assertIn("FORMS-MARKER", text)
+        self.assertNotIn("\nTHEODORE ", "\n" + text, "no status")
+        time.sleep(reading.CHAIN_WINDOW_S + 0.5)                # the next calls come from this test, not from one command line
         engine = self.box.run_launcher("guide", "pptx", timeout=600)
         self.assertEqual(engine.returncode, 0, engine.stdout + engine.stderr)
         self.assertEqual(self.box.run_launcher("guide", "deck-design").returncode, 0)
