@@ -210,5 +210,54 @@ class UpdateStateMachine(unittest.TestCase):
             self.assertEqual(install.update_state()["last_check"], 5)
 
 
+AGENT_TOKEN = "x." + b64u(json.dumps({"feat": ["agent-reports"], "exp": 9999999999}).encode()) + ".y"
+
+
+class ReportSwitch(unittest.TestCase):
+    """Ruling 2: a cached switch, on or off, older than an hour or dated ahead of the clock is unknown: the client asks
+    again and sends nothing unless the fresh answer says on."""
+
+    def cache(self, home: Path, enabled: bool, age: float, source: str = "server") -> None:
+        account.save_token(AGENT_TOKEN, auto_reports=enabled)
+        record = json.loads((home / "state" / "entitlement.json").read_text())
+        record["auto_reports"] = {"enabled": enabled, "source": source, "at": int(core.now() - age)}
+        (home / "state" / "entitlement.json").write_text(json.dumps(record))
+
+    def test_on_or_off_outside_zero_to_an_hour_is_unknown(self):
+        with client_home() as home:
+            core.home().ensure()
+            for enabled in (True, False):
+                for source in ("server", "refused"):
+                    for age, fresh in ((-1, False), (3601, False), (86399, False), (0, True), (10, True), (3599, True)):
+                        with self.subTest(enabled=enabled, source=source, age=age):
+                            self.cache(home, enabled, age, source)
+                            expected = ((True, "") if enabled else (False, "off")) if fresh else (False, "unknown")
+                            if source == "refused" and enabled and fresh:
+                                expected = (False, "unknown")        # a refusal never records "on"
+                            self.assertEqual(account.automatic_reports(), expected)
+
+    def report(self, refresh_answer):
+        from theodore_client import commands
+        sent = []
+        with mock.patch.object(account, "refresh", side_effect=refresh_answer) as refreshed, \
+                mock.patch.object(commands, "_api", side_effect=lambda *a, **k: sent.append(a) or (200, {}, b'{"ref": "TR-1"}')), \
+                mock.patch("builtins.print"):
+            code = commands.report("bug", "A title", "Some details", None, None, None, "automatic", False)
+        return code, refreshed.call_count, sent
+
+    def test_an_expired_off_is_asked_again_and_only_a_fresh_on_sends(self):
+        with client_home() as home:
+            core.home().ensure()
+            self.cache(home, False, 3601)
+            code, asked, sent = self.report(lambda timeout=0: account.save_token(AGENT_TOKEN, auto_reports=True))
+            self.assertEqual((code, asked, len(sent)), (0, 1, 1), "a stale off is asked again; the fresh on sends")
+            for answer in (lambda timeout=0: account.save_token(AGENT_TOKEN, auto_reports=False),
+                           lambda timeout=0: account.save_token(AGENT_TOKEN),
+                           api.NetworkError("down")):
+                self.cache(home, False, -1)
+                code, asked, sent = self.report(answer)
+                self.assertEqual((code, asked, sent), (73, 1, []), "off, no answer or no connection: nothing is sent")
+
+
 if __name__ == "__main__":
     unittest.main()

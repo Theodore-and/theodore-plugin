@@ -93,30 +93,25 @@ def save_token(token: str, release: dict | None = None, auto_reports: bool | Non
 
 
 AGENT_REPORTS_FEATURE = "agent-reports"
-REFUSED_OFF_SECONDS = 86400
-ON_FRESH_SECONDS = 3600
+SWITCH_FRESH_SECONDS = 3600
 
 
 def automatic_reports() -> tuple[bool, str]:
     """Whether an automatic report may be sent, decided before anything is sent: (allowed, why not).
 
     The plan feature `agent-reports` is in the entitlement's feat claim. The user's switch is cached with the
-    entitlement: from the licence refresh answer (auto_report_enabled), or from a 403 auto_reports_disabled
-    (remembered for a day). When neither has said, the answer is "unknown" and no automatic report is sent."""
+    entitlement: from the licence refresh answer (auto_report_enabled), or from a 403 auto_reports_disabled (off).
+    A cached value, on or off, is trusted for an hour; older, or dated ahead of the clock, it is "unknown", the
+    caller asks the service again, and no automatic report is sent unless the fresh answer says on."""
     token, claims = stored_token()
     if token and AGENT_REPORTS_FEATURE not in (claims.get("feat") or []):
         return False, "plan"
     known = core.read_json(_token_path()).get("auto_reports") or {}
-    if known.get("source") == "server" and isinstance(known.get("enabled"), bool):
-        if not known["enabled"]:
-            return False, "off"
-        if 0 <= core.now() - float(known.get("at") or 0) <= ON_FRESH_SECONDS:     # "on" is trusted for an hour, then asked again;
-            # a time ahead of the clock (cached while the clock was fast) is not trusted at all
-            return True, ""
-        return False, "unknown"
-    if known.get("enabled") is False and core.now() - float(known.get("at") or 0) < REFUSED_OFF_SECONDS:
-        return False, "off"
-    return False, "unknown"         # not said by the server: no automatic report (a report the user asks for still goes)
+    enabled, source = known.get("enabled"), known.get("source")
+    if isinstance(enabled, bool) and (source == "server" or (source == "refused" and enabled is False)):
+        if 0 <= core.now() - float(known.get("at") or 0) <= SWITCH_FRESH_SECONDS:
+            return (True, "") if enabled else (False, "off")
+    return False, "unknown"         # not said, or said too long ago: no automatic report (a report the user asks for still goes)
 
 
 def remember_automatic_reports_off() -> None:
