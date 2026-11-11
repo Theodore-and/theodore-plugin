@@ -132,7 +132,7 @@
     "channel": "theodore-channel-manifest@1",
     "runtime": "theodore-runtime-manifest@1"
   },
-  "openapi_sha256": "f620e63ac5f05a708526f65e52ae282757571823642bca71ed369a684b647f9d",
+  "openapi_sha256": "f4e5f4f0d066ab9f3dc000728352a959e43c4467c12a2b4639db765ac267c857",
   "origins": {
     "production": {
       "api": "https://api.theodoreand.ai",
