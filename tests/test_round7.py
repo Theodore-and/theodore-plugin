@@ -457,11 +457,15 @@ class SpecimenRegistry(unittest.TestCase):
             precious.mkdir()
             (precious / "keep.txt").write_text("keep")
             link = dirs["tmp-b"] / "theodore-specimens-link"
-            os.symlink(precious, link, target_is_directory=True)
-            (home / "state" / "specimens.txt").write_text(f"0 {precious}\n0 {link}\n")
+            try:
+                os.symlink(precious, link, target_is_directory=True)
+            except OSError:             # Windows without the privilege to make links: the plain case still runs
+                link = None
+            (home / "state" / "specimens.txt").write_text(f"0 {precious}\n" + (f"0 {link}\n" if link else ""))
             self.assertEqual(specimens.sweep(everything=True), [])
             self.assertTrue((precious / "keep.txt").exists())
-            self.assertTrue(os.path.lexists(link))
+            if link:
+                self.assertTrue(os.path.lexists(link))
 
     def test_never_under_the_working_folder_even_when_it_holds_the_temporary_folder_or_the_home(self):
         with self.world() as (specimens, home, dirs):
