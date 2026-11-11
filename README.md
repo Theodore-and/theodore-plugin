@@ -67,8 +67,8 @@ Outside that folder:
 - **The sign-in credential.** macOS: one item in your login keychain (service `ai.theodoreand.theodore`).
   Windows: a file in `state/` protected with DPAPI for your user. Linux: a file in `state/` readable only by
   you.
-- **The engine's render cache**: `~/Library/Caches/pptx-runtime` (macOS), `%LOCALAPPDATA%\pptx-runtime`
-  (Windows), `~/.cache/pptx-runtime` (Linux).
+- **The engine's render cache**: `~/Library/Caches/Theodore` (macOS), `%LOCALAPPDATA%\Theodore\Cache` (Windows),
+  `~/.cache/theodore` (Linux); older engines used `pptx-runtime` in the same places, which the uninstall removes too.
 - **Your deck workspaces** get one small file, `.pptx-state/theodore-engine.json`, naming the engine version
   that started the workspace, so an update never changes a deck halfway through.
 - **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
