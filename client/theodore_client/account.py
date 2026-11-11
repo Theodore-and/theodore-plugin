@@ -257,7 +257,8 @@ def _open_browser(url: str) -> bool:
 
 def login_start(reason: str = "this computer is not signed in to Theodore.", open_browser: bool = False) -> Status:
     """Begin browser approval (or reuse the pending one) and return SIGN_IN_REQUIRED carrying the URL. The browser is
-    opened only for a sign-in command (`login`); any other command that finds the computer signed out prints the link."""
+    opened only when the user asked for it (`login --open`); everything else, the installers included, prints the link
+    for the assistant to relay."""
     pending_path = core.home().state / "device.json"
     pending = core.read_json(pending_path)
     fresh = False
@@ -319,7 +320,7 @@ def login_finish(wait_seconds: float) -> Status:
     if credentials.load() and not pending.get("device_code"):
         return signed_in_status(stored_token()[1])
     if not pending.get("device_code"):
-        return login_start(open_browser=True)
+        return login_start()
     interval = max(1, int(pending.get("interval") or 5))
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_POLL_INTERVAL"):
         interval = float(os.environ["THEODORE_TEST_POLL_INTERVAL"])

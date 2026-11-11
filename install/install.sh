@@ -3,7 +3,7 @@
 # ~/.theodore (or THEODORE_HOME). Written to be run by an AI assistant or by a person:
 #
 #   sh install.sh --code ABCD-1234        sign this computer in with a one-time code and set everything up
-#   sh install.sh                         the same, with a browser sign-in instead of a code
+#   sh install.sh                         the same, ending with a sign-in link instead of a code (no browser opens)
 #   sh install.sh --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
 #   sh install.sh --uninstall             remove Theodore from this computer
 #
@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.2.1"
-PIN_CLIENT="client/client-0.2.1.tar cc3b937a32b195a52d6b66c769de6517fd8d3f0a2f792268eebbcff8a34b38f1"
+PIN_CLIENT="client/client-0.2.1.tar 2821130fd274d765fd69ee43819ce2e50d0affd9ad80691aa55613b0b56308a8"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -188,10 +188,6 @@ T="$HOME_DIR/bin/theodore"
 [ -f "$T" ] || T=$LAUNCHER
 theodore() { THEODORE_HOME=$HOME_DIR sh "$T" "$@"; }
 
-if [ -z "$CODE" ]; then
-  theodore whoami >/dev/null 2>&1 || theodore login --start
-fi
-
 # --- 5. the assistants on this computer ----------------------------------------------------------------------------------
 say "registering Theodore in the assistants found on this computer"
 theodore hosts register
@@ -212,6 +208,12 @@ fi
 
 # --- 7. the check the assistant reports: the last line says what failed, if anything did ------------------------------
 say "the stable launcher is $T"
+if ! theodore whoami >/dev/null 2>&1; then
+  # Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to
+  # relay. The installer never opens a browser; only `theodore login --open`, asked for by the user, does.
+  theodore login --start
+  exit $?
+fi
 theodore doctor
 rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"

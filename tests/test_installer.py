@@ -129,11 +129,25 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
-    def test_without_a_code_it_starts_the_browser_sign_in_and_still_sets_up(self):
-        result = self.install()
+    def test_without_a_code_it_prints_the_sign_in_link_opens_no_browser_and_still_sets_up(self):
+        opened = self.box.tmp / "opened.log"
+        if IS_WINDOWS:
+            browser = self.box.tmp / "fake-browser.cmd"
+            browser.write_text(f'@echo off\r\n>>"{opened}" echo %*\r\n')
+        else:
+            browser = self.box.tmp / "fake-browser"
+            browser.write_text(f'#!/bin/sh\necho "$1" >> "{opened}"\n')
+            browser.chmod(0o755)
+        result = self.install(env={"THEODORE_NO_BROWSER": "", "THEODORE_TEST_BROWSER": str(browser)})
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
-        self.assertIn("THEODORE SIGN_IN_REQUIRED", result.stdout)
-        self.assertIn("https://theodoreand.ai/device?code=", result.stdout)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertTrue(first.startswith("THEODORE SIGN_IN_REQUIRED"), first)
+        self.assertIn("https://theodoreand.ai/device?code=", nxt, "the last block carries the sign-in link for the assistant to relay")
+        self.assertIn("https://theodoreand.ai/device?code=", tell)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        import time
+        time.sleep(1)
+        self.assertFalse(opened.exists(), "the installer opens no browser")
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the runtime is installed while the user approves")
         self.assertNotIn("/v1/device/activate", [r["path"] for r in self.api.requests])
 

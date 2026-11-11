@@ -22,7 +22,7 @@ commands below. Run nothing else from this page.
      To do that by hand after step 1: codex plugin marketplace add ~/.theodore/plugin
      (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
      (once the plugin repository is public: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
-   The first use then downloads the same files and asks for one browser sign-in.
+   The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
 3. Check: run `theodore doctor` by the path the installer printed ("the stable launcher is ..."). Report its
    last line to the user.
 4. Tell the user to start a new session and ask for a deck.
@@ -32,5 +32,5 @@ API key.
 <!-- For the Worker that serves this page: replace the {{ACTIVATION_CODE}} marker in the three commands with the
      `code` query parameter after normalising it and checking it against the contract's display form
      (^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$; a format check only, no existence oracle). With no code, or
-     a code that fails the check, remove the " --code ..." text from every command; the installer then starts a
-     browser sign-in. Strip this comment when serving. -->
+     a code that fails the check, remove the " --code ..." text from every command; the installer then ends with a
+     sign-in link for the agent to relay (it opens no browser). Strip this comment when serving. -->

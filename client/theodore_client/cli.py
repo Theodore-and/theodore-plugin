@@ -12,7 +12,8 @@ HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
   specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
-  login [--start | --finish --wait S | --code XXXX-XXXX]    logout    whoami
+  login [--start | --open | --finish --wait S | --code XXXX-XXXX]    logout    whoami
+                                 (--open: also open the sign-in page in the browser; nothing else ever opens one)
   status [--json] [--wait S]     doctor [--json]         version
   update [--check | --apply | --rollback | --channel C | --pin V | --unpin | --reset-state]
   report --kind bug|feedback --title T --details D [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
@@ -39,6 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     sp.add_argument("files", nargs="*")
     lg = sub.add_parser("login", add_help=False)
     lg.add_argument("--start", action="store_true")
+    lg.add_argument("--open", action="store_true")
     lg.add_argument("--finish", action="store_true")
     lg.add_argument("--wait", type=float, default=0.0)
     lg.add_argument("--code")
@@ -122,7 +124,7 @@ def _dispatch(argv: list[str]) -> int:
             return core.emit(account.login_code(args.code))
         if args.finish:
             return core.emit(account.login_finish(args.wait))
-        return core.emit(account.login_start(open_browser=True))
+        return core.emit(account.login_start(open_browser=args.open))      # only `login --open` opens a browser
     if cmd == "logout":
         return core.emit(account.logout())
     if cmd == "whoami":

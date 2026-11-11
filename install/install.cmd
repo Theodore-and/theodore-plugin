@@ -3,7 +3,7 @@ rem Theodore installer for Windows. No admin rights, no package manager, no Powe
 rem into %LOCALAPPDATA%\Theodore (or THEODORE_HOME). Written to be run by an AI assistant or by a person:
 rem
 rem   install.cmd --code ABCD-1234        sign this computer in with a one-time code and set everything up
-rem   install.cmd                         the same, with a browser sign-in instead of a code
+rem   install.cmd                         the same, ending with a sign-in link instead of a code (no browser opens)
 rem   install.cmd --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
 rem   install.cmd --uninstall             remove Theodore from this computer
 rem
@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.1"
-set "PIN_CLIENT=client/client-0.2.1.tar cc3b937a32b195a52d6b66c769de6517fd8d3f0a2f792268eebbcff8a34b38f1"
+set "PIN_CLIENT=client/client-0.2.1.tar 2821130fd274d765fd69ee43819ce2e50d0affd9ad80691aa55613b0b56308a8"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -213,11 +213,7 @@ set "THEODORE_BOOTSTRAP_WAIT="
 set "T=%HOME_DIR%\bin\theodore.cmd"
 if not exist "%T%" set "T=%LAUNCHER%"
 
-if defined CODE goto :hosts
-call "%T%" whoami >nul 2>&1
-if errorlevel 1 call "%T%" login --start
 
-:hosts
 rem --- 5. the assistants on this computer ------------------------------------------------------------------------------
 echo theodore-install: registering Theodore in the assistants found on this computer
 call "%T%" hosts register
@@ -235,6 +231,10 @@ call "%T%" packs install --all --background >nul 2>&1
 :doctor
 rem --- 7. the check the assistant reports: the last line says what failed, if anything did -------------------------
 echo theodore-install: the stable launcher is %T%
+rem Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to
+rem relay. The installer never opens a browser; only "theodore login --open", asked for by the user, does.
+call "%T%" whoami >nul 2>&1
+if errorlevel 1 goto :sign_in_last
 call "%T%" doctor
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" goto :finish
@@ -243,6 +243,11 @@ echo THEODORE RETRY: Theodore is installed, but it could not be added to every a
 echo NEXT: register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session.
 echo TELL THE USER: Theodore is installed, but I could not add it to one of your assistants automatically. I will add it by hand.
 set "RC=75"
+goto :finish
+
+:sign_in_last
+call "%T%" login --start
+set "RC=%ERRORLEVEL%"
 goto :finish
 
 rem =====================================================================================================================

@@ -1551,11 +1551,18 @@ class HostTest(ClientCase):
         self.assertFalse(log.exists(), "a command other than login opened the browser")
         _first, _nxt, tell = self.assertStatus(self.client("guide", "pptx", env=env), "SIGN_IN_REQUIRED", 65)
         self.assertIn("Please open https://theodoreand.ai/device?code=", tell)
-        _first, _nxt, tell = self.assertStatus(self.client("login", "--start", env=env), "SIGN_IN_REQUIRED", 65)
+        for command in (["login"], ["login", "--start"], ["login", "--finish"]):      # a sign-in, but no request to open anything
+            if command[-1] == "--finish":           # nothing pending: it starts a sign-in
+                (self.box.home / "state" / "device.json").unlink()
+            _first, nxt, tell = self.assertStatus(self.client(*command, env=env), "SIGN_IN_REQUIRED", 65)
+            self.assertIn("/device?code=", nxt)
+        time.sleep(0.5)
+        self.assertFalse(log.exists(), "only login --open opens the browser")
+        _first, _nxt, tell = self.assertStatus(self.client("login", "--open", env=env), "SIGN_IN_REQUIRED", 65)
         deadline = time.time() + 10
         while not log.exists() and time.time() < deadline:
             time.sleep(0.1)
-        self.assertTrue(log.exists(), "login --start opens the page")
+        self.assertTrue(log.exists(), "login --open opens the page")
         self.assertIn("/device?code=", log.read_text())
         self.assertIn("I opened a browser page", tell)
 
