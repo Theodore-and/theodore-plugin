@@ -4,5 +4,11 @@
 # When the snapshot is regenerated the value and the commit change: add the new fingerprint here in that commit.
 085fbc9d5e100af3b07b980051737797a7df7914:tests/fixtures/contract-v1.json:generic-api-key:134
 tests/fixtures/contract-v1.json:generic-api-key:134
-5fa41113db18e524988ae5f477333530bb5cb529:tests/fixtures/contract-v1.json:generic-api-key:135
+60d0bb897accfa81c572368e098dc0bea780a41f:tests/fixtures/contract-v1.json:generic-api-key:135
 tests/fixtures/contract-v1.json:generic-api-key:135
+# False positive: line 9 of each launcher.json is manifest_key_1_x, the service's public Ed25519 manifest key (the
+# verifying half, published at /v1/keys). It is meant to be public.
+c5d790d689e7497f589f26e53c9fae1bd67d7df7:plugins/theodore/skills/deck-design/scripts/launcher.json:generic-api-key:9
+c5d790d689e7497f589f26e53c9fae1bd67d7df7:plugins/theodore/skills/pptx/scripts/launcher.json:generic-api-key:9
+plugins/theodore/skills/deck-design/scripts/launcher.json:generic-api-key:9
+plugins/theodore/skills/pptx/scripts/launcher.json:generic-api-key:9

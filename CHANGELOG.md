@@ -17,6 +17,11 @@
   shell exactly; one line says it may run in a cloud sandbox session.
 - Windows (lane WIN): asset packs come back for a catalogue call; LibreOffice is fetched when nothing can render
   (about 350 MB, in the background) and the deck waits for it; doctor says when Claude Code has no Git Bash.
+- Windows (lane WIN): Git Bash for Claude Code on Windows without Git (PortableGit, pinned, into Theodore's folder;
+  CLAUDE_CODE_GIT_BASH_PATH set and taken back on uninstall); LibreOffice unpacks without Windows Installer when the
+  service refuses (1601); only x64 runtime DLLs are copied beside soffice.
+- The deck-design body loaded by the skill names this launcher's path in its reporting line; the service names the
+  launcher by where it is when its text reaches the agent through a tool.
 - Launcher generation 8.
 
 ## 0.3.2

@@ -11,7 +11,9 @@ decks there too, and that workspace is the computer this page means.
    ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
    present, downloads about 100 to 130 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice,
    also LibreOffice, about 300 MB, and on Windows with neither LibreOffice nor PowerPoint, about 350 MB, both in the
-   background), and signs this computer in with the one-time code. Run the
+   background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
+   no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and
+   sets Claude Code's CLAUDE_CODE_GIT_BASH_PATH to it, so Theodore's skills can load; uninstalling takes both back. Run the
    line for the shell you have, exactly as written:
    macOS/Linux:        ( d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
    Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d
