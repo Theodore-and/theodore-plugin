@@ -325,6 +325,18 @@ class WindowsLauncher(unittest.TestCase):
         return subprocess.Popen(command, env={**self.box.env, **(env or {})}, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, cwd=str(self.box.tmp))
 
+    def test_the_skill_body_with_characters_outside_the_code_page(self):
+        self.box.run_launcher("version", timeout=600)
+        self.box.wait_jobs(600)
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600).returncode, 0)
+        self.api.guides["deck-design"][""] = "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n"
+        done = subprocess.run(cmd_command(str(self.box.launcher), "skill", "deck-design"), env=self.box.env, capture_output=True,
+                              timeout=600, cwd=str(self.box.tmp))
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(done.stdout.decode("utf-8"), "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n".replace("\n", "\r\n")
+                         if b"\r\n" in done.stdout else "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n")
+
     def test_before_setup_standard_output_stays_clean_then_the_server_answers(self):
         proc = self._mcp({"THEODORE_BOOTSTRAP_WAIT": "1"})
         out, err = proc.communicate(b"", timeout=600)

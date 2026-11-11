@@ -2146,6 +2146,22 @@ class Internals(unittest.TestCase):
         self.assertEqual(api._network_error(OSError("[Errno 61] Connection refused (127.0.0.1:64071)")).cause, "NETWORK")
         self.assertEqual(api._network_error(OSError("http://127.0.0.1:4070/x unreachable")).cause, "NETWORK")
 
+    def test_output_is_utf8_whatever_the_code_page(self):
+        import io
+        from theodore_client import cli
+        raw = io.BytesIO()
+        saved = sys.stdout
+        wrapper = sys.stdout = io.TextIOWrapper(raw, encoding="cp1252", newline="")       # what a Windows pipe gets
+        try:
+            cli._utf8_streams()
+            sys.stdout.write("a \u2192 b \u2014 c\n")
+            sys.stdout.flush()
+            written = raw.getvalue()
+        finally:
+            sys.stdout = saved
+        self.assertEqual(written.decode("utf-8"), "a \u2192 b \u2014 c\n")
+        self.assertEqual(wrapper.encoding, "utf-8")
+
     def test_exit_codes_are_the_frozen_ones(self):
         from theodore_client.contract import EXIT
         self.assertEqual(EXIT, {"OK": 0, "USAGE": 64, "SIGN_IN_REQUIRED": 65, "SIGN_IN_PENDING": 66, "SETUP_IN_PROGRESS": 67, "SETUP_FAILED": 68,

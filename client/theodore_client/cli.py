@@ -173,7 +173,18 @@ def _dispatch(argv: list[str]) -> int:
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 
+def _utf8_streams() -> None:
+    """Text goes out as UTF-8 whatever the system's code page: on Windows a pipe or a file otherwise gets the ANSI code
+    page (cp1252), and a guidance character outside it would end the command with UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "").replace("_", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["mcp"]:         # standard output carries only the protocol: statuses become tool answers
         from . import mcp
