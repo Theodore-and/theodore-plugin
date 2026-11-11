@@ -527,5 +527,49 @@ class Generations(LauncherCase):
         self.assertEqual(stamp.stat().st_mtime_ns, before)
 
 
+class Environments(LauncherCase):
+    """Ruling 6: a Theodore folder records the service it belongs to; a launcher stamped for another refuses it."""
+
+    STAGING = "https://api.staging.example.test"
+
+    def test_a_folder_of_another_service_is_not_reused_and_the_way_out_is_named(self):
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs()
+        record = self.box.home / "state" / "environment"
+        self.assertEqual(record.read_text().strip(), self.api.base, "the folder records its service")
+        stable = self.box.home / "bin" / "launcher.json"
+        before = stable.read_bytes()
+        for generation in (1, 2):           # the same generation, and a newer one that would otherwise take the stable copy's place
+            with self.subTest(generation=generation):
+                self.box.write_launcher_json(generation=generation, api_base=self.STAGING, site_base="https://staging.example.test")
+                first, nxt, tell = self.assertStatus(self.run_launcher("guide", "pptx"), "USAGE", 64)
+                for text in (self.api.base, self.STAGING, str(self.box.home)):
+                    self.assertIn(text, first)
+                self.assertIn("THEODORE_HOME", nxt)
+                self.assertIn("uninstall", nxt)
+                self.assertIn(str(self.box.home / "bin" / ("theodore.cmd" if IS_WINDOWS else "theodore")), nxt)
+                self.assertEqual(stable.read_bytes(), before, "the other service's stable copy is left alone")
+                self.assertEqual(record.read_text().strip(), self.api.base)
+        legacy = self.box.home / "state" / "environment"
+        legacy.unlink()                     # a folder from before the record: its stable launcher.json says
+        self.assertStatus(self.run_launcher("version"), "USAGE", 64)
+        self.box.write_launcher_json()      # this service's build again: it works and records the folder's service
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.assertEqual(legacy.read_text().strip(), self.api.base)
+
+    def test_uninstall_is_the_way_out_and_a_separate_folder_works(self):
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs()
+        self.box.write_launcher_json(api_base=self.STAGING)
+        other = self.box.tmp / "staging home"
+        result = self.run_launcher("version", env={"THEODORE_HOME": str(other)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.box.wait_jobs()
+        self.assertEqual((other / "state" / "environment").read_text().strip(), self.STAGING)
+        removed = self.run_launcher("uninstall")
+        self.assertIn(removed.returncode, (0, 75), removed.stdout + removed.stderr)     # Windows schedules the removal
+        self.assertNotIn("THEODORE USAGE", removed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

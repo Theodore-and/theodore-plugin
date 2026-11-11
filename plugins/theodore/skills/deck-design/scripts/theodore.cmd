@@ -35,10 +35,35 @@ if /i "%~1"=="uninstall" goto :keys_ok
 "%SYS32%\findstr.exe" /r /c:"\"manifest_key_[0-9]*_x\"" "%CONF%" 2>nul | "%SYS32%\findstr.exe" /v /c:"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" >nul 2>&1 || goto :no_keys
 :keys_ok
 
+rem --- 1b. a Theodore folder belongs to one service: the one it was set up for (state\environment, one line) ------
+rem The detached job (__bootstrap) gets its folder as an argument and was checked by the call that started it.
+set "FOREIGN="
+call :jget api_base "%CONF%"
+set "MY_API=%JV%"
+if "%~1"=="__bootstrap" goto :env_ok
+if not defined MY_API goto :env_ok
+if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
+set "HOME_API="
+if exist "%HOME_DIR%\state\environment" for /f "usebackq delims=" %%L in ("%HOME_DIR%\state\environment") do if not defined HOME_API set "HOME_API=%%L"
+if exist "%HOME_DIR%\state\environment" goto :env_compare
+rem A folder from before the record: its stable copy says.
+if not exist "%HOME_DIR%\bin\launcher.json" goto :env_ok
+call :jget api_base "%HOME_DIR%\bin\launcher.json"
+set "HOME_API=%JV%"
+:env_compare
+if not defined HOME_API goto :env_ok
+if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
+if /i "%HOME_API%"=="%MY_API%" goto :env_ok
+set "FOREIGN=1"
+rem Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.
+if /i not "%~1"=="uninstall" goto :foreign_home
+:env_ok
+
 rem --- 2. one stable copy in <home>\bin: newer wins ---------------------------------------------------------------
 call :jget launcher_generation "%CONF%"
 set /a MY_GEN=JV
 if /i "%SELF%"=="%STABLE%" goto :copied
+if defined FOREIGN goto :copied
 set /a ST_GEN=-1
 if not exist "%STABLE%" goto :st_done
 if not exist "%HOME_DIR%\bin\launcher.json" goto :st_done
@@ -300,6 +325,7 @@ set "THEODORE_LAUNCHER=%LAUNCHER%"
 
 :bootstrap_job
 for %%D in (staging runtime client logs) do if not exist "%HOME_DIR%\%%D" mkdir "%HOME_DIR%\%%D" 2>nul
+if defined MY_API if not exist "%HOME_DIR%\state\environment" (>"%HOME_DIR%\state\environment" echo %MY_API%)
 del /q "%B%\failed" >nul 2>&1
 call :jget stage1_python_win32_%ARCH%_url "%CONF%"
 set "PY_URL=%JV%"
@@ -405,6 +431,12 @@ echo THEODORE INTERNAL: this copy of the Theodore plugin carries no release sign
 echo NEXT: do not retry. Tell the user to install Theodore from https://theodoreand.ai/install; this copy is an unstamped development build.
 echo TELL THE USER: This copy of Theodore was built without its security keys and cannot be used. Please install it again from theodoreand.ai/install.
 exit /b 78
+
+:foreign_home
+echo THEODORE USAGE: this Theodore folder (%HOME_DIR%) belongs to the Theodore service at %HOME_API%, but this launcher is stamped for %MY_API%; a folder is never shared between two services.
+echo NEXT: do not retry. Tell the user: to use this build, set THEODORE_HOME to a separate folder for it and run the same command again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
+echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
+exit /b 64
 
 :no_conf
 echo THEODORE INTERNAL: launcher.json is missing beside the launcher.

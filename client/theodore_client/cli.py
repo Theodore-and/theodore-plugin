@@ -167,6 +167,10 @@ def _dispatch(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        core.check_environment(argv[0] if argv else None)      # before anything touches the folder
+    except Status as status:
+        return core.emit(status)
     specimens.sweep()       # specimen sheets older than an hour go before anything else is done
     try:
         code = _dispatch(argv)

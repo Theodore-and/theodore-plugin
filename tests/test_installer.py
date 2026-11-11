@@ -151,6 +151,19 @@ class Installer(unittest.TestCase):
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the runtime is installed while the user approves")
         self.assertNotIn("/v1/device/activate", [r["path"] for r in self.api.requests])
 
+    def test_a_folder_of_another_service_is_refused_before_anything_is_downloaded(self):
+        (self.box.home / "state").mkdir(parents=True)
+        (self.box.home / "state" / "environment").write_text("https://api.other.example.test\n")
+        result = self.install()
+        self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+        first, nxt, _tell = status_lines(result.stdout)
+        self.assertIn("https://api.other.example.test", first)
+        self.assertIn(self.api.base, first)
+        self.assertIn("THEODORE_HOME", nxt)
+        self.assertIn("uninstall", nxt)
+        self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/")], [], "nothing was downloaded")
+        self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["state"])
+
     def test_bad_arguments(self):
         for args in (("--frobnicate",), ("--code", "nope")):
             result = self.install(*args)

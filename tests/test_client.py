@@ -1800,6 +1800,36 @@ class Revocation(ClientCase):
                 self.assertStatus(self.client("pptx", "start", str(workspace)), "SIGN_IN_REQUIRED", 65)
 
 
+class Environments(ClientCase):
+    """Ruling 6, in the client: a build stamped for another service refuses this folder; printed links come from the
+    running build's stamp."""
+
+    def skill(self, **overrides) -> dict:
+        folder = self.box.tmp / "other build" / "skills" / "pptx"
+        self.box.write_launcher_json(into=folder / "scripts", **overrides)
+        return {"THEODORE_SKILL_DIR": str(folder)}
+
+    def test_a_build_of_another_service_refuses_and_uninstall_is_allowed(self):
+        self.ready()
+        self.assertEqual((self.box.home / "state" / "environment").read_text().strip(), self.api.base)
+        env = self.skill(api_base="https://api.staging.example.test")
+        for command in (["guide", "pptx"], ["version"], ["prefs", "list"], ["login", "--start"]):
+            first, nxt, _tell = self.assertStatus(self.client(*command, env=env), "USAGE", 64)
+            self.assertIn("https://api.staging.example.test", first)
+            self.assertIn(self.api.base, first)
+            self.assertIn("THEODORE_HOME", nxt)
+        self.assertEqual(len([r for r in self.api.requests if "staging" in r["path"]]), 0)
+        self.assertIn(self.client("uninstall", env=env).returncode, (0, 75))
+        self.assertFalse((self.box.home / "engines").exists())
+
+    def test_printed_links_come_from_the_running_build(self):
+        self.ready()
+        env = self.skill(site_base="https://running-build.example.test")
+        _f, nxt, tell = self.assertStatus(self.client("update", "--channel", "beta", env=env), "OK", 0)
+        self.assertIn("https://running-build.example.test/app/plan", nxt)
+        self.assertIn("running-build.example.test/app/plan", tell)
+
+
 class Internals(unittest.TestCase):
     def test_ed25519_rfc8032_vectors(self):
         from theodore_client import ed25519

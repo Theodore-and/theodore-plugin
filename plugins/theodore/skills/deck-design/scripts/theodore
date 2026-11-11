@@ -107,10 +107,29 @@ jget() { # file key
 }
 num() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
 
+# --- 1b. a Theodore folder belongs to one service: the one it was set up for (state/environment, one line) ---------
+MY_API=$(jget "$CONF" api_base); MY_API=${MY_API%/}
+HOME_API=
+if [ -f "$HOME_DIR/state/environment" ]; then
+  HOME_API=$(head -n 1 "$HOME_DIR/state/environment" 2>/dev/null | tr -d '\r')
+elif [ -f "$HOME_DIR/bin/launcher.json" ]; then        # a folder from before the record: its stable copy says
+  HOME_API=$(jget "$HOME_DIR/bin/launcher.json" api_base)
+fi
+HOME_API=${HOME_API%/}
+FOREIGN=
+if [ -n "$HOME_API" ] && [ -n "$MY_API" ] && [ "$HOME_API" != "$MY_API" ]; then
+  FOREIGN=1
+  # Uninstalling is the documented way out, so it is allowed; nothing else runs against another service's folder.
+  [ "${1:-}" = uninstall ] || status USAGE 64 "this Theodore folder ($HOME_DIR) belongs to the Theodore service at $HOME_API, but this launcher is stamped for $MY_API; a folder is never shared between two services." \
+    "do not retry. Tell the user: to use this build, set THEODORE_HOME to a separate folder for it and run the same command again, or first remove the other installation with: \"$HOME_DIR/bin/theodore\" uninstall" \
+    "Theodore found an installation for another Theodore service ($HOME_API) in $HOME_DIR. To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first."
+fi
+record_environment() { [ -n "$MY_API" ] && [ -z "$FOREIGN" ] && [ -d "$HOME_DIR/state" ] && [ ! -s "$HOME_DIR/state/environment" ] && printf '%s\n' "$MY_API" > "$HOME_DIR/state/environment" 2>/dev/null; return 0; }
+
 
 # --- 2. one stable copy in <home>/bin: newer wins --------------------------------------------------------------
 MY_GEN=$(num "$(jget "$CONF" launcher_generation)" 0)
-if [ "$SELF" != "$STABLE" ]; then
+if [ "$SELF" != "$STABLE" ] && [ -z "$FOREIGN" ]; then
   ST_GEN=-1
   if [ -f "$STABLE" ] && [ -f "$HOME_DIR/bin/launcher.json" ]; then
     ST_GEN=$(num "$(jget "$HOME_DIR/bin/launcher.json" launcher_generation)" -1)
@@ -214,6 +233,7 @@ fetch() { # url dest; on failure sets CAUSE and DETAIL
 # --- 4b. the bootstrap job (runs detached; started below) --------------------------------------------------------
 bootstrap_job() {
   mkdir -p "$B" "$HOME_DIR/staging" "$HOME_DIR/runtime" "$HOME_DIR/client" "$HOME_DIR/logs" || exit 1
+  record_environment
   echo $$ > "$B/pid"
   rm -f "$B/failed"
   fail() { printf '%s\n%s\n' "$1" "$2" > "$B/failed"; rm -f "$B/pid" "$B/phase"; exit 1; }

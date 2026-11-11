@@ -28,7 +28,9 @@ Windows 10 version 1803 or later (x64), Linux x64 and arm64 with glibc 2.28 or l
 Everything Theodore owns is in one folder per user: `~/.theodore` on macOS and Linux,
 `%LOCALAPPDATA%\Theodore` on Windows (`THEODORE_HOME` overrides it). All assistants on the computer share it.
 Theodore creates and manages only the subfolders listed here. If the folder already exists and holds anything
-else, Theodore never reads, changes or deletes it.
+else, Theodore never reads, changes or deletes it. The folder belongs to the Theodore service it was set up for
+(`state/environment` names it): a build for another service refuses it and says so; give that build its own folder
+with `THEODORE_HOME`, or uninstall the other first.
 
 | Path | What it is | Size |
 | --- | --- | --- |

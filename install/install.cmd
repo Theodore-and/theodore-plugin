@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=manifest-unset=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.2.1"
-set "PIN_CLIENT=client/client-0.2.1.tar 2821130fd274d765fd69ee43819ce2e50d0affd9ad80691aa55613b0b56308a8"
+set "PIN_CLIENT=client/client-0.2.1.tar 8fb59c94b09a08f725ac505eebe51c78c77e989e7005e785f3ffaf50538dbae6"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -76,7 +76,7 @@ set "HASH="
 for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%SELF%" SHA256 2^>nul') do if not defined HASH set "HASH=%%H"
 if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with https://theodoreand.ai/install)
 
-if not defined UNINSTALL goto :install
+if not defined UNINSTALL goto :env_check
 if exist "%HOME_DIR%\bin\theodore.cmd" "%HOME_DIR%\bin\theodore.cmd" uninstall
 rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
 rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
@@ -91,6 +91,29 @@ echo THEODORE OK: Theodore is not installed on this computer.
 echo NEXT: nothing to do.
 echo TELL THE USER: Theodore was not installed on this computer.
 exit /b 0
+
+:env_check
+rem A Theodore folder belongs to one service, the one it was set up for (state\environment): this installer does not
+rem reuse a folder of another. Uninstalling is the way out, so it is allowed.
+set "MY_API=%API_BASE%"
+if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
+set "HOME_API="
+if exist "%HOME_DIR%\state\environment" for /f "usebackq delims=" %%L in ("%HOME_DIR%\state\environment") do if not defined HOME_API set "HOME_API=%%L"
+if exist "%HOME_DIR%\state\environment" goto :env_compare
+if not exist "%HOME_DIR%\bin\launcher.json" goto :install
+for /f "usebackq tokens=1,* delims=:" %%A in (`%SYS32%\findstr.exe /c:"\"api_base\"" "%HOME_DIR%\bin\launcher.json" 2^>nul`) do if not defined HOME_API set "HOME_API=%%B"
+if not defined HOME_API goto :install
+set "HOME_API=%HOME_API:"=%"
+if "%HOME_API:~-1%"=="," set "HOME_API=%HOME_API:~0,-1%"
+if "%HOME_API:~0,1%"==" " set "HOME_API=%HOME_API:~1%"
+:env_compare
+if not defined HOME_API goto :install
+if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
+if /i "%HOME_API%"=="%MY_API%" goto :install
+echo THEODORE USAGE: the Theodore folder %HOME_DIR% belongs to the Theodore service at %HOME_API%, but this installer is for %MY_API%; a folder is never shared between two services.
+echo NEXT: do not retry. Tell the user: to install this build, set THEODORE_HOME to a separate folder for it and run the installer again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
+echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
+exit /b 64
 
 :install
 if not defined CODE goto :code_ok
@@ -110,6 +133,7 @@ if not defined ARCH goto :no_curl
 if not exist "%HOME_DIR%\staging" mkdir "%HOME_DIR%\staging" 2>nul
 if not exist "%HOME_DIR%\state" mkdir "%HOME_DIR%\state" 2>nul
 if not exist "%HOME_DIR%\staging" goto :not_writable
+if not exist "%HOME_DIR%\state\environment" (>"%HOME_DIR%\state\environment" echo %MY_API%)
 rem state\ holds the activation answer (the installation secret) for a minute: only this user may read it, whatever
 rem folder THEODORE_HOME points at. Inheritance is cut and the current user alone gets access, before anything is written.
 set "SID="

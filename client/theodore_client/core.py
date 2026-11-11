@@ -247,14 +247,63 @@ def config() -> dict:
     return _CONFIG
 
 
-def site_base() -> str:
-    """The site this build belongs to (sign-in pages, the portal, the install page): launcher.json's site_base, or
-    for a launcher.json from before that key the origin of its marketplace address. Never a host written here: a
-    staging build must not send anyone to production. Empty when launcher.json names neither."""
+def running_stamp() -> dict:
+    """launcher.json of the build that is running: beside the skill folder that called us (the launcher names it),
+    else <home>/bin's. {} when there is none."""
+    skill = os.environ.get("THEODORE_SKILL_DIR")
+    if skill:
+        try:
+            stamp = json.loads((Path(skill) / "scripts" / "launcher.json").read_text(encoding="utf-8"))
+            if isinstance(stamp, dict):
+                return stamp
+        except (OSError, ValueError):
+            pass
     try:
-        cfg = config()
+        return config()
     except Status:
-        return ""
+        return {}
+
+
+def environment_path() -> Path:
+    """state/environment: the API base of the service this Theodore folder was set up for, one line (the launchers
+    and installers read it too)."""
+    return home().state / "environment"
+
+
+def home_environment() -> str:
+    lines = read_text(environment_path()).splitlines()
+    recorded = lines[0].strip() if lines else ""
+    if not recorded:            # a folder from before the record: its stable launcher.json says
+        recorded = str(read_json(home().bin / "launcher.json").get("api_base") or "").strip()
+    return recorded.rstrip("/")
+
+
+def check_environment(command: str | None) -> None:
+    """A Theodore folder belongs to one service. A build stamped for another refuses it, naming both and the ways
+    out; `uninstall` (one of those ways) is allowed. A folder without a record gets this build's."""
+    own = str(running_stamp().get("api_base") or "").strip().rstrip("/")
+    if not own:
+        return
+    theirs = home_environment()
+    if theirs and theirs != own:
+        if command == "uninstall":
+            return
+        raise Status("USAGE", f"this Theodore folder ({home().root}) belongs to the Theodore service at {theirs}, but this build is "
+                              f"stamped for {own}; a folder is never shared between two services.",
+                     f"do not retry. Tell the user: to use this build, set THEODORE_HOME to a separate folder for it and run the same "
+                     f"command again, or first remove the other installation with: \"{home().bin / ('theodore.cmd' if IS_WINDOWS else 'theodore')}\" uninstall",
+                     f"Theodore found an installation for another Theodore service ({theirs}) in {home().root}. To use this one, give it "
+                     f"its own folder (THEODORE_HOME) or uninstall the other first.")
+    if not read_text(environment_path()) and home().state.is_dir():
+        with contextlib.suppress(OSError):
+            write_atomic(environment_path(), own + "\n", 0o644)
+
+
+def site_base() -> str:
+    """The site this build belongs to (sign-in pages, the portal, the install page): the running build's
+    launcher.json site_base, or for a launcher.json from before that key the origin of its marketplace address.
+    Never a host written here: a staging build must not send anyone to production. Empty when it names neither."""
+    cfg = running_stamp()
     base = str(cfg.get("site_base") or "").strip().rstrip("/")
     if not base:
         parsed = urlparse(str(cfg.get("marketplace_url") or ""))
