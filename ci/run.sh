@@ -176,7 +176,7 @@ run_windows() {
   ( cd "$ROOT" && git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar --no-mac-metadata --no-xattrs -cf "$dir/repo.tar" ) || { result "$name" shim fail; result "$name" runtime fail; return; }
   SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 ${KNOWN:+-o UserKnownHostsFile=$KNOWN} ${KEY:+-i $KEY}"
   # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
-  retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; sleep 20; done; }
+  retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
   if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' > "$dir/remote.log" 2>&1 &&
       retry scp -q $SSHO -o ConnectTimeout=20 "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" >> "$dir/remote.log" 2>&1 &&
       retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "(if not exist C:\\theodore-ci\\started C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo) & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-start.ps1 $pins" >> "$dir/remote.log" 2>&1; then
@@ -184,6 +184,8 @@ run_windows() {
     wstart=$(date +%s)
     until ssh $SSHO -o ConnectTimeout=20 "$HOST" 'if exist C:\theodore-ci\out\runtime.result echo done' 2>/dev/null | grep -q done; do
       [ $(( $(date +%s) - wstart )) -lt 10800 ] || { say "windows-x64: no result after 3 h"; break; }
+      # Not answering: on Azure, this Mac may have changed address; admit the new one (the job runs on regardless).
+      ssh $SSHO -o ConnectTimeout=20 "$HOST" 'echo up' >/dev/null 2>&1 || { [ -z "${ADMIT:-}" ] || $ADMIT >> "$dir/remote.log" 2>&1; }
       sleep 30
     done
   fi
@@ -204,6 +206,7 @@ run_windows_azure() {
   started=$(date +%s)
   if CI_AZURE_KEY="${KEY:-$HOME/.ssh/theodore_ci}" bash "$ROOT/ci/azure-windows.sh" up "$state" > "$dir/azure.log" 2>&1; then
     HOST=$(cat "$state/host") KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN="$state/known_hosts"
+    ADMIT="bash $ROOT/ci/azure-windows.sh admit $state"
     say "windows-x64: $(cat "$state/size" 2>/dev/null) ready after $(( $(date +%s) - started )) s"
     cp "$dir/azure.log" "$OUT/azure-up.log"
     run_windows

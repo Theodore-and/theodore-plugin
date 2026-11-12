@@ -5,6 +5,8 @@
 #
 #   ci/azure-windows.sh up <state-dir>     create it; writes <state-dir>/host (user@ip), known_hosts, group
 #   ci/azure-windows.sh down <state-dir>   delete its resource group (and wait), then the state folder
+#   ci/azure-windows.sh admit <state-dir>  add the /24 this machine leaves from now to the SSH rule (its address can
+#                                          change during a run; ci/run.sh calls it when the machine stops answering)
 #   ci/azure-windows.sh sweep              delete every throwaway group left behind (tag purpose=theodore-plugin-ci
 #                                          and a theodore-plugin-ci-<UTC> name)
 #
@@ -24,7 +26,7 @@ die() { say "$*"; exit 1; }
 
 ACTION=${1:-}
 STATE=${2:-}
-[ -n "$ACTION" ] && { [ -n "$STATE" ] || [ "$ACTION" = sweep ]; } || { sed -n '2,9p' "$0"; exit 64; }
+[ -n "$ACTION" ] && { [ -n "$STATE" ] || [ "$ACTION" = sweep ]; } || { sed -n '2,11p' "$0"; exit 64; }
 LOCATION=${CI_AZURE_LOCATION:-eastus2}
 # Tried in order until Azure has capacity for one (a size can be "not available" in a region for hours).
 SIZES=${CI_AZURE_SIZE:-Standard_D4s_v3 Standard_F4s_v2 Standard_D4as_v4 Standard_D4s_v4}
@@ -98,6 +100,8 @@ PS
         "$USER_NAME@$addr" "echo ready" >/dev/null 2>&1; then
       say "ready: $USER_NAME@$addr"; return 0
     fi
+    # This machine may now leave from another address than the ones probed at the start.
+    [ $((i % 6)) -ne 0 ] || admit || true
     sleep 10
   done
   die "no SSH answer from $addr"
@@ -111,6 +115,21 @@ down() {
   az group delete -n "$group" --yes -o none
   rm -rf "${STATE:?}"
   say "deleted $group"
+}
+
+admit() {
+  [ -f "$STATE/group" ] || die "no machine in $STATE"
+  local group ip net cur; group=$(cat "$STATE/group")
+  [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || die "refusing to change '$group': not a group this script made"
+  ip=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null) || { say "cannot read this machine's public address"; return 1; }
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { say "cannot read this machine's public address"; return 1; }
+  net="${ip%.*}.0/24"
+  cur=$(az network nsg rule show -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
+    --query "join(' ', [sourceAddressPrefix || '', join(' ', sourceAddressPrefixes)])" -o tsv)
+  case " $cur " in *" $net "*) return 0 ;; esac
+  az network nsg rule update -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
+    --source-address-prefixes $(printf '%s\n' $cur "$net" | sort -u) -o none
+  say "SSH now also admitted from $net"
 }
 
 sweep() {
@@ -127,8 +146,9 @@ sweep() {
   case "$ACTION" in
     up) up ;;
     down) down ;;
+    admit) admit ;;
     sweep) sweep ;;
-    *) sed -n '2,9p' "$0"; exit 64 ;;
+    *) sed -n '2,11p' "$0"; exit 64 ;;
   esac
   exit $?
 }
