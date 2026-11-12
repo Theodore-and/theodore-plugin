@@ -33,8 +33,8 @@ pages). LibreOffice, when Theodore fetches it, comes unmodified from The Documen
 
 ## What is sent
 
-The installation credential, the installation id, the computer's name (shown to you in the portal's Devices
-page), operating system and processor type, the client, plugin and engine versions, the update channel, the
+The installation credential, the installation id, the computer's name (shown to you in the portal's Settings,
+Computers and assistants), operating system and processor type, the client, plugin and engine versions, the update channel, the
 names of the instructions and section requested, and the name of the assistant when it can be told (for example
 "claude-code"; "claude-web" or "chatgpt" for a Claude or ChatGPT cloud workspace, whose device entry ends by itself
 after 7 days without use). The assistant is told from the variables it sets for the programs it starts; no other
@@ -69,8 +69,8 @@ changed since the client last learned it, the service refuses the report, stores
 
 ## Credentials and the licence
 
-- The installation credential is issued at sign-in, is valid only for this computer, and can be revoked from
-  the portal's Devices page. It is kept in the macOS keychain (through `/usr/bin/security`), in a
+- The installation credential is issued at sign-in, is valid only for this computer, and can be removed from
+  Settings in the portal (Computers and assistants). It is kept in the macOS keychain (through `/usr/bin/security`), in a
   DPAPI-protected file on Windows, and in a file readable only by you on Linux (also on a Mac when the
   keychain is not available, for example over SSH). It is never printed or logged.
 - The licence is a signed token that the engine checks offline. It is refreshed when online and lasts 7 days
@@ -129,7 +129,7 @@ changed since the client last learned it, the service refuses the report, stores
 plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). On Windows the folders go a moment
 after the client has exited, so the first run says the removal is scheduled, not confirmed (`RETRY`); running the
 installer with `--uninstall` again confirms it, and answers `RETRY` while any of those folders or the render cache remains. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
-portal's Devices page. The next command on that computer that reaches the Theodore service, whichever it is (loading
+Settings in the portal (Computers and assistants, Remove). The next command on that computer that reaches the Theodore service, whichever it is (loading
 the instructions, a licence refresh, an update check, a report, automatic or not, a preference, a specimen, the setup
 job, the hourly "in use" note), is refused: the client deletes the stored sign-in and the stored licence at once, and
 that command ends with `SIGN_IN_REQUIRED` and the sign-in link, whatever else it did or failed to do afterwards (it
