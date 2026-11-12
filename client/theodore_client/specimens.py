@@ -8,6 +8,11 @@ folder (~/Library/Caches/Theodore/specimens, $XDG_CACHE_HOME/theodore/specimens,
 Every folder made is recorded in <home>/state/specimens.txt, one line "<created epoch> <path>", which the launchers and
 installers read too. Every client call first removes recorded folders, and folders in the current roots, older than an
 hour; `uninstall` removes them all. A changed TMPDIR therefore cannot strand a folder.
+
+A sheet already held in a recorded folder at most REUSE_SECONDS old is not fetched again: the client asks the service
+with If-None-Match (its SHA-256) and, on 304, prints that file's path. Nothing new is written and no bytes travel; the
+service still checks the device and the version on every call. A refusal that signs the device out or refuses the
+account removes every specimen folder at once.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from .core import Status
 
 PREFIX = "theodore-specimens-"
 KEEP_SECONDS = 3600
+REUSE_SECONDS = 2700            # a held sheet is reused while at least 15 minutes of its folder's hour remain
 MAX_FILES = 8
 MAX_BYTES = 1 << 20
 NAME = re.compile(r"[A-Za-z0-9._-]{1,80}\.jpg")
@@ -232,6 +238,27 @@ def _ours(path: Path) -> float | None:
         info = os.lstat(path)
         if stat.S_ISDIR(info.st_mode) and (core.IS_WINDOWS or info.st_uid == os.getuid()):
             return info.st_mtime
+    return None
+
+
+def held(name: str) -> Path | None:
+    """The newest recorded copy of sheet `name` that may be reused: in a folder of ours made at most REUSE_SECONDS ago,
+    a regular file (never a link) of at most MAX_BYTES. None when there is none."""
+    if not valid_name(name):
+        return None
+    now = core.now()
+    try:
+        entries = sorted(_read_registry(), key=lambda entry: entry[0], reverse=True)
+    except Exception:       # noqa: BLE001  no record: nothing to reuse
+        return None
+    for made, folder in entries:
+        if not 0 <= now - made <= REUSE_SECONDS or _ours(folder) is None or not _usable(folder.parent):
+            continue
+        path = folder / name
+        with contextlib.suppress(OSError):
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode) and 0 < info.st_size <= MAX_BYTES:
+                return path
     return None
 
 

@@ -181,8 +181,51 @@ class Specimen(ClientCase):
                          [("GET", "/v1/guide/specimens/cover-01.jpg", True, {"skill": "deck-design"}),
                           ("GET", "/v1/guide/specimens/Grid_2.b.jpg", True, {"skill": "deck-design"})])
         again = self.client("specimen", "cover-01.jpg", cwd=self.deck)
-        self.assertNotEqual(Path(again.stdout.strip()).parent, one.parent, "a folder per run, nothing is reused")
-        self.assertEqual(len(self.specimen_requests()), 3, "nothing is cached: asked again")
+        self.assertEqual(Path(again.stdout.strip()), one, "a sheet held in a recent folder is reused after the check")
+        self.assertEqual(len(self.specimen_requests()), 3, "asked again, conditionally")
+        self.assertEqual(self.api.served["specimen", "cover-01.jpg", 304], 1)
+        self.assertEqual(self.folders(), [one.parent], "nothing new written")
+
+    def test_reuse_one_fetch_per_distinct_sheet_across_calls(self):
+        names = [f"s{i}.jpg" for i in range(10)]
+        self.api.specimens = {name: JPEG + name.encode() for name in names}
+        calls = [names[0:6], names[3:9], names[5:10] + names[0:2], names[1:7], names[::2], names[4:10]]
+        printed = {}
+        for asked in calls:          # a lead and five designers, each in a process of its own
+            result = self.client("specimen", *asked[:8])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name, line in zip(asked, result.stdout.splitlines()):
+                self.assertEqual(Path(line).read_bytes(), JPEG + name.encode())
+                printed.setdefault(name, set()).add(line)
+        for name in names:
+            self.assertEqual(self.api.served["specimen", name, 200], 1, name)
+            self.assertEqual(len(printed[name]), 1, "the same held copy each time")
+        self.assertEqual(sum(v for (route, _n, status), v in self.api.served.items() if route == "specimen" and status == 304),
+                         sum(len(set(c)) for c in calls) - len(names))
+
+    def test_no_reuse_of_a_changed_sheet_an_old_folder_or_an_older_service(self):
+        first = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        self.api.specimens["cover-01.jpg"] = JPEG + b"v2"            # a new version: the held copy no longer matches
+        second = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        self.assertNotEqual(second, first)
+        self.assertEqual(second.read_bytes(), JPEG + b"v2")
+        self.assertEqual(self.api.served["specimen", "cover-01.jpg", 200], 2)
+        later = self.client("specimen", "cover-01.jpg", env={"THEODORE_TEST_CLOCK_OFFSET": "2760"})    # 46 minutes on
+        self.assertNotIn(Path(later.stdout.strip()).parent, (first.parent, second.parent), "too little of the hour is left")
+        self.api.specimen_etag = False                              # an older service: no ETag, If-None-Match ignored
+        older = Path(self.client("specimen", "Grid_2.b.jpg").stdout.strip())
+        again = Path(self.client("specimen", "Grid_2.b.jpg").stdout.strip())
+        self.assertNotEqual(older, again)
+        self.assertEqual(again.read_bytes(), JPEG + b"2")
+
+    def test_a_refusal_removes_every_held_sheet(self):
+        held = Path(self.client("specimen", "cover-01.jpg", "Grid_2.b.jpg").stdout.splitlines()[0])
+        self.assertTrue(held.exists())
+        for inst in self.api.installations.values():
+            inst["revoked"] = True
+        self.assertStatus(self.client("specimen", "cover-01.jpg"), "SIGN_IN_REQUIRED", 65)
+        self.assertFalse(held.parent.exists(), "a revoked device keeps no sheet on disk")
+        self.assertEqual(self.folders(), [])
 
     def test_a_temporary_folder_inside_the_deck_or_inside_theodore_is_not_used(self):
         for inside in (self.deck / "tmp", self.box.home / "tmp"):
