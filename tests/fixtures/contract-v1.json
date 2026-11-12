@@ -132,7 +132,7 @@
     "channel": "theodore-channel-manifest@1",
     "runtime": "theodore-runtime-manifest@1"
   },
-  "openapi_sha256": "f4e5f4f0d066ab9f3dc000728352a959e43c4467c12a2b4639db765ac267c857",
+  "openapi_sha256": "fd865a5ba9a2a89a3fadbd01dc08a66441ea090b42ac20c7c6889e671abeaf5b",
   "origins": {
     "production": {
       "api": "https://api.theodoreand.ai",
@@ -226,6 +226,7 @@
       "path": "/v1/guide/specimens/{file}",
       "responses": [
         "200",
+        "304",
         "401",
         "403",
         "404",
