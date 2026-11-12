@@ -7,8 +7,12 @@
 #   ci/azure-windows.sh down <state-dir>   delete its resource group (and wait), then the state folder
 #   ci/azure-windows.sh admit <state-dir>  add the /24 this machine leaves from now to the SSH rule (its address can
 #                                          change during a run; ci/run.sh calls it when the machine stops answering)
-#   ci/azure-windows.sh sweep              delete every throwaway group left behind (tag purpose=theodore-plugin-ci
-#                                          and a theodore-plugin-ci-<UTC> name)
+#   ci/azure-windows.sh sweep [hours]      delete every throwaway group left behind (tag purpose=theodore-plugin-ci
+#                                          and a theodore-plugin-ci-<UTC> name); with hours, only those older
+#
+# A deadline that does not need this Mac: the VM gets Azure's own auto-shutdown at CI_AZURE_DEADLINE_HOURS (default 4)
+# after it is made, which deallocates it (no compute billed) even if the run that made it is gone, and every
+# ci/run.sh windows-x64 --azure starts by sweeping groups older than that deadline plus one hour.
 #
 # Needs the Azure CLI signed in (az login) and an SSH key pair (CI_AZURE_KEY, default ~/.ssh/theodore_ci). What it
 # makes, all in a new resource group theodore-plugin-ci-<UTC time> in CI_AZURE_LOCATION (default eastus2):
@@ -59,7 +63,10 @@ up() {
   say "SSH admitted from: $from"
   # 24 characters from the system's random source, with the four classes Windows asks for
   ( umask 077; printf 'Aa1-%s' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)" > "$STATE/password" )
-  az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE -o none
+  local deadline_h=${CI_AZURE_DEADLINE_HOURS:-4} expires shutdown_at
+  expires=$(date -u -v+"${deadline_h}"H +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "+$deadline_h hours" +%Y-%m-%dT%H:%MZ)
+  shutdown_at=$(date -u -v+"${deadline_h}"H +%H%M 2>/dev/null || date -u -d "+$deadline_h hours" +%H%M)
+  az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE expires="$expires" -o none
   local size made=
   for size in $SIZES; do
     say "creating $group ($size, $LOCATION)"
@@ -74,6 +81,9 @@ up() {
   [ -n "$made" ] || die "no size of '$SIZES' could be made in $LOCATION"
   echo "$made" > "$STATE/size"
   rm -f "$STATE/password"
+  # The deadline Azure keeps by itself: deallocated at that UTC time even if nothing here is left to delete it.
+  az vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" -o none || die "could not set the VM's auto-shutdown deadline"
+  say "auto-shutdown (deallocate) at $shutdown_at UTC"
   az network nsg rule create -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner --priority 100 --direction Inbound \
     --access Allow --protocol Tcp --source-address-prefixes $from --destination-port-ranges 22 -o none
   local pub; pub=$(cut -d' ' -f1-2 "$KEY.pub")
@@ -112,7 +122,12 @@ down() {
   local group; group=$(cat "$STATE/group")
   [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || die "refusing to delete '$group': not a group this script made"
   say "deleting $group"
-  az group delete -n "$group" --yes -o none
+  local n=0
+  until az group delete -n "$group" --yes -o none; do
+    n=$((n + 1))
+    [ $n -lt 6 ] || die "could not delete $group (network?): its auto-shutdown deallocates it, and the next run's sweep deletes it"
+    sleep 30
+  done
   rm -rf "${STATE:?}"
   say "deleted $group"
 }
@@ -133,9 +148,15 @@ admit() {
 }
 
 sweep() {
-  local group found=0
+  local group found=0 hours=${STATE:-} made age
+  [ -z "$hours" ] || [[ "$hours" =~ ^[0-9]+$ ]] || die "sweep takes a number of hours"
   for group in $(az group list --tag purpose=$PURPOSE --query '[].name' -o tsv); do
     [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || { say "skipping $group: not a name this script makes"; continue; }
+    if [ -n "$hours" ]; then
+      made=${group##*-}
+      age=$(( $(date -u +%s) - $(date -u -j -f %Y%m%d%H%M%S "$made" +%s 2>/dev/null || date -u -d "${made:0:8} ${made:8:2}:${made:10:2}:${made:12:2}" +%s) ))
+      [ "$age" -ge $((hours * 3600)) ] || continue
+    fi
     say "deleting leftover $group"; az group delete -n "$group" --yes -o none; found=$((found + 1))
   done
   say "sweep: $found group(s) deleted"

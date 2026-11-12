@@ -83,7 +83,7 @@ in_container() { # docker-platform name script
   dplat=$1 name=$2 script=$3
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { say "docker is not running"; return 1; }
   mkdir -p "$OUT/$name" "$CACHE"
-  docker run --rm --platform "$dplat" -v "$ROOT:/repo:ro" -v "$OUT/$name:/repo/ci/out/$name" -v "$CACHE:/repo/ci/out/cache" \
+  docker run --rm --label "theodore-ci=$$" --platform "$dplat" -v "$ROOT:/repo:ro" -v "$OUT/$name:/repo/ci/out/$name" -v "$CACHE:/repo/ci/out/cache" \
     -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$UBUNTU" sh -c "$script"
 }
 
@@ -203,6 +203,10 @@ run_windows_azure() {
   # which runs the EXIT trap). The trap carries the paths by value.
   trap "bash '$ROOT/ci/azure-windows.sh' down '$state' >> '$dir/azure.log' 2>&1" EXIT
   trap 'exit 130' INT TERM HUP
+  # Started by ci/run.sh all: end (and delete the machine) as soon as that run is gone.
+  if [ -n "${CI_PARENT:-}" ]; then me=$$; ( while kill -0 "$CI_PARENT" 2>/dev/null; do sleep 10; done; kill -TERM "$me" 2>/dev/null ) & fi
+  # Groups an earlier run could not delete (its Mac lost the network): past their deadline, deleted now.
+  bash "$ROOT/ci/azure-windows.sh" sweep $(( ${CI_AZURE_DEADLINE_HOURS:-4} + 1 )) >> "$dir/azure.log" 2>&1
   started=$(date +%s)
   if CI_AZURE_KEY="${KEY:-$HOME/.ssh/theodore_ci}" bash "$ROOT/ci/azure-windows.sh" up "$state" > "$dir/azure.log" 2>&1; then
     HOST=$(cat "$state/host") KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN="$state/known_hosts"
@@ -284,18 +288,73 @@ require() {
   echo "no green check for $sha: run ci/run.sh all --azure at that commit (stamps in $LOGS/green/plugin/)" >&2; exit 1
 }
 
+# --- guards: one matrix run at a time on this Mac, a load ceiling, a hard deadline per job ------------------------------
+# The lock is shared by the three repositories' runners ($THEODORE_CI_LOGS/locks/matrix); a lock whose process is gone
+# is taken over. Before each heavy local job the runner waits until the 1- and 5-minute load averages are under
+# CI_MAX_LOAD (default 8). Each local job runs in its own process group under a hard deadline, and a watchdog kills it,
+# with its containers (label theodore-ci=<runner pid>), on the deadline or as soon as this runner is gone, however it died.
+LOCKDIR="$LOGS/locks/matrix"
+LOCKED=
+acquire_lock() { # what
+  mkdir -p "$LOGS/locks"
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$LOCKDIR"; continue; fi
+    say "another matrix run holds the lock (pid ${holder:-?}: $(cat "$LOCKDIR/what" 2>/dev/null)); waiting"; sleep 60
+  done
+  echo $$ > "$LOCKDIR/pid"; echo "$1" > "$LOCKDIR/what"; LOCKED=1
+}
+release_lock() { if [ -n "$LOCKED" ] && [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ]; then rm -rf "$LOCKDIR"; fi; LOCKED=; }
+wait_load() {
+  max=${CI_MAX_LOAD:-8}; said=
+  while :; do
+    set -- $(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}') 0 0
+    [ "${1%.*}" -lt "$max" ] && [ "${2%.*}" -lt "$max" ] && return 0
+    [ -n "$said" ] || say "load $1 $2, limit $max: waiting"; said=1; sleep 60
+  done
+}
+kill_containers() { docker ps -q --filter "label=theodore-ci=$$" 2>/dev/null | xargs docker kill >/dev/null 2>&1; }
+limited() { # seconds label command...: the command in its own process group, killed on the deadline or when this runner dies
+  secs=$1 label=$2; shift 2
+  set -m; "$@" & cpid=$!; set +m
+  runner=$$
+  ( n=0
+    while kill -0 "$cpid" 2>/dev/null; do
+      if ! kill -0 "$runner" 2>/dev/null || [ "$n" -ge "$secs" ]; then
+        [ "$n" -ge "$secs" ] && echo "ci: $label: killed at its hard deadline ($secs s)" >&2
+        kill -TERM -"$cpid" 2>/dev/null || kill -TERM "$cpid" 2>/dev/null
+        docker ps -q --filter "label=theodore-ci=$runner" 2>/dev/null | xargs docker kill >/dev/null 2>&1
+        sleep 10; kill -KILL -"$cpid" 2>/dev/null; break
+      fi
+      sleep 5; n=$((n + 5))
+    done ) &
+  wd=$!
+  wait "$cpid"; rc=$?
+  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  return $rc
+}
+heavy() { # seconds label command...: wait for the load, then run it under its deadline
+  wait_load; limited "$@"
+}
+
 mkdir -p "$OUT"
+cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; release_lock; }
+trap 'cleanup' EXIT
+trap 'exit 130' INT TERM HUP
 case "$TARGET" in
-  macos-arm64) run_mac macos-arm64 darwin-arm64 "" ;;
-  macos-x64) run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
-  linux-x64) run_linux linux-x64 linux/amd64 linux-x64 ;;
-  linux-arm64) run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
+esac
+case "$TARGET" in
+  macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
+  macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
+  linux-x64) heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
+  linux-arm64) heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
   windows-x64) if [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
-  archives) run_archives ;;
+  archives) heavy 900 archives run_archives ;;
   record) record ;;
   require) require ;;
-  network) run_network ;;
-  secrets) run_secrets ;;
+  network) heavy 900 network run_network ;;
+  secrets) limited 900 secrets run_secrets ;;
   index) run_index ;;
   summary) summary ;;
   all)
@@ -303,20 +362,19 @@ case "$TARGET" in
     wpid=
     if [ -n "$AZURE$HOST" ]; then
       mkdir -p "$OUT/windows-x64"
-      sh "$0" windows-x64 ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} > "$OUT/windows-x64.run.log" 2>&1 & wpid=$!
-      trap 'kill $wpid 2>/dev/null; wait $wpid; exit 130' INT TERM HUP
+      CI_PARENT=$$ sh "$0" windows-x64 ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} > "$OUT/windows-x64.run.log" 2>&1 & wpid=$!
       say "windows-x64 started (ci/out/windows-x64.run.log)"
     else
       result windows-x64 shim not-run; result windows-x64 runtime not-run
     fi
-    run_secrets
-    run_mac macos-arm64 darwin-arm64 ""
-    run_mac macos-x64 darwin-x64 "arch -x86_64"
-    run_linux linux-x64 linux/amd64 linux-x64
-    run_linux linux-arm64 linux/arm64 linux-arm64
-    run_network
-    run_archives
-    if [ -n "$wpid" ]; then say "waiting for windows-x64"; wait "$wpid"; trap - INT TERM HUP; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
+    limited 900 secrets run_secrets
+    heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 ""
+    heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64"
+    heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64
+    heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64
+    heavy 900 network run_network
+    heavy 900 archives run_archives
+    if [ -n "$wpid" ]; then say "waiting for windows-x64"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     run_index
     summary
     record ;;
