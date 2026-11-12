@@ -16,6 +16,8 @@
   out; a new version drops everything of the old one.
 - Any command that learns the device is signed out, revoked, suspended, refused or blocked removes every specimen
   folder, and any command (the tool server on each call) removes folders older than an hour.
+- README and SECURITY name the portal's pages as they are now: the Theodore home page (the sentence to send) and
+  Settings, Computers and assistants (where a computer is removed).
 
 ## 0.3.3
 
