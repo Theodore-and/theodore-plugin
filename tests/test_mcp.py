@@ -101,7 +101,7 @@ class Listing(McpCase):
         self.api.guide_index = INDEX
         server = self.server()
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["enum"], ["craft", "forms"])
+        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
         one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
         self.assertEqual(one["enum"], ["cover-01.jpg", "rules-and-ledgers.jpg"])
         self.assertEqual((many["type"], many["items"]["enum"], many["minItems"], many["maxItems"]),
@@ -125,7 +125,7 @@ class Listing(McpCase):
         server.send("ping")
         self.assertEqual(server.notifications, [{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}])
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["enum"], ["craft", "critique"])
+        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "critique"])
 
     def test_without_the_index_names_still_work(self):
         self.sign_in()
@@ -203,6 +203,30 @@ class Guide(McpCase):
         text = self.server().call("guide", skill="pptx")["content"][0]["text"]
         self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
         self.assertIn("=== END theodore pptx SKILL.md", text)
+
+
+    def test_a_served_pptx_section_is_fetched_whole_and_a_missing_one_is_a_clean_usage(self):
+        """Lane STUDIO: a pptx section the service serves to this account (the rest of the manual is on disk). Against
+        a service that does not serve it (an older one, or an account without it), the same clean answer as any
+        missing section."""
+        self.sign_in()
+        self.api.guides["pptx"]["served-part"] = "SERVED PPTX SECTION, see [charts](references/pptxgenjs-charts.md)\n"
+        server = self.server()
+        text = server.call("guide", skill="pptx", section="served-part")["content"][0]["text"]
+        self.assertEqual(text, "SERVED PPTX SECTION, see [charts](references/pptxgenjs-charts.md)\n")
+        self.assertEqual(self.api.guide_queries[-1], {"form": "whole", "bindings": "tool"})
+        missing = server.call("guide", skill="pptx", section="not-served")
+        self.assertTrue(missing["isError"])
+        first = missing["content"][0]["text"].splitlines()[0]
+        self.assertEqual(first, "THEODORE USAGE: guide pptx has no section 'not-served'.")
+        self.assertEqual(server.send("ping")["result"], {})
+
+    def test_the_guide_tool_accepts_a_section_outside_the_deck_design_listing(self):
+        from theodore_client import mcp
+        tool = next(t for t in mcp.tools({"sections": ["craft"], "specimens": []}) if t["name"] == "guide")
+        section = tool["inputSchema"]["properties"]["section"]
+        self.assertEqual(section["anyOf"][0]["enum"], ["craft"])
+        self.assertEqual(section["anyOf"][1], {"type": "string"})
 
 
 class Specimen(McpCase):
