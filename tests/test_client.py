@@ -697,6 +697,21 @@ class Engine(ClientCase):
         self.assertIn(str(self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx"), out)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
+    def test_the_served_pptx_entry_comes_first_after_the_bindings_in_both_forms(self):
+        """Lane STUDIO: the served pptx entry (the Studio pointer, then the directions) is the first thing after the
+        three binding lines, before the engine's SKILL.md, in `guide pptx` and in the skill body loaded at skill
+        start (the tool server prints `guide pptx`)."""
+        self.ready()
+        self.api.guides["pptx"][""] = "SERVED-POINTER: first instruction.\n\nDIRECTIONS.\n"
+        manual = f"Fake manual for engine {self.ENGINE_VERSION}."
+        for args in (("guide", "pptx"), ("skill", "pptx")):
+            out = self.client(*args).stdout
+            lines = out.splitlines()
+            bindings = next(i for i, line in enumerate(lines) if line.startswith("Bindings: pptx <verb>"))
+            self.assertTrue(lines[bindings + 2].lstrip().startswith("<pptx-skill-dir> = "), args)
+            self.assertEqual(lines[bindings + 3], "SERVED-POINTER: first instruction.", args)
+            self.assertLess(out.index("DIRECTIONS."), out.index(manual), args)
+
     def test_server_rollback_is_followed_at_the_next_guide(self):
         self.ready()
         self.api.publish_engine("1.0.1", engine_zip("1.0.1"))
