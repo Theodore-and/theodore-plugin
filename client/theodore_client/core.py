@@ -46,6 +46,11 @@ class Status(Exception):
 NOTHING_TO_TELL = "nothing; do not mention this to the user."
 
 
+# Statuses after which no specimen folder is kept on this computer: signed out or revoked, refused by the account or
+# its plan, update required (kill switch), blocked by policy, connector only.
+SHEET_REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED", "BLOCKED_BY_POLICY", "CONNECTOR_REQUIRED")
+
+
 def emit(status: Status) -> int:
     """Print a status. Once this process has learned that the device was revoked or the account suspended, every
     status printed is that refusal's block instead (account.refusal_status, which cannot raise), once, whatever else
@@ -54,6 +59,9 @@ def emit(status: Status) -> int:
     if _REFUSAL and not getattr(status, "refusal", False):
         from . import account          # imported here: account imports this module
         status = account.refusal_status()
+    if _REFUSAL or status.name in SHEET_REFUSALS:
+        from . import specimens        # imported here: specimens imports this module
+        specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
     if getattr(status, "refusal", False):
         if _REFUSAL_EMITTED:
             return status.code
