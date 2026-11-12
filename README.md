@@ -172,17 +172,23 @@ tests/                              a local fake of the Theodore API and the tes
 
 ## Development
 
-Checks run on our own machines, not on a hosted CI: `ci/run.sh` is the source of truth, and the workflow files
-under `.github/workflows/` are an optional mirror of it.
+Checks run on our own machines, not on a hosted CI: `ci/run.sh` is the source of truth. The workflow files under
+`.github/workflows/` are a manual-only mirror: no push or pull request starts them, and nobody waits for them.
 
 ```
-ci/run.sh all --host <user@windows-host> --key <ssh key>   every platform, the corporate-network job, the secret scan, the runtime index
-ci/run.sh macos-arm64 | macos-x64 | linux-x64 | linux-arm64 | windows-x64 | network | secrets | index | summary
+ci/run.sh all --azure        every platform, the corporate-network job, the secret scan, the archives, the runtime index,
+                             then the table; Windows on a throwaway Azure VM deleted when the run ends
+ci/run.sh all --host <user@windows-host> --key <ssh key>   the same with Windows over SSH on a machine of your own
+ci/run.sh macos-arm64 | macos-x64 | linux-x64 | linux-arm64 | windows-x64 | network | secrets | archives | index | summary
+ci/run.sh require [commit]   exit 0 only when `all` passed at that commit on a clean tree; release steps call it
+ci/azure-windows.sh sweep    delete any throwaway Windows VM a stopped run left behind (tag purpose=theodore-plugin-ci)
 ```
 
 macOS x64 runs under Rosetta, Linux in ubuntu 22.04 containers pinned by digest (Docker), Windows over SSH on a
-stock Windows that `ci/windows-prepare.ps1` prepares (it adds Git for Windows, for the Git Bash tests). Results,
-logs and the runtime bundles to publish are in `ci/out/`.
+stock Windows Server 2022 that `ci/windows-prepare.ps1` prepares (it adds Git for Windows, for the Git Bash tests).
+Working files and the runtime bundles to publish are in `ci/out/`. `all` ends with `ci/run.sh record`: the table and
+logs go to `$THEODORE_CI_LOGS/<date>/plugin-<commit>-<time>/` (default `~/theodore-ci`), and when every row passed on
+a clean tree, the stamp `green/plugin/<commit>` ("checks green at <commit>") that `require` looks for.
 
 ```
 python3 -m unittest discover -s tests -v        every suite, in clean temporary homes, against the local fake API

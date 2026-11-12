@@ -1,3 +1,6 @@
+# MANUAL MIRROR ONLY. The source of truth is ci/run.sh, run on our own machines (`ci/run.sh all --azure`): it runs
+# this job and every other check, and a release requires its stamp (`ci/run.sh require`). No push or pull request
+# starts this workflow, so a red or refused hosted run never blocks or misleads anyone; start it by hand if wanted.
 # Builds and smoke-tests the runtime bundle for the five platforms from the public lock files in runtime/locks/.
 #
 # No secrets and no publishing step: the bundles and the combined index are uploaded as workflow artifacts only.
@@ -6,16 +9,6 @@
 name: runtime
 
 on:
-  push:
-    paths:
-      - "runtime/locks/**"
-      - "runtime/build/**"
-      - ".github/workflows/runtime.yml"
-  pull_request:
-    paths:
-      - "runtime/locks/**"
-      - "runtime/build/**"
-      - ".github/workflows/runtime.yml"
   workflow_dispatch:
 
 permissions:
