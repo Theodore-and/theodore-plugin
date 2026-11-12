@@ -2280,8 +2280,8 @@ class HostAndCloud(unittest.TestCase):
     def host(self, env: dict, linux: bool = False, opt_codex: bool = False) -> str:
         real_is_dir = Path.is_dir
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", "linux" if linux else "darwin"), \
-                mock.patch.object(Path, "is_dir", lambda p: (opt_codex and str(p) == "/opt/codex/runtimes") or
-                                  (str(p) not in ("/opt/codex/runtimes", "/mnt/skills", "/mnt/user-data", "/home/oai") and real_is_dir(p))):
+                mock.patch.object(Path, "is_dir", lambda p: (opt_codex and p.as_posix() == "/opt/codex/runtimes") or
+                                  (p.as_posix() not in ("/opt/codex/runtimes", "/mnt/skills", "/mnt/user-data", "/home/oai") and real_is_dir(p))):
             return self.core.host_name()
 
     def test_each_assistant_is_reported_as_itself(self):
