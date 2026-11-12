@@ -436,7 +436,7 @@ if [ "${1:-}" = "uninstall" ]; then
   fi
   # Settings Theodore changed cannot be taken back exactly without its Python: the record of what was there is kept.
   keep_settings=
-  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys|git_bash)":' "$rec" 2>/dev/null; then
+  if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys|git_bash|instructions)":' "$rec" 2>/dev/null; then
     keep_settings=1
     settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$rec" | head -n 1)
     left="$left; Theodore's changes to ${settings:-the Claude Code settings.json}, which need Theodore's runtime to take back exactly: what it added and the values before are kept in $rec. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"

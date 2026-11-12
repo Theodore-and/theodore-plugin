@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install, specimens
+from . import __version__, account, api, core, credentials, install, routing, specimens
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -91,6 +91,7 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
 
 
 def guide(skill: str, section: str | None, part: int, license_text: bool) -> int:
+    ensure_instructions()
     if skill not in SKILLS:
         raise core.usage(f"unknown skill '{skill}'. The skills are: {', '.join(SKILLS)}.")
     if part < 1:
@@ -318,6 +319,7 @@ def _pptx_body() -> str:
 def skill(name: str) -> int:
     """`theodore skill <name>`: the skill's instructions as a clean document (no framing), or a three-line status.
     Always exit 0: a host that injects this output aborts the whole skill on any other code."""
+    ensure_instructions()
     try:
         if name not in SKILLS:
             raise core.usage(f"unknown skill '{name}'. The skills are: {', '.join(SKILLS)}.")
@@ -655,6 +657,7 @@ def status(as_json: bool, wait: float) -> int:
 
 def doctor(as_json: bool) -> int:
     account.import_pending_activation()
+    ensure_instructions()
     home = core.home()
     snap = _snapshot()
     checks: list[tuple[str, str, str]] = []
@@ -712,6 +715,8 @@ def doctor(as_json: bool) -> int:
             f"{info['version']}" if info["status"] == "ready" else f"{info['status']} ({info['percent']}%)")
     for name in ("claude", "codex"):
         add("ok", f"assistant {name}", shutil.which(name) or "not found on PATH")
+    written = _host_record().get(routing.RECORD_KEY) or {}
+    add("ok", "instructions", "; ".join(f"{n}: {e.get('path')}" for n, e in sorted(written.items())) or "none written")
     if core.IS_WINDOWS and shutil.which("claude") and not claude_git_bash():
         add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
             "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
@@ -1175,6 +1180,8 @@ def hosts(action: str, apply: bool) -> int:
                     record["codex_config_created"] = bool(record.get("codex_config_created")) or (not config_before and _codex_config().exists())
         else:
             lines.append("codex: not found on this computer")
+        record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
+        lines += routed
         if record:
             _save_host_record(record)
     elif action == "unregister":
@@ -1335,6 +1342,32 @@ def _claude_settings_restore(file_ours: bool = False) -> tuple[str | None, list[
     return None, notes
 
 
+def _take_back_instructions(left: list[str]) -> None:
+    """Remove the routing block from each file the record names, and those entries from the record."""
+    record = _host_record()
+    if routing.RECORD_KEY not in record:
+        return
+    record = routing.take_back(record, left)
+    if record:
+        _save_host_record(record)
+    else:
+        core.remove_tree(_host_record_path())
+
+
+def ensure_instructions() -> None:
+    """An install that never ran the installer (the plugin added from a marketplace) gets the routing block at its
+    first guide, skill or doctor run; later runs update its wording in place. Never fails the command it runs in."""
+    try:
+        record = _host_record()
+        updated, lines = routing.ensure(record)
+        if updated != record:
+            _save_host_record(updated)
+        for line in lines:
+            core.log(line)
+    except Exception as exc:  # the block is a convenience: a guide or doctor run never fails because of it
+        core.log(f"instructions: not written ({exc.__class__.__name__}: {exc})")
+
+
 def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) -> list[str]:
     """Remove the plugin from each assistant; its marketplace only when Theodore added it (or when no record says);
     then the settings Theodore recorded. Problems go to `left`; returns notes for what stays on purpose."""
@@ -1367,6 +1400,7 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) ->
     if problem:
         left.append(f"the Theodore entries in {_claude_settings_path()} ({problem})")
     notes += settings_notes
+    _take_back_instructions(left)
     _codex_leftovers()                      # reads the record: before it goes
     if len(left) == problems_before:
         # Everything taken back: the record has done its job (a stale one could later claim a settings file the user
@@ -1495,6 +1529,8 @@ def uninstall(keep_hosts: bool) -> int:
     notes: list[str] = []
     if not keep_hosts:
         notes = _unregister_hosts(shutil.which("claude"), shutil.which("codex"), left)
+    else:
+        _take_back_instructions(left)           # its record goes with state/: the block cannot be left without it
     for name in ("setup", "packs", "engine-update", "client-update", "libreoffice"):
         pid = int(Job(name).read().get("pid") or 0)
         if pid and pid != os.getpid() and Job(name).alive():

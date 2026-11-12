@@ -20,6 +20,15 @@
   installed by the user), copied byte for byte.
 - README and SECURITY name the portal's pages as they are now: the Theodore home page (the sentence to send) and
   Settings, Computers and assistants (where a computer is removed).
+- Routing: `hosts register` (the installer runs it) writes one line between `<!-- theodore:begin -->` and
+  `<!-- theodore:end -->` in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` (CLAUDE_CONFIG_DIR / CODEX_HOME when set),
+  naming Theodore for every presentation, deck or set of slides in any format. Without it, Claude Code's own Slides
+  artifact (VS Code, desktop, web) takes "make me a deck" before any skill loads. A file is created only when absent,
+  nothing outside the markers is touched, a second run changes nothing, and a new wording replaces the old in place.
+  An install from a marketplace alone gets it at its first `guide`, `skill` or `doctor`; a block the user deleted is
+  not written again except by `hosts register`. It is recorded in `state/host-settings.json`; `hosts unregister` and
+  `uninstall` (also `--keep-hosts`) remove exactly the block, and the file only when Theodore created it and nothing
+  else is in it. `doctor` lists the files that hold it.
 
 ## 0.3.3
 
