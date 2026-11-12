@@ -1,5 +1,16 @@
 # Changes
 
+## 0.3.4
+
+- The plugin's tool server keeps each specimen sheet and each reference it fetched in memory for the session (never
+  on disk), so a lead and its sub-agents opening the same sheets cost one fetch per sheet per guide version. Held
+  sheets are confirmed with the service by one conditional request at most every 60 seconds; held references are
+  asked for conditionally on every call. A revoked device is refused on its next reference call at once and on its
+  next sheet call within 60 seconds, and nothing held is served after a refusal.
+- `theodore specimen` reuses a sheet it already holds in a recent specimen folder (at most 45 minutes old) after a
+  conditional check with the service: nothing new is written or downloaded. A refusal that signs the device out or
+  refuses the account removes every specimen folder at once.
+
 ## 0.3.3
 
 - The assistant is reported as itself: Claude Code (also from the plugin's MCP server and a skill's load command,
