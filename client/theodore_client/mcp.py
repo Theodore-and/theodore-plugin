@@ -38,6 +38,12 @@ PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 GUIDE_MAX_RESULT_CHARS = 400_000
 SPECIMEN_MAX_PER_CALL = 6          # sheets one specimen call returns; each sheet not held is one fetch
 REVALIDATE_SECONDS = 60.0          # held sheets are served for at most this long after the service last confirmed them
+# What one process holds at most: the sheets and the references of one guide version. A version holds at most 64
+# sheets of at most 1 MiB each (the service's limits); references are whole sections of at most 400,000 characters.
+HELD_SHEETS_MAX = 64
+HELD_SHEET_BYTES_MAX = 64 << 20
+HELD_GUIDES_MAX = 64
+HELD_GUIDE_CHARS_MAX = 16 << 20
 
 DESCRIPTIONS = {
     "list": "Lists the files of a Theodore skill.",
@@ -86,14 +92,35 @@ def _revalidate_seconds() -> float:
     return REVALIDATE_SECONDS
 
 
-def forget() -> None:
-    """Drop everything held: after a refusal nothing held is served again."""
+def forget(refused: bool = False) -> None:
+    """Drop everything held: after a refusal nothing held is served again. After a refusal of the device or the
+    account (`refused`), the launcher's specimen folders on this computer go too: it keeps no sheet anywhere."""
     global INDEX, VALIDATED_AT, INDEX_TRIED
     SHEETS.clear()
     GUIDES.clear()
     VALIDATED_AT = None
     INDEX = None                    # fetched again (and confirmed) before anything is held again
     INDEX_TRIED = False
+    if refused:
+        specimens.sweep(everything=True)
+
+
+def _hold(store: dict, key, value, size, max_entries: int, max_size: int) -> None:
+    """Keep `value` under `key`, newest last; evict the oldest entries beyond the count or the total size."""
+    store.pop(key, None)
+    store[key] = value
+    while len(store) > max_entries or (len(store) > 1 and sum(size(v) for v in store.values()) > max_size):
+        store.pop(next(iter(store)))
+    if sum(size(v) for v in store.values()) > max_size:      # one item larger than the whole bound: not held
+        store.pop(key, None)
+
+
+def _hold_sheet(name: str, value: tuple[str, bytes, str | None]) -> None:
+    _hold(SHEETS, name, value, lambda v: len(v[1]), HELD_SHEETS_MAX, HELD_SHEET_BYTES_MAX)
+
+
+def _hold_guide(key: tuple[str, str], value: tuple[str, str]) -> None:
+    _hold(GUIDES, key, value, lambda v: len(v[1]), HELD_GUIDES_MAX, HELD_GUIDE_CHARS_MAX)
 
 
 def _names(items, key: str, pattern) -> list[str]:
@@ -144,9 +171,9 @@ def _adopt(fresh: dict | None) -> None:
     global INDEX, VALIDATED_AT
     if fresh is None:
         return
-    if fresh.get("etag") != (INDEX or {}).get("etag"):      # another version: each held sheet is checked on its own
-        for name, (digest, raw, _etag) in list(SHEETS.items()):
-            SHEETS[name] = (digest, raw, None)
+    if INDEX is not None and fresh.get("etag") != INDEX.get("etag"):      # another version: nothing of the old one is kept
+        SHEETS.clear()
+        GUIDES.clear()
     changed = INDEX is not None and {k: v for k, v in fresh.items() if k != "etag"} != {k: v for k, v in INDEX.items() if k != "etag"}
     INDEX = fresh
     VALIDATED_AT = time.monotonic() if fresh.get("etag") else None
@@ -261,7 +288,7 @@ def _fetch_whole(skill: str, section: str | None) -> str:
     text = b"".join(chunks).decode("utf-8", errors="replace")
     etag = str(headers.get("ETag") or "").strip()
     if total == 1 and etag:
-        GUIDES[key] = (etag, text)
+        _hold_guide(key, (etag, text))
     else:
         GUIDES.pop(key, None)
     return text
@@ -318,7 +345,7 @@ def _sheet(name: str, current: str | None) -> bytes:
     if core.refused():
         raise api.sign_in_required()
     if status == 304 and held:
-        SHEETS[name] = (held[0], held[1], current)
+        _hold_sheet(name, (held[0], held[1], current))
         return held[1]
     SHEETS.pop(name, None)
     if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
@@ -328,7 +355,7 @@ def _sheet(name: str, current: str | None) -> bytes:
         raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing).",
                      "call the same tool again once. If it fails again, continue without the sheet.",
                      "A design specimen arrived damaged. I am trying once more.")
-    SHEETS[name] = (digest, raw, current)
+    _hold_sheet(name, (digest, raw, current))
     return raw
 
 
@@ -351,11 +378,12 @@ def tool_specimen(args: dict) -> dict:
     account.require("deck-design")
     if INDEX is None and not INDEX_TRIED:
         _index()
-    current = _validate()
     sheets: dict[str, bytes] = {}
     for name in names:
         if name not in sheets:
-            sheets[name] = _sheet(name, current)
+            # The confirmation's age is checked for every sheet served, so no batch serves a held sheet more than
+            # REVALIDATE_SECONDS after the service last confirmed it.
+            sheets[name] = _sheet(name, _validate())
     if core.refused():
         raise api.sign_in_required()
     if not many:
@@ -396,7 +424,11 @@ HANDLERS = {"list": tool_list, "guide": tool_guide, "specimen": tool_specimen}
 
 # --- the server ----------------------------------------------------------------------------------------------------------
 
-REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED")
+# Every status but a passing network trouble drops what is held: a refusal of any kind (revoked, suspended, no plan,
+# update required, kill switch or policy block), and a service answer that something is gone (USAGE from a 404).
+KEEP_HELD_ON = ("OFFLINE", "RETRY")
+# Refusals of the device or the account: the launcher's folders are removed as well.
+REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED", "BLOCKED_BY_POLICY", "CONNECTOR_REQUIRED")
 BLOCKED: Status | None = None          # a status that stops every tool (this folder belongs to another service)
 
 
@@ -407,11 +439,12 @@ def call_tool(name: str, args) -> dict:
     if BLOCKED is not None:
         return _status(BLOCKED)
     core._REFUSAL, core._REFUSAL_EMITTED = None, False      # each call learns afresh (a device may sign in again meanwhile)
+    specimens.sweep()               # the launcher's folders older than an hour go, as before any launcher command
     try:
         result = handler(args if isinstance(args, dict) else {})
     except Status as status:
-        if core.refused() or status.name in REFUSALS:
-            forget()
+        if core.refused() or status.name not in KEEP_HELD_ON:
+            forget(refused=core.refused() or status.name in REFUSALS)
         return _status(status)
     except api.TooLarge as exc:
         return _status(core.internal(f"an answer from the Theodore service was longer than {exc.limit} bytes; it was refused."))
@@ -419,7 +452,7 @@ def call_tool(name: str, args) -> dict:
         core.log(f"mcp {name}: {exc.__class__.__name__}: {exc}")
         return _status(core.internal(f"{exc.__class__.__name__}: {exc}"))
     if core.refused():
-        forget()
+        forget(refused=True)
     return result
 
 

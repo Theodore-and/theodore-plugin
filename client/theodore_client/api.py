@@ -224,7 +224,9 @@ def _signed_out(http_status: int, code: str) -> None:
     """The service refused this installation's own credential. Whatever route learned it: a revoked or unknown
     installation loses the credential and the stored licence now, so no later command works from what is on disk; an
     account that is refused (403) loses the stored licence. Automatic reports being off is not a refusal of the account."""
-    from . import account, credentials
+    from . import account, credentials, specimens
+    if code in DELETE_CREDENTIAL_ON or code in ("account_suspended", "entitlement_inactive"):
+        specimens.sweep(everything=True)        # whatever command learned it: no specimen sheet is kept (never raises)
     if code in DELETE_CREDENTIAL_ON:
         core.mark_refused("revoked", code)      # the command ends with the sign-in block, whatever it does next (core.emit, cli.main)
         credentials.delete()

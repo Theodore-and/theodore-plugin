@@ -10,6 +10,12 @@
 - `theodore specimen` reuses a sheet it already holds in a recent specimen folder (at most 45 minutes old) after a
   conditional check with the service: nothing new is written or downloaded. A refusal that signs the device out or
   refuses the account removes every specimen folder at once.
+- Every refusal (also the channel's kill switch and a policy block) empties what the tool server holds, and the
+  60-second confirmation is checked for every sheet served, also within one call. The tool server holds at most the
+  sheets and references of one guide version (64 sheets and 64 MiB; 64 references and 16 MiB of text), oldest first
+  out; a new version drops everything of the old one.
+- Any command that learns the device is signed out, revoked, suspended, refused or blocked removes every specimen
+  folder, and any command (the tool server on each call) removes folders older than an hour.
 
 ## 0.3.3
 

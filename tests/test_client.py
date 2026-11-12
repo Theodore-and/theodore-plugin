@@ -227,6 +227,32 @@ class Specimen(ClientCase):
         self.assertFalse(held.parent.exists(), "a revoked device keeps no sheet on disk")
         self.assertEqual(self.folders(), [])
 
+    def test_any_command_that_learns_of_a_refusal_removes_every_held_sheet(self):
+        """Not only `specimen`: whatever command hears that the device is revoked, the account suspended, or that the
+        channel is switched off, no sheet stays on this computer."""
+        for refuse, command in (("revoked", ("guide", "deck-design")), ("suspended", ("guide", "deck-design")), ("kill", ("guide", "deck-design"))):
+            held = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+            self.assertTrue(held.exists(), refuse)
+            if refuse == "revoked":
+                for inst in self.api.installations.values():
+                    inst["revoked"] = True
+            elif refuse == "suspended":
+                self.api.account_state = "suspended"
+            else:
+                self.api.guide_kill = True
+            self.client(*command)
+            self.assertFalse(held.parent.exists(), f"{refuse}: no sheet kept after `{' '.join(command)}`")
+            self.assertEqual(self.folders(), [], refuse)
+            for inst in self.api.installations.values():
+                inst["revoked"] = False
+            self.api.account_state, self.api.guide_kill = "active", False
+            self.sign_in()
+
+    def test_expired_folders_go_with_any_command(self):
+        held = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        self.client("version", env={"THEODORE_TEST_CLOCK_OFFSET": "3700"})
+        self.assertFalse(held.parent.exists(), "an hour on, any launcher command removes the folder")
+
     def test_a_temporary_folder_inside_the_deck_or_inside_theodore_is_not_used(self):
         for inside in (self.deck / "tmp", self.box.home / "tmp"):
             inside.mkdir(parents=True)

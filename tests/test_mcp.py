@@ -325,7 +325,7 @@ class Reuse(McpCase):
         self.assertEqual(base64.b64decode(content[1]["data"]), JPEG + b"v2")
         self.assertEqual(self.api.served["index", "", 200], 2)
         self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2)
-        self.assertEqual(self.api.served["specimen", SHEETS[1], 304], 1, "an unchanged sheet comes back as 304")
+        self.assertEqual(self.api.served["specimen", SHEETS[1], 200], 2, "nothing of the old version is kept: fetched again")
 
     def test_without_the_index_each_held_sheet_is_checked_on_its_own(self):
         self.api.guide_index = None
@@ -344,6 +344,80 @@ class Reuse(McpCase):
         self.api.revoke_all()
         result = server.call("guide", skill="deck-design", section="craft")
         self.assertTrue(result["content"][0]["text"].startswith("THEODORE SIGN_IN_REQUIRED: "), "refused at once")
+
+
+class ReuseBounds(McpCase):
+    """Lane SERVE review: every refusal empties what is held, the 60-second bound holds per sheet, and what is held is
+    bounded in count and bytes."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in()
+        self.api.specimens = {name: JPEG + name.encode() for name in SHEETS}
+        self.api.guide_index = {"version": "g1", "sections": [{"name": "craft"}], "specimens": [{"file": n} for n in SHEETS]}
+
+    def test_the_kill_switch_empties_what_is_held(self):
+        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+        server.send("tools/list")
+        server.call("specimen", file=SHEETS[0:2])
+        self.api.guide_kill = True
+        time.sleep(1.2)
+        result = server.call("specimen", file=SHEETS[0])
+        self.assertTrue(result["content"][0]["text"].startswith("THEODORE UPDATE_REQUIRED: "), result)
+        self.api.guide_kill = False
+        self.assertEqual([b["type"] for b in server.call("specimen", file=SHEETS[0])["content"]], ["image"])
+        self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2, "nothing held survived the refusal")
+
+    def test_a_long_batch_checks_the_confirmation_for_every_sheet(self):
+        self.api.specimen_delay = 0.6        # each sheet takes 0.6 s to arrive
+        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+        server.send("tools/list")
+        server.call("specimen", file=SHEETS[0:4])                   # 2.4 s: the confirmation is renewed during the batch
+        self.assertGreaterEqual(self.api.served["index", "", 304], 1, "the age is checked per sheet, not once per call")
+
+
+class HeldBounds(unittest.TestCase):
+    """The two stores of `theodore mcp`, in-process: count and byte bounds, oldest evicted first, a version change drops
+    everything of the old version."""
+
+    def setUp(self):
+        sys.path.insert(0, str(CLIENT_DIR))
+        from theodore_client import mcp
+        self.mcp = mcp
+        mcp.SHEETS.clear()
+        mcp.GUIDES.clear()
+        self.addCleanup(mcp.SHEETS.clear)
+        self.addCleanup(mcp.GUIDES.clear)
+
+    def test_sheets_are_bounded_in_count_oldest_first(self):
+        for i in range(self.mcp.HELD_SHEETS_MAX + 5):
+            self.mcp._hold_sheet(f"s{i}.jpg", ("h", b"x", None))
+        self.assertEqual(len(self.mcp.SHEETS), self.mcp.HELD_SHEETS_MAX)
+        self.assertNotIn("s0.jpg", self.mcp.SHEETS)
+        self.assertIn(f"s{self.mcp.HELD_SHEETS_MAX + 4}.jpg", self.mcp.SHEETS)
+
+    def test_sheets_are_bounded_in_bytes(self):
+        big = b"x" * (self.mcp.HELD_SHEET_BYTES_MAX // 4 + 1)
+        for i in range(5):
+            self.mcp._hold_sheet(f"b{i}.jpg", ("h", big, None))
+        self.assertLessEqual(sum(len(v[1]) for v in self.mcp.SHEETS.values()), self.mcp.HELD_SHEET_BYTES_MAX)
+        self.assertEqual(list(self.mcp.SHEETS), ["b2.jpg", "b3.jpg", "b4.jpg"])
+
+    def test_references_are_bounded_in_count_and_characters(self):
+        for i in range(self.mcp.HELD_GUIDES_MAX + 3):
+            self.mcp._hold_guide(("deck-design", f"r{i}"), ("e", "t"))
+        self.assertEqual(len(self.mcp.GUIDES), self.mcp.HELD_GUIDES_MAX)
+        huge = "t" * (self.mcp.HELD_GUIDE_CHARS_MAX + 1)
+        self.mcp._hold_guide(("deck-design", "huge"), ("e", huge))
+        self.assertNotIn(("deck-design", "huge"), self.mcp.GUIDES, "an item larger than the bound is not held")
+
+    def test_a_new_version_drops_everything_of_the_old_one(self):
+        self.mcp.INDEX = {"version": "g1", "sections": [], "specimens": ["a.jpg"], "etag": '"v1"'}
+        self.mcp._hold_sheet("a.jpg", ("h", b"x", '"v1"'))
+        self.mcp._hold_guide(("deck-design", "craft"), ("e", "t"))
+        self.mcp._adopt({"version": "g2", "sections": [], "specimens": ["a.jpg"], "etag": '"v2"'})
+        self.assertEqual((self.mcp.SHEETS, self.mcp.GUIDES), ({}, {}))
+        self.mcp.INDEX, self.mcp.NOTIFY[:] = None, []
 
 
 class SkillBody(ClientCase):
