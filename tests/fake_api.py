@@ -143,6 +143,7 @@ class FakeApi:
         self.min_version = None
         self.kill, self.kill_message = False, ""
         self.guide_kill = False
+        self.guide_delays: dict[str, list[float]] = {}   # skill -> seconds each next entry answer waits, in order (a slow proxy)
         self.specimen_delay = 0.0         # seconds each sheet answer waits (a slow network)           # the channel's kill switch as the guide routes answer it: 426 update_required
         self.runtime: dict | None = None  # the current release's runtime: {runtime_id, parts: [{part, version, url, sha256, size}]}
         self.runtimes: dict[str, dict] = {}   # every published runtime by id
@@ -455,6 +456,8 @@ class FakeApi:
             return self._send(h, 200, data, {"X-Theodore-Sha256": self.specimen_sha or sha256_hex(data), **extra}, content_type=self.specimen_type)
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):
             skill, section = route[1], route[2] if len(route) == 3 else ""
+            if not section and self.guide_delays.get(skill):
+                time.sleep(self.guide_delays[skill].pop(0))
             if skill not in self.features:
                 return self._error(h, 403, "entitlement_inactive")
             if query.get("form") == "index" and self.guide_index is not None and not section:

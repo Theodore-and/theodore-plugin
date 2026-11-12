@@ -187,6 +187,17 @@ class Guide(McpCase):
         self.assertTrue(result["content"][0]["text"].startswith("THEODORE SIGN_IN_REQUIRED: "), result)
         self.assertEqual(server.send("ping")["result"], {})
 
+    def test_pptx_manual_says_when_the_served_entry_could_not_be_reached(self):
+        """Lane STUDIO: the tool server's pptx guide prints what `guide pptx` prints, so a served entry that could not
+        be reached after every attempt is named first, never dropped silently."""
+        self.ready()
+        self.api.guides["pptx"][""] = "SERVED-POINTER.\n"
+        self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]
+        text = self.server(env={"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}).call("guide", skill="pptx")["content"][0]["text"]
+        self.assertTrue(text.splitlines()[1].startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), text[:400])
+        self.assertNotIn("SERVED-POINTER", text)
+        self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
+
     def test_pptx_manual_comes_from_the_engine(self):
         self.ready()
         text = self.server().call("guide", skill="pptx")["content"][0]["text"]
