@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -255,6 +256,94 @@ class Specimen(McpCase):
         self.api.fail_with = (429, "rate_limited")
         text = server.call("specimen", file="cover-01.jpg")["content"][0]["text"]
         self.assertTrue(text.startswith("THEODORE RETRY: "), text)
+
+
+SHEETS = [f"sheet-{i:02d}.jpg" for i in range(14)]
+
+
+class Reuse(McpCase):
+    """One server for a session (Claude Code's sub-agents call the same process): each sheet is fetched once per guide
+    version; held sheets are confirmed by one conditional index request per interval; a refusal drops everything."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in()
+        self.api.specimens = {name: JPEG + name.encode() for name in SHEETS}
+        self.api.guide_index = {"version": "g1", "sections": [{"name": "craft"}], "specimens": [{"file": n} for n in SHEETS]}
+
+    def sheet_answers(self, status: int) -> int:
+        return sum(v for (route, _n, code), v in self.api.served.items() if route == "specimen" and code == status)
+
+    def test_a_lead_and_five_designers_fetch_each_sheet_once(self):
+        server = self.server()
+        server.send("tools/list")
+        calls = [SHEETS[0:6], SHEETS[3:9], SHEETS[6:12], SHEETS[8:14], SHEETS[0:3] + SHEETS[10:13], SHEETS[1:7], [SHEETS[5]]]
+        for asked in calls * 3:
+            content = server.call("specimen", file=asked)["content"]
+            images = [base64.b64decode(b["data"]) for b in content if b["type"] == "image"]
+            self.assertEqual(images, [JPEG + name.encode() for name in asked])
+        for name in SHEETS:
+            self.assertEqual(self.api.served["specimen", name, 200], 1, name)
+        self.assertEqual(self.sheet_answers(304), 0, "within the interval nothing is asked again")
+        self.assertEqual(self.api.served["index", "", 200], 1)
+        self.assertEqual(self.api.served["index", "", 304], 0)
+
+    def test_after_the_interval_one_index_check_confirms_every_held_sheet(self):
+        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+        server.send("tools/list")
+        server.call("specimen", file=SHEETS[0:6])
+        time.sleep(1.2)
+        server.call("specimen", file=SHEETS[0:6])
+        server.call("specimen", file=SHEETS[0:3])
+        self.assertEqual(self.api.served["index", "", 304], 1, "one conditional index request")
+        self.assertEqual(self.sheet_answers(200), 6)
+        self.assertEqual(self.sheet_answers(304), 0)
+
+    def test_a_revoked_device_is_refused_after_the_interval_and_nothing_held_is_served(self):
+        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+        server.send("tools/list")
+        server.call("specimen", file=SHEETS[0:2])
+        self.api.revoke_all()
+        time.sleep(1.2)
+        result = server.call("specimen", file=SHEETS[0])
+        self.assertTrue(result["content"][0]["text"].startswith("THEODORE SIGN_IN_REQUIRED: "), result)
+        self.assertNotIn("image", [b["type"] for b in result["content"]])
+        for inst in self.api.installations.values():           # signed in again: nothing was kept, fetched afresh
+            inst["revoked"] = False
+        self.sign_in()
+        self.assertEqual([b["type"] for b in server.call("specimen", file=SHEETS[0])["content"]], ["image"])
+        self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2)
+
+    def test_a_new_guide_version_drops_the_held_sheets(self):
+        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+        server.send("tools/list")
+        server.call("specimen", file=SHEETS[0:2])
+        self.api.specimens[SHEETS[0]] = JPEG + b"v2"
+        self.api.guide_index = {**self.api.guide_index, "version": "g2"}
+        time.sleep(1.2)
+        content = server.call("specimen", file=SHEETS[0:2])["content"]
+        self.assertEqual(base64.b64decode(content[1]["data"]), JPEG + b"v2")
+        self.assertEqual(self.api.served["index", "", 200], 2)
+        self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2)
+        self.assertEqual(self.api.served["specimen", SHEETS[1], 304], 1, "an unchanged sheet comes back as 304")
+
+    def test_without_the_index_each_held_sheet_is_checked_on_its_own(self):
+        self.api.guide_index = None
+        server = self.server()
+        server.call("specimen", file=SHEETS[0:3])
+        server.call("specimen", file=SHEETS[0:3])
+        self.assertEqual(self.sheet_answers(200), 3)
+        self.assertEqual(self.sheet_answers(304), 3)
+
+    def test_a_held_guide_text_is_asked_for_conditionally_every_time(self):
+        self.api.guides["deck-design"]["craft"] = "CRAFT TEXT\n"
+        server = self.server()
+        texts = [server.call("guide", skill="deck-design", section="craft")["content"][0]["text"] for _ in range(4)]
+        self.assertEqual(set(texts), {"CRAFT TEXT\n"})
+        self.assertEqual((self.api.served["guide", "craft", 200], self.api.served["guide", "craft", 304]), (1, 3))
+        self.api.revoke_all()
+        result = server.call("guide", skill="deck-design", section="craft")
+        self.assertTrue(result["content"][0]["text"].startswith("THEODORE SIGN_IN_REQUIRED: "), "refused at once")
 
 
 class SkillBody(ClientCase):

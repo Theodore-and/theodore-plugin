@@ -13,6 +13,7 @@ Run it by hand:  python3 tests/fake_api.py --port 8787   (prints its base URL an
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -155,6 +156,8 @@ class FakeApi:
         self.specimen_sha: str | None = None          # a wrong X-Theodore-Sha256 to answer with
         self.specimen_type = "image/jpeg"
         self.specimen_redirect: str | None = None     # Location of a 302
+        self.specimen_etag = True                     # False: an older server (no ETag, ignores If-None-Match)
+        self.served: collections.Counter = collections.Counter()   # (route, name, HTTP status) -> answers: "specimen", "index", "guide"
         self.guide_fetches = 0
         self.guide_queries: list[dict] = []
         self.guide_index: dict | None = None           # GET /v1/guide/deck-design?form=index; None: an older server (answers the text)
@@ -437,11 +440,25 @@ class FakeApi:
             data = self.specimens.get(route[2])
             if data is None or not re.match(r"^[A-Za-z0-9._-]{1,80}\.jpg$", route[2]):
                 return self._error(h, 404, "not_found", "no such specimen sheet")
-            return self._send(h, 200, data, {"X-Theodore-Sha256": self.specimen_sha or sha256_hex(data)}, content_type=self.specimen_type)
+            etag = '"' + sha256_hex(data) + '"'
+            if self.specimen_etag and h.headers.get("If-None-Match") == etag:
+                self.served["specimen", route[2], 304] += 1
+                return self._send(h, 304, None, {"ETag": etag})
+            self.served["specimen", route[2], 200] += 1
+            extra = {"ETag": etag} if self.specimen_etag else {}
+            return self._send(h, 200, data, {"X-Theodore-Sha256": self.specimen_sha or sha256_hex(data), **extra}, content_type=self.specimen_type)
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):
             skill, section = route[1], route[2] if len(route) == 3 else ""
             if skill not in self.features:
                 return self._error(h, 403, "entitlement_inactive")
+            if query.get("form") == "index" and self.guide_index is not None and not section:
+                self.guide_queries.append(dict(query))
+                etag = '"' + sha256_hex(json.dumps(self.guide_index, sort_keys=True).encode("utf-8"))[:32] + '"'
+                if h.headers.get("If-None-Match") == etag:
+                    self.served["index", "", 304] += 1
+                    return self._send(h, 304, None, {"ETag": etag})
+                self.served["index", "", 200] += 1
+                return self._send(h, 200, self.guide_index, {"ETag": etag})
             text = self.guides.get(skill, {}).get(section)
             if text is None:
                 return self._error(h, 404, "not_found", f"no section {section!r} in {skill}")
@@ -451,8 +468,6 @@ class FakeApi:
                         "".join(f"- {p['text']}\n" for p in self.preferences) + "--- end of the user's notes ---\n"
             limit = 24000
             self.guide_queries.append(dict(query))
-            if query.get("form") == "index" and self.guide_index is not None and not section:
-                return self._send(h, 200, self.guide_index)
             if query.get("form") == "whole" and self.guide_whole:       # the whole stored text in one answer
                 parts = [text + self.guide_whole_tail.get(section, "")]
             else:
@@ -460,9 +475,11 @@ class FakeApi:
             index = int(query.get("part", "1"))
             if index < 1 or index > len(parts):
                 return self._error(h, 404, "not_found", "no such part")
-            etag = '"' + sha256_hex((text + str(index)).encode("utf-8"))[:16] + '"'
+            etag = '"' + sha256_hex((self.guide_version + parts[index - 1] + str(index) + str(query.get("form"))).encode("utf-8"))[:16] + '"'
             if h.headers.get("If-None-Match") == etag:
+                self.served["guide", section, 304] += 1
                 return self._send(h, 304, None, {"ETag": etag})
+            self.served["guide", section, 200] += 1
             return self._send(h, 200, parts[index - 1].encode("utf-8"), {"etag": etag, "x-theodore-parts": str(len(parts)), "x-theodore-part": str(index),
                                                                           "x-theodore-guide-version": self.guide_version},
                               content_type="text/markdown; charset=utf-8")
