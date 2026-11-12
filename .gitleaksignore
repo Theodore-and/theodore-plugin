@@ -6,6 +6,7 @@
 tests/fixtures/contract-v1.json:generic-api-key:134
 f2eb585ac5e802b3717910821538373c8af339c9:tests/fixtures/contract-v1.json:generic-api-key:135
 tests/fixtures/contract-v1.json:generic-api-key:135
+457519c3342c0749e38af2f90ace5b3dd37e0030:tests/fixtures/contract-v1.json:generic-api-key:135
 # False positive: line 9 of each launcher.json is manifest_key_1_x, the service's public Ed25519 manifest key (the
 # verifying half, published at /v1/keys). It is meant to be public.
 c5d790d689e7497f589f26e53c9fae1bd67d7df7:plugins/theodore/skills/deck-design/scripts/launcher.json:generic-api-key:9
