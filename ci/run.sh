@@ -89,7 +89,7 @@ in_container() { # docker-platform name script
 
 # What the old runners had and the jobs use: a Python to bootstrap the pinned one, curl, openssl, xz, git, and one
 # font with fontconfig (skia-canvas measures text with the system's fonts; a desktop Linux always has some).
-SETUP='set -e; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null
+SETUP='set -e; export DEBIAN_FRONTEND=noninteractive; echo "Acquire::Retries \"5\";" > /etc/apt/apt.conf.d/80retries; apt-get update -qq >/dev/null
   apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git fontconfig fonts-dejavu-core >/dev/null
   useradd -m tester'
 
