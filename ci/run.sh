@@ -8,7 +8,9 @@
 #   ci/run.sh windows-x64 --azure      the same on a throwaway Azure VM made for this run and deleted after it, pass,
 #                                      fail or interrupted (ci/azure-windows.sh; `ci/azure-windows.sh sweep` deletes leftovers)
 #   ci/run.sh windows-x64 --host user@host [--key file]   over SSH on a Windows machine (stock Windows with OpenSSH
-#                                      server; ci/windows-prepare.ps1 runs there first and installs Git for Windows)
+#                                      server; ci/windows-prepare.ps1 runs there first and installs Git for Windows);
+#                                      the job runs detached there (ci/windows-start.ps1), so a dropped connection only
+#                                      delays the copy of its results
 #   ci/run.sh network                  the corporate-network job (TLS inspection, authenticating proxy), in a container
 #   ci/run.sh secrets                  gitleaks over every commit
 #   ci/run.sh archives                 the plugin archives, the client tar (its sha256 must equal launcher.json's pin) and
@@ -173,24 +175,19 @@ run_windows() {
     "$ROOT/runtime/locks/versions.json")
   ( cd "$ROOT" && git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar --no-mac-metadata --no-xattrs -cf "$dir/repo.tar" ) || { result "$name" shim fail; result "$name" runtime fail; return; }
   SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 ${KNOWN:+-o UserKnownHostsFile=$KNOWN} ${KEY:+-i $KEY}"
-  if ssh $SSHO "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' > "$dir/remote.log" 2>&1 &&
-      scp -q $SSHO "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" >> "$dir/remote.log" 2>&1; then
-    ssh $SSHO "$HOST" "C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo && powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-run.ps1 $pins" \
-      >> "$dir/remote.log" 2>&1 &
-    spid=$! started=$(date +%s)
-    # A Windows SSH session sometimes stays open after the job has written its results (a process of the session
-    # holds it): once runtime.result (written last) is there, the session gets a minute, then it is closed. 3 h at most.
-    while kill -0 "$spid" 2>/dev/null; do
+  # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
+  retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; sleep 20; done; }
+  if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' > "$dir/remote.log" 2>&1 &&
+      retry scp -q $SSHO -o ConnectTimeout=20 "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" >> "$dir/remote.log" 2>&1 &&
+      retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "(if not exist C:\\theodore-ci\\started C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo) & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-start.ps1 $pins" >> "$dir/remote.log" 2>&1; then
+    # windows-run.ps1 writes runtime.result last. A failed poll (a dropped connection) is only retried. 3 h at most.
+    wstart=$(date +%s)
+    until ssh $SSHO -o ConnectTimeout=20 "$HOST" 'if exist C:\theodore-ci\out\runtime.result echo done' 2>/dev/null | grep -q done; do
+      [ $(( $(date +%s) - wstart )) -lt 10800 ] || { say "windows-x64: no result after 3 h"; break; }
       sleep 30
-      if ssh $SSHO "$HOST" 'if exist C:\theodore-ci\out\runtime.result echo done' 2>/dev/null | grep -q done; then
-        n=0; while kill -0 "$spid" 2>/dev/null && [ $n -lt 6 ]; do sleep 10; n=$((n + 1)); done
-        kill "$spid" 2>/dev/null; break
-      fi
-      [ $(( $(date +%s) - started )) -lt 10800 ] || { say "windows-x64: no result after 3 h"; kill "$spid" 2>/dev/null; break; }
     done
-    wait "$spid" 2>/dev/null
   fi
-  scp -q -r $SSHO "$HOST:C:/theodore-ci/out/*" "$dir/" 2>>"$dir/remote.log"
+  retry scp -q -r $SSHO -o ConnectTimeout=20 "$HOST:C:/theodore-ci/out/*" "$dir/" 2>>"$dir/remote.log"
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(tr -d '\r' < "$dir/$job.result")"; done
   rm -f "$dir/repo.tar"
 }
