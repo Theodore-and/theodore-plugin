@@ -352,44 +352,45 @@ def specimen(files: list[str]) -> int:
 
 def _specimen_paths(files: list[str]) -> dict[str, Path]:
     account.require("deck-design")
+    copies = {name: specimens.held(name) for name in dict.fromkeys(files)}
+    # A sheet not held needs a folder: made before anything is fetched, so a working folder that leaves no private
+    # place for sheets stops the call before any sheet is downloaded (as before 0.3.4).
+    folder = specimens.make_folder() if any(copy is None for copy in copies.values()) else None
     paths: dict[str, Path] = {}
-    fetched: dict[str, bytes] = {}
-    for name in files:
-        if name in paths or name in fetched:
-            continue
-        what = f"specimen {name}"
-        asked = {"Accept": "image/jpeg, application/json;q=0.9"}
-        copy = specimens.held(name)
-        if copy is not None:
+    try:
+        for name, copy in copies.items():
+            what = f"specimen {name}"
+            asked = {"Accept": "image/jpeg, application/json;q=0.9"}
+            if copy is not None:
+                try:
+                    asked["If-None-Match"] = '"' + hashlib.sha256(copy.read_bytes()).hexdigest() + '"'
+                except OSError:
+                    copy = None
             try:
-                asked["If-None-Match"] = '"' + hashlib.sha256(copy.read_bytes()).hexdigest() + '"'
-            except OSError:
-                copy = None
-        try:
-            status, headers, raw = _api("guide_specimen", what, file=name, query={"skill": "deck-design"},
-                                        headers=asked, redirects=False, limit=specimens.MAX_BYTES)
-        except api.TooLarge:
-            raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
-        if core.refused():
-            raise api.sign_in_required()
-        if status == 304 and copy is not None:
-            paths[name] = copy
-            continue
-        if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
-            raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
-        if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
-            raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
-                         "run the same command again once. If it fails again, continue without the sheet.",
-                         "A design specimen arrived damaged. I am trying once more.")
-        fetched[name] = raw
-    if fetched:
-        folder = specimens.make_folder()
-        try:
-            for name, raw in fetched.items():
-                paths[name] = specimens.write(folder, name, raw)
-        except BaseException:
+                status, headers, raw = _api("guide_specimen", what, file=name, query={"skill": "deck-design"},
+                                            headers=asked, redirects=False, limit=specimens.MAX_BYTES)
+            except api.TooLarge:
+                raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
+            if core.refused():
+                raise api.sign_in_required()
+            if status == 304 and copy is not None:
+                paths[name] = copy
+                continue
+            if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
+                raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
+            if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
+                raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
+                             "run the same command again once. If it fails again, continue without the sheet.",
+                             "A design specimen arrived damaged. I am trying once more.")
+            if folder is None:          # a held copy went missing or was answered 200: this sheet needs a folder after all
+                folder = specimens.make_folder()
+            paths[name] = specimens.write(folder, name, raw)
+    except BaseException:
+        if folder is not None:
             core.remove_tree(folder)
-            raise
+        raise
+    if folder is not None and not any(path.parent == folder for path in paths.values()):
+        core.remove_tree(folder)        # every sheet was held after all: the empty folder goes
     return paths
 
 
