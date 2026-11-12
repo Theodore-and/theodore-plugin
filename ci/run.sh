@@ -246,8 +246,8 @@ summary() {
     printf '%-12s %-8s %-8s %-62s %s\n' platform shim runtime "bundle manifest" sha256
     for name in macos-arm64 macos-x64 windows-x64 linux-x64 linux-arm64; do
       m=$(ls "$OUT/$name/bundle/"*.manifest.json 2>/dev/null | head -n 1)
-      printf '%-12s %-8s %-8s %-62s %s\n' "$name" "$(tr -d '\r' < "$OUT/$name/shim.result" 2>/dev/null || echo not-run)" \
-        "$(tr -d '\r' < "$OUT/$name/runtime.result" 2>/dev/null || echo not-run)" "${m#$ROOT/}" "$( [ -n "$m" ] && shasum -a 256 "$m" | cut -d' ' -f1)"
+      printf '%-12s %-8s %-8s %-62s %s\n' "$name" "$(tr -d '\r' 2>/dev/null < "$OUT/$name/shim.result" || echo not-run)" \
+        "$(tr -d '\r' 2>/dev/null < "$OUT/$name/runtime.result" || echo not-run)" "${m#$ROOT/}" "$( [ -n "$m" ] && shasum -a 256 "$m" | cut -d' ' -f1)"
     done
     for job in network/job secrets/scan archives/build index/build; do
       printf '%-12s %s\n' "${job%/*}" "$(cat "$OUT/$job.result" 2>/dev/null || echo not-run)"
