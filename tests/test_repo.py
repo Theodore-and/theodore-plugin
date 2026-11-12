@@ -44,6 +44,22 @@ def frontmatter(text: str) -> dict[str, str]:
     return {line.split(":", 1)[0]: line for line in lines[1:end]}
 
 
+# The engine commit whose skill descriptions the stubs copy, while it is not yet on the engine's main (it lands there
+# with engine rc.6; then set this to None and the test reads the checked-out files again). Read with `git show`, so
+# whatever branch the engine checkout is on does not matter.
+ENGINE_DESCRIPTIONS_COMMIT = "600768ee"
+
+
+def engine_skill(source_root: Path, skill: str) -> str:
+    if ENGINE_DESCRIPTIONS_COMMIT:
+        shown = subprocess.run(["git", "-C", str(source_root), "show", f"{ENGINE_DESCRIPTIONS_COMMIT}:skills/{skill}/SKILL.md"],
+                               capture_output=True)
+        if shown.returncode == 0:
+            return shown.stdout.decode("utf-8")
+        raise unittest.SkipTest(f"the engine checkout does not have commit {ENGINE_DESCRIPTIONS_COMMIT} yet")
+    return (source_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+
+
 class Stubs(unittest.TestCase):
     def test_name_and_description_are_byte_identical_to_the_source_skills(self):
         for skill in ("pptx", "deck-design"):
@@ -58,7 +74,7 @@ class Stubs(unittest.TestCase):
         if not (source_root / "skills" / "pptx" / "SKILL.md").exists():
             self.skipTest("the engine repository is not checked out beside this one")
         for skill in ("pptx", "deck-design"):
-            live = frontmatter((source_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8"))
+            live = frontmatter(engine_skill(source_root, skill))
             mine = frontmatter((FIXTURES / "frontmatter" / f"{skill}.txt").read_text(encoding="utf-8"))
             self.assertEqual((live["name"], live["description"]), (mine["name"], mine["description"]), skill)
 

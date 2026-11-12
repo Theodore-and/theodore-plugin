@@ -16,6 +16,8 @@
   out; a new version drops everything of the old one.
 - Any command that learns the device is signed out, revoked, suspended, refused or blocked removes every specimen
   folder, and any command (the tool server on each call) removes folders older than an hour.
+- The pptx skill's description is the engine's new one (it opens by saying the skill is this session's slides skill,
+  installed by the user), copied byte for byte.
 - README and SECURITY name the portal's pages as they are now: the Theodore home page (the sentence to send) and
   Settings, Computers and assistants (where a computer is removed).
 
