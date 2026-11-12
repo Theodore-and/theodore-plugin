@@ -1,3 +1,6 @@
+# MANUAL MIRROR ONLY. The source of truth is ci/run.sh, run on our own machines (`ci/run.sh all --azure`): it runs
+# this job and every other check, and a release requires its stamp (`ci/run.sh require`). No push or pull request
+# starts this workflow, so a red or refused hosted run never blocks or misleads anyone; start it by hand if wanted.
 # Tests the plugin, the launcher, the client and the installer, and builds the plugin archives.
 #
 # No secrets and no publishing step. The archives (theodore-<version>.zip for the hosted marketplace.json,
@@ -7,14 +10,6 @@
 name: shim
 
 on:
-  push:
-    paths-ignore:
-      - "runtime/locks/**"
-      - "**.md"
-  pull_request:
-    paths-ignore:
-      - "runtime/locks/**"
-      - "**.md"
   workflow_dispatch:
     inputs:
       release:
@@ -120,13 +115,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      # The repository carries the placeholder manifest key; keys are stamped per environment at release. A release
-      # build must refuse a tree that was not stamped (the plugin would refuse to start for every user).
-      - name: A release build refuses the placeholder key
-        run: |
-          if python tools/build_plugin_archives.py --out "$RUNNER_TEMP/release-check" --release; then
-            echo "an unstamped tree was accepted as a release"; exit 1
-          fi
+      # main carries the production-stamped manifest key since 0.3.3, so a release build of it is accepted; the
+      # refusal of an unstamped tree is tested by test_repo.GeneratedFiles (the unit job).
       - name: Build
         env:
           RELEASE: ${{ inputs.release && '--release' || '' }}

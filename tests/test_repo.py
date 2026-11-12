@@ -237,11 +237,18 @@ class Installers(unittest.TestCase):
 
 class Workflows(unittest.TestCase):
     def test_the_secret_scan_runs_for_every_commit(self):
-        text = (ROOT / ".github" / "workflows" / "secrets.yml").read_text()
-        on = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertNotIn("paths", on, "no path filter: a commit touching only Markdown or locks is scanned too")
-        self.assertIn("gitleaks\" git . ", text)
-        self.assertNotIn("gitleaks", (ROOT / ".github" / "workflows" / "shim.yml").read_text())
+        runner = (ROOT / "ci" / "run.sh").read_text()
+        scan = runner.split("run_secrets() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('gitleaks" git . ', scan, "the local runner scans the whole history, not the working tree")
+        self.assertIn("run_secrets", runner.split("\n  all)", 1)[1], "ci/run.sh all includes the secret scan")
+
+    def test_no_hosted_workflow_starts_on_push_or_pull_request(self):
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            on = workflow.read_text().split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+            self.assertEqual(on.split()[0], "workflow_dispatch:", workflow.name)
+            self.assertNotIn("push", on, workflow.name)
+            self.assertNotIn("pull_request", on, workflow.name)
+            self.assertNotIn("schedule", on, workflow.name)
 
     def test_the_combined_runtime_index_keeps_lock_sha256(self):
         import runtime_index
@@ -261,7 +268,7 @@ class Workflows(unittest.TestCase):
             (Path(tmp) / "linux-x64" / "python.tar.gz").write_bytes(b"tampered")
             with self.assertRaises(SystemExit):
                 runtime_index.build_index(Path(tmp))
-        self.assertIn("tools/runtime_index.py", (ROOT / ".github" / "workflows" / "runtime.yml").read_text())
+        self.assertIn("tools/runtime_index.py", (ROOT / "ci" / "run.sh").read_text())
 
 
 class HostLimits(unittest.TestCase):

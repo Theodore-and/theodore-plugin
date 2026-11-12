@@ -1,17 +1,26 @@
 #!/bin/sh
-# The local runner: what .github/workflows/shim.yml, runtime.yml and secrets.yml do, per platform, from one Mac.
-# The scripts in ci/ are the source of truth; the workflow files are an optional mirror.
+# The local runner: every check of this repository, per platform, from one Mac. It is the source of truth: nothing
+# depends on GitHub Actions (the files in .github/workflows/ are a manual-only mirror that no push or pull request starts).
 #
 #   ci/run.sh macos-arm64              natively
 #   ci/run.sh macos-x64                under Rosetta (arch -x86_64), with the x64 CPython and Node
 #   ci/run.sh linux-x64 | linux-arm64  in an ubuntu 22.04 container (pinned by digest; Docker, for example colima)
+#   ci/run.sh windows-x64 --azure      the same on a throwaway Azure VM made for this run and deleted after it, pass,
+#                                      fail or interrupted (ci/azure-windows.sh; `ci/azure-windows.sh sweep` deletes leftovers)
 #   ci/run.sh windows-x64 --host user@host [--key file]   over SSH on a Windows machine (stock Windows with OpenSSH
 #                                      server; ci/windows-prepare.ps1 runs there first and installs Git for Windows)
 #   ci/run.sh network                  the corporate-network job (TLS inspection, authenticating proxy), in a container
 #   ci/run.sh secrets                  gitleaks over every commit
+#   ci/run.sh archives                 the plugin archives, the client tar (its sha256 must equal launcher.json's pin) and
+#                                      the install files, with SHA256SUMS (a release build when the tree is stamped)
 #   ci/run.sh index                    runtime-<id>.json from the bundles in ci/out/*/bundle (lock_sha256 kept)
 #   ci/run.sh summary                  the table of the last results
-#   ci/run.sh all [--host user@host]   everything reachable, then the table
+#   ci/run.sh all [--azure | --host user@host]   everything (Windows from the start, in the background), the table,
+#                                      then `record`
+#   ci/run.sh record                   copy the table and logs to $THEODORE_CI_LOGS/<date>/plugin-<commit>-<time>/
+#                                      (default ~/theodore-ci) and, when every row passed on a clean tree, write the
+#                                      stamp green/plugin/<commit> ("checks green at <commit>")
+#   ci/run.sh require [commit]         exit 0 only when that commit (default HEAD) has the stamp: release steps call it
 #
 # Per platform: "shim" is sync_launchers --check and every test suite (on Windows against the real bundle, as the
 # workflow did); "runtime" is build_bundle, smoke_test, and the launcher and installer suites against that bundle.
@@ -28,10 +37,14 @@ UBUNTU="ubuntu@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04
 GITLEAKS_VERSION=8.30.1
 HOST=
 KEY=
+AZURE=
+KNOWN=
+LOGS=${THEODORE_CI_LOGS:-$HOME/theodore-ci}
 TARGET=${1:-}
 [ $# -gt 0 ] && shift
 while [ $# -gt 0 ]; do
-  case "$1" in --host) HOST=${2:-}; shift ;; --key) KEY=${2:-}; shift ;; *) echo "unknown option $1" >&2; exit 64 ;; esac
+  case "$1" in --host) HOST=${2:-}; shift ;; --key) KEY=${2:-}; shift ;; --azure) AZURE=1 ;;
+    [0-9a-f]*) [ "$TARGET" = require ] && REQUIRE=$1 || { echo "unknown option $1" >&2; exit 64; } ;; *) echo "unknown option $1" >&2; exit 64 ;; esac
   shift
 done
 
@@ -159,14 +172,73 @@ run_windows() {
   pins=$("$(host_python)" -c 'import json,sys; p=json.load(open(sys.argv[1]))["python"]; a=p["assets"]["win32-x64"]; print(p["pbs_release"], a["file"], a["sha256"])' \
     "$ROOT/runtime/locks/versions.json")
   ( cd "$ROOT" && git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar --no-mac-metadata --no-xattrs -cf "$dir/repo.tar" ) || { result "$name" shim fail; result "$name" runtime fail; return; }
-  SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new ${KEY:+-i $KEY}"
-  ssh $SSHO "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' &&
-    scp -q $SSHO "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" &&
+  SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 ${KNOWN:+-o UserKnownHostsFile=$KNOWN} ${KEY:+-i $KEY}"
+  if ssh $SSHO "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' > "$dir/remote.log" 2>&1 &&
+      scp -q $SSHO "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" >> "$dir/remote.log" 2>&1; then
     ssh $SSHO "$HOST" "C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo && powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-run.ps1 $pins" \
-    > "$dir/remote.log" 2>&1
+      >> "$dir/remote.log" 2>&1 &
+    spid=$! started=$(date +%s)
+    # A Windows SSH session sometimes stays open after the job has written its results (a process of the session
+    # holds it): once runtime.result (written last) is there, the session gets a minute, then it is closed. 3 h at most.
+    while kill -0 "$spid" 2>/dev/null; do
+      sleep 30
+      if ssh $SSHO "$HOST" 'if exist C:\theodore-ci\out\runtime.result echo done' 2>/dev/null | grep -q done; then
+        n=0; while kill -0 "$spid" 2>/dev/null && [ $n -lt 6 ]; do sleep 10; n=$((n + 1)); done
+        kill "$spid" 2>/dev/null; break
+      fi
+      [ $(( $(date +%s) - started )) -lt 10800 ] || { say "windows-x64: no result after 3 h"; kill "$spid" 2>/dev/null; break; }
+    done
+    wait "$spid" 2>/dev/null
+  fi
   scp -q -r $SSHO "$HOST:C:/theodore-ci/out/*" "$dir/" 2>>"$dir/remote.log"
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(tr -d '\r' < "$dir/$job.result")"; done
   rm -f "$dir/repo.tar"
+}
+
+# --- Windows on a throwaway Azure VM ---------------------------------------------------------------------------------------
+run_windows_azure() {
+  state="$OUT/azure-windows"; dir="$OUT/windows-x64"
+  mkdir -p "$dir"
+  [ ! -f "$state/group" ] || { say "$state still names a machine: ci/azure-windows.sh down $state"; result windows-x64 shim not-run; result windows-x64 runtime not-run; return; }
+  # The VM is deleted on every way out: the end of this function, a failure, or a signal (the signal handler exits,
+  # which runs the EXIT trap). The trap carries the paths by value.
+  trap "bash '$ROOT/ci/azure-windows.sh' down '$state' >> '$dir/azure.log' 2>&1" EXIT
+  trap 'exit 130' INT TERM HUP
+  started=$(date +%s)
+  if CI_AZURE_KEY="${KEY:-$HOME/.ssh/theodore_ci}" bash "$ROOT/ci/azure-windows.sh" up "$state" > "$dir/azure.log" 2>&1; then
+    HOST=$(cat "$state/host") KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN="$state/known_hosts"
+    say "windows-x64: $(cat "$state/size" 2>/dev/null) ready after $(( $(date +%s) - started )) s"
+    cp "$dir/azure.log" "$OUT/azure-up.log"
+    run_windows
+    cat "$OUT/azure-up.log" "$dir/azure.log" > "$OUT/azure.tmp" 2>/dev/null; mv "$OUT/azure.tmp" "$dir/azure.log"; rm -f "$OUT/azure-up.log"
+  else
+    say "windows-x64: the Azure machine could not be made (ci/out/windows-x64/azure.log)"
+    result windows-x64 shim not-run; result windows-x64 runtime not-run
+  fi
+  bash "$ROOT/ci/azure-windows.sh" down "$state" >> "$dir/azure.log" 2>&1
+  trap - EXIT INT TERM HUP
+  echo "$(( $(date +%s) - started ))" > "$dir/azure.seconds"
+  say "windows-x64: machine deleted; $(( ($(date +%s) - started) / 60 )) min from create to delete"
+}
+
+# --- the archives ----------------------------------------------------------------------------------------------------------
+run_archives() {
+  dir="$OUT/archives"; fresh "$dir"; mkdir -p "$CACHE"
+  case "$(uname -m)" in arm64) key=darwin-arm64 ;; *) key=darwin-x64 ;; esac
+  PY=$("$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") || { result archives build fail; return; }
+  ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 &&
+    if "$PY" -c 'import sys; sys.path.insert(0, "tools"); import build_plugin_archives as b; sys.exit(1 if b.placeholder_keys(b.ROOT) else 0)'; then
+      rel=--release; echo "stamped tree: release build"; else rel=; echo "placeholder key: development build (a release build would refuse it)"; fi &&
+    "$PY" tools/build_plugin_archives.py --out "$dir/plugin" $rel &&
+    "$PY" runtime/build/build_client.py --out "$dir/client" &&
+    mkdir -p "$dir/install" && cp install/install.md install/install.sh install/install.cmd "$dir/install/" &&
+    want=$("$PY" -c 'import json; print(json.load(open("plugins/theodore/skills/pptx/scripts/launcher.json"))["stage1_client_sha256"])') &&
+    got=$(shasum -a 256 "$dir/client/"client-*.tar | cut -d' ' -f1) &&
+    { [ "$got" = "$want" ] || { echo "client tar sha256 $got is not launcher.json's stage1_client_sha256 $want"; false; }; } &&
+    echo "client tar sha256 equals launcher.json's pin" &&
+    ( cd "$dir" && shasum -a 256 plugin/* client/* install/* > SHA256SUMS ) ) > "$dir/archives.log" 2>&1 \
+    && result archives build pass || result archives build fail
+  tail -n 3 "$dir/archives.log"
 }
 
 summary() {
@@ -177,11 +249,39 @@ summary() {
       printf '%-12s %-8s %-8s %-62s %s\n' "$name" "$(tr -d '\r' < "$OUT/$name/shim.result" 2>/dev/null || echo not-run)" \
         "$(tr -d '\r' < "$OUT/$name/runtime.result" 2>/dev/null || echo not-run)" "${m#$ROOT/}" "$( [ -n "$m" ] && shasum -a 256 "$m" | cut -d' ' -f1)"
     done
-    for job in network/job secrets/scan index/build; do
+    for job in network/job secrets/scan archives/build index/build; do
       printf '%-12s %s\n' "${job%/*}" "$(cat "$OUT/$job.result" 2>/dev/null || echo not-run)"
     done
     ls "$OUT/index/"runtime-*.json 2>/dev/null | sed "s|$ROOT/||"
   } | tee "$OUT/summary.txt"
+}
+
+# --- the record: a dated folder outside the repository, and the stamp a release step requires ---------------------------
+commit() { git -C "$ROOT" rev-parse HEAD; }
+record() {
+  sha=$(commit); short=$(printf %.12s "$sha")
+  dest="$LOGS/$(date +%Y-%m-%d)/plugin-$short-$(date +%H%M%S)"; mkdir -p "$dest"
+  for name in macos-arm64 macos-x64 windows-x64 linux-x64 linux-arm64 network secrets archives index; do
+    [ -d "$OUT/$name" ] || continue
+    mkdir -p "$dest/$name"; find "$OUT/$name" -maxdepth 1 -type f \( -name '*.log' -o -name '*.result' -o -name '*.seconds' -o -name SHA256SUMS -o -name 'runtime-*.json' \) -exec cp {} "$dest/$name/" \;
+  done
+  cp "$OUT/summary.txt" "$dest/table.txt"
+  # Every row must pass. index is only required when all five bundles were built (it is the publish input).
+  bad=$(grep -vE '^platform ' "$OUT/summary.txt" | grep -vE '^ci/out/' | awk '$1 != "index" { for (i = 2; i <= 3 && i <= NF; i++) if ($i == "fail" || $i == "not-run") print $1 } $1 == "index" && $2 == "fail" { print $1 }' | sort -u | tr '\n' ' ')
+  dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
+  if [ -z "$bad" ] && [ -z "$dirty" ]; then
+    mkdir -p "$LOGS/green/plugin"
+    printf 'checks green at %s\n%s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$dest" > "$LOGS/green/plugin/$sha"
+    line="checks green at $sha"
+  elif [ -n "$dirty" ]; then line="checks NOT green at $sha: the tree has uncommitted changes (no stamp)"
+  else line="checks NOT green at $sha: ${bad% }"; fi
+  echo "$line" | tee "$dest/result.txt"
+  say "record: $dest"
+}
+require() {
+  sha=$(git -C "$ROOT" rev-parse "${REQUIRE:-HEAD}") || exit 2
+  if [ -f "$LOGS/green/plugin/$sha" ]; then head -n 1 "$LOGS/green/plugin/$sha"; exit 0; fi
+  echo "no green check for $sha: run ci/run.sh all --azure at that commit (stamps in $LOGS/green/plugin/)" >&2; exit 1
 }
 
 mkdir -p "$OUT"
@@ -190,20 +290,35 @@ case "$TARGET" in
   macos-x64) run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
   linux-x64) run_linux linux-x64 linux/amd64 linux-x64 ;;
   linux-arm64) run_linux linux-arm64 linux/arm64 linux-arm64 ;;
-  windows-x64) run_windows ;;
+  windows-x64) if [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
+  archives) run_archives ;;
+  record) record ;;
+  require) require ;;
   network) run_network ;;
   secrets) run_secrets ;;
   index) run_index ;;
   summary) summary ;;
   all)
+    # Windows runs remotely from the start (it is the longest), the local jobs one at a time beside it.
+    wpid=
+    if [ -n "$AZURE$HOST" ]; then
+      mkdir -p "$OUT/windows-x64"
+      sh "$0" windows-x64 ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} > "$OUT/windows-x64.run.log" 2>&1 & wpid=$!
+      trap 'kill $wpid 2>/dev/null; wait $wpid; exit 130' INT TERM HUP
+      say "windows-x64 started (ci/out/windows-x64.run.log)"
+    else
+      result windows-x64 shim not-run; result windows-x64 runtime not-run
+    fi
     run_secrets
     run_mac macos-arm64 darwin-arm64 ""
     run_mac macos-x64 darwin-x64 "arch -x86_64"
     run_linux linux-x64 linux/amd64 linux-x64
     run_linux linux-arm64 linux/arm64 linux-arm64
     run_network
-    if [ -n "$HOST" ]; then run_windows; else result windows-x64 shim not-run; result windows-x64 runtime not-run; fi
+    run_archives
+    if [ -n "$wpid" ]; then say "waiting for windows-x64"; wait "$wpid"; trap - INT TERM HUP; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     run_index
-    summary ;;
+    summary
+    record ;;
   *) sed -n '2,20p' "$0"; exit 64 ;;
 esac
