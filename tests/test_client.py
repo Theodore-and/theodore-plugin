@@ -1920,6 +1920,23 @@ class HostTest(ClientCase):
         self.assertIn("craft, forms, worked-notes", first)
         self.assertEqual([r["path"] for r in self.api.requests if "passwd" in r["path"] or ".." in r["path"]], [])
 
+    def test_guide_pptx_section_prints_a_served_section_and_refuses_an_unserved_one_cleanly(self):
+        """Lane STUDIO: `guide pptx <section>` reads a section the service serves; pptx links stay file paths (the
+        manual's references are on disk). A section not served (an older service, an account without it) is a
+        clean USAGE that fetches nothing else."""
+        self.sign_in()
+        self.api.guides["pptx"]["served-part"] = "SERVED-PPTX see [charts](references/pptxgenjs-charts.md)\n"
+        result = self.client("guide", "pptx", "served-part")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("SERVED-PPTX see [charts](references/pptxgenjs-charts.md)", result.stdout)
+        self.assertEqual(result.stdout.splitlines()[1], "--- served-part ---")
+        before = len(self.api.requests)
+        first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
+        self.assertIn("guide pptx has no section 'not-served'.", first)
+        self.assertIn("guide pptx for the manual", nxt)
+        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/pptx/not-served"])
+        self.assertStatus(self.client("guide", "pptx", "--license"), "USAGE", 64)
+
     # --- 5: uninstall with an assistant that never had Theodore ------------------------------------------------------------------
     def test_uninstall_with_codex_never_registered_is_a_clean_removal(self):
         self.ready()

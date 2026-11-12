@@ -97,9 +97,11 @@ def guide(skill: str, section: str | None, part: int, license_text: bool) -> int
     if part < 1:
         raise core.usage("--part starts at 1.")
     if skill == "pptx":
-        if section or license_text:
-            raise core.usage("guide pptx takes no section: the rest of the pptx manual is read from the engine folder named in its header.")
-        return _guide_pptx(part)
+        if license_text:
+            raise core.usage("guide pptx has no --license: the pptx manual and its notices are in the engine folder named in its header.")
+        if not section:
+            return _guide_pptx(part)
+        # A section of pptx is one the service serves to this account (lane STUDIO); the rest of the manual is on disk.
     return _guide_remote(skill, "license" if license_text else section, part)
 
 
@@ -176,7 +178,12 @@ def _section_name(given: str) -> str:
 
 
 def _no_such_section(skill: str, given: str) -> Status:
-    """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored)."""
+    """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
+    only the answer: its manual is on disk, and a served section is named by the text that points to it."""
+    launcher = quoted_launcher()
+    shown = "".join(ch for ch in given if ch.isprintable())[:80]
+    if skill == "pptx":
+        return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx for the manual.")
     names: list[str] = []
     try:
         _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill)
@@ -186,8 +193,6 @@ def _no_such_section(skill: str, given: str) -> Status:
     except Status as status:
         if status.name != "USAGE":
             raise
-    launcher = quoted_launcher()
-    shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if names:
         return core.usage(f"guide {skill} has no section '{shown}'. Sections: {', '.join(names)}.",
                           f"run {launcher} guide {skill} <section> with one of those names.")
@@ -224,7 +229,7 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
     elif part > total:
         raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     name = section or "SKILL.md"
-    if section != "license":       # a reference is a section of this guide, not a file: its link becomes the command that prints it
+    if section != "license" and skill != "pptx":   # a reference is a section of this guide, not a file: its link becomes the command that prints it (pptx references are files on disk)
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
