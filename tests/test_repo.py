@@ -498,7 +498,9 @@ class Documents(unittest.TestCase):
     def test_security_describes_reports_off_as_off(self):
         text = (ROOT / "SECURITY.md").read_text()
         self.assertNotIn("the assistant then asks you first", text)
-        self.assertIn("the assistant does not ask you about\nreports and files one only when you ask it to", text)
+        flat = " ".join(text.split())
+        self.assertIn("the assistant does not ask you about reports and files one only when you ask it to", flat)
+        self.assertIn("To stop them, write to support@theodoreand.ai", flat)
         self.assertIn("redact.py", text)
 
 

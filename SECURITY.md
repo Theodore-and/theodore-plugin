@@ -60,12 +60,12 @@ The limit, plainly: a report's description is prose the assistant writes, and no
 that prose free of deck content (an unquoted sentence copied from a slide reads like any other sentence). What
 stands between deck content and a report is, in order: the reporting directions, which forbid deck content, file
 names and client names; the client's redaction above; and the service's own redaction. `theodore report ... --dry-run` prints exactly what
-would be sent and sends nothing. You see every report in the portal.
+would be sent and sends nothing. To see the reports sent from your account, write to support@theodoreand.ai.
 
-You can switch automatic reports off in the portal. With them off, the assistant does not ask you about
-reports and files one only when you ask it to; the client knows the setting before sending (from your plan and
-your licence) and sends nothing. If the setting changed since the client last learned it, the service refuses
-the report, stores nothing, and the client remembers.
+During the beta, automatic reports are on. To stop them, write to support@theodoreand.ai and they are switched off
+for your account. With them off, the assistant does not ask you about reports and files one only when you ask it
+to; the client knows the setting before sending (from your plan and your licence) and sends nothing. If the setting
+changed since the client last learned it, the service refuses the report, stores nothing, and the client remembers.
 
 ## Credentials and the licence
 
