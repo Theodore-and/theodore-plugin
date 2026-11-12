@@ -697,6 +697,21 @@ class Engine(ClientCase):
         self.assertIn(str(self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx"), out)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
+    def test_the_served_pptx_entry_comes_first_after_the_bindings_in_both_forms(self):
+        """Lane STUDIO: the served pptx entry (the Studio pointer, then the directions) is the first thing after the
+        three binding lines, before the engine's SKILL.md, in `guide pptx` and in the skill body loaded at skill
+        start (the tool server prints `guide pptx`)."""
+        self.ready()
+        self.api.guides["pptx"][""] = "SERVED-POINTER: first instruction.\n\nDIRECTIONS.\n"
+        manual = f"Fake manual for engine {self.ENGINE_VERSION}."
+        for args in (("guide", "pptx"), ("skill", "pptx")):
+            out = self.client(*args).stdout
+            lines = out.splitlines()
+            bindings = next(i for i, line in enumerate(lines) if line.startswith("Bindings: pptx <verb>"))
+            self.assertTrue(lines[bindings + 2].lstrip().startswith("<pptx-skill-dir> = "), args)
+            self.assertEqual(lines[bindings + 3], "SERVED-POINTER: first instruction.", args)
+            self.assertLess(out.index("DIRECTIONS."), out.index(manual), args)
+
     def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
         """Lane STUDIO: the served pptx entry gets three attempts. One that answers in time on a later attempt is
         delivered as usual; when none does, the first line after the document header says Theodore's online part
