@@ -9,6 +9,14 @@ Protocol: JSON-RPC 2.0, one message per line on standard input and output (the M
 else this process would print goes to standard error, so that nothing can break the stream. Python standard
 library only, like the rest of the client; it needs the stage-1 client and the installation credential, not the
 engine (except `guide` with skill pptx, whose manual comes with the engine).
+
+Reuse within the session: this process keeps each sheet and each whole guide text it fetched in memory, never on
+disk, for as long as it runs; Claude Code's sub-agents call the same process. A held guide text is asked for again
+on every call with If-None-Match (the service answers 304 and does not count it as a fetch). Held sheets belong to
+the published guide version the index names: at most REVALIDATE_SECONDS after the last check, one conditional index
+request confirms the version and the device (304); a new version makes each held sheet be checked on its own
+(If-None-Match with its SHA-256); a refusal drops every held item. A revoked device is therefore refused on its next guide call at once and on its next sheet call within
+60 seconds; it is never served a held item after the service refused it.
 """
 
 from __future__ import annotations
@@ -18,7 +26,9 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import sys
+import time
 
 from . import __version__, account, api, commands, core, credentials, install, specimens
 from .contract import HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, SKILLS
@@ -26,7 +36,8 @@ from .core import Status
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 GUIDE_MAX_RESULT_CHARS = 400_000
-SPECIMEN_MAX_PER_CALL = 6          # sheets one specimen call returns; each is one fetch against the service's limit
+SPECIMEN_MAX_PER_CALL = 6          # sheets one specimen call returns; each sheet not held is one fetch
+REVALIDATE_SECONDS = 60.0          # held sheets are served for at most this long after the service last confirmed them
 
 DESCRIPTIONS = {
     "list": "Lists the files of a Theodore skill.",
@@ -59,8 +70,30 @@ def tools(index: dict | None = None) -> list[dict]:
 
 # --- the published index: names only ------------------------------------------------------------------------------------
 
-INDEX: dict | None = None          # {"version", "sections": [names], "specimens": [files]} of deck-design, when known
+INDEX: dict | None = None          # {"version", "sections", "specimens", "etag"} of deck-design, when known
 NOTIFY: list[dict] = []            # notifications the server sends after its next answer
+SHEETS: dict[str, tuple[str, bytes, str | None]] = {}       # name -> (sha256, bytes, index ETag it was fetched under)
+GUIDES: dict[tuple[str, str], tuple[str, str]] = {}         # (skill, section) -> (ETag, whole text)
+VALIDATED_AT: float | None = None  # time.monotonic() of the service's last confirmation of INDEX (and of this device)
+
+
+def _revalidate_seconds() -> float:
+    """REVALIDATE_SECONDS. Test seam: THEODORE_TEST_REVALIDATE_SECONDS, honoured only when the API base is loopback."""
+    raw = os.environ.get("THEODORE_TEST_REVALIDATE_SECONDS")
+    if raw and core.is_loopback_api():
+        with contextlib.suppress(ValueError):
+            return float(raw)
+    return REVALIDATE_SECONDS
+
+
+def forget() -> None:
+    """Drop everything held: after a refusal nothing held is served again."""
+    global INDEX, VALIDATED_AT, INDEX_TRIED
+    SHEETS.clear()
+    GUIDES.clear()
+    VALIDATED_AT = None
+    INDEX = None                    # fetched again (and confirmed) before anything is held again
+    INDEX_TRIED = False
 
 
 def _names(items, key: str, pattern) -> list[str]:
@@ -72,6 +105,26 @@ def _names(items, key: str, pattern) -> list[str]:
     return out
 
 
+def _parse_index(headers, raw: bytes) -> dict | None:
+    if "json" not in str(headers.get("Content-Type") or "").lower():
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    sections = _names(data.get("sections"), "name", commands.SECTION_NAME.fullmatch)
+    sheets = _names(data.get("specimens"), "file", specimens.valid_name)
+    if not sections and not sheets:
+        return None
+    index = {"version": str(data.get("version") or ""), "sections": sections, "specimens": sheets}
+    etag = str(headers.get("ETag") or "").strip()
+    if etag:
+        index["etag"] = etag
+    return index
+
+
 def fetch_index() -> dict | None:
     """GET /v1/guide/deck-design?form=index: {version, sections: [{name}], specimens: [{file}]}. None when signed out,
     offline, or from a service without the index (then the tools take any name, as before)."""
@@ -80,37 +133,77 @@ def fetch_index() -> dict | None:
         if not cred:
             return None
         _s, headers, raw = api.call("guide", bearer=cred["installation_secret"], skill="deck-design", query={"form": "index"}, timeout=5.0)
-        if "json" not in str(headers.get("Content-Type") or "").lower():
-            return None
-        data = json.loads(raw.decode("utf-8"))
     except Exception:       # noqa: BLE001  no index: the tools still work by name
         return None
-    if not isinstance(data, dict):
-        return None
-    sections = _names(data.get("sections"), "name", commands.SECTION_NAME.fullmatch)
-    sheets = _names(data.get("specimens"), "file", specimens.valid_name)
-    if not sections and not sheets:
-        return None
-    return {"version": str(data.get("version") or ""), "sections": sections, "specimens": sheets}
+    return _parse_index(headers, raw)
+
+
+def _adopt(fresh: dict | None) -> None:
+    """Take a newly fetched index: held sheets of another version are no longer served unchecked, and the host is told
+    when the names changed."""
+    global INDEX, VALIDATED_AT
+    if fresh is None:
+        return
+    if fresh.get("etag") != (INDEX or {}).get("etag"):      # another version: each held sheet is checked on its own
+        for name, (digest, raw, _etag) in list(SHEETS.items()):
+            SHEETS[name] = (digest, raw, None)
+    changed = INDEX is not None and {k: v for k, v in fresh.items() if k != "etag"} != {k: v for k, v in INDEX.items() if k != "etag"}
+    INDEX = fresh
+    VALIDATED_AT = time.monotonic() if fresh.get("etag") else None
+    if changed:
+        NOTIFY.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
+
+INDEX_TRIED = False                # a specimen call asks for a missing index once, not on every call
 
 
 def _index() -> dict | None:
-    global INDEX
+    global INDEX, VALIDATED_AT, INDEX_TRIED
     if INDEX is None:
+        INDEX_TRIED = True
         INDEX = fetch_index()
+        VALIDATED_AT = time.monotonic() if INDEX and INDEX.get("etag") else None
     return INDEX
 
 
 def _seen_version(version: str | None) -> None:
     """A guide answer named its guide version: when it is not the index's, fetch the index again and tell the host
     that the tools changed."""
-    global INDEX
     if not version or INDEX is None or not INDEX.get("version") or version == INDEX["version"]:
         return
     fresh = fetch_index()
     if fresh and fresh != INDEX:
-        INDEX = fresh
-        NOTIFY.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+        _adopt(fresh)
+
+
+def _validate() -> str | None:
+    """The index ETag under which held sheets may be served now, or None (no index: each held sheet is checked on its
+    own). Past the interval, one conditional index request: 304 confirms; a new version demotes the held sheets; a
+    refusal or a failure raises its status (call_tool then drops everything held after a refusal)."""
+    global VALIDATED_AT, INDEX
+    etag = (INDEX or {}).get("etag")
+    if not etag:
+        return None
+    if VALIDATED_AT is not None and 0 <= time.monotonic() - VALIDATED_AT < _revalidate_seconds():
+        return etag
+    try:
+        status, headers, raw = commands._api("guide", "specimen", skill="deck-design", query={"form": "index"},
+                                             headers={"If-None-Match": etag})
+    except Status as status:
+        if status.name not in ("OFFLINE", "RETRY"):         # refused, or no published version: nothing held is kept
+            forget()
+        raise
+    if core.refused():
+        raise api.sign_in_required()
+    if status == 304:
+        VALIDATED_AT = time.monotonic()
+        return etag
+    fresh = _parse_index(headers, raw)
+    if fresh is None:               # the service no longer serves the index: check sheets one by one
+        INDEX = {k: v for k, v in (INDEX or {}).items() if k != "etag"}
+        return None
+    _adopt(fresh)
+    return fresh.get("etag")
 
 
 def _text(text: str, error: bool = False) -> dict:
@@ -139,14 +232,24 @@ def _fetch_whole(skill: str, section: str | None) -> str:
         name = commands._section_name(section)
         if not commands.SECTION_NAME.fullmatch(name):
             raise commands._no_such_section(skill, name)
+    key = (skill, name if section else "")
+    held = GUIDES.get(key)
+    conditional = {"If-None-Match": held[0]} if held else None
+    if section:
         try:
-            _s, headers, raw = commands._api("guide_section", what, passing=("not_found",), skill=skill, section=name, query=query)
+            status, headers, raw = commands._api("guide_section", what, passing=("not_found",), skill=skill, section=name,
+                                                 query=query, headers=conditional)
         except api.ApiError:
+            GUIDES.pop(key, None)
             raise commands._no_such_section(skill, name) from None
         route, extra = "guide_section", {"section": name}
     else:
-        _s, headers, raw = commands._api("guide", what, skill=skill, query=query)
+        status, headers, raw = commands._api("guide", what, skill=skill, query=query, headers=conditional)
         route, extra = "guide", {}
+    if core.refused():
+        raise api.sign_in_required()
+    if status == 304 and held:
+        return held[1]
     _seen_version(headers.get(HEADER_GUIDE_VERSION))
     chunks = [raw]
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
@@ -155,7 +258,13 @@ def _fetch_whole(skill: str, section: str | None) -> str:
         chunks.append(more)
     if core.refused():
         raise api.sign_in_required()
-    return b"".join(chunks).decode("utf-8", errors="replace")
+    text = b"".join(chunks).decode("utf-8", errors="replace")
+    etag = str(headers.get("ETag") or "").strip()
+    if total == 1 and etag:
+        GUIDES[key] = (etag, text)
+    else:
+        GUIDES.pop(key, None)
+    return text
 
 
 def _pptx_manual() -> str:
@@ -190,21 +299,36 @@ def tool_guide(args: dict) -> dict:
 
 # --- specimen ------------------------------------------------------------------------------------------------------------
 
-def _sheet(name: str) -> bytes:
-    """One sheet's bytes, checked (JPEG, at most 1 MiB, the SHA-256 the service sent). One fetch."""
+def _sheet(name: str, current: str | None) -> bytes:
+    """One sheet's bytes, checked (JPEG, at most 1 MiB, the SHA-256 the service sent). Held under the index ETag
+    `current` (just confirmed): served from memory. Held otherwise: one conditional request (304: served from memory).
+    Not held: one fetch."""
+    held = SHEETS.get(name)
+    if held and current and held[2] == current:
+        return held[1]
     what = f"specimen {name}"
+    asked = {"Accept": "image/jpeg, application/json;q=0.9"}
+    if held:
+        asked["If-None-Match"] = f'"{held[0]}"'
     try:
-        _s, headers, raw = commands._api("guide_specimen", what, file=name, query={"skill": "deck-design"},
-                                         headers={"Accept": "image/jpeg, application/json;q=0.9"}, redirects=False,
-                                         limit=specimens.MAX_BYTES)
+        status, headers, raw = commands._api("guide_specimen", what, file=name, query={"skill": "deck-design"},
+                                             headers=asked, redirects=False, limit=specimens.MAX_BYTES)
     except api.TooLarge:
         raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused.") from None
+    if core.refused():
+        raise api.sign_in_required()
+    if status == 304 and held:
+        SHEETS[name] = (held[0], held[1], current)
+        return held[1]
+    SHEETS.pop(name, None)
     if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
         raise core.internal(f"{what}: the answer is not a JPEG image; it was refused.")
-    if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
+    digest = hashlib.sha256(raw).hexdigest()
+    if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != digest:
         raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing).",
                      "call the same tool again once. If it fails again, continue without the sheet.",
                      "A design specimen arrived damaged. I am trying once more.")
+    SHEETS[name] = (digest, raw, current)
     return raw
 
 
@@ -225,10 +349,13 @@ def tool_specimen(args: dict) -> dict:
     if not all(isinstance(name, str) and specimens.valid_name(name) for name in names):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
     account.require("deck-design")
+    if INDEX is None and not INDEX_TRIED:
+        _index()
+    current = _validate()
     sheets: dict[str, bytes] = {}
     for name in names:
         if name not in sheets:
-            sheets[name] = _sheet(name)
+            sheets[name] = _sheet(name, current)
     if core.refused():
         raise api.sign_in_required()
     if not many:
@@ -269,6 +396,7 @@ HANDLERS = {"list": tool_list, "guide": tool_guide, "specimen": tool_specimen}
 
 # --- the server ----------------------------------------------------------------------------------------------------------
 
+REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED")
 BLOCKED: Status | None = None          # a status that stops every tool (this folder belongs to another service)
 
 
@@ -280,14 +408,19 @@ def call_tool(name: str, args) -> dict:
         return _status(BLOCKED)
     core._REFUSAL, core._REFUSAL_EMITTED = None, False      # each call learns afresh (a device may sign in again meanwhile)
     try:
-        return handler(args if isinstance(args, dict) else {})
+        result = handler(args if isinstance(args, dict) else {})
     except Status as status:
+        if core.refused() or status.name in REFUSALS:
+            forget()
         return _status(status)
     except api.TooLarge as exc:
         return _status(core.internal(f"an answer from the Theodore service was longer than {exc.limit} bytes; it was refused."))
     except Exception as exc:  # noqa: BLE001  a tool answers; it never ends the server
         core.log(f"mcp {name}: {exc.__class__.__name__}: {exc}")
         return _status(core.internal(f"{exc.__class__.__name__}: {exc}"))
+    if core.refused():
+        forget()
+    return result
 
 
 def handle(message: dict) -> dict | None:
