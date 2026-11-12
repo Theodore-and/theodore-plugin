@@ -332,38 +332,65 @@ def skill(name: str) -> int:
 
 def specimen(files: list[str]) -> int:
     """Fetch deck-design specimen sheets into a private temporary folder of this run and print one path per line.
-    All or nothing: a sheet that is refused leaves no folder and no path."""
+    A sheet this computer already holds in a recent specimen folder is checked with the service (If-None-Match) and,
+    when unchanged, its path is printed instead. All or nothing: a sheet that is refused leaves no folder and no path.
+    A refusal that signs the device out or refuses the account removes every specimen folder."""
     if not 1 <= len(files) <= specimens.MAX_FILES:
         raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
     if not all(specimens.valid_name(name) for name in files):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
-    account.require("deck-design")
-    folder = specimens.make_folder()
     try:
-        paths: dict[str, Path] = {}
-        for name in files:
-            if name in paths:
-                continue
-            what = f"specimen {name}"
-            try:
-                _status, headers, raw = _api("guide_specimen", what, file=name, query={"skill": "deck-design"},
-                                             headers={"Accept": "image/jpeg, application/json;q=0.9"}, redirects=False,
-                                             limit=specimens.MAX_BYTES)
-            except api.TooLarge:
-                raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
-            if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
-                raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
-            if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
-                raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
-                             "run the same command again once. If it fails again, continue without the sheet.",
-                             "A design specimen arrived damaged. I am trying once more.")
-            paths[name] = specimens.write(folder, name, raw)
-    except BaseException:
-        core.remove_tree(folder)
+        paths = _specimen_paths(files)
+    except Status as status:
+        if core.refused() or status.name in ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT"):
+            specimens.sweep(everything=True)
         raise
     for name in files:
         print(paths[name].resolve().as_posix(), flush=True)
     return 0
+
+
+def _specimen_paths(files: list[str]) -> dict[str, Path]:
+    account.require("deck-design")
+    paths: dict[str, Path] = {}
+    fetched: dict[str, bytes] = {}
+    for name in files:
+        if name in paths or name in fetched:
+            continue
+        what = f"specimen {name}"
+        asked = {"Accept": "image/jpeg, application/json;q=0.9"}
+        copy = specimens.held(name)
+        if copy is not None:
+            try:
+                asked["If-None-Match"] = '"' + hashlib.sha256(copy.read_bytes()).hexdigest() + '"'
+            except OSError:
+                copy = None
+        try:
+            status, headers, raw = _api("guide_specimen", what, file=name, query={"skill": "deck-design"},
+                                        headers=asked, redirects=False, limit=specimens.MAX_BYTES)
+        except api.TooLarge:
+            raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
+        if core.refused():
+            raise api.sign_in_required()
+        if status == 304 and copy is not None:
+            paths[name] = copy
+            continue
+        if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
+            raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
+        if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
+            raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
+                         "run the same command again once. If it fails again, continue without the sheet.",
+                         "A design specimen arrived damaged. I am trying once more.")
+        fetched[name] = raw
+    if fetched:
+        folder = specimens.make_folder()
+        try:
+            for name, raw in fetched.items():
+                paths[name] = specimens.write(folder, name, raw)
+        except BaseException:
+            core.remove_tree(folder)
+            raise
+    return paths
 
 
 def _heartbeat(engine_version: str) -> None:
