@@ -1,5 +1,60 @@
 # Changes
 
+## 0.3.5
+
+- Uninstall takes Theodore out of Claude Code and Codex also when `claude` or `codex` is not on PATH (Claude Code's
+  Windows installer leaves `%USERPROFILE%\.local\bin` off PATH; npm, nvm, Volta and Homebrew folders are often only on
+  an interactive shell's PATH). Before, the Claude Code step was skipped without a word, its plugin stayed enabled, and
+  its next session ran the plugin's launcher, which downloaded the runtime again. The command is looked for where
+  each assistant's installers put it and at the path recorded at registration (now recorded); when it is nowhere, the
+  entries Theodore's registration added are taken out of the files directly, each only while it holds what the
+  registration wrote (Claude Code: `settings.json` `enabledPlugins."theodore@theodore"` and
+  `extraKnownMarketplaces.theodore`, `plugins/installed_plugins.json`, `plugins/known_marketplaces.json`, and its copy
+  of the plugin; Codex: the `[marketplaces.theodore]` and `[plugins."theodore@theodore"]` tables, by their lines
+  only), and the uninstall says which files it edited (JSON is written again: same content, spacing may differ).
+  Whatever it cannot take back is named in its list with the file and the keys. A record from an earlier client is
+  taken back the same way. The launchers' own uninstall (without Theodore's Python) looks in the same places and names
+  a registration it cannot reach.
+- `hosts register`, `doctor`, the routing block and the Windows Git Bash check find the assistants off PATH too. A
+  registration run inside Claude Code (or Codex) that cannot find its command says FAILED instead of a success with no
+  skills.
+- Every uninstall path (the client, both launchers, `install.sh --uninstall`, `install.cmd --uninstall`) removes the
+  engine's caches from before 1.0.0-rc.7: `~/.cache/pptx-slide-raster` (images of the user's slides),
+  `~/.cache/pptx-icons`, `~/.cache/pptx-flags`, the icons' fallback in the temporary folder, and `pptx-runtime` under
+  `$XDG_CACHE_HOME` when set; only files of the names the engine writes, a folder only when nothing else is in it, and
+  says what it removed or left.
+- The served pptx entry is never dropped silently: three attempts in a 20-second budget, then a status line first in
+  the skill body, `guide pptx` and the tool server (lane STUDIO's part of PR #7; `guide pptx <section>` waits).
+- The installers remove their own download folder when they end (only a `tmp.*` or `theodore-*` folder holding
+  nothing but the installer), so an install line an agent split in two and whose cleanup it dropped (Codex) leaves
+  nothing behind. The Windows lines tolerate the folder being gone already.
+- Downloads in the background that stopped (sleep, sign-out, a killed process) start again at the next guide, skill
+  or doctor: LibreOffice and PortableGit now, as the packs since 0.3.3 and the runtime and first engine through the
+  setup job; a failure that passes by itself is retried a minute later at the earliest, one that needs the user is
+  reported with the command that tries again. `doctor` has a "still missing" line naming each missing part and what
+  will fetch it.
+- Updates need no user action. The first Theodore command of each assistant session checks the channel (one request;
+  the six-hour rule stays the floor within a session), so a release reaches a user at their next session; nothing is
+  applied in the middle of a build. When a newer plugin is published, a background job updates the plugin's files
+  through each assistant's own command (Claude Code: `claude plugin marketplace update theodore`, then
+  `claude plugin update theodore@theodore`; Codex: Theodore's own copy refreshed, then `codex plugin add`), used
+  from the next session. What updated itself (client, engine, asset packs, plugin files, with the release's note when
+  it has one) is said once, in one line, at the next skill load or guide. Where an assistant cannot be updated from
+  outside (claude.ai's account-level plugin) or its command failed, one line with that assistant's action, once per
+  release; `doctor` says what is pending and why. install.md, README and SECURITY say so.
+- Claude Code starts the plugin's tool server by the launcher's path instead of `sh <path>`: on Windows there is no
+  `sh` on PATH, so every Windows user saw Theodore's server as failed; the path resolves to `theodore.cmd` there and
+  the server connects (Windows Server 2022, Claude Code; macOS too).
+- `doctor` and `tools install libreoffice` name the platform's real way to get LibreOffice: on Linux the package
+  manager's command (apt, dnf, yum, zypper, apk, pacman) or plain words, never a command that is not supported there.
+- `update --apply` says what was updated (client, engine, asset packs) and what was already current, instead of
+  "nothing to update" while the client moved.
+- install.md's first line has the agent read it into a new private folder, never straight into /tmp, and the
+  installers remove any copy of it they can identify by its first line (their own folder, the temporary folder, a
+  private folder there): it holds the one-time code.
+- The archive builders never take macOS metadata files (AppleDouble `._*`, `.DS_Store`); a test checks every archive.
+- Launcher generation 9.
+
 ## 0.3.4
 
 - The plugin's tool server keeps each specimen sheet and each reference it fetched in memory for the session (never

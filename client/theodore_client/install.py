@@ -638,8 +638,11 @@ def activate_checked(version: str, issued: float, why: str) -> bool:
         if forbidden(version):
             core.log(f"{why}: engine {version} not activated: withdrawn or below the channel's minimum")
             return False
+        before = current_engine()
         activate_engine(version)
-        return True
+    if before and before != version:
+        announce("engine", version, update_state().get("latest_notes"))
+    return True
 
 
 def save_restrictions(manifest: dict) -> None:
@@ -672,6 +675,144 @@ def forbidden(version: str | None, rules: dict | None = None) -> bool:
     rules = (update_state().get("restrictions") or {}) if rules is None else rules
     return bool(version) and (version in (rules.get("revoked") or []) or
                               bool(rules.get("min_version") and core.version_key(version) < core.version_key(str(rules["min_version"]))))
+
+
+# How a release reaches a user without any action of theirs:
+# - Guidance is fetched on use. The client, the engine and the packs update themselves: the first Theodore command of
+#   each assistant session checks the channel (check_updates), and what it brings applies between builds.
+# - The plugin's own files (the skill stubs, the launcher, the tool-server configuration) live in each assistant's plugin
+#   folder. When the signed plugin/latest.json names a newer plugin than an assistant runs, a background job updates
+#   them through that assistant's own command (Claude Code: `claude plugin marketplace update theodore`, then
+#   `claude plugin update theodore@theodore`; Codex: Theodore's own copy refreshed, then `codex plugin add`), found
+#   with core.host_executable. It takes effect at the assistant's next session. The installer says Theodore keeps
+#   itself up to date; the user turned that on by installing it, and uninstalling is one command.
+# - What changed is said once, in one line, at the next skill load or guide (announce / take_announcement).
+# - Where an assistant cannot be updated from outside (claude.ai's account-level plugin), or its command failed (a
+#   managed setting forbids it), the skill load says once per release, in one line, what the user can do there.
+# - Nothing is applied in the middle of a build, and a failure never blocks work: the current version keeps working
+#   and doctor says what is pending and why.
+
+
+def _first_line(text) -> str | None:
+    line = str(text or "").strip().splitlines()[0].strip() if str(text or "").strip() else ""
+    return line[:200] or None
+
+
+def announce(kind: str, version: str, note: str | None = None) -> None:
+    """Note an update to say once at the next skill load or guide."""
+    try:
+        state = update_state()
+        pending = dict(state.get("announce") or {})
+        pending[kind] = {"version": version, **({"note": note} if note else {})}
+        save_update_state(announce=pending)
+    except Exception as exc:  # an announcement never fails an update
+        core.log(f"announce: {exc.__class__.__name__}")
+
+
+def take_announcement() -> str | None:
+    """The one line saying what updated itself since the last one, then forgotten."""
+    try:
+        pending = update_state().get("announce") or {}
+        if not pending:
+            return None
+        save_update_state(announce={})
+        names = {"client": "client", "engine": "engine", "packs": "asset pack", "plugin": "plugin files"}
+        parts = []
+        for kind in ("plugin", "client", "engine", "packs"):
+            item = pending.get(kind)
+            if item:
+                parts.append(f"{names[kind]} {item['version']}" + (f" ({item['note']})" if item.get("note") else "")
+                             + ((", now in use" if core.plugin_version() == item["version"] else ", used from your next session")
+                                if kind == "plugin" else ""))
+        return (f"THEODORE NOTICE: Theodore updated itself: {'; '.join(parts)}. "
+                f"Tell the user once, in one line; it does not stop this task.")
+    except Exception as exc:
+        core.log(f"announcement: {exc.__class__.__name__}")
+        return None
+
+
+def refresh_plugin_latest(timeout: float) -> None:
+    """Note the current plugin version from the signed plugin/latest.json. Silent on any failure."""
+    from .contract import PLUGIN_LATEST_SCHEMA
+    try:
+        base = str(core.config().get("dl_base") or "").rstrip("/")
+        _status, _headers, raw = api.request("GET", f"{base}/plugin/latest.json", timeout=timeout, redirects=False)
+        envelope = json.loads(raw.decode("utf-8"))
+        doc = account.verify_signed(envelope, "the plugin release document", PLUGIN_LATEST_SCHEMA, platform=False)
+        version = str(doc.get("version") or "")
+        if core._SEMVER.match(version):
+            save_update_state(plugin_latest=version)
+    except (api.NetworkError, api.ApiError, ValueError, AttributeError, Status) as exc:
+        core.log(f"plugin version check: {exc.__class__.__name__}")
+
+
+def _newer(a: str, b: str) -> bool:
+    return bool(a) and core._SEMVER.match(a) is not None and (not b or core.version_key(a) > core.version_key(b))
+
+
+def start_plugin_update() -> None:
+    """Start the background plugin update when the published plugin is newer than this computer's and it was not tried
+    for that version in this session (a failed try is tried again next session). Never fails the caller."""
+    try:
+        state = update_state()
+        latest = str(state.get("plugin_latest") or "")
+        done = state.get("plugin_update") or {}
+        if not _newer(latest, core.plugin_version()):
+            return
+        if core.cloud_sandbox():          # a cloud chat's plugin is the account's: only its owner can update it there
+            return
+        session = core.session_id() or "-"
+        if done.get("version") == latest and done.get("session") == session:
+            return
+        if Job("plugin-update").alive():
+            return
+        save_update_state(plugin_update={**done, "version": latest, "session": session, "ok": False, "started": int(core.now())})
+        Job("plugin-update").spawn(["update", "--plugin-job"])
+    except Exception as exc:
+        core.log(f"plugin update: not started ({exc.__class__.__name__}: {exc})")
+
+
+def plugin_update_action(host: str | None = None) -> str:
+    host = host or core.host_name()
+    if host == "claude-web":
+        return ("in Claude: Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > ... > Check for updates, "
+                "then start a new chat")
+    if host == "claude-code":
+        return "in Claude Code: run `claude plugin update theodore@theodore` (or /plugin > Marketplaces > theodore > Update), then start a new session"
+    if host in ("codex", "chatgpt"):
+        return ("in Codex: run `codex plugin marketplace upgrade theodore` (an install by Theodore's installer: run the installer "
+                "again), then start a new session")
+    return "update the Theodore plugin in your assistant, then start a new session"
+
+
+def plugin_notice(daily: bool) -> str | None:
+    """When the calling plugin is older than the current one and Theodore could not update it itself (an assistant it
+    cannot reach, like claude.ai's account-level plugin, or its command failed): one line with that assistant's action,
+    once per release (`daily` False: every time, for doctor). None when the update succeeded (it is announced instead)."""
+    try:
+        state = update_state()
+        latest, mine = str(state.get("plugin_latest") or ""), core.plugin_version()
+        if not latest or mine == "0.0.0" or core.version_key(mine) >= core.version_key(latest):
+            return None
+        done = state.get("plugin_update") or {}
+        host = core.host_name()
+        reached = (done.get("hosts") or {}).get(host)
+        if done.get("version") == latest and reached == "updated":
+            return None                                   # the new files are there: they load at the next session
+        if done.get("version") == latest and Job("plugin-update").alive():
+            return None                                   # being updated now
+        if host not in core.CLOUD_HOSTS and reached is None and done.get("version") != latest:
+            return None                                   # not tried yet: the update runs first
+        if daily:
+            if state.get("plugin_notice_version") == latest:
+                return None
+            save_update_state(plugin_notice_version=latest)
+        why = f" ({reached})" if reached and reached != "updated" else ""
+        return (f"THEODORE NOTICE: Theodore's plugin files on this assistant ({mine}) are older than the current version ({latest}) "
+                f"and could not be updated automatically{why}; {plugin_update_action()}. Tell the user once; it does not stop this task.")
+    except Exception as exc:  # a notice is never the reason a skill fails to load
+        core.log(f"plugin notice: {exc.__class__.__name__}")
+        return None
 
 
 def plugin_too_old(shim_min) -> Status:
@@ -726,7 +867,13 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
                 save_update_state(pending=None)
         state = update_state()
     last = max(float(state.get("last_check") or 0), float(state.get("last_attempt") or 0))
-    if not force and core.now() - last < UPDATE_CHECK_INTERVAL_S:
+    # The first Theodore command of each assistant session checks (one request), so a release reaches a user at their
+    # next session; within a session the six-hour rule stays the floor for repeated checks.
+    session = core.session_id()
+    new_session = bool(session) and state.get("checked_session") != session
+    if new_session:
+        save_update_state(checked_session=session)
+    if not force and not new_session and core.now() - last < UPDATE_CHECK_INTERVAL_S:
         enforce_restrictions(current_engine())
         return None
     save_update_state(last_attempt=int(core.now()))
@@ -747,7 +894,11 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
         enforce_restrictions(current_engine())
         return None
     save_update_state(last_check=int(core.now()), latest=manifest.get("engine", {}).get("version"),
-                      guides=manifest.get("guides") or {}, tools=manifest.get("tools") or {})
+                      guides=manifest.get("guides") or {}, tools=manifest.get("tools") or {},
+                      latest_notes=_first_line((manifest.get("engine") or {}).get("notes")),
+                      client_notes=_first_line((manifest.get("client") or {}).get("notes")))
+    refresh_plugin_latest(timeout)
+    start_plugin_update()
     save_restrictions(manifest)
     enforce_restrictions()          # kill switch and plugin minimum; the engine's own case is handled below
     engine = engine_artifact(manifest)
@@ -845,7 +996,10 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None, issu
         if floor.get("client") and when < float(floor.get("since") or 0) and core.version_key(version) < core.version_key(str(floor["client"])):
             core.log(f"client {version} not switched to: below the client installed at the last reset")
             return
+        previous = core.read_text(home.client / "current.txt")
         core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
+    if previous and previous != version:
+        announce("client", version, update_state().get("client_notes"))
     for child in home.client.iterdir():
         if child.is_dir() and child.name not in (version, __version__, core.read_text(home.client / "current.txt")):
             core.remove_tree(child)
@@ -1014,9 +1168,13 @@ def _save_pack(pack_id: str, **fields) -> None:
     with core.lock("packs-state", timeout=30):
         state = packs_state()
         entry = state.setdefault(pack_id, {})
+        moved = fields.get("status") == "ready" and entry.get("status") == "ready" and entry.get("version") \
+            and fields.get("version") and entry["version"] != fields["version"]
         entry.update(fields)
         entry["updated"] = int(time.time())
         core.write_json(core.home().packs / "state.json", state)
+    if moved:
+        announce("packs", f"{pack_id} {fields['version']}")
 
 
 def pack_ready(pack_id: str) -> bool:
@@ -1314,6 +1472,22 @@ def libreoffice_pin() -> dict | None:
     return override or LIBREOFFICE_PINS.get(key)
 
 
+# Where Theodore fetches no LibreOffice (Linux), the system's package manager installs it: the command, when known.
+_PACKAGE_COMMANDS = (("apt-get", "sudo apt-get install libreoffice-impress"), ("dnf", "sudo dnf install libreoffice-impress"),
+                     ("yum", "sudo yum install libreoffice-impress"), ("zypper", "sudo zypper install libreoffice-impress"),
+                     ("apk", "sudo apk add libreoffice"), ("pacman", "sudo pacman -S libreoffice-fresh"))
+
+
+def libreoffice_install_action() -> str:
+    """What installs LibreOffice here, in words a user can act on."""
+    if libreoffice_pin():
+        return f"`{quoted_launcher()} tools install libreoffice` fetches it into Theodore's folder"
+    for tool, command in _PACKAGE_COMMANDS:
+        if shutil.which(tool):
+            return f"install LibreOffice with the system's package manager: `{command}`"
+    return "install LibreOffice (its Impress part) with the system's package manager"
+
+
 def libreoffice_binary() -> Path | None:
     base = core.home().tools / "libreoffice"
     for candidate in (base / "LibreOffice.app" / "Contents" / "MacOS" / "soffice", base / "program" / "soffice.exe",
@@ -1324,6 +1498,8 @@ def libreoffice_binary() -> Path | None:
 
 
 def system_libreoffice() -> str | None:
+    if os.environ.get("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE") and core.is_loopback_api():     # test seam: a computer without one
+        return None
     if os.environ.get("SOFFICE_BIN") and Path(os.environ["SOFFICE_BIN"]).exists():
         return os.environ["SOFFICE_BIN"]
     found = shutil.which("soffice")
@@ -1354,6 +1530,19 @@ def needs_libreoffice() -> bool:
         and libreoffice_pin() is not None
 
 
+# A background fetch that failed for a reason that passes by itself (the network dropped: the computer slept, the user
+# signed out) is started again by the next command, a minute after the failure at the earliest; one that needs the
+# user (a proxy sign-in, TLS inspection, a full disk, a refusal) is reported instead.
+RESUMABLE_CAUSES = ("NETWORK", "HASH_MISMATCH")
+RESUME_AFTER_FAILURE_S = 60
+
+
+def resumable_failure(state: dict) -> bool:
+    failed = state.get("failed") or {}
+    return failed.get("cause") in RESUMABLE_CAUSES and \
+        core.now() - int(state.get("updated") or state.get("started") or 0) >= RESUME_AFTER_FAILURE_S
+
+
 def _libreoffice_failed(failed: dict) -> Status:
     return Status("SETUP_FAILED", f"LibreOffice, which turns the slides into images, could not be installed "
                   f"({failed.get('detail') or failed.get('cause') or 'unknown error'}).",
@@ -1367,14 +1556,15 @@ RENDERING_CALLS = (("apply",), ("render",), ("slide", "add"))
 
 def wait_for_renderer(args: list[str], wait: float = 25.0) -> None:
     """A rendering call on a Windows computer with no converter: fetch LibreOffice (in the background, as on macOS at
-    install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, not retried."""
+    install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, and started again
+    when its failure passes by itself (resumable_failure)."""
     if not any(tuple(args[:len(call)]) == call for call in RENDERING_CALLS) or not needs_libreoffice():
         return
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_RENDERER_WAIT"):
         wait = float(os.environ["THEODORE_TEST_RENDERER_WAIT"])
     job = Job("libreoffice")
     failed = job.read().get("failed") if not job.alive() else None
-    if failed:
+    if failed and not resumable_failure(job.read()):
         raise _libreoffice_failed(failed)
     if not job.alive():
         job.spawn(["tools", "install", "libreoffice", "--job"])
@@ -1546,7 +1736,7 @@ def install_libreoffice(job: Job | None = None) -> Path:
     pin = libreoffice_pin()
     if not pin:
         raise Status("UNSUPPORTED_PLATFORM", "Theodore does not fetch LibreOffice on this platform.",
-                     "ask the user to install LibreOffice with their package manager; renders work once `soffice` is on PATH.",
+                     f"ask the user to {libreoffice_install_action()}; renders work once `soffice` is on PATH.",
                      "To preview slides, please install LibreOffice with your system's package manager.")
     home = core.home()
     existing = libreoffice_binary()

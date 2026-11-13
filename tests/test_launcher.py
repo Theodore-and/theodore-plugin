@@ -349,6 +349,25 @@ class Failures(LauncherCase):
         first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
         self.assertIn("Allowed websites", tell)
         self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
+        # a proxy that lets the tunnel open and then is not the host (an interception with a certificate the sandbox
+        # does not trust, or a block page): curl fails in the TLS step, which is the same refusal
+        import socketserver
+        class Garbage(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(4096)
+                self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                self.request.recv(4096)
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nBlocked page")
+        tunnel = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Garbage)
+        threading.Thread(target=tunnel.serve_forever, daemon=True).start()
+        self.addCleanup(tunnel.shutdown)
+        url = f"http://127.0.0.1:{tunnel.server_address[1]}"
+        self.box.write_launcher_json(stage1_client_url="https://theodore.invalid/client.tar")
+        result = self.run_launcher("guide", "deck-design", env={"CLAUDE_CODE_REMOTE": "true", "HTTPS_PROXY": url, "https_proxy": url,
+                                                                "no_proxy": "", "NO_PROXY": ""})
+        first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
+        self.assertIn("cause NETWORK", first)
+        self.assertIn("Allowed websites", tell)
 
     @unittest.skipIf(IS_WINDOWS, "a POSIX sh launcher test")
     def test_a_flag_set_to_no_is_not_a_sandbox(self):
@@ -509,6 +528,75 @@ class Failures(LauncherCase):
         self.assertIn("claude plugin uninstall theodore@theodore", calls)
         self.assertIn("codex plugin remove theodore@theodore", calls)
         self.assertFalse([c for c in calls if "marketplace remove" in c], calls)
+
+    def _fake_hosts(self, folder: Path, log: Path) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ("claude", "codex"):
+            if IS_WINDOWS:
+                (folder / f"{name}.cmd").write_text(f'@echo off\r\n>>"{log}" echo {name} %*\r\nexit /b 0\r\n')
+            else:
+                (folder / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{log}"\nexit 0\n')
+                (folder / name).chmod(0o755)
+
+    def test_uninstall_without_python_finds_the_assistants_off_path(self):
+        # Claude Code's Windows installer leaves claude off PATH: the path recorded at registration is used (and, on
+        # macOS and Linux, ~/.local/bin, where Claude Code's own installer puts it).
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        log = self.box.tmp / "calls.log"
+        elsewhere = self.box.tmp / "elsewhere"
+        self._fake_hosts(elsewhere, log)
+        ext = ".cmd" if IS_WINDOWS else ""
+        record = {"claude_registered": True, "claude_added_marketplace": True, "claude_path": str(elsewhere / f"claude{ext}"),
+                  "codex_registered": True, "codex_added_marketplace": True}
+        if IS_WINDOWS:
+            record["codex_path"] = str(elsewhere / "codex.cmd")
+        else:
+            self._fake_hosts(self.box.user_home / ".local" / "bin", log)
+            (self.box.user_home / ".local" / "bin" / "claude").unlink()           # claude by its recorded path, codex from ~/.local/bin
+        (state / "host-settings.json").write_text(json.dumps(record, indent=2) + "\n")
+        self.assertStatus(self.run_launcher("uninstall"), "OK", 0)
+        calls = [line.strip() for line in log.read_text().splitlines()]
+        for call in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
+                     "codex plugin remove theodore@theodore", "codex plugin marketplace remove theodore"):
+            self.assertIn(call, calls)
+
+    def test_uninstall_without_python_removes_the_engines_former_caches(self):
+        # ~/.cache/pptx-slide-raster (images of the user's slides), pptx-icons and pptx-flags, and the icons' fallback
+        # in the temporary folder: only the engine's files go, and a folder holding anything else is named.
+        temp = self.box.tmp / "tmp"
+        env = {"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)}
+        cache = self.box.user_home / ".cache"
+        raster = cache / "pptx-slide-raster" / ("b" * 64)
+        raster.mkdir(parents=True)
+        (raster / "slide-0004-150.jpg").write_bytes(b"jpg")
+        for folder, name in ((cache / "pptx-icons", f"{'1' * 40}.png"), (cache / "pptx-flags", f"{'2' * 40}.uri"),
+                             (temp / "pptx-icons", f"{'3' * 40}.png")):
+            folder.mkdir(parents=True)
+            (folder / name).write_bytes(b"x")
+        first, _n, _t = self.assertStatus(self.run_launcher("uninstall", env=env), "OK", 0)
+        self.assertIn("the engine's former caches were removed", first)
+        for folder in (cache / "pptx-slide-raster", cache / "pptx-icons", cache / "pptx-flags", temp / "pptx-icons"):
+            self.assertFalse(folder.exists(), folder)
+        (cache / "pptx-flags").mkdir(parents=True)
+        (cache / "pptx-flags" / f"{'4' * 40}.uri").write_text("x")
+        (cache / "pptx-flags" / "mine.txt").write_text("not the engine's")
+        first, _n, _t = self.assertStatus(self.run_launcher("uninstall", env=env), "RETRY", 75)
+        self.assertIn(str(cache / "pptx-flags"), first)
+        self.assertEqual([p.name for p in (cache / "pptx-flags").iterdir()], ["mine.txt"])
+
+    def test_uninstall_without_python_names_a_registration_it_cannot_reach(self):
+        state = self.box.home / "state"
+        state.mkdir(parents=True)
+        record = state / "host-settings.json"
+        record.write_text(json.dumps({"claude_registered": True, "claude_added_marketplace": True,
+                                      "claude_path": str(self.box.tmp / "gone" / "claude")}, indent=2) + "\n")
+        first, _n, tell = self.assertStatus(self.run_launcher("uninstall"), "RETRY", 75)
+        self.assertIn("Theodore's registration in Claude Code", first)
+        self.assertIn("settings.json", first)
+        self.assertIn("/plugin uninstall theodore@theodore", first)
+        self.assertNotIn("Theodore is uninstalled", tell)
+        self.assertTrue(record.exists(), "the record stays for a later uninstall that can reach claude")
 
     @unittest.skipIf(IS_WINDOWS, "the sh launcher's own uninstall")
     def test_a_keychain_call_that_ignores_sigterm_is_killed(self):

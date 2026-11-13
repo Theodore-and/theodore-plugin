@@ -20,7 +20,7 @@ $dir = Join-Path $env:TEMP ("theodore-ci-" + [guid]::NewGuid())
 $null = New-Item -ItemType Directory -Path $dir
 try {
     $installer = Join-Path $dir $file
-    & "$env:SystemRoot\System32\curl.exe" --proto =https -fsSL -o $installer $url
+    & "$env:SystemRoot\System32\curl.exe" --proto =https -fsSL --retry 5 --retry-all-errors --retry-delay 2 -C - -o $installer $url
     if ($LASTEXITCODE -ne 0) { throw "download of $file failed" }
     $got = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLower()
     if ($got -ne $sha256) { throw "$file has sha256 $got, not the pinned $sha256" }

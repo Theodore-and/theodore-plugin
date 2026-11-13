@@ -381,6 +381,32 @@ remove_recorded() { # all | expired: the folders the record names
   done < "$reg"
   return 0
 }
+# The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): ~/.cache/pptx-slide-raster (images of
+# the user's slides), ~/.cache/pptx-icons, ~/.cache/pptx-flags and the icons' fallback in Node's temporary folder. Only
+# files of the names the engine writes go; a folder goes once nothing else is in it, else it is named in $left.
+remove_old_engine_caches() {
+  old_removed=
+  for d in "${HOME:-/nonexistent}/.cache/pptx-slide-raster" "${HOME:-/nonexistent}/.cache/pptx-icons" \
+           "${HOME:-/nonexistent}/.cache/pptx-flags" "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/pptx-icons"; do
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || continue
+    for e in "$d"/*; do
+      [ -e "$e" ] && [ ! -L "$e" ] || continue
+      case "${d##*/}" in
+        pptx-slide-raster)
+          [ -d "$e" ] && printf '%s\n' "${e##*/}" | grep -Eqx '[0-9a-f]{64}' || continue
+          for f in "$e"/*; do
+            [ -f "$f" ] && [ ! -L "$f" ] && printf '%s\n' "${f##*/}" | grep -Eqx 'slide-[0-9]{4}-[0-9]+\.jpg' && rm -f "$f"
+          done
+          rmdir "$e" 2>/dev/null ;;
+        *) [ -f "$e" ] && printf '%s\n' "${e##*/}" | grep -Eqx '[0-9a-f]{40}\.(png|uri)' && rm -f "$e" ;;
+      esac
+    done
+    if rmdir "$d" 2>/dev/null; then old_removed="$old_removed, $d"
+    else left="$left; the folder $d (a cache of the engine before 1.0.0-rc.7: its files of the engine's were removed, and what else it holds is not Theodore's and was left)"; fi
+  done
+  old_removed=${old_removed#, }
+}
+
 remove_specimens() { # all of them (uninstall)
   remove_recorded all
   sc=$(specimen_cache)
@@ -422,20 +448,44 @@ if [ "${1:-}" = "uninstall" ]; then
   }
   # A registration or marketplace that was there before Theodore's own (the record says so) is not Theodore's to remove.
   rec="$HOME_DIR/state/host-settings.json"
-  notes=
+  notes= notes_done=
   not_ours() { grep -q "\"$1\": false" "$rec" 2>/dev/null; }
-  if command -v claude >/dev/null 2>&1; then
+  ours() { grep -q "\"$1\": true" "$rec" 2>/dev/null; }
+  # The assistant's command: on PATH, else the path recorded at registration, else where its installer puts it.
+  # Test seam: against a loopback API the folders outside the home are THEODORE_TEST_HOST_DIRS (none when unset).
+  sysdirs="/opt/homebrew/bin /usr/local/bin /home/linuxbrew/.linuxbrew/bin"
+  case "$(jget "$CONF" api_base)" in http://127.0.0.1*|http://localhost*) sysdirs=$(printf '%s' "${THEODORE_TEST_HOST_DIRS:-}" | tr ':' ' ') ;; esac
+  host_cmd() {
+    command -v "$1" 2>/dev/null && return 0
+    for c in "$(sed -n "s/^ *\"$1_path\": *\"\(.*\)\",\{0,1\}$/\1/p" "$rec" 2>/dev/null | head -n 1)" \
+             "${HOME:-/nonexistent}/.local/bin/$1" "${HOME:-/nonexistent}/.claude/local/$1" "${HOME:-/nonexistent}/.npm-global/bin/$1" \
+             "${HOME:-/nonexistent}/.volta/bin/$1" "${HOME:-/nonexistent}/.bun/bin/$1"; do
+      [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+    for d in $sysdirs; do
+      [ -f "$d/$1" ] && [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
+    done
+    return 1
+  }
+  unfound=
+  if claude_cmd=$(host_cmd claude); then
     if not_ours claude_registered; then notes="$notes; the Claude Code plugin registration was there before Theodore's installer and was kept (claude plugin uninstall theodore@theodore removes it)"
-    else unreg claude-code claude plugin uninstall theodore@theodore; fi
-    not_ours claude_added_marketplace || unreg claude-code claude plugin marketplace remove theodore
+    else unreg claude-code "$claude_cmd" plugin uninstall theodore@theodore; fi
+    not_ours claude_added_marketplace || unreg claude-code "$claude_cmd" plugin marketplace remove theodore
+  elif ours claude_registered || ours claude_added_marketplace; then
+    unfound=1
+    left="$left; Theodore's registration in Claude Code (its claude command was not found): the enabledPlugins \"theodore@theodore\" and extraKnownMarketplaces.theodore entries in ${CLAUDE_CONFIG_DIR:-${HOME:-~}/.claude}/settings.json; in Claude Code, /plugin uninstall theodore@theodore removes them"
   fi
-  if command -v codex >/dev/null 2>&1; then
+  if codex_cmd=$(host_cmd codex); then
     if not_ours codex_registered; then notes="$notes; the Codex plugin registration was there before Theodore's installer and was kept"
-    else unreg codex codex plugin remove theodore@theodore; fi
-    not_ours codex_added_marketplace || unreg codex codex plugin marketplace remove theodore
+    else unreg codex "$codex_cmd" plugin remove theodore@theodore; fi
+    not_ours codex_added_marketplace || unreg codex "$codex_cmd" plugin marketplace remove theodore
+  elif ours codex_registered || ours codex_added_marketplace; then
+    unfound=1
+    left="$left; Theodore's registration in Codex (its codex command was not found): the [marketplaces.theodore] and [plugins.\"theodore@theodore\"] tables in ${CODEX_HOME:-${HOME:-~}/.codex}/config.toml; codex plugin remove theodore@theodore removes them"
   fi
   # Settings Theodore changed cannot be taken back exactly without its Python: the record of what was there is kept.
-  keep_settings=
+  keep_settings=$unfound
   if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys|git_bash|instructions)":' "$rec" 2>/dev/null; then
     keep_settings=1
     settings=$(sed -n 's/^ *"path": *"\(.*\)",\{0,1\}$/\1/p' "$rec" | head -n 1)
@@ -467,7 +517,7 @@ if [ "${1:-}" = "uninstall" ]; then
   fi
   remove_specimens
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    caches="${HOME:-/nonexistent}/Library/Caches/pptx-runtime ${HOME:-/nonexistent}/Library/Caches/Theodore"
+    caches="${HOME:-/nonexistent}/Library/Caches/pptx-runtime ${HOME:-/nonexistent}/Library/Caches/Theodore${XDG_CACHE_HOME:+ $XDG_CACHE_HOME/pptx-runtime}"
   else
     caches="${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/pptx-runtime ${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/theodore"
   fi
@@ -475,6 +525,8 @@ if [ "${1:-}" = "uninstall" ]; then
     rm -rf "$cache" 2>/dev/null
     [ -e "$cache" ] && left="$left; the render cache $cache"
   done
+  remove_old_engine_caches
+  if [ -n "$old_removed" ]; then notes_done="; the engine's former caches were removed ($old_removed)"; fi
   # Only Theodore's own subfolders: the folder may hold things that are not Theodore's. In state/, the records still
   # needed (settings to take back, specimen folders to remove) stay.
   for d in bin client runtime engines packs tools state logs staging plugin plugin.partial; do
@@ -498,7 +550,7 @@ if [ "${1:-}" = "uninstall" ]; then
       "tell the user what is left (each item above says what it is and how it can be removed)." \
       "Theodore is mostly removed, but these pieces could not be: ${left#; }. Your decks were not touched."
   fi
-  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed${notes:+; left as they are: ${notes#; }}." "nothing to do." "Theodore is uninstalled."
+  status OK 0 "Theodore was not fully installed; its folders in $HOME_DIR, its registrations, sign-in item and render cache were removed${notes_done:-}${notes:+; left as they are: ${notes#; }}." "nothing to do." "Theodore is uninstalled."
 fi
 
 [ "${1:-}" = "__bootstrap" ] || sweep_specimens         # before the bootstrap: also when it fails or cannot start

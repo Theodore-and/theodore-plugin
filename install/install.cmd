@@ -21,6 +21,30 @@ rem never follow a redirect. Lines starting with THEODORE are statuses for the a
 setlocal EnableExtensions DisableDelayedExpansion
 rem Before any SHIFT: SHIFT moves %0 too.
 set "SELF=%~f0"
+rem The download folder of the install line goes when the installer ends, also when the agent ran the line split and
+rem dropped its cleanup (Codex does): only a folder named theodore-* that holds nothing but this file. The installer runs
+rem as a call of itself, so the file stays on disk while it runs; then this outer run deletes the file and the folder
+rem from memory ((goto) ends the batch context first) and passes the exit code on.
+rem install.md carries a one-time code in its first line: a copy the agent saved in this folder or directly in %TEMP%
+rem goes, only a file whose first line is install.md's own.
+for %%F in ("%~dp0install.md" "%TEMP%\install.md") do if exist "%%~F" "%SystemRoot%\System32\findstr.exe" /b /c:"Read this file as downloaded, not through a tool that summarises web pages" "%%~F" >nul 2>&1 && del /f /q "%%~F" >nul 2>&1
+if defined THEODORE_INSTALL_INNER goto :installer_body
+set "IDIR=%~dp0"
+if not defined IDIR goto :installer_body
+set "IDIR=%IDIR:~0,-1%"
+set "INAME="
+for %%I in ("%IDIR%") do set "INAME=%%~nxI"
+if /i not "%INAME:~0,9%"=="theodore-" goto :installer_body
+if /i not "%~nx0"=="install.cmd" goto :installer_body
+set "ICOUNT=0"
+for /f %%N in ('dir /b /a "%IDIR%" 2^>nul ^| "%SystemRoot%\System32\find.exe" /c /v ""') do set "ICOUNT=%%N"
+if not "%ICOUNT%"=="1" goto :installer_body
+set "THEODORE_INSTALL_INNER=1"
+call "%SELF%" %*
+set "IRC=%ERRORLEVEL%"
+set "THEODORE_INSTALL_INNER="
+(goto) 2>nul & del /f /q "%IDIR%\install.cmd" >nul 2>&1 & rmdir "%IDIR%" >nul 2>&1 & "%SystemRoot%\System32\cmd.exe" /d /c exit %IRC%
+:installer_body
 rem The inbox tools by full path: a Git or MSYS tar.exe or curl.exe earlier on PATH behaves differently (GNU tar
 rem reads C:\... as a remote host name).
 set "SYS32=%SystemRoot%\System32"
@@ -32,8 +56,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.3.4"
-set "PIN_CLIENT=client/client-0.3.4.tar 77394cf525f135f1ba609eec0a2b862bf8dd4d9f81955f31d9c711a04d6b7d60"
+set "PIN_CLIENT_VERSION=0.3.5"
+set "PIN_CLIENT=client/client-0.3.5.tar 58a6c3aaafdfd8e7fecf24f59cc58a8a86ed5de9fb4dd358d70ddb911dc9e07a"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -102,6 +126,8 @@ if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Theodore\Cache" rmdir /s /q "%L
 for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=%LEFTOVER%; Theodore's folders in %HOME_DIR%"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\pptx-runtime"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Theodore\Cache" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\Theodore\Cache"
+call :old_engine_caches
+if defined OCLEFT set "LEFTOVER=%LEFTOVER%%OCLEFT%"
 if exist "%HOME_DIR%" rmdir "%HOME_DIR%" >nul 2>&1
 if defined LEFTOVER goto :uninstall_left
 echo THEODORE OK: Theodore is not installed on this computer.
@@ -490,3 +516,37 @@ echo NEXT: tell the user to write to support@theodoreand.ai.
 echo TELL THE USER: Theodore's download is incomplete.
 set "RC=78"
 goto :finish
+
+:old_engine_caches
+rem The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): %USERPROFILE%\.cache\pptx-slide-raster
+rem (images of the user's slides), pptx-icons and pptx-flags beside it, and %TEMP%\pptx-icons. Only files of the names
+rem the engine writes go (names listed by dir and filtered by findstr, never echoed); a folder goes once nothing else is
+rem in it. Results in OCLEFT (what stays) and OCDONE (the folders removed).
+set "OCLEFT="
+set "OCDONE="
+if not defined USERPROFILE exit /b 0
+set "OCR=%USERPROFILE%\.cache\pptx-slide-raster"
+if exist "%OCR%\" for /f "delims=" %%S in ('dir /b /ad "%OCR%" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "[0-9a-f]*"') do call :old_raster_dir "%OCR%\%%S"
+call :old_cache_dir "%OCR%"
+call :old_icon_files "%USERPROFILE%\.cache\pptx-icons"
+call :old_icon_files "%USERPROFILE%\.cache\pptx-flags"
+if defined TEMP call :old_icon_files "%TEMP%\pptx-icons"
+exit /b 0
+
+:old_raster_dir
+for /f "delims=" %%N in ('dir /b /a-d "%~1" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "slide-[0-9]*-[0-9]*\.jpg"') do del /f /q "%~1\%%N" >nul 2>&1
+rmdir "%~1" >nul 2>&1
+exit /b 0
+
+:old_icon_files
+if not exist "%~1\" exit /b 0
+for /f "delims=" %%N in ('dir /b /a-d "%~1" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "[0-9a-f]*\.png [0-9a-f]*\.uri"') do del /f /q "%~1\%%N" >nul 2>&1
+call :old_cache_dir "%~1"
+exit /b 0
+
+:old_cache_dir
+if not exist "%~1\" exit /b 0
+rmdir "%~1" >nul 2>&1
+if exist "%~1\" set "OCLEFT=%OCLEFT%; the folder %~1, a cache of the engine before 1.0.0-rc.7: its files of the engine's were removed, and what else it holds is not Theodore's and was left"
+if not exist "%~1\" set "OCDONE=%OCDONE%, %~1"
+exit /b 0

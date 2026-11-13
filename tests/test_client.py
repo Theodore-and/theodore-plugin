@@ -697,6 +697,28 @@ class Engine(ClientCase):
         self.assertIn(str(self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx"), out)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
+    def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
+        """Lane STUDIO: the served pptx entry gets three attempts. One that answers in time on a later attempt is
+        delivered as usual; when none does, the first line after the document header says Theodore's online part
+        could not be reached and how to get it, in `guide pptx` and in the skill body, and `skill` still exits 0."""
+        self.ready()
+        self.api.guides["pptx"][""] = "SERVED-POINTER: first instruction.\n"
+        env = {"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}
+        self.api.guide_delays["pptx"] = [1.2, 1.2]                # the first two attempts time out, the third answers
+        out = self.client("guide", "pptx", env=env).stdout
+        self.assertIn("SERVED-POINTER: first instruction.", out)
+        self.assertNotIn("THEODORE OFFLINE", out)
+        for args in (("guide", "pptx"), ("skill", "pptx")):
+            self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]       # none answers in time
+            result = self.client(*args, env=env)
+            self.assertEqual(result.returncode, 0, args)
+            lines = result.stdout.splitlines()
+            first = lines[1] if args[0] == "guide" else lines[0]
+            self.assertTrue(first.startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), (args, first))
+            self.assertIn("guide pptx again before building.", first)
+            self.assertNotIn("SERVED-POINTER", result.stdout)
+            self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", result.stdout)
+
     def test_server_rollback_is_followed_at_the_next_guide(self):
         self.ready()
         self.api.publish_engine("1.0.1", engine_zip("1.0.1"))
@@ -1496,6 +1518,47 @@ class StatusDoctorUninstall(ClientCase):
         self.assertTrue((workspace / ".pptx-state" / "theodore-engine.json").exists(), "the user's workspaces are not touched")
 
 
+    def old_engine_caches(self, foreign: bool = False) -> list[Path]:
+        """The engine's caches before 1.0.0-rc.7, as the accept-local run found them, and (foreign) a file of someone else."""
+        cache = self.box.user_home / ".cache"
+        raster = cache / "pptx-slide-raster" / ("a" * 64)
+        raster.mkdir(parents=True)
+        (raster / "slide-0001-150.jpg").write_bytes(b"jpg")
+        (cache / "pptx-icons").mkdir()
+        (cache / "pptx-icons" / f"{'1' * 40}.png").write_bytes(b"png")
+        (cache / "pptx-flags").mkdir()
+        (cache / "pptx-flags" / f"{'2' * 40}.uri").write_text("data:")
+        temp_icons = Path(self.box.env["TMPDIR"]) / "pptx-icons"
+        temp_icons.mkdir()
+        (temp_icons / f"{'3' * 40}.png").write_bytes(b"png")
+        if foreign:
+            (cache / "pptx-icons" / "my-notes.txt").write_text("mine")
+        folders = [cache / "pptx-slide-raster", cache / "pptx-icons", cache / "pptx-flags", temp_icons]
+        if sys.platform == "darwin":            # engines up to rc.6 honoured XDG_CACHE_HOME on macOS for their runtime cache
+            xdg = Path(self.box.env["XDG_CACHE_HOME"]) / "pptx-runtime" / "workspaces"
+            xdg.mkdir(parents=True)
+            folders.append(xdg.parent)
+        return folders
+
+    def test_uninstall_removes_the_engines_former_caches(self):
+        self.ready()
+        folders = self.old_engine_caches()
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("the engine's former caches were removed", first)
+        for folder in folders:
+            self.assertFalse(folder.exists(), folder)
+        for folder in folders[:4]:
+            self.assertIn(str(folder), first)
+
+    def test_uninstall_leaves_and_names_what_is_not_the_engines_in_a_former_cache(self):
+        self.ready()
+        folders = self.old_engine_caches(foreign=True)
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "RETRY", 75)
+        self.assertEqual([p.name for p in folders[1].iterdir()], ["my-notes.txt"], "only the engine's files went")
+        self.assertIn(f"the folder {folders[1]}", first)
+        self.assertFalse(folders[0].exists())
+
+
 class Hosts(ClientCase):
     def test_uninstall_says_what_it_could_not_remove(self):
         self.ready()
@@ -1743,6 +1806,338 @@ class Hosts(ClientCase):
         settings.write_text("{ not json")
         self.client("hosts", "settings", "--apply")
         self.assertEqual(settings.read_text(), "{ not json")
+
+
+# A stand-in for Claude Code's and Codex's plugin commands that writes what the real ones write (measured with Claude
+# Code 2.1.292 and codex-cli 0.160.1, 2026-11-13): Claude Code's settings.json entries, installed_plugins.json,
+# known_marketplaces.json and its plugin copy; Codex's two config.toml tables and its plugin copy.
+FAKE_HOST = r'''
+import json, os, sys, shutil
+name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+with open(os.environ["FAKE_HOST_LOG"], "a") as log:
+    log.write(name + " " + " ".join(args) + "\n")
+cmd = " ".join(args)
+def load(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except OSError:
+        return default
+def save(path, value):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(value, f, indent=2)
+if name == "claude":
+    base = os.environ["CLAUDE_CONFIG_DIR"]
+    settings, plugins = os.path.join(base, "settings.json"), os.path.join(base, "plugins")
+    if cmd == "plugin list --json":
+        print("[]")
+    elif cmd.startswith("plugin install"):
+        url = args[args.index("--marketplace") + 1] if "--marketplace" in args else "https://x.test/marketplace.json"
+        s = load(settings, {})
+        s.setdefault("extraKnownMarketplaces", {})["theodore"] = {"source": {"source": "url", "url": url}}
+        s.setdefault("enabledPlugins", {})["theodore@theodore"] = True
+        save(settings, s)
+        k = load(os.path.join(plugins, "known_marketplaces.json"), {})
+        k["theodore"] = {"source": {"source": "url", "url": url}, "installLocation": "x", "lastUpdated": "t"}
+        save(os.path.join(plugins, "known_marketplaces.json"), k)
+        i = load(os.path.join(plugins, "installed_plugins.json"), {"version": 2, "plugins": {}})
+        i["plugins"]["theodore@theodore"] = [{"scope": "user", "version": "0.3.5"}]
+        save(os.path.join(plugins, "installed_plugins.json"), i)
+        os.makedirs(os.path.join(plugins, "cache", "theodore", "theodore", "0.3.5"), exist_ok=True)
+    elif cmd.startswith("plugin uninstall"):
+        s = load(settings, {}); s.get("enabledPlugins", {}).pop("theodore@theodore", None); save(settings, s)
+        i = load(os.path.join(plugins, "installed_plugins.json"), {"plugins": {}}); i["plugins"].pop("theodore@theodore", None)
+        save(os.path.join(plugins, "installed_plugins.json"), i)
+    elif cmd.startswith("plugin marketplace remove"):
+        s = load(settings, {}); s.get("extraKnownMarketplaces", {}).pop("theodore", None); save(settings, s)
+        k = load(os.path.join(plugins, "known_marketplaces.json"), {}); k.pop("theodore", None)
+        save(os.path.join(plugins, "known_marketplaces.json"), k)
+else:
+    base = os.environ["CODEX_HOME"]
+    config = os.path.join(base, "config.toml")
+    text = open(config).read() if os.path.exists(config) else ""
+    if cmd.startswith("plugin marketplace add") and "[marketplaces.theodore]" not in text:
+        text += ("\n" if text else "") + '[marketplaces.theodore]\nsource_type = "local"\nsource = "%s"\n' % args[-1]
+    elif cmd == "plugin add theodore@theodore" and '[plugins."theodore@theodore"]' not in text:
+        text += '\n[plugins."theodore@theodore"]\nenabled = true\n'
+        os.makedirs(os.path.join(base, "plugins", "cache", "theodore", "theodore", "0.3.5"), exist_ok=True)
+    os.makedirs(base, exist_ok=True)
+    open(config, "w").write(text)
+'''
+
+
+class HostsOffPath(ClientCase):
+    """Claude Code's Windows installer leaves claude off PATH; npm and nvm leave codex off PATH outside a login shell.
+    The uninstall must still take Theodore out of both, and nothing of it may come back by itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = self.box.tmp / "host-calls.log"
+        self.box.env["FAKE_HOST_LOG"] = str(self.log)
+        self.claude_dir = Path(self.box.env["CLAUDE_CONFIG_DIR"])
+        self.codex_config = Path(self.box.env["CODEX_HOME"]) / "config.toml"
+        plugin = self.box.home / "plugin"
+        (plugin / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
+        (plugin / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+
+    def tools_in(self, folder: Path, names=("claude", "codex")) -> Path:
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (folder / name).write_text(f"#!{sys.executable}\n{FAKE_HOST}")
+            (folder / name).chmod(0o755)
+        return folder
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def register_then_lose_the_tools(self, user_settings: str, user_config: str = "") -> None:
+        settings = self.claude_dir / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(user_settings)
+        if user_config:
+            self.codex_config.parent.mkdir(parents=True, exist_ok=True)
+            self.codex_config.write_text(user_config)
+        tools = self.tools_in(self.box.tmp / "fakebin")
+        path = self.box.env["PATH"]
+        self.assertStatus(self.client("hosts", "register", env={"PATH": f"{tools}{os.pathsep}{path}"}), "OK", 0)
+        self.assertTrue(json.loads(settings.read_text())["enabledPlugins"]["theodore@theodore"])
+        shutil.rmtree(tools)            # claude and codex are nowhere this client can find them
+
+    def test_uninstall_takes_the_registration_back_from_the_files_when_claude_and_codex_cannot_be_found(self):
+        user_settings = '{\n  "theme": "dark",\n  "enabledPlugins": {"other@x": true}\n}\n'
+        user_config = '# mine\nmodel = "gpt-5"\n\n# my server\n[mcp_servers.docs]\ncommand = "docs"\n'
+        self.register_then_lose_the_tools(user_settings, user_config)
+        self.assertIn("[marketplaces.theodore]", self.codex_config.read_text())
+        before = len(self.calls())
+        first, _n, tell = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(len(self.calls()), before, "nothing was run: the tools are gone")
+        self.assertIn("claude command was not found, so Theodore took back its registration by editing", first)
+        self.assertIn("spacing may differ", first)
+        self.assertIn("codex command was not found", first)
+        settings = json.loads((self.claude_dir / "settings.json").read_text())
+        self.assertEqual(settings, {"theme": "dark", "enabledPlugins": {"other@x": True}}, "only Theodore's entries went")
+        self.assertEqual(json.loads((self.claude_dir / "plugins" / "installed_plugins.json").read_text()), {"version": 2, "plugins": {}})
+        self.assertEqual(json.loads((self.claude_dir / "plugins" / "known_marketplaces.json").read_text()), {})
+        self.assertFalse((self.claude_dir / "plugins" / "cache" / "theodore").exists(), "no copy is left that could start Theodore again")
+        self.assertEqual(self.codex_config.read_text(), user_config, "the user's Codex configuration, byte for byte")
+        self.assertFalse((Path(self.box.env["CODEX_HOME"]) / "plugins" / "cache" / "theodore").exists())
+        self.assertIn("Theodore is uninstalled", tell)
+
+    def test_a_record_from_before_0_3_5_is_taken_back_too(self):
+        self.register_then_lose_the_tools('{"theme": "dark"}')
+        record_path = self.box.home / "state" / "host-settings.json"
+        record = json.loads(record_path.read_text())
+        for key in ("claude_entries", "claude_path", "codex_entries", "codex_path"):
+            record.pop(key, None)
+        record_path.write_text(json.dumps(record, indent=2, sort_keys=True))
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(json.loads((self.claude_dir / "settings.json").read_text()), {"theme": "dark"})
+        self.assertNotIn("theodore", self.codex_config.read_text() if self.codex_config.exists() else "")
+
+    def test_an_entry_changed_since_is_named_and_left(self):
+        self.register_then_lose_the_tools('{"theme": "dark"}')
+        path = self.claude_dir / "settings.json"
+        settings = json.loads(path.read_text())
+        settings["enabledPlugins"]["theodore@theodore"] = {"mine": True}
+        path.write_text(json.dumps(settings))
+        first, _n, tell = self.assertStatus(self.client("uninstall"), "RETRY", 75)
+        self.assertIn('enabledPlugins."theodore@theodore"', first)
+        self.assertIn(str(path), first)
+        self.assertIn("/plugin uninstall theodore@theodore", first)
+        self.assertNotIn("Theodore is uninstalled", tell)
+        after = json.loads(path.read_text())
+        self.assertEqual(after["enabledPlugins"]["theodore@theodore"], {"mine": True}, "never a value Theodore did not write")
+        self.assertNotIn("extraKnownMarketplaces", after, "what is still Theodore's goes")
+
+    def test_the_path_recorded_at_registration_is_used_when_the_tool_is_off_path(self):
+        tools = self.tools_in(self.box.tmp / "elsewhere")
+        self.assertStatus(self.client("hosts", "register", env={"PATH": f"{tools}{os.pathsep}{self.box.env['PATH']}"}), "OK", 0)
+        record = json.loads((self.box.home / "state" / "host-settings.json").read_text())
+        self.assertEqual(record["claude_path"], str(tools / "claude"))
+        self.assertStatus(self.client("uninstall"), "OK", 0)            # PATH without it
+        self.assertIn("claude plugin uninstall theodore@theodore", self.calls())
+        self.assertIn("codex plugin remove theodore@theodore", self.calls())
+
+    def test_claude_is_found_where_its_installer_puts_it_for_register_doctor_and_uninstall(self):
+        self.tools_in(self.box.user_home / ".local" / "bin", names=("claude",))
+        self.tools_in(self.box.user_home / ".nvm" / "versions" / "node" / "v24.0.0" / "bin", names=("codex",))
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.calls())
+        self.assertIn("codex plugin add theodore@theodore", self.calls())
+        self.assertTrue((self.claude_dir / "CLAUDE.md").exists(), "the routing line too")
+        doctor = self.client("doctor").stdout
+        self.assertIn(f"assistant claude: {self.box.user_home / '.local' / 'bin' / 'claude'} (not on PATH", doctor)
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("claude plugin uninstall theodore@theodore", self.calls())
+        self.assertIn("claude plugin marketplace remove theodore", self.calls())
+        self.assertIn("codex plugin remove theodore@theodore", self.calls())
+
+    def test_register_inside_claude_code_without_its_command_is_not_a_silent_success(self):
+        result = self.client("hosts", "register", env={"CLAUDECODE": "1"})
+        first, nxt, _t = self.assertStatus(result, "RETRY", 75)
+        self.assertIn("claude-code: FAILED (this runs inside Claude Code", first)
+        self.assertIn("register by hand", nxt)
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)        # elsewhere: no Claude Code is simply not there
+
+    def test_codex_tables_go_without_touching_the_rest_of_the_file(self):
+        from theodore_client import commands
+        text = ('a = 1\n\n[marketplaces.theodore]\nsource_type = "local"\nsource = "/x"\n\n# about b\n[b]\nc = 2\n'
+                '\n[plugins."theodore@theodore"]\nenabled = true\n# trailing note\n')
+        self.assertEqual(commands._toml_without(text, {"[marketplaces.theodore]", '[plugins."theodore@theodore"]'}),
+                         'a = 1\n\n# about b\n[b]\nc = 2\n\n# trailing note\n')
+
+
+
+class BackgroundResume(ClientCase):
+    """A background download that stopped before it finished (the computer slept, the user signed out) is started
+    again by the next command: the runtime and engine by the setup job, LibreOffice and PortableGit by guide, skill and
+    doctor; doctor says what is still missing and what will fetch it."""
+
+    DEAD_PID = 2 ** 22 + 12345          # no process has it
+
+    def dead_job(self, name: str, **fields) -> Path:
+        path = self.box.home / "state" / "jobs" / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": self.DEAD_PID, "phase": "downloading", "percent": 40, "started": int(time.time()) - 600,
+                                    "updated": int(time.time()) - 600, **fields}))
+        return path
+
+    def test_a_runtime_download_that_died_is_started_again_by_the_next_command(self):
+        self.sign_in()
+        self.dead_job("setup", phase="downloading runtime")
+        self.assertIn(self.client("status", "--wait", "90").returncode, (0, 67))     # the runtime, then the engine
+        self.box.wait_jobs(120)
+        self.assertStatus(self.client("status"), "OK", 0)
+        self.assertTrue(json.loads(self.client("status", "--json").stdout)["engine"], "the engine came with it")
+
+    def test_libreoffice_that_stopped_is_started_again_and_doctor_says_so(self):
+        self.box.env["THEODORE_TEST_NO_SYSTEM_LIBREOFFICE"] = "1"
+        self.ready()
+        missing = {"version": "0.0.9", "url": f"{self.api.base}/dl/upstream/LibreOffice_missing.dmg", "sha256": "1" * 64, "size": 10}
+        state_path = self.box.home / "state" / "update.json"
+        state = json.loads(state_path.read_text())
+        state["tools"] = {"libreoffice": {k: missing for k in ("darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64")}}
+        state_path.write_text(json.dumps(state))
+        record = self.dead_job("libreoffice")
+        out = self.client("doctor").stdout
+        self.assertIn("restarted: downloads that had stopped before they finished were started again: libreoffice", out)
+        self.assertIn("still missing:", out)
+        self.assertIn("LibreOffice (slide previews)", out)
+        self.box.wait_jobs()
+        after = json.loads(record.read_text())
+        self.assertNotEqual(after.get("pid"), self.DEAD_PID, "a new attempt ran")
+        # a failure that passes by itself is retried a minute later at the earliest; the attempt above failed just now
+        tried = len([r for r in self.api.requests if "LibreOffice_missing.dmg" in r["path"]])
+        self.assertGreater(tried, 0)
+        self.assertNotIn("restarted:", self.client("doctor").stdout, "not again within the minute")
+        # one that needs the user is not retried: doctor names it and the command that tries again
+        self.dead_job("libreoffice", failed={"cause": "PROXY_AUTH", "detail": "the proxy asks for a sign-in"})
+        out = self.client("doctor").stdout
+        self.assertNotIn("restarted:", out)
+        self.assertIn("its download failed (the proxy asks for a sign-in)", out)
+        self.assertIn("tools install libreoffice` tries again", out)
+
+    def test_a_download_that_never_started_is_not_begun_by_guide_or_doctor(self):
+        self.ready()
+        self.client("doctor")
+        self.client("guide", "deck-design")
+        self.assertFalse((self.box.home / "state" / "jobs" / "libreoffice.json").exists())
+        self.assertFalse((self.box.home / "state" / "jobs" / "git.json").exists())
+        self.assertIn("still missing: nothing", self.client("doctor").stdout)
+
+
+
+class AutoUpdate(ClientCase):
+    """A release reaches a user with no action of theirs: the first Theodore command of each assistant session checks;
+    the plugin's files are updated through the assistant's own command in the background; what changed is said once;
+    an assistant that cannot be updated from outside gets one line with its action, once per release."""
+
+    def publish_plugin(self, version: str) -> None:
+        doc = {"schema": "theodore-plugin-latest@1", "version": version, "archive": f"theodore-plugin-{version}.tar.gz",
+               "sha256": "0" * 64, "size": 1}
+        self.api.files["plugin/latest.json"] = json.dumps(self.api.signed(doc)).encode()
+
+    def fake_claude(self, update_rc: int = 0) -> Path:
+        bin_dir = self.box.tmp / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        log = self.box.tmp / "claude-calls.log"
+        (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $*" >> "{log}"\ncase "$*" in\n'
+                                        '"plugin list --json") echo \'[{"id": "theodore@theodore", "version": "0.3.4"}]\';;\n'
+                                        f'"plugin update theodore@theodore") [ {update_rc} -eq 0 ] || {{ echo "Error: managed settings forbid plugin updates" >&2; exit {update_rc}; }};;\n'
+                                        'esac\nexit 0\n')
+        (bin_dir / "claude").chmod(0o755)
+        self.box.env["PATH"] = f"{bin_dir}{os.pathsep}{self.box.env['PATH']}"
+        return log
+
+    def manifest_calls(self) -> int:
+        return len([r for r in self.api.requests if "releases" in r["path"] and "manifest" in r["path"]])
+
+    def test_the_first_command_of_each_session_checks_and_a_repeat_within_the_session_does_not(self):
+        self.ready()
+        before = self.manifest_calls()
+        self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-1"})
+        self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-1"})
+        self.assertEqual(self.manifest_calls(), before + 1, "once in a session (the six-hour floor within it)")
+        self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-2"})
+        self.assertEqual(self.manifest_calls(), before + 2, "a new session checks at its first command")
+
+    def test_plugin_files_are_updated_through_claude_code_and_said_once(self):
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        env = {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}
+        self.client("skill", "pptx", env=env)
+        self.box.wait_jobs()
+        calls = log.read_text().splitlines()
+        self.assertIn("claude plugin marketplace update theodore", calls)
+        self.assertIn("claude plugin update theodore@theodore", calls)
+        out = self.client("skill", "deck-design", env=env).stdout.splitlines()
+        self.assertEqual(out[0], "THEODORE NOTICE: Theodore updated itself: plugin files 9.9.9, used from your next session. "
+                                 "Tell the user once, in one line; it does not stop this task.")
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once")
+        self.assertIn("plugin files: last update to 9.9.9: claude-code updated", self.client("doctor", env=env).stdout)
+
+    def test_a_host_that_refuses_gets_one_line_with_its_action_once_per_release_and_doctor_says_why(self):
+        self.fake_claude(update_rc=1)
+        self.ready()
+        self.publish_plugin("9.9.9")
+        env = {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}
+        self.client("skill", "pptx", env=env)
+        self.box.wait_jobs()
+        first = self.client("skill", "deck-design", env=env).stdout.splitlines()[0]
+        self.assertTrue(first.startswith("THEODORE NOTICE: Theodore's plugin files on this assistant ("), first)
+        self.assertIn("could not be updated automatically (claude plugin update failed: Error: managed settings forbid plugin updates)", first)
+        self.assertIn("claude plugin update theodore@theodore", first)
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once per release")
+        self.assertIn("plugin files: Theodore's plugin files", self.client("doctor", env=env).stdout)
+
+    def test_claude_ai_is_never_touched_and_hears_its_update_path_once(self):
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        self.client("update", "--check")
+        env = {"THEODORE_HOST": "claude-web", "THEODORE_EPHEMERAL": "1"}
+        first = self.client("skill", "deck-design", env=env).stdout.splitlines()[0]
+        self.assertIn("Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > ... > Check for updates", first)
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout)
+        self.box.wait_jobs()
+        self.assertNotIn("plugin update", log.read_text() if log.exists() else "")
+
+    def test_a_client_and_engine_update_is_said_once(self):
+        self.ready()
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        out = self.client("skill", "deck-design").stdout.splitlines()
+        self.assertTrue(out[0].startswith("THEODORE NOTICE: Theodore updated itself: engine 2.0.0"), out[:2])
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design").stdout)
+
+    def test_a_current_plugin_hears_nothing(self):
+        self.ready()
+        self.publish_plugin("0.0.1")
+        self.client("update", "--check")
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design").stdout)
+        self.assertNotIn("plugin files:", self.client("doctor").stdout)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")
@@ -2448,3 +2843,59 @@ class ProxiesAndSandboxes(ClientCase):
         self.assertIn(url, tell)
         plain = self.client("login", "--start")
         self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])
+
+
+class LibreOfficeAction(unittest.TestCase):
+    """doctor names the platform's real way to get LibreOffice: on Linux, where Theodore fetches none, the system's
+    package manager (lane accept-local: doctor said `tools install libreoffice`, which answers 'not supported')."""
+
+    def test_linux_names_the_package_manager_or_says_it_plainly(self):
+        from unittest import mock
+        from theodore_client import install
+        with mock.patch.object(install, "libreoffice_pin", lambda: None):
+            with mock.patch.object(install.shutil, "which", lambda tool: "/usr/bin/apt-get" if tool == "apt-get" else None):
+                self.assertEqual(install.libreoffice_install_action(),
+                                 "install LibreOffice with the system's package manager: `sudo apt-get install libreoffice-impress`")
+            with mock.patch.object(install.shutil, "which", lambda tool: "/sbin/apk" if tool == "apk" else None):
+                self.assertIn("`sudo apk add libreoffice`", install.libreoffice_install_action())
+            with mock.patch.object(install.shutil, "which", lambda tool: None):
+                action = install.libreoffice_install_action()
+                self.assertEqual(action, "install LibreOffice (its Impress part) with the system's package manager")
+                self.assertNotIn("tools install", action)
+
+
+class UpdateApplySays(ClientCase):
+    """`update --apply` says what was updated (client, engine, packs) and what was already current (lane accept-local:
+    it printed "nothing to update" while the client moved from 0.3.3 to 0.3.4)."""
+
+    def client_tar(self, version: str) -> bytes:
+        import io
+        import tarfile
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime" / "build"))
+        import build_client
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+            for path in build_client.client_files():
+                data = path.read_bytes()
+                if path.name == "__init__.py" and path.parent.name == "theodore_client":
+                    data = re.sub(rb'__version__ = "[^"]+"', f'__version__ = "{version}"'.encode(), data)
+                info = tarfile.TarInfo(f"{version}/{path.relative_to(build_client.CLIENT).as_posix()}")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return raw.getvalue()
+
+    def test_it_names_the_client_and_engine_it_moved_and_what_was_current(self):
+        self.ready()
+        first, _n, tell = self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        self.assertIn("nothing needed an update; already current: client ", first)
+        self.assertIn(f"engine {self.ENGINE_VERSION}", first)
+        self.assertIn("asset packs", first)
+        self.assertIn("up to date", tell)
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.api.publish_client("9.9.9", self.client_tar("9.9.9"))
+        first, _n, tell = self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        self.assertIn("updated: client 9.9.9 (was ", first)
+        self.assertIn(f"engine 2.0.0 (was {self.ENGINE_VERSION})", first)
+        self.assertIn("already current: asset packs", first)
+        self.assertNotIn("nothing", first)
+        self.assertIn("client 9.9.9", tell)

@@ -131,6 +131,80 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
+    def test_the_installer_removes_its_own_download_folder_when_the_cleanup_was_dropped(self):
+        # Codex ran the install line split in two and dropped "rm -rf $d" (lane PORTAL, 2026-11-12): the installer
+        # removes its own download folder when it ends, only a folder of the line's own name holding nothing else.
+        import shutil
+        name = "install.cmd" if IS_WINDOWS else "install.sh"
+        for folder_name in ("theodore-1a2b3c", "tmp.Ab12Cd34") if not IS_WINDOWS else ("theodore-1a2b3c",):
+            folder = self.box.tmp / folder_name
+            folder.mkdir()
+            shutil.copy2(self.box.installer(), folder / name)
+            result = self.install("--uninstall", installer=folder / name)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(status_lines(result.stdout)[0].startswith("THEODORE OK"), result.stdout)
+            self.assertFalse(folder.exists(), f"{folder_name}: the download folder is gone")
+        kept = self.box.tmp / "theodore-keep"
+        kept.mkdir()
+        shutil.copy2(self.box.installer(), kept / name)
+        (kept / "notes.txt").write_text("someone else's")
+        self.assertEqual(self.install("--uninstall", installer=kept / name).returncode, 0)
+        self.assertEqual(sorted(p.name for p in kept.iterdir()), sorted([name, "notes.txt"]), "a folder with anything else stays whole")
+        other = self.box.tmp / "downloads"
+        other.mkdir()
+        shutil.copy2(self.box.installer(), other / name)
+        self.assertEqual(self.install("--uninstall", installer=other / name).returncode, 0)
+        self.assertTrue((other / name).exists(), "a folder of another name is never touched")
+
+    def test_the_installer_removes_install_md_copies_holding_the_code(self):
+        # The agent saved install.md, whose first line carries the one-time code, to /tmp (lane accept-local): the
+        # installer removes a copy it can identify by that first line, and nothing else.
+        import shutil
+        page = (Path(__file__).resolve().parents[1] / "install" / "install.md").read_text().replace("{{ACTIVATION_CODE}}", "ABCD-2345")
+        temp = Path(self.box.env["TMPDIR"]) if not IS_WINDOWS else self.box.tmp / "temp"
+        temp.mkdir(exist_ok=True)
+        env = {"TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)}
+        loose = temp / "install.md"
+        loose.write_text(page)
+        name = "install.cmd" if IS_WINDOWS else "install.sh"
+        own = self.box.tmp / "theodore-own"
+        own.mkdir()
+        shutil.copy2(self.box.installer(), own / name)
+        (own / "install.md").write_text(page)
+        private = temp / "tmp.Xy12Ab34"
+        private.mkdir()
+        (private / "install.md").write_text(page)
+        other = temp / "notes"
+        other.mkdir()
+        (other / "install.md").write_text("# my own install notes\n")
+        result = self.install("--uninstall", env=env, installer=own / name)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(loose.exists(), "the copy straight in the temporary folder")
+        self.assertFalse(own.exists(), "the installer's own folder, with its copy")
+        if not IS_WINDOWS:
+            self.assertFalse(private.exists(), "a private folder holding only the copy")
+        self.assertEqual((other / "install.md").read_text(), "# my own install notes\n", "a file of another content stays")
+
+    def test_uninstall_with_no_installation_still_removes_the_engines_former_caches(self):
+        temp = self.box.tmp / "tmp"
+        env = {"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)}
+        cache = self.box.user_home / ".cache"
+        raster = cache / "pptx-slide-raster" / ("c" * 64)
+        raster.mkdir(parents=True)
+        (raster / "slide-0001-150.jpg").write_bytes(b"jpg")
+        (cache / "pptx-icons").mkdir()
+        (cache / "pptx-icons" / f"{'1' * 40}.png").write_bytes(b"png")
+        (cache / "pptx-icons" / "mine.txt").write_text("not the engine's")
+        result = self.install("--uninstall", env=env)
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertIn(str(cache / "pptx-icons"), status_lines(result.stdout)[0])
+        self.assertFalse((cache / "pptx-slide-raster").exists())
+        self.assertEqual([p.name for p in (cache / "pptx-icons").iterdir()], ["mine.txt"])
+        (cache / "pptx-icons" / "mine.txt").unlink()
+        done = self.install("--uninstall", env=env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse((cache / "pptx-icons").exists())
+
     def test_without_a_code_it_prints_the_sign_in_link_opens_no_browser_and_still_sets_up(self):
         opened = self.box.tmp / "opened.log"
         if IS_WINDOWS:

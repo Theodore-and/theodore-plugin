@@ -24,6 +24,8 @@ import sys
 import tarfile
 import tempfile
 import time
+import http.client
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -118,21 +120,76 @@ def wheel_platform_tags(platform_key: str, floor: dict) -> list[str]:
     return tags
 
 
+# Downloads survive a flaky network: five attempts with backoff (2, 4, 8, 16 s), each resuming the partial file where
+# the server allows (Range), and every verified archive is kept in a store keyed by its pinned sha256
+# (THEODORE_FETCH_STORE, else <cache>/by-sha256), so a rerun, another work folder or another platform's build never
+# fetches it again.
+FETCH_ATTEMPTS = 5
+
+
+def _store(dest: Path, sha256: str) -> Path:
+    # Never inside a folder that is packed whole (the licence folders are): main() sets the default to <cache>/by-sha256.
+    return Path(os.environ.get("THEODORE_FETCH_STORE") or dest.parent.parent / "by-sha256") / sha256
+
+
+def download_resuming(url: str, part: Path, attempts: int = FETCH_ATTEMPTS, timeout: float = 120.0) -> None:
+    """Download url into part, resuming and retrying; raise the last error when every attempt failed."""
+    last: Exception | None = None
+    for attempt in range(attempts):
+        if attempt:
+            wait = 2 ** attempt
+            log(f"retry    {url} in {wait} s ({last.__class__.__name__}: {last})")
+            time.sleep(wait)
+        have = part.stat().st_size if part.exists() else 0
+        request = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                resumed = have and getattr(response, "status", 200) == 206
+                expected = int(response.headers.get("Content-Length") or -1)
+                written = 0
+                with open(part, "ab" if resumed else "wb") as handle:
+                    while chunk := response.read(1 << 20):
+                        handle.write(chunk)
+                        written += len(chunk)
+                if expected >= 0 and written < expected:       # the connection ended early: resume from here
+                    raise http.client.IncompleteRead(b"", expected - written)
+            return
+        except urllib.error.HTTPError as error:
+            if error.code == 416:           # asked past the end: the part is whole (or wrong), start again
+                part.unlink(missing_ok=True)
+            elif error.code < 500 and error.code != 429:
+                raise
+            last = error
+        except (OSError, http.client.HTTPException) as error:      # resets, timeouts, short reads
+            last = error
+    raise last if last else RuntimeError(f"no attempt made for {url}")
+
+
 def fetch(url: str, dest: Path, sha256: str, size: int | None = None) -> None:
     """Download into the cache and verify. A mismatch is a hard failure."""
     if dest.exists() and sha256_file(dest) == sha256:
         log(f"cached   {dest.name}")
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
+    store = _store(dest, sha256)
+    if store.is_file() and sha256_file(store) == sha256:
+        shutil.copyfile(store, dest)
+        log(f"stored   {dest.name}")
+        return
     part = dest.with_name(dest.name + ".part")
     log(f"download {url}")
-    with urllib.request.urlopen(url, timeout=120) as response, open(part, "wb") as handle:
-        shutil.copyfileobj(response, handle, 1 << 20)
+    try:
+        download_resuming(url, part)
+    except Exception as error:  # noqa: BLE001 - reported with the URL, after every attempt
+        die(f"download of {url} failed after {FETCH_ATTEMPTS} attempts: {error.__class__.__name__}: {error}")
     got, got_size = sha256_file(part), part.stat().st_size
     if got != sha256 or (size is not None and got_size != size):
         part.unlink()
         die(f"checksum mismatch for {url}: expected sha256 {sha256} size {size}, got sha256 {got} size {got_size}")
     os.replace(part, dest)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(dest, store.with_name(store.name + ".tmp"))
+    os.replace(store.with_name(store.name + ".tmp"), store)
 
 
 def extract(archive: Path, dest: Path) -> None:
@@ -236,7 +293,7 @@ def build_wheels(python: Path, runtime_root: Path, wheel_dir: Path, tags: list[s
                  ) -> list[tuple[str, Path]]:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     pip = [python, "-I", "-B", "-m", "pip", "--isolated", "--disable-pip-version-check", "--no-input",
-           "--no-cache-dir"]
+           "--no-cache-dir", "--retries", "8", "--timeout", "60"]           # a reset connection is retried, not fatal
     locks = ["--require-hashes", "--only-binary", ":all:", "--no-deps",
              "-r", LOCKS / "requirements.txt", "-r", LOCKS / "runtime-extra.txt"]
     site = site_packages_dir(python)
@@ -277,7 +334,7 @@ def build_wheels(python: Path, runtime_root: Path, wheel_dir: Path, tags: list[s
             licences[f"licenses/python-packages/{dist}/{'/'.join(rel)}"] = path
     entries = list(licences.items())
     entries += [(f"python/{rel}", python_root / rel) for rel in added if rel.startswith(site_rel + "/")]
-    entries += [(f"licenses/python-build-standalone/{path.name}", path) for path in sorted(licence_dir.iterdir())]
+    entries += [(f"licenses/python-build-standalone/{path.name}", path) for path in sorted(licence_dir.iterdir()) if path.is_file()]
     return entries
 
 
@@ -428,7 +485,9 @@ def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, pl
            "npm_config_cache": str(cache / "npm"),
            "npm_config_userconfig": str(npmrc["user"]),
            "npm_config_globalconfig": str(npmrc["global"]),
-           "npm_config_update_notifier": "false"}
+           "npm_config_update_notifier": "false",
+           "npm_config_fetch_retries": "5", "npm_config_fetch_retry_mintimeout": "2000",
+           "npm_config_fetch_retry_maxtimeout": "30000"}
     # --ignore-scripts: nothing from a package runs at build time. The one native binary an install script would
     # have fetched (skia-canvas) is placed by install_skia_binary below instead; see README.md.
     run([node, npm_cli, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=scratch, env=env)
@@ -566,7 +625,9 @@ def main() -> int:
     temporary = None if args.work else tempfile.mkdtemp(prefix="theodore-runtime-")
     work = (args.work or Path(temporary)).resolve()
     try:
-        build(args.platform, args.out.resolve(), work, (args.cache or work / "cache").resolve())
+        cache = (args.cache or work / "cache").resolve()
+        os.environ.setdefault("THEODORE_FETCH_STORE", str(cache / "by-sha256"))     # one store, outside every packed folder
+        build(args.platform, args.out.resolve(), work, cache)
     finally:
         if temporary:
             shutil.rmtree(temporary, ignore_errors=True)

@@ -1,4 +1,4 @@
-Read this file as downloaded, not through a tool that summarises web pages: `curl -q --proto '=https' -fsS 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'` (Windows: `curl.exe -q --proto =https -fsS "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"`), then run the line for your shell in step 1 exactly as written.
+Read this file as downloaded, not through a tool that summarises web pages, into a new private folder (never straight into /tmp): `d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.md" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}' && cat "$d/install.md"` (Windows PowerShell: `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d; curl.exe -q --proto =https -fsS -o "$d\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"; Get-Content "$d\install.md"`), then run the line for your shell in step 1 exactly as written. The installer deletes this file when it runs.
 
 # Set up Theodore (instructions for an AI agent)
 
@@ -14,11 +14,13 @@ decks there too, and that workspace is the computer this page means.
    also LibreOffice, about 300 MB, and on Windows with neither LibreOffice nor PowerPoint, about 350 MB, both in the
    background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
    no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and
-   sets Claude Code's CLAUDE_CODE_GIT_BASH_PATH to it, so Theodore's skills can load; uninstalling takes both back. Run the
+   sets Claude Code's CLAUDE_CODE_GIT_BASH_PATH to it, so Theodore's skills can load; uninstalling takes both back.
+   Theodore then keeps itself up to date: its client, engine and assets, and the plugin's files in Claude Code and
+   Codex through their own plugin command (used from their next session); uninstalling stops it. Run the
    line for the shell you have, exactly as written:
    macOS/Linux:        ( d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
-   Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d
-   Windows cmd:        cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" --code {{ACTIVATION_CODE}} & rmdir /s /q "!D!""
+   Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+   Windows cmd:        cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" --code {{ACTIVATION_CODE}} & rmdir /s /q "!D!" 2>nul"
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    The download step can take several minutes: give the command a timeout of at least 15 minutes, or run it in
    the background and wait for it.

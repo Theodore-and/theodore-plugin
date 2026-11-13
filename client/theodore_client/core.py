@@ -8,6 +8,7 @@ import json
 import os
 import re
 import platform as _platform
+import shutil
 import subprocess
 import sys
 import threading
@@ -201,6 +202,63 @@ def host_name() -> str:
                                              "CODEX_SESSION_ID", "CODEX_VERSION")):
         return "codex"
     return "other"
+
+
+def host_executable(name: str) -> str | None:
+    """An assistant's command (claude or codex), also when it is not on PATH: PATH first, then the path recorded when
+    Theodore registered it (state/host-settings.json, <name>_path), then where the assistant's own installers put it.
+    Claude Code's Windows installer puts claude.exe in %USERPROFILE%\\.local\\bin without adding that folder to PATH,
+    and npm, nvm, Volta and Homebrew folders are often only on PATH in an interactive shell. None when it is nowhere.
+    Test seam: against a loopback API the folders outside the user's home are THEODORE_TEST_HOST_DIRS (none when unset)."""
+    found = shutil.which(name)
+    if found:
+        return found
+    candidates: list[Path] = []
+    recorded = read_json(home().state / "host-settings.json")
+    if isinstance(recorded, dict) and isinstance(recorded.get(f"{name}_path"), str) and recorded[f"{name}_path"]:
+        candidates.append(Path(recorded[f"{name}_path"]))
+    user = Path.home()
+    if IS_WINDOWS:
+        appdata, local = os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA")
+        candidates += [user / ".local" / "bin" / f"{name}.exe"]
+        if appdata:
+            candidates += [Path(appdata) / "npm" / f"{name}.cmd"]
+        if local:
+            candidates += [Path(local) / "Microsoft" / "WinGet" / "Links" / f"{name}.exe", Path(local) / "Volta" / "bin" / f"{name}.exe"]
+        candidates += [user / "scoop" / "shims" / f"{name}.exe", user / ".bun" / "bin" / f"{name}.exe"]
+        system: list[Path] = []
+    else:
+        candidates += [user / ".local" / "bin" / name, user / ".claude" / "local" / name, user / ".npm-global" / "bin" / name,
+                       user / ".volta" / "bin" / name, user / ".bun" / "bin" / name, user / ".linuxbrew" / "bin" / name]
+        prefix = os.environ.get("NPM_CONFIG_PREFIX") or os.environ.get("npm_config_prefix")
+        if prefix:
+            candidates.append(Path(prefix) / "bin" / name)
+        with contextlib.suppress(OSError):
+            nvm = sorted((user / ".nvm" / "versions" / "node").glob(f"*/bin/{name}"), key=lambda p: p.stat().st_mtime, reverse=True)
+            candidates += nvm
+        system = [Path(d) / name for d in ("/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin")]
+    try:
+        loopback = is_loopback_api()
+    except Status:              # no launcher.json: not a test
+        loopback = False
+    if loopback:
+        system = [Path(d) / (f"{name}.exe" if IS_WINDOWS else name) for d in (os.environ.get("THEODORE_TEST_HOST_DIRS") or "").split(os.pathsep) if d]
+    for candidate in candidates + system:
+        try:
+            if candidate.is_file() and (IS_WINDOWS or os.access(candidate, os.X_OK)):
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
+def session_id() -> str:
+    """The assistant session this command runs in, when the assistant says (Claude Code, Codex); else empty."""
+    for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value[:128]
+    return ""
 
 
 # Hosts that run Theodore on a machine of the assistant's own (a cloud sandbox), never on the user's computer.

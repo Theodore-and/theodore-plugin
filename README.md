@@ -17,8 +17,8 @@ By hand:
 | Assistant | Command |
 | --- | --- |
 | Any, macOS or Linux | `( d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
-| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d` |
-| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!""` |
+| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue` |
+| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!" 2>nul"` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
 | Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` (the installer above registers Codex from its own copy, the same as `codex plugin marketplace add ~/.theodore/plugin`) |
 
@@ -68,15 +68,29 @@ Outside that folder:
   Windows: a file in `state/` protected with DPAPI for your user. Linux: a file in `state/` readable only by
   you.
 - **The engine's render cache**: `~/Library/Caches/Theodore` (macOS), `%LOCALAPPDATA%\Theodore\Cache` (Windows),
-  `~/.cache/theodore` (Linux); older engines used `pptx-runtime` in the same places, which the uninstall removes too.
+  `~/.cache/theodore` (Linux); older engines used `pptx-runtime` in the same places (and under `$XDG_CACHE_HOME`
+  when set), and engines up to 1.0.0-rc.6 also kept slide images in `~/.cache/pptx-slide-raster` and icon and flag
+  images in `~/.cache/pptx-icons`, `~/.cache/pptx-flags` and the temporary folder's `pptx-icons` (on Windows under
+  `%USERPROFILE%\.cache` and `%TEMP%`); the uninstall removes all of them (only files of the names the engine writes).
 - **Your deck workspaces** get one small file, `.pptx-state/theodore-engine.json`, naming the engine version
   that started the workspace, so an update never changes a deck halfway through.
 - **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
   (automatic plugin updates for the Theodore marketplace; permission to run `~/.theodore/bin/theodore`
   without a prompt).
 
-Nothing is installed system-wide and nothing runs in the background after setup has finished. There are no
-hooks: Theodore runs only when your assistant calls it.
+Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
+download or an update in the background, which ends when it is done. There are no hooks.
+
+## Updates
+
+Theodore keeps itself up to date with nothing for you to do. The first Theodore command of each assistant session
+checks once; a newer client, engine or asset pack is fetched and used from the next deck (a deck in progress keeps the
+engine that started it). When a newer plugin is published, Theodore updates the plugin's files in Claude Code and
+Codex through their own plugin command, in the background; the new files are used from the assistant's next session.
+The assistant tells you once, in one line, what was updated. A claude.ai account's plugin can only be updated in
+claude.ai (Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > Check for updates); the skill
+says so once per release. If an update cannot be fetched or applied, the current version keeps working and
+`theodore doctor` says what is pending and why. `theodore uninstall` stops all of it.
 
 ## What Theodore sends and does not send
 
@@ -90,8 +104,10 @@ and the reports and preferences you or your assistant file; never deck content, 
 "%LOCALAPPDATA%\Theodore\bin\theodore.cmd" uninstall  Windows
 ```
 
-This removes the plugin from Claude Code and Codex, takes back exactly what Theodore added or changed in their
-settings (recorded in `state/host-settings.json` when it made the change), and deletes
+This removes the plugin from Claude Code and Codex, also when their `claude` or `codex` command is not on PATH (it
+looks where their installers put it, and where it was at registration; when it is nowhere, it takes out of their
+settings files exactly the entries Theodore's registration added and says so), takes back exactly what Theodore added
+or changed in their settings (recorded in `state/host-settings.json` when it made the change), and deletes
 the keychain item, the engine's render cache and every Theodore subfolder listed above (and the folder itself
 when nothing else is in it). What is left afterwards:
 

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +207,34 @@ class GeneratedFiles(unittest.TestCase):
             self.assertFalse((Path(one) / "latest.txt").exists(), "nothing unsigned is published for the installer")
 
 
+    def test_no_archive_carries_macos_metadata(self):
+        # The 8a1c5e2 test build (packed by hand with macOS tar) carried AppleDouble ._* entries (lane accept-local):
+        # the builders take neither ._* nor .DS_Store files, even when they lie beside the sources.
+        import tarfile
+        from unittest import mock
+        import build_client
+        import build_plugin_archives
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "tree"
+            for rel in (".claude-plugin", ".agents", "plugins"):
+                shutil.copytree(ROOT / rel, tree / rel)
+            client = Path(tmp) / "client"
+            shutil.copytree(ROOT / "client", client, ignore=shutil.ignore_patterns("__pycache__"))
+            for folder in (tree / "plugins" / "theodore" / "skills" / "pptx", client / "theodore_client"):
+                (folder / "._SKILL.md").write_bytes(b"\x00\x05\x16\x07AppleDouble")
+                (folder / ".DS_Store").write_bytes(b"Bud1")
+            out = Path(tmp) / "out"
+            record = build_plugin_archives.build(out, tree)
+            with mock.patch.object(build_client, "CLIENT", client):
+                client_tar = build_client.build(out)
+            names = zipfile.ZipFile(out / record["zip"]["file"]).namelist()
+            for archive in (out / record["tar"]["file"], client_tar):
+                with tarfile.open(archive) as bundle:
+                    names += bundle.getnames()
+            leaked = [n for n in names if Path(n).name.startswith("._") or Path(n).name == ".DS_Store"]
+            self.assertEqual(leaked, [])
+            self.assertTrue(any(n.endswith("theodore_client/core.py") for n in names))
+
     def test_a_release_build_refuses_the_placeholder_key_and_takes_stamped_keys(self):
         import build_plugin_archives
         import sync_launchers
@@ -384,8 +413,18 @@ class HostLimits(unittest.TestCase):
         self.assertEqual(codex["plugins"][0]["source"], {"source": "local", "path": "./plugins/theodore"})
         self.assertEqual(set(codex["plugins"][0]["policy"]), {"installation", "authentication"})
         # The local MCP server (theodore mcp), registered for Claude Code (.mcp.json) and for Codex (mcp.json, named by plugin.json).
+        # Claude Code starts the launcher by its path, without "sh": on Windows there is no sh on PATH (the server showed
+        # "failed"), and the path without extension resolves to theodore.cmd there (PATHEXT); on macOS and Linux the file
+        # itself is executable with its #!/bin/sh line. Proved on Windows Server 2022 with Claude Code (lane PLUGFIX,
+        # 2026-11-13): "sh ..." failed to connect, the path connected.
         self.assertEqual(json.loads((PLUGIN / ".mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "sh", "args": ["${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "mcp"]}}})
+                         {"mcpServers": {"theodore": {"command": "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "args": ["mcp"]}}})
+        self.assertTrue((SCRIPTS / "theodore.cmd").is_file(), "the Windows launcher beside it, which PATHEXT finds")
+        self.assertTrue((SCRIPTS / "theodore").read_text().startswith("#!/bin/sh\n"))
+        mode = subprocess.run(["git", "ls-files", "-s", "plugins/theodore/skills/pptx/scripts/theodore"], cwd=ROOT,
+                              capture_output=True, text=True).stdout.split(" ")[0]
+        if mode:                    # a git checkout: the launcher is committed executable, so every copy of it runs
+            self.assertEqual(mode, "100755")
         self.assertEqual(json.loads((PLUGIN / "mcp.json").read_text()),
                          {"mcpServers": {"theodore": {"command": "sh", "args": ["./skills/pptx/scripts/theodore", "mcp"], "cwd": "."}}})
         self.assertEqual(portable["mcpServers"], "./mcp.json")
@@ -596,8 +635,12 @@ class InstallPage(unittest.TestCase):
         # The first line says how to read the page word for word, with the address quoted for a shell (zsh globs "?").
         first = text.splitlines()[0]
         self.assertIn("not through a tool that summarises web pages", first)
-        self.assertIn("curl -q --proto '=https' -fsS 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'", first)
-        self.assertIn('curl.exe -q --proto =https -fsS "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"', first)
+        self.assertIn("curl -q --proto '=https' -fsS -o \"$d/install.md\" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'", first)
+        self.assertIn('curl.exe -q --proto =https -fsS -o "$d\\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"', first)
+        # into a private folder of its own, not /tmp, and the installer removes it (its code is in the address)
+        self.assertIn("d=$(mktemp -d)", first)
+        self.assertIn("never straight into /tmp", first)
+        self.assertIn("The installer deletes this file when it runs.", first)
         self.assertIn("exactly as written", first)
         self.assertIn("This may run in a cloud sandbox session", text)
         # A new private folder each time: mktemp -d (0700) on POSIX, a random name created exclusively under %TEMP% on
@@ -666,3 +709,155 @@ class HostParity(unittest.TestCase):
         for value, cloud in (("true", True), ("1", True), ("yes", True), ("no", False), ("0", False), ("false", False), ("", False), ("No", False)):
             done = subprocess.run([sh, "-c", defs + "claude_cloud"], env={"PATH": "/usr/bin:/bin", "CLAUDE_CODE_REMOTE": value})
             self.assertEqual(done.returncode == 0, cloud, value)
+
+
+class Downloads(unittest.TestCase):
+    """The bundle build and the runner survive a flaky network (a TLS reset cost a 75-minute matrix run, 2026-11-13):
+    five attempts with backoff, resuming where the server allows, and a store of verified archives by sha256."""
+
+    def serve(self, payload: bytes, failures: int):
+        import http.server
+        import threading
+        state = {"calls": 0, "ranges": []}
+
+        class Flaky(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                state["calls"] += 1
+                start = int((self.headers.get("Range") or "bytes=0-")[6:].split("-")[0] or 0)
+                state["ranges"].append(start)
+                if state["calls"] <= failures:      # half the file, then the connection drops
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload[: len(payload) // 2])
+                    self.wfile.flush()
+                    self.connection.shutdown(2)
+                    return
+                body = payload[start:]
+                self.send_response(206 if start else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Flaky)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}/f.tar.gz", state
+
+    def test_a_dropped_download_is_retried_resumed_and_then_served_from_the_store(self):
+        from unittest import mock
+        import build_bundle
+        payload = os.urandom(300_000)
+        sha = hashlib.sha256(payload).hexdigest()
+        url, state = self.serve(payload, failures=2)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(build_bundle.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"THEODORE_FETCH_STORE": str(Path(tmp) / "store")}):
+            dest = Path(tmp) / "a" / "f.tar.gz"
+            build_bundle.fetch(url, dest, sha, len(payload))
+            self.assertEqual(dest.read_bytes(), payload)
+            self.assertEqual(state["calls"], 3, "two drops, then the third attempt")
+            self.assertGreater(state["ranges"][-1], 0, "the last attempt resumed where the part ended")
+            self.assertTrue((Path(tmp) / "store" / sha).is_file())
+            other = Path(tmp) / "b" / "f.tar.gz"           # another work folder or a rerun: no request at all
+            build_bundle.fetch(url, other, sha, len(payload))
+            self.assertEqual(state["calls"], 3)
+            self.assertEqual(other.read_bytes(), payload)
+
+    def test_the_store_is_never_inside_a_folder_that_is_packed_whole(self):
+        # 2026-11-13: the store defaulted to <dest folder>/by-sha256, so the licence folder (packed whole) held a
+        # folder and the Windows and macOS bundle builds failed. The default is now outside the destination folder.
+        import build_bundle
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("THEODORE_FETCH_STORE", None)
+            dest = Path("/c/cache/python-build-standalone-x-licences/LICENSE.txt")
+            self.assertEqual(build_bundle._store(dest, "ab"), Path("/c/cache/by-sha256/ab"))
+
+    def test_five_failures_stop_with_the_url_named(self):
+        from unittest import mock
+        import build_bundle
+        url, state = self.serve(b"x" * 1000, failures=99)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(build_bundle.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"THEODORE_FETCH_STORE": str(Path(tmp) / "store")}):
+            with self.assertRaises(SystemExit) as stopped:
+                build_bundle.fetch(url, Path(tmp) / "f.tar.gz", "0" * 64)
+            self.assertEqual(state["calls"], 5)
+            self.assertIn(url, str(stopped.exception))
+
+
+@unittest.skipIf(os.name == "nt", "the runner is a POSIX shell script on the Mac")
+class StampFromParts(unittest.TestCase):
+    """The green stamp is assembled from per-target records at one commit: a target that failed for an outside reason
+    is rerun alone; a test failure needs a new commit."""
+
+    PARTS = ["secrets/scan", "macos-arm64/shim", "macos-arm64/runtime", "macos-x64/shim", "macos-x64/runtime",
+             "windows-x64/shim", "windows-x64/runtime", "linux-x64/shim", "linux-x64/runtime", "linux-arm64/shim",
+             "linux-arm64/runtime", "network/job", "archives/build"]
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "repo"
+        (self.repo / "ci").mkdir(parents=True)
+        for name in ("run.sh", "lock.sh"):
+            shutil.copy2(ROOT / "ci" / name, self.repo / "ci" / name)
+        (self.repo / ".gitignore").write_text("ci/out/\n")
+        git = ["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "c"], check=True)
+        self.sha = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.logs = self.tmp / "logs"
+
+    def result(self, part: str, value: str, log: str = "ok\n", commit: str | None = None):
+        name, job = part.split("/")
+        folder = self.repo / "ci" / "out" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "commit").write_text((commit or self.sha) + "\n")
+        (folder / f"{job}.result").write_text(value + "\n")
+        (folder / f"{job}.log").write_text(log)
+
+    def stamp(self):
+        return subprocess.run(["sh", str(self.repo / "ci" / "run.sh"), "stamp"], capture_output=True, text=True,
+                              env={**os.environ, "THEODORE_CI_LOGS": str(self.logs)}, timeout=60)
+
+    def test_an_outside_failure_rerun_alone_completes_the_stamp_and_a_test_failure_never_does(self):
+        for part in self.PARTS:
+            self.result(part, "pass")
+        self.result("macos-x64/runtime", "fail", "ConnectionResetError: [Errno 54] Connection reset by peer\n")
+        self.result("linux-x64/shim", "pass", commit="0" * 40)          # a result of another commit
+        out = self.stamp()
+        self.assertIn("no stamp yet", out.stdout)
+        self.assertIn("macos-x64-runtime", out.stdout)
+        self.assertIn("linux-x64-shim", out.stdout)
+        self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())
+        self.result("macos-x64/runtime", "pass")                         # the rerun of that target alone
+        self.result("linux-x64/shim", "pass")
+        out = self.stamp()
+        self.assertIn(f"checks green at {self.sha}", out.stdout)
+        self.assertTrue((self.logs / "green" / "plugin" / self.sha).read_text().startswith(f"checks green at {self.sha}"))
+        self.assertTrue((self.logs / "green" / "plugin-parts" / self.sha / "macos-x64-runtime").is_file(), "each record keeps its log")
+
+    def test_modules_that_failed_to_import_for_want_of_a_bundle_are_an_outside_failure(self):
+        for part in self.PARTS:
+            self.result(part, "pass")
+        self.result("windows-x64/shim", "fail", "ERROR: test_client (unittest.loader._FailedTest.test_client)\n"
+                    '  File "C:\\theodore-ci\\repo\\tests\\support.py", line 119, in <module>\n'
+                    '    _manifest = json.loads(next(Path(REAL_BUNDLE).glob("*.manifest.json")).read_text(encoding="utf-8"))\n'
+                    "StopIteration\nFAILED (errors=7, skipped=6)\n")
+        out = self.stamp()
+        self.assertIn("no stamp yet", out.stdout)
+        self.result("windows-x64/shim", "pass")                          # the rerun once the bundle builds
+        self.assertIn(f"checks green at {self.sha}", self.stamp().stdout)
+
+    def test_a_test_failure_blocks_the_stamp_at_that_commit(self):
+        for part in self.PARTS:
+            self.result(part, "pass")
+        self.result("linux-arm64/shim", "fail", "FAIL: test_something (tests.test_x.Case.test_something)\nFAILED (failures=1)\n")
+        self.stamp()
+        self.result("linux-arm64/shim", "pass")                          # a flaky pass later does not count
+        out = self.stamp()
+        self.assertIn("test failures at this commit (linux-arm64-shim)", out.stdout)
+        self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())

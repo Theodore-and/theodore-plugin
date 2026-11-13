@@ -11,7 +11,7 @@ from unittest import mock
 
 from support import ClientCase, IS_WINDOWS  # noqa: F401  (support puts the client on sys.path)
 
-from theodore_client import routing
+from theodore_client import core, routing
 
 
 def _blocks(text: str) -> int:
@@ -111,8 +111,11 @@ class BlockFile(unittest.TestCase):
     def test_ensure_skips_a_block_the_user_deleted_but_register_writes_it_again(self):
         claude_dir = self.dir / ".claude"
         claude_dir.mkdir()
-        env = {"CLAUDE_CONFIG_DIR": str(claude_dir), "CODEX_HOME": str(self.dir / "no-codex"), "PATH": ""}
-        with mock.patch.dict(os.environ, env):
+        # A home of its own: codex is also looked for where its installers put it (~/.nvm, ~/.local/bin, ...).
+        env = {"CLAUDE_CONFIG_DIR": str(claude_dir), "CODEX_HOME": str(self.dir / "no-codex"), "PATH": "",
+               "HOME": str(self.dir), "USERPROFILE": str(self.dir), "THEODORE_HOME": str(self.dir / "theodore")}
+        with mock.patch.dict(os.environ, env), mock.patch.object(core, "_HOME", None), \
+                mock.patch.object(core, "is_loopback_api", lambda: True):
             record, lines = routing.ensure({})
             self.assertEqual(len(lines), 1)
             target = claude_dir / "CLAUDE.md"

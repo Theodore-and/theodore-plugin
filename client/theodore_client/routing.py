@@ -14,7 +14,6 @@ is not written again: the record remembers that Theodore wrote it once.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from . import core
@@ -36,11 +35,11 @@ def block(newline: str = "\n") -> str:
 
 
 def targets() -> list[tuple[str, Path, str | None]]:
-    """(assistant, its global instructions file, its command on PATH or None)."""
+    """(assistant, its global instructions file, its command (also off PATH, where its installer puts it) or None)."""
     claude_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     codex_dir = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-    return [("claude", claude_dir / "CLAUDE.md", shutil.which("claude")),
-            ("codex", codex_dir / "AGENTS.md", shutil.which("codex"))]
+    return [("claude", claude_dir / "CLAUDE.md", core.host_executable("claude")),
+            ("codex", codex_dir / "AGENTS.md", core.host_executable("codex"))]
 
 
 def _present(path: Path, tool: str | None) -> bool:
