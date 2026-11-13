@@ -206,6 +206,34 @@ class GeneratedFiles(unittest.TestCase):
             self.assertFalse((Path(one) / "latest.txt").exists(), "nothing unsigned is published for the installer")
 
 
+    def test_no_archive_carries_macos_metadata(self):
+        # The 8a1c5e2 test build (packed by hand with macOS tar) carried AppleDouble ._* entries (lane accept-local):
+        # the builders take neither ._* nor .DS_Store files, even when they lie beside the sources.
+        import tarfile
+        from unittest import mock
+        import build_client
+        import build_plugin_archives
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "tree"
+            for rel in (".claude-plugin", ".agents", "plugins"):
+                shutil.copytree(ROOT / rel, tree / rel)
+            client = Path(tmp) / "client"
+            shutil.copytree(ROOT / "client", client, ignore=shutil.ignore_patterns("__pycache__"))
+            for folder in (tree / "plugins" / "theodore" / "skills" / "pptx", client / "theodore_client"):
+                (folder / "._SKILL.md").write_bytes(b"\x00\x05\x16\x07AppleDouble")
+                (folder / ".DS_Store").write_bytes(b"Bud1")
+            out = Path(tmp) / "out"
+            record = build_plugin_archives.build(out, tree)
+            with mock.patch.object(build_client, "CLIENT", client):
+                client_tar = build_client.build(out)
+            names = zipfile.ZipFile(out / record["zip"]["file"]).namelist()
+            for archive in (out / record["tar"]["file"], client_tar):
+                with tarfile.open(archive) as bundle:
+                    names += bundle.getnames()
+            leaked = [n for n in names if Path(n).name.startswith("._") or Path(n).name == ".DS_Store"]
+            self.assertEqual(leaked, [])
+            self.assertTrue(any(n.endswith("theodore_client/core.py") for n in names))
+
     def test_a_release_build_refuses_the_placeholder_key_and_takes_stamped_keys(self):
         import build_plugin_archives
         import sync_launchers

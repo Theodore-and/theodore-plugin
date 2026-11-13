@@ -37,7 +37,8 @@ EXECUTABLE = {"theodore"}
 
 def tree_files(root: Path) -> list[Path]:
     keep = [root / ".claude-plugin" / "marketplace.json", root / ".agents" / "plugins" / "marketplace.json"]
-    keep += sorted(p for p in (root / "plugins" / "theodore").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store")
+    keep += sorted(p for p in (root / "plugins" / "theodore").rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store"
+             and not p.name.startswith("._"))      # never macOS metadata (AppleDouble)
     return keep
 
 
