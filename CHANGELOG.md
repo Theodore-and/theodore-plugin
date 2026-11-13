@@ -36,6 +36,17 @@
 - An assistant that runs older plugin files than the current release (claude.ai keeps the copy a user added until
   they press Check for updates) is told so in one line at skill load and guide, at most once a day, and by `doctor`,
   with that assistant's update action.
+- Claude Code starts the plugin's tool server by the launcher's path instead of `sh <path>`: on Windows there is no
+  `sh` on PATH, so every Windows user saw Theodore's server as failed; the path resolves to `theodore.cmd` there and
+  the server connects (Windows Server 2022, Claude Code; macOS too).
+- `doctor` and `tools install libreoffice` name the platform's real way to get LibreOffice: on Linux the package
+  manager's command (apt, dnf, yum, zypper, apk, pacman) or plain words, never a command that is not supported there.
+- `update --apply` says what was updated (client, engine, asset packs) and what was already current, instead of
+  "nothing to update" while the client moved.
+- install.md's first line has the agent read it into a new private folder, never straight into /tmp, and the
+  installers remove any copy of it they can identify by its first line (their own folder, the temporary folder, a
+  private folder there): it holds the one-time code.
+- The archive builders never take macOS metadata files (AppleDouble `._*`, `.DS_Store`); a test checks every archive.
 - Launcher generation 9.
 
 ## 0.3.4

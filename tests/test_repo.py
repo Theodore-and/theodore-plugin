@@ -412,8 +412,18 @@ class HostLimits(unittest.TestCase):
         self.assertEqual(codex["plugins"][0]["source"], {"source": "local", "path": "./plugins/theodore"})
         self.assertEqual(set(codex["plugins"][0]["policy"]), {"installation", "authentication"})
         # The local MCP server (theodore mcp), registered for Claude Code (.mcp.json) and for Codex (mcp.json, named by plugin.json).
+        # Claude Code starts the launcher by its path, without "sh": on Windows there is no sh on PATH (the server showed
+        # "failed"), and the path without extension resolves to theodore.cmd there (PATHEXT); on macOS and Linux the file
+        # itself is executable with its #!/bin/sh line. Proved on Windows Server 2022 with Claude Code (lane PLUGFIX,
+        # 2026-11-13): "sh ..." failed to connect, the path connected.
         self.assertEqual(json.loads((PLUGIN / ".mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "sh", "args": ["${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "mcp"]}}})
+                         {"mcpServers": {"theodore": {"command": "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore", "args": ["mcp"]}}})
+        self.assertTrue((SCRIPTS / "theodore.cmd").is_file(), "the Windows launcher beside it, which PATHEXT finds")
+        self.assertTrue((SCRIPTS / "theodore").read_text().startswith("#!/bin/sh\n"))
+        mode = subprocess.run(["git", "ls-files", "-s", "plugins/theodore/skills/pptx/scripts/theodore"], cwd=ROOT,
+                              capture_output=True, text=True).stdout.split(" ")[0]
+        if mode:                    # a git checkout: the launcher is committed executable, so every copy of it runs
+            self.assertEqual(mode, "100755")
         self.assertEqual(json.loads((PLUGIN / "mcp.json").read_text()),
                          {"mcpServers": {"theodore": {"command": "sh", "args": ["./skills/pptx/scripts/theodore", "mcp"], "cwd": "."}}})
         self.assertEqual(portable["mcpServers"], "./mcp.json")
