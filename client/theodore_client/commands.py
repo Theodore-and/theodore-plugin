@@ -928,6 +928,7 @@ def update(action: str, value: str | None) -> int:
                                 "nothing to do." if same else f"run {launcher} update --apply, or just continue: it applies at the next guide.",
                                 "Theodore is up to date." if same else f"A Theodore update ({latest}) is available and will install itself."))
     install.save_update_state(held=None, failed=None)
+    packs_before = {p: (i.get("status"), i.get("version")) for p, i in install.packs_state().items()}
     try:
         manifest = install.check_updates(force=True, wait=240.0, timeout=20.0)
     except install.StaleDocument as stale:
@@ -945,9 +946,32 @@ def update(action: str, value: str | None) -> int:
         raise Status("SETUP_IN_PROGRESS", f"engine {target} is still downloading.", "run the same command again in 30 seconds.",
                      "Theodore is downloading an update.")
     changed = now_current != current
-    return core.emit(Status("OK", f"engine {now_current} is current" + (f" (was {current})." if changed else "; nothing to update."),
-                            f"run {launcher} guide pptx again before continuing." if changed else "nothing to do.",
-                            f"Theodore updated to version {now_current}." if changed else "Theodore is up to date."))
+    # Say what moved and what was already current: the client, the engine and the asset packs.
+    updated, current_parts = [], []
+    offered_client = str((manifest.get("client") or {}).get("version") or "")
+    if offered_client and offered_client != __version__:
+        Job("client-update").wait(60)
+        if core.read_text(core.home().client / "current.txt") == offered_client:
+            updated.append(f"client {offered_client} (was {__version__}; used from the next command)")
+        else:
+            updated.append(f"client {offered_client} (downloading in the background; was {__version__})")
+    else:
+        current_parts.append(f"client {__version__}")
+    (updated if changed else current_parts).append(f"engine {now_current}" + (f" (was {current})" if changed else ""))
+    after = install.packs_state()
+    moved = sorted(p for p, i in after.items() if (i.get("status"), i.get("version")) != packs_before.get(p) and i.get("status") == "ready")
+    arriving = sorted(p for p, i in after.items() if i.get("status") != "ready") if Job("packs").alive() else []
+    if moved:
+        updated.append(f"asset packs {', '.join(moved)}")
+    if arriving:
+        updated.append(f"asset packs {', '.join(arriving)} (downloading in the background)")
+    if not moved and not arriving:
+        current_parts.append("asset packs")
+    summary = (f"updated: {'; '.join(updated)}" if updated else "nothing needed an update") + \
+        (f"; already current: {', '.join(current_parts)}" if current_parts else "") + "."
+    return core.emit(Status("OK", summary,
+                            f"run {launcher} guide pptx again before continuing." if updated else "nothing to do.",
+                            f"Theodore is updated ({'; '.join(u.split(' (')[0] for u in updated)})." if updated else "Theodore is up to date."))
 
 
 def _stale_status(stale) -> Status:

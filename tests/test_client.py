@@ -2805,3 +2805,40 @@ class LibreOfficeAction(unittest.TestCase):
                 action = install.libreoffice_install_action()
                 self.assertEqual(action, "install LibreOffice (its Impress part) with the system's package manager")
                 self.assertNotIn("tools install", action)
+
+
+class UpdateApplySays(ClientCase):
+    """`update --apply` says what was updated (client, engine, packs) and what was already current (lane accept-local:
+    it printed "nothing to update" while the client moved from 0.3.3 to 0.3.4)."""
+
+    def client_tar(self, version: str) -> bytes:
+        import io
+        import tarfile
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime" / "build"))
+        import build_client
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+            for path in build_client.client_files():
+                data = path.read_bytes()
+                if path.name == "__init__.py" and path.parent.name == "theodore_client":
+                    data = re.sub(rb'__version__ = "[^"]+"', f'__version__ = "{version}"'.encode(), data)
+                info = tarfile.TarInfo(f"{version}/{path.relative_to(build_client.CLIENT).as_posix()}")
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return raw.getvalue()
+
+    def test_it_names_the_client_and_engine_it_moved_and_what_was_current(self):
+        self.ready()
+        first, _n, tell = self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        self.assertIn("nothing needed an update; already current: client ", first)
+        self.assertIn(f"engine {self.ENGINE_VERSION}", first)
+        self.assertIn("asset packs", first)
+        self.assertIn("up to date", tell)
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.api.publish_client("9.9.9", self.client_tar("9.9.9"))
+        first, _n, tell = self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        self.assertIn("updated: client 9.9.9 (was ", first)
+        self.assertIn(f"engine 2.0.0 (was {self.ENGINE_VERSION})", first)
+        self.assertIn("already current: asset packs", first)
+        self.assertNotIn("nothing", first)
+        self.assertIn("client 9.9.9", tell)
