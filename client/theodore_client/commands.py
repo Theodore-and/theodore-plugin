@@ -1997,6 +1997,48 @@ def _remove_old_engine_caches(left: list[str]) -> list[str]:
     return removed
 
 
+# What the engine keeps in the temporary folder (Python's tempfile.gettempdir(), the engine's own rule): LibreOffice's
+# profile and its warm copy, the profile's lock file, and the folder of empty lock files. ACCEPT-LOCAL2 D-B.
+_TEMP_PROFILE = ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed")
+_TEMP_PROFILE_LOCK = "pptx-soffice-profile.lock"
+_TEMP_LOCKS = "theodore-pptx-locks"
+
+
+def _remove_engine_temp(left: list[str]) -> list[str]:
+    """Remove those, only by the engine's names, only this user's, never through a link. Returns what was removed."""
+    import tempfile
+    base = Path(tempfile.gettempdir())
+    removed: list[str] = []
+
+    def mine(path: Path) -> bool:
+        try:
+            return not path.is_symlink() and (core.IS_WINDOWS or path.lstat().st_uid == os.getuid())
+        except OSError:
+            return False
+    for name in _TEMP_PROFILE:
+        folder = base / name
+        if folder.is_dir() and mine(folder):
+            core.remove_tree(folder)
+            (left.append(f"the LibreOffice profile Theodore's engine used in {folder}") if folder.exists() else removed.append(str(folder)))
+    lock = base / _TEMP_PROFILE_LOCK
+    if lock.is_file() and mine(lock):
+        with contextlib.suppress(OSError):
+            lock.unlink()
+            removed.append(str(lock))
+    locks = base / _TEMP_LOCKS
+    if locks.is_dir() and mine(locks):
+        for item in list(locks.iterdir()):
+            if item.suffix == ".lock" and item.is_file() and not item.is_symlink():
+                with contextlib.suppress(OSError):
+                    item.unlink()
+        try:
+            locks.rmdir()
+            removed.append(str(locks))
+        except OSError:
+            left.append(f"the folder {locks} (the engine's lock files were removed; what else it holds is not Theodore's and was left)")
+    return removed
+
+
 # An assistant that is on the computer but never had Theodore registered: nothing to remove, not a failure.
 _NOT_THERE = ("not found", "not installed", "not configured", "no such", "does not exist", "unknown plugin", "unknown marketplace",
               "not registered", "is not a known", "no plugin named", "no marketplace named")
@@ -2137,6 +2179,9 @@ def uninstall(keep_hosts: bool) -> int:
     old_caches = _remove_old_engine_caches(left)
     if old_caches:
         edits.append(f"the engine's former caches were removed ({', '.join(old_caches)})")
+    temp = _remove_engine_temp(left)
+    if temp:
+        edits.append(f"the engine's LibreOffice profile and lock files were removed from the temporary folder ({', '.join(temp)})")
     specimens_left = specimens.sweep(everything=True)
     for folder in specimens_left:
         left.append(f"the specimen folder {folder} (its record is kept in {specimens.registry()}; running uninstall again retries it)")

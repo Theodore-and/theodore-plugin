@@ -1571,6 +1571,24 @@ class StatusDoctorUninstall(ClientCase):
         for folder in folders[:4]:
             self.assertIn(str(folder), first)
 
+    def test_uninstall_removes_the_engines_libreoffice_profile_and_lock_files_from_the_temporary_folder(self):
+        # ACCEPT-LOCAL2 D-B: pptx-soffice-profile/, its .warm-seed/, its .lock, theodore-pptx-locks/*.lock stayed.
+        self.ready()
+        temp = Path(self.box.env["TMPDIR"])
+        for name in ("pptx-soffice-profile/user/registrymodifications.xcu", "pptx-soffice-profile.warm-seed/user/x.xcu"):
+            (temp / name).parent.mkdir(parents=True, exist_ok=True)
+            (temp / name).write_text("<x/>")
+        (temp / "pptx-soffice-profile.lock").write_text("")
+        (temp / "theodore-pptx-locks").mkdir()
+        for n in range(3):
+            (temp / "theodore-pptx-locks" / f"{n}.lock").write_text("")
+        (temp / "someone-elses").mkdir()
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("LibreOffice profile and lock files were removed", first)
+        for name in ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed", "pptx-soffice-profile.lock", "theodore-pptx-locks"):
+            self.assertFalse((temp / name).exists(), name)
+        self.assertTrue((temp / "someone-elses").exists())
+
     def test_uninstall_leaves_and_names_what_is_not_the_engines_in_a_former_cache(self):
         self.ready()
         folders = self.old_engine_caches(foreign=True)
