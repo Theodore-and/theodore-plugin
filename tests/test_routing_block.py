@@ -98,7 +98,7 @@ class BlockFile(unittest.TestCase):
         self.path.symlink_to(real)
         routing.write(self.path)
         self.assertTrue(self.path.is_symlink(), "the link stays a link")
-        self.assertIn(routing.TEXT, real.read_text())
+        self.assertIn(routing.TEXT[:-1], real.read_text())
         routing.remove(self.path, created=False)
         self.assertTrue(self.path.is_symlink())
         self.assertEqual(real.read_text(), "mine\n")
@@ -149,6 +149,22 @@ class BlockThroughTheClient(ClientCase):
     def _files(self) -> tuple[Path, Path]:
         return Path(self.box.env["CLAUDE_CONFIG_DIR"]) / "CLAUDE.md", Path(self.box.env["CODEX_HOME"]) / "AGENTS.md"
 
+    def expected_block(self) -> str:
+        launcher = self.box.home / "bin" / ("theodore.cmd" if IS_WINDOWS else "theodore")
+        return f'{routing.BEGIN}\n{routing.TEXT[:-1]}; to uninstall Theodore, run "{launcher}" uninstall.\n{routing.END}\n'
+
+    def test_the_block_names_theodores_uninstall_command_and_a_version_1_block_is_updated_in_place(self):
+        # ACCEPT-LOCAL2 D-D: asked to uninstall Theodore, the agent removed things by hand. Version 2 names the command.
+        self._fake_tools()
+        claude_md, _agents = self._files()
+        claude_md.parent.mkdir(parents=True)
+        v1 = f"{routing.BEGIN}\n{routing.TEXT}\n{routing.END}\n"
+        claude_md.write_text("# Mine\n\n" + v1 + "\nMore of mine.\n")
+        self.client("hosts", "register")
+        text = claude_md.read_text()
+        self.assertEqual(text, "# Mine\n\n" + self.expected_block() + "\nMore of mine.\n", "replaced in place, nothing else touched")
+        self.assertEqual(self.state("state/host-settings.json")["instructions"]["claude"]["version"], 2)
+
     def test_register_writes_both_and_uninstall_takes_back_exactly_the_block(self):
         self._fake_tools()
         claude_md, agents_md = self._files()
@@ -157,9 +173,9 @@ class BlockThroughTheClient(ClientCase):
         result = self.client("hosts", "register")
         self.assertStatus(result, "OK", 0)
         self.assertIn(f"claude instructions: Theodore added this line to {claude_md}", result.stdout)
-        self.assertIn(routing.TEXT, result.stdout, "the installer shows the sentence it writes")
-        self.assertIn(routing.TEXT, claude_md.read_text())
-        self.assertEqual(agents_md.read_text(), routing.block(), "AGENTS.md created with only the block")
+        self.assertIn(routing.TEXT[:-1], result.stdout, "the installer shows the sentence it writes")
+        self.assertIn(routing.TEXT[:-1], claude_md.read_text())
+        self.assertEqual(agents_md.read_text(), self.expected_block(), "AGENTS.md created with only the block")
         record = self.state("state/host-settings.json")
         self.assertEqual(record["instructions"]["claude"], {"path": str(claude_md), "version": routing.VERSION, "file_created": False})
         self.assertTrue(record["instructions"]["codex"]["file_created"])
@@ -186,7 +202,7 @@ class BlockThroughTheClient(ClientCase):
         claude_md.parent.mkdir(parents=True)            # Claude Code's folder, no command on PATH (the desktop app)
         self.ready()
         self.client("doctor")
-        self.assertIn(routing.TEXT, claude_md.read_text())
+        self.assertIn(routing.TEXT[:-1], claude_md.read_text())
         self.assertFalse(agents_md.exists(), "no Codex on this computer")
         claude_md.write_text("")                        # the user removes it: not written again by later runs
         self.client("guide", "pptx")
