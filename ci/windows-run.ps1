@@ -61,7 +61,8 @@ if ($Mode -eq 'serial') {
     # (started directly, not through the shell) with its own TEMP, LOCALAPPDATA and APPDATA; logs are joined in order.
     $lister = "$base\t\list_tests.py"
     Set-Content -Encoding ascii -Path $lister -Value @'
-import sys, unittest
+import os, sys, unittest
+sys.path.insert(0, os.getcwd())  # the repository (a script's own folder is what Python puts first)
 def ids(suite):
     for t in suite:
         yield from (ids(t) if isinstance(t, unittest.TestSuite) else [t.id()])
