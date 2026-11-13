@@ -162,6 +162,37 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
+    def test_install_uninstall_install_again_at_once_stays_signed_in(self):
+        # ACCEPT-LOCAL2 observation (b): a second install on the same profile right after an uninstall said "signed in"
+        # and ended with SIGN_IN_REQUIRED. On Windows the first uninstall's cleanup was still running and removed the new
+        # installation's state (its sign-in) as it was written. Elsewhere the removal is done before uninstall returns.
+        import time
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.install("--code", "ABCD-1234").returncode, 0)
+        self.box.wait_jobs()
+        self.assertEqual(self.install("--uninstall").returncode, 0)
+        self.api.issue_activation_code("ABCD-2345")
+        again = self.install("--code", "ABCD-2345")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertTrue(status_lines(again.stdout)[0].startswith("THEODORE OK: Theodore is ready"), again.stdout)
+        self.box.wait_jobs()
+        if IS_WINDOWS:
+            time.sleep(150)                     # longer than the first uninstall's cleanup may run
+        status = self.box.run_launcher("status", launcher=self.box.home / "bin" / STABLE)
+        self.assertTrue(status_lines(status.stdout)[0].startswith("THEODORE OK"), status.stdout + status.stderr)
+
+    def test_a_damaged_download_is_fetched_again(self):
+        # ACCEPT-LOCAL2: on a flaky network a download arrived damaged once and the install stopped.
+        config = json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+        client_key = config["stage1_client_url"].split("/dl/", 1)[1]
+        self.api.dl_damaged[client_key] = 2
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("arrived damaged; downloading it again", result.stdout)
+        self.assertEqual(len([r for r in self.api.requests if r["path"].endswith(client_key)]), 3)
+        self.box.wait_jobs()
+
     def test_the_installer_removes_its_own_download_folder_when_the_cleanup_was_dropped(self):
         # Codex ran the install line split in two and dropped "rm -rf $d" (lane PORTAL, 2026-11-12): the installer
         # removes its own download folder when it ends, only a folder of the line's own name holding nothing else.

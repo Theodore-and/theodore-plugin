@@ -15,6 +15,14 @@
 - The routing block (version 2) adds one clause naming Theodore's own uninstall command with the launcher's quoted
   path: asked to uninstall Theodore, Claude Code on macOS and Windows used to remove the plugin by hand and leave
   Theodore's folder, sign-in and block. Existing blocks are updated in place.
+- An install right after an uninstall stays signed in on Windows: the first uninstall's cleanup works only while its
+  marker is in the folder, and the installer and the launcher remove that marker (and wait for a pass in progress)
+  before they write anything. Before, the cleanup, still running, removed the new installation's sign-in as it was
+  written: "signed in (the one-time code was accepted)", then SIGN_IN_REQUIRED.
+- A download that arrives damaged (a flaky network) is fetched afresh, three times at most, by the client (the
+  runtime, the engine, packs, LibreOffice, PortableGit) and by both installers (Python and the client) before the
+  install stops; a connection that drops on the way is retried the same way.
+- Launcher generation 10.
 - `guide pptx <section>`: a section the service serves to this account, held in memory like deck-design's sections;
   a section it does not serve is a clean USAGE (lane STUDIO, PR #7).
 - The runner's per-target record copies whatever logs the target wrote (PR #12).

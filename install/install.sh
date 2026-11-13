@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.6"
-PIN_CLIENT="client/client-0.3.6.tar 01fe06f1ff31f0f0061706d464126f8ac7f3779b0464421613a6ae915cc923c0"
+PIN_CLIENT="client/client-0.3.6.tar 440711655f5b10cb6555a3d4abdaa4eb182f7860222d9068738081c25ee657e4"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -315,6 +315,16 @@ host_of() {
   elif [ -n "${CODEX_HOME:-}${CODEX_SANDBOX:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_VERSION:-}" ]; then echo codex
   else echo installer; fi
 }
+# fetch, then check against the pinned SHA-256; a damaged download (a flaky network) is fetched afresh, three times at most
+fetch_checked() { # url dest sha what
+  for try in 1 2; do
+    fetch "$1" "$2" "$4"
+    [ "$(sha256_of "$2")" = "$3" ] && return 0
+    rm -f "$2"; say "$4 arrived damaged; downloading it again"; sleep $((try * 2))
+  done
+  fetch "$1" "$2" "$4"
+  checked "$2" "$3" "$4"
+}
 checked() { # file sha what: delete and stop on a mismatch
   [ "$(sha256_of "$1")" = "$2" ] && return 0
   rm -f "$1"
@@ -347,8 +357,7 @@ RT=$PIN_RUNTIME_ID; CV=$PIN_CLIENT_VERSION
 PY="$HOME_DIR/runtime/$RT/python/bin/python3"
 if [ ! -x "$PY" ] || [ "$(cat "$HOME_DIR/runtime/$RT/.parts/python" 2>/dev/null)" != "$PY_SHA" ]; then
   say "downloading Theodore's Python (checked against its pinned SHA-256)"
-  fetch "$DL_BASE/$PY_PATH" "$WORK/python.tar.gz" "Theodore's Python"
-  checked "$WORK/python.tar.gz" "$PY_SHA" "Theodore's Python"
+  fetch_checked "$DL_BASE/$PY_PATH" "$WORK/python.tar.gz" "$PY_SHA" "Theodore's Python"
   rm -rf "$HOME_DIR/runtime/$RT/python" "$WORK/python"
   mkdir -p "$WORK/python" "$HOME_DIR/runtime/$RT/.parts" && tar -xzf "$WORK/python.tar.gz" -C "$WORK/python" &&
     mv "$WORK/python/python" "$HOME_DIR/runtime/$RT/python" ||
@@ -357,8 +366,7 @@ if [ ! -x "$PY" ] || [ "$(cat "$HOME_DIR/runtime/$RT/.parts/python" 2>/dev/null)
   rm -f "$WORK/python.tar.gz"
 fi
 if [ ! -f "$HOME_DIR/client/$CV/__main__.py" ]; then
-  fetch "$DL_BASE/$C_PATH" "$WORK/client.tar" "the Theodore client"
-  checked "$WORK/client.tar" "$C_SHA" "the Theodore client"
+  fetch_checked "$DL_BASE/$C_PATH" "$WORK/client.tar" "$C_SHA" "the Theodore client"
   mkdir -p "$WORK/client" "$HOME_DIR/client" && tar -xf "$WORK/client.tar" -C "$WORK/client" && rm -rf "$HOME_DIR/client/$CV" &&
     mv "$WORK/client/$CV" "$HOME_DIR/client/$CV" ||
     status SETUP_FAILED 68 "cause DISK: the Theodore client could not be unpacked into $HOME_DIR." "free disk space, then run the installer again." "Theodore could not write its files."

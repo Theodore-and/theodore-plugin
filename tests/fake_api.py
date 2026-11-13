@@ -124,6 +124,7 @@ class FakeApi:
         self.fail_with = None             # (http status, error code) for every authenticated /v1 call
         self.requests: list[dict] = []    # {method, path, auth} of every request, for assertions
         self.files: dict[str, bytes | Path] = {}      # /dl/<key> -> content
+        self.dl_damaged: dict[str, int] = {}          # /dl/<key> -> how many next answers arrive with a flipped byte
         self.dl_status: dict[str, int] = {}           # /dl/<key> -> forced HTTP status (for example 407)
         self.dl_redirect: dict[str, str] = {}         # /dl/<key> -> Location of a 302
         self.dl_delay = 0.0                           # seconds to stall every /dl/ download (a slow connection)
@@ -374,6 +375,9 @@ class FakeApi:
             if content is None:
                 return self._send(h, 404, b"not found", content_type="text/plain")
             data = content if isinstance(content, bytes) else Path(content).read_bytes()
+            if self.dl_damaged.get(key):                # a flaky network: these next answers arrive damaged
+                self.dl_damaged[key] -= 1
+                data = bytes([data[0] ^ 0xFF]) + data[1:] if data else data
             return self._send(h, 200, data, content_type="application/octet-stream")
         if seg[:1] != ["v1"]:
             return self._error(h, 404, "not_found")

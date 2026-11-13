@@ -2116,6 +2116,9 @@ def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
     return pids
 
 
+UNINSTALL_MARKER = ".theodore-uninstalling"
+
+
 def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -> Path:
     """Delete Theodore's folders after this process ends (its Python runs from inside them): a script in a private
     temporary folder, started outside this console's job (a closed console or SSH session does not stop it), retries
@@ -2124,8 +2127,15 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
     import tempfile
     work = Path(tempfile.mkdtemp(prefix="theodore-uninstall-"))
     result = work / "result.txt"
+    # The cleanup works only while this marker is there. An installer or launcher that starts in the folder meanwhile
+    # (an install right after the uninstall) removes it first, so the cleanup stops instead of deleting the new
+    # installation's files as they are written (its sign-in was lost: ACCEPT-LOCAL2, observation b).
+    marker = root / UNINSTALL_MARKER
+    core.write_atomic(marker, f"{os.getpid()}\n", 0o644)
     # A few seconds first: the launcher that called this client reads its own file to its end once the client exits.
-    lines = ["@echo off", "setlocal", "set N=0", "ping -n 5 127.0.0.1 >nul", ":again"]
+    lines = ["@echo off", "setlocal", "set N=0", "ping -n 5 127.0.0.1 >nul", ":again",
+             f'if exist "{marker}" goto pass', f'>"{result}" echo stopped: a new installation started in {root}', "goto end",
+             ":pass"]
     for name in names:
         target = root / name
         if name == "state" and keep_specimen_record:
@@ -2135,11 +2145,12 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
             lines.append(f'if exist "{target}" rmdir /s /q "{target}" >nul 2>&1')
     checks = [f'if exist "{root / n}" goto wait' for n in names if not (n == "state" and keep_specimen_record)]
     lines += checks + ["goto done", ":wait", "set /a N+=1", "if %N% geq 60 goto done",
-                       "ping -n 3 127.0.0.1 >nul", "goto again", ":done", f'rmdir "{root}" >nul 2>&1']
+                       "ping -n 3 127.0.0.1 >nul", "goto again", ":done", f'del /f /q "{marker}" >nul 2>&1',
+                       f'rmdir "{root}" >nul 2>&1']
     lines += [f'if exist "{root / n}" (>>"{result}" echo left: {root / n})' for n in names
               if not (n == "state" and keep_specimen_record)]
     # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
-    lines += [f'if not exist "{result}" (>"{result}" echo removed: {root})', "ping -n 301 127.0.0.1 >nul",
+    lines += [f'if not exist "{result}" (>"{result}" echo removed: {root})', ":end", "ping -n 301 127.0.0.1 >nul",
               f'(goto) 2>nul & rmdir /s /q "{work}"']
     script = work / "cleanup.cmd"
     script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")

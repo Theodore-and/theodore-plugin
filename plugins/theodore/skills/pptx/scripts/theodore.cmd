@@ -79,6 +79,8 @@ if defined READY goto :run_client
 
 rem --- not installed yet -------------------------------------------------------------------------------------------
 if /i "%~1"=="uninstall" goto :uninstall_bare
+rem An uninstall's cleanup may still be running in this folder: its marker goes first, which stops it (see install.cmd).
+if exist "%HOME_DIR%\.theodore-uninstalling" (del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1 & ping -n 6 127.0.0.1 >nul)
 if /i "%~1"=="mcp" goto :mcp_not_ready
 rem Expired specimen folders go before the bootstrap starts, so also when it fails (the client sweeps once it runs).
 call :sweep_specimens

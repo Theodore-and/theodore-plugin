@@ -1514,6 +1514,17 @@ class StatusDoctorUninstall(ClientCase):
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["loose-file.txt", "memory"])
         self.assertEqual(foreign.read_text(), "not Theodore's")
 
+    def test_a_damaged_download_is_fetched_again_and_a_damaged_one_three_times_fails(self):
+        # ACCEPT-LOCAL2: a runtime part arrived damaged once on a flaky network (HASH_MISMATCH) and the install failed.
+        self.sign_in()
+        key = next(k for k in self.api.files if k.startswith("runtime/") and "node_modules" in k)
+        self.api.dl_damaged[key] = 2
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        self.box.wait_jobs()
+        self.assertStatus(self.client("status"), "OK", 0)
+        tries = [r for r in self.api.requests if r["path"].endswith(key)]
+        self.assertEqual(len(tries), 3, "two damaged answers, then the good one")
+
     def test_uninstall_stops_theodores_own_running_processes_first(self):
         # ACCEPT-LOCAL2 D-C: a background job (and a tool server) still running from Theodore's folder. Each is found by
         # the file Theodore wrote for it, never by name; this test's own processes of the same name are untouched.
