@@ -330,12 +330,9 @@ class Failures(LauncherCase):
         self.assertIn("cause NETWORK", first)
         self.assertIn("running ", nxt)
         self.assertIn("again is right (not before)", nxt)
-        self.assertIn("Settings > Capabilities, and under Allowed websites add theodoreand.ai and *.theodoreand.ai, then ask again", tell)
-        # the setting first, the connector second (lane accept-web, 2026-11-13: the user must learn the one setting)
-        self.assertLess(tell.index("Allowed websites"), tell.index("connector"))
-        self.assertIn("Until then I can build with Theodore's design guidance through its connector, without its engine.", tell)
-        self.assertLess(nxt.index("again is right"), nxt.index("connector"))
-        self.assertNotIn("CONNECTOR_REQUIRED", result.stdout)
+        self.assertIn('Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add '
+                      'theodoreand.ai and *.theodoreand.ai', tell)
+        self.assertIn("ChatGPT Work mode does", tell)
         # the same through a proxy that answers 403 for the host, in any sandbox
         import http.server, threading
         class Refuse(http.server.BaseHTTPRequestHandler):
