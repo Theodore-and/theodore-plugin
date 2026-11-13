@@ -2138,8 +2138,9 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
                        "ping -n 3 127.0.0.1 >nul", "goto again", ":done", f'rmdir "{root}" >nul 2>&1']
     lines += [f'if exist "{root / n}" (>>"{result}" echo left: {root / n})' for n in names
               if not (n == "state" and keep_specimen_record)]
-    lines += [f'if not exist "{result}" (>"{result}" echo removed: {root})',
-              f'(goto) 2>nul & del /f /q "%~f0"']
+    # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
+    lines += [f'if not exist "{result}" (>"{result}" echo removed: {root})', "ping -n 301 127.0.0.1 >nul",
+              f'(goto) 2>nul & rmdir /s /q "{work}"']
     script = work / "cleanup.cmd"
     script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
     system32 = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32")
@@ -2197,7 +2198,7 @@ def uninstall(keep_hosts: bool) -> int:
         result = _windows_cleanup(root, names, bool(specimens_left)) if names else None
         what = (f"its folder {root} is deleted by a cleanup that starts when this command ends (Theodore's own processes are "
                 f"stopped; it retries for up to two minutes while Windows releases the last files; its result is written to "
-                f"{result})") if result else f"{root} was deleted"
+                f"{result} for five minutes)") if result else f"{root} was deleted"
         what += (f"; {'; '.join(edits)}" if edits else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "")
         if left:
             print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed and {what}, but these could not be: "
