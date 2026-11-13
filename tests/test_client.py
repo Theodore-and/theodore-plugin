@@ -2786,3 +2786,22 @@ class ProxiesAndSandboxes(ClientCase):
         self.assertIn(url, tell)
         plain = self.client("login", "--start")
         self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])
+
+
+class LibreOfficeAction(unittest.TestCase):
+    """doctor names the platform's real way to get LibreOffice: on Linux, where Theodore fetches none, the system's
+    package manager (lane accept-local: doctor said `tools install libreoffice`, which answers 'not supported')."""
+
+    def test_linux_names_the_package_manager_or_says_it_plainly(self):
+        from unittest import mock
+        from theodore_client import install
+        with mock.patch.object(install, "libreoffice_pin", lambda: None):
+            with mock.patch.object(install.shutil, "which", lambda tool: "/usr/bin/apt-get" if tool == "apt-get" else None):
+                self.assertEqual(install.libreoffice_install_action(),
+                                 "install LibreOffice with the system's package manager: `sudo apt-get install libreoffice-impress`")
+            with mock.patch.object(install.shutil, "which", lambda tool: "/sbin/apk" if tool == "apk" else None):
+                self.assertIn("`sudo apk add libreoffice`", install.libreoffice_install_action())
+            with mock.patch.object(install.shutil, "which", lambda tool: None):
+                action = install.libreoffice_install_action()
+                self.assertEqual(action, "install LibreOffice (its Impress part) with the system's package manager")
+                self.assertNotIn("tools install", action)

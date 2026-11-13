@@ -1369,6 +1369,22 @@ def libreoffice_pin() -> dict | None:
     return override or LIBREOFFICE_PINS.get(key)
 
 
+# Where Theodore fetches no LibreOffice (Linux), the system's package manager installs it: the command, when known.
+_PACKAGE_COMMANDS = (("apt-get", "sudo apt-get install libreoffice-impress"), ("dnf", "sudo dnf install libreoffice-impress"),
+                     ("yum", "sudo yum install libreoffice-impress"), ("zypper", "sudo zypper install libreoffice-impress"),
+                     ("apk", "sudo apk add libreoffice"), ("pacman", "sudo pacman -S libreoffice-fresh"))
+
+
+def libreoffice_install_action() -> str:
+    """What installs LibreOffice here, in words a user can act on."""
+    if libreoffice_pin():
+        return f"`{quoted_launcher()} tools install libreoffice` fetches it into Theodore's folder"
+    for tool, command in _PACKAGE_COMMANDS:
+        if shutil.which(tool):
+            return f"install LibreOffice with the system's package manager: `{command}`"
+    return "install LibreOffice (its Impress part) with the system's package manager"
+
+
 def libreoffice_binary() -> Path | None:
     base = core.home().tools / "libreoffice"
     for candidate in (base / "LibreOffice.app" / "Contents" / "MacOS" / "soffice", base / "program" / "soffice.exe",
@@ -1617,7 +1633,7 @@ def install_libreoffice(job: Job | None = None) -> Path:
     pin = libreoffice_pin()
     if not pin:
         raise Status("UNSUPPORTED_PLATFORM", "Theodore does not fetch LibreOffice on this platform.",
-                     "ask the user to install LibreOffice with their package manager; renders work once `soffice` is on PATH.",
+                     f"ask the user to {libreoffice_install_action()}; renders work once `soffice` is on PATH.",
                      "To preview slides, please install LibreOffice with your system's package manager.")
     home = core.home()
     existing = libreoffice_binary()

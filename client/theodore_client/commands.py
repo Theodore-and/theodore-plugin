@@ -731,7 +731,7 @@ def doctor(as_json: bool) -> int:
         add("warn", "service", f"{core.config().get('api_base')} answered HTTP {error.http_status}")
     office = snap["renderer"]["libreoffice"]
     add("ok" if office else "warn", "renderer", f"LibreOffice at {office}" if office else
-        f"no LibreOffice found: slide previews are unavailable until `{quoted_launcher()} tools install libreoffice` has run")
+        f"no LibreOffice found: slide previews are unavailable until it is installed; {install.libreoffice_install_action()}")
     try:
         import importlib.util
         pdfium = importlib.util.find_spec("pypdfium2") is not None
