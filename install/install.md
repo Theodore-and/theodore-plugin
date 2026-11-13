@@ -1,4 +1,4 @@
-Read this file as downloaded, not through a tool that summarises web pages: `curl -q --proto '=https' -fsS 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'` (Windows: `curl.exe -q --proto =https -fsS "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"`), then run the line for your shell in step 1 exactly as written.
+Read this file as downloaded, not through a tool that summarises web pages, into a new private folder (never straight into /tmp): `d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.md" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}' && cat "$d/install.md"` (Windows PowerShell: `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d; curl.exe -q --proto =https -fsS -o "$d\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"; Get-Content "$d\install.md"`), then run the line for your shell in step 1 exactly as written. The installer deletes this file when it runs.
 
 # Set up Theodore (instructions for an AI agent)
 

@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.5"
-PIN_CLIENT="client/client-0.3.5.tar b0a21c2a390763d68973eb112700a5cfc2db8dc5e363bffb77063a52b5a0153c"
+PIN_CLIENT="client/client-0.3.5.tar 0c83200087c616647c855686a944faf15502708f1f7fedcb7dafd0a4f2815b50"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -64,6 +64,26 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$0" ] && say "installer sha256 $(sha256_of "$0") (compare with https://theodoreand.ai/install)"
+# install.md carries a one-time code in its first line. A copy the agent saved is removed: in this installer's own
+# folder, and directly in the temporary folder or in a private folder there (tmp.*, theodore-*), only a file of this
+# user whose first line is install.md's own; such a folder goes too once empty.
+MD_MARK='Read this file as downloaded, not through a tool that summarises web pages'
+remove_install_md() {
+  own=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || own=
+  roots="${TMPDIR:-/tmp} /tmp"
+  case "$API_BASE" in http://127.0.0.1*|http://localhost*) roots=${TMPDIR:-/tmp} ;; esac      # a test: its own folder only
+  for t in $roots; do
+    for f in ${own:+"$own/install.md"} "${t%/}/install.md" "${t%/}"/tmp.*/install.md "${t%/}"/theodore-*/install.md; do
+      [ -f "$f" ] && [ ! -L "$f" ] && [ -O "$f" ] || continue
+      head -n 1 "$f" 2>/dev/null | grep -qF "$MD_MARK" || continue
+      rm -f "$f"
+      case "${f%/*}" in "${t%/}") ;; *) [ "${f%/*}" = "$own" ] || rmdir "${f%/*}" 2>/dev/null ;; esac
+    done
+  done
+  return 0
+}
+remove_install_md
+
 # The download folder of the install line (mktemp -d) goes when the installer ends, also when the agent ran the line
 # split in two and dropped its cleanup (Codex does): only a folder named tmp.* or theodore-* that holds nothing but
 # this file. The file stays on disk while the installer runs.

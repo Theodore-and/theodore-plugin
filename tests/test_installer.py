@@ -156,6 +156,35 @@ class Installer(unittest.TestCase):
         self.assertEqual(self.install("--uninstall", installer=other / name).returncode, 0)
         self.assertTrue((other / name).exists(), "a folder of another name is never touched")
 
+    def test_the_installer_removes_install_md_copies_holding_the_code(self):
+        # The agent saved install.md, whose first line carries the one-time code, to /tmp (lane accept-local): the
+        # installer removes a copy it can identify by that first line, and nothing else.
+        import shutil
+        page = (Path(__file__).resolve().parents[1] / "install" / "install.md").read_text().replace("{{ACTIVATION_CODE}}", "ABCD-2345")
+        temp = Path(self.box.env["TMPDIR"]) if not IS_WINDOWS else self.box.tmp / "temp"
+        temp.mkdir(exist_ok=True)
+        env = {"TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)}
+        loose = temp / "install.md"
+        loose.write_text(page)
+        name = "install.cmd" if IS_WINDOWS else "install.sh"
+        own = self.box.tmp / "theodore-own"
+        own.mkdir()
+        shutil.copy2(self.box.installer(), own / name)
+        (own / "install.md").write_text(page)
+        private = temp / "tmp.Xy12Ab34"
+        private.mkdir()
+        (private / "install.md").write_text(page)
+        other = temp / "notes"
+        other.mkdir()
+        (other / "install.md").write_text("# my own install notes\n")
+        result = self.install("--uninstall", env=env, installer=own / name)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(loose.exists(), "the copy straight in the temporary folder")
+        self.assertFalse(own.exists(), "the installer's own folder, with its copy")
+        if not IS_WINDOWS:
+            self.assertFalse(private.exists(), "a private folder holding only the copy")
+        self.assertEqual((other / "install.md").read_text(), "# my own install notes\n", "a file of another content stays")
+
     def test_uninstall_with_no_installation_still_removes_the_engines_former_caches(self):
         temp = self.box.tmp / "tmp"
         env = {"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)}

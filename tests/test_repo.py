@@ -624,8 +624,12 @@ class InstallPage(unittest.TestCase):
         # The first line says how to read the page word for word, with the address quoted for a shell (zsh globs "?").
         first = text.splitlines()[0]
         self.assertIn("not through a tool that summarises web pages", first)
-        self.assertIn("curl -q --proto '=https' -fsS 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'", first)
-        self.assertIn('curl.exe -q --proto =https -fsS "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"', first)
+        self.assertIn("curl -q --proto '=https' -fsS -o \"$d/install.md\" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}'", first)
+        self.assertIn('curl.exe -q --proto =https -fsS -o "$d\\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"', first)
+        # into a private folder of its own, not /tmp, and the installer removes it (its code is in the address)
+        self.assertIn("d=$(mktemp -d)", first)
+        self.assertIn("never straight into /tmp", first)
+        self.assertIn("The installer deletes this file when it runs.", first)
         self.assertIn("exactly as written", first)
         self.assertIn("This may run in a cloud sandbox session", text)
         # A new private folder each time: mktemp -d (0700) on POSIX, a random name created exclusively under %TEMP% on

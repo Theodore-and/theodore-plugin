@@ -25,6 +25,9 @@ rem The download folder of the install line goes when the installer ends, also w
 rem dropped its cleanup (Codex does): only a folder named theodore-* that holds nothing but this file. The installer runs
 rem as a call of itself, so the file stays on disk while it runs; then this outer run deletes the file and the folder
 rem from memory ((goto) ends the batch context first) and passes the exit code on.
+rem install.md carries a one-time code in its first line: a copy the agent saved in this folder or directly in %TEMP%
+rem goes, only a file whose first line is install.md's own.
+for %%F in ("%~dp0install.md" "%TEMP%\install.md") do if exist "%%~F" "%SystemRoot%\System32\findstr.exe" /b /c:"Read this file as downloaded, not through a tool that summarises web pages" "%%~F" >nul 2>&1 && del /f /q "%%~F" >nul 2>&1
 if defined THEODORE_INSTALL_INNER goto :installer_body
 set "IDIR=%~dp0"
 if not defined IDIR goto :installer_body
@@ -54,7 +57,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.5"
-set "PIN_CLIENT=client/client-0.3.5.tar b0a21c2a390763d68973eb112700a5cfc2db8dc5e363bffb77063a52b5a0153c"
+set "PIN_CLIENT=client/client-0.3.5.tar 0c83200087c616647c855686a944faf15502708f1f7fedcb7dafd0a4f2815b50"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
