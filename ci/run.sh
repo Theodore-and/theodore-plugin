@@ -26,6 +26,10 @@
 #   ci/run.sh stamp                    record this tree's results per target and write the stamp when every target has
 #                                      a green record at this commit (a target that failed for an outside reason is
 #                                      rerun alone; a test failure needs a new commit)
+#   ci/run.sh plan                     what HEAD needs, from what changed since the nearest stamped ancestor, by the table
+#                                      CHANGE_TABLE below (inherit, text, windows, client, runtime), and the targets
+#   ci/run.sh selected [--azure]       run only those targets, then a stamp that names the ancestor the other rows are
+#                                      inherited from (a runtime change runs `all`)
 #   ci/run.sh lock-status              the shared lock's holder and its queue in order (lock-waits: today's waits and holds)
 #
 # Per platform: "shim" is sync_launchers --check and every test suite (on Windows against the real bundle, as the
@@ -77,6 +81,7 @@ run_mac() { # name platform-key arch-prefix
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
     $prefix "$PY" tools/sync_launchers.py --check && $prefix "$PY" -m unittest discover -s tests -v ) > "$dir/shim.log" 2>&1 \
     && result "$name" shim pass || result "$name" shim fail
+  [ -n "${CI_SHIM_ONLY:-}" ] && { result "$name" runtime not-run; rm -rf "${dir:?}/work" "${dir:?}/tmp"; return; }
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
     $prefix "$PY" runtime/build/build_bundle.py --platform "$key" --out "$dir/bundle" --work "$dir/work" --cache "$CACHE/bundle-$key" &&
     $prefix "$PY" runtime/build/smoke_test.py --bundle "$dir/bundle" --platform "$key" &&
@@ -109,6 +114,7 @@ run_linux() { # name docker-platform platform-key
     su tester -c 'cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
       ( \$PY tools/sync_launchers.py --check && \$PY -m unittest discover -s tests -v ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
+      $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'echo not-run > \$O/runtime.result; exit 0;' )
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
         THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY -m unittest -v tests.test_launcher tests.test_installer ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
@@ -332,6 +338,102 @@ require() {
   echo "no green check for $sha: run ci/run.sh all --azure at that commit (stamps in $LOGS/green/plugin/)" >&2; exit 1
 }
 
+# --- which checks a commit needs: one table ---------------------------------------------------------------------------
+# Each changed file takes the class of the first row its path matches; the commit needs the highest class of its files.
+#   inherit  nothing that ships or that a test reads: secrets only
+#   text     the skill stubs' and the plugin's text: secrets, archives, macos-arm64 shim (the stub-versus-engine test)
+#   windows  Windows-only files: secrets, archives, windows-x64
+#   client   the client, the launchers, the install files, the build tools or the tests: secrets, archives, network and
+#            the shim job on every platform (bundles untouched, so no runtime job; windows-x64 runs whole)
+#   runtime  the runtime recipe, its locks or anything else: everything (`all`)
+CHANGE_TABLE='
+.github/*|inherit
+README.md|inherit
+SECURITY.md|inherit
+CHANGELOG.md|inherit
+THIRD-PARTY-NOTICES.md|inherit
+ci/run.sh|inherit
+ci/lock.sh|inherit
+plugins/*/skills/*/SKILL.md|text
+plugins/*/README.md|text
+ci/windows-*.ps1|windows
+ci/azure-*.sh|windows
+plugins/*/scripts/*.cmd|windows
+install/install.cmd|windows
+client/truststore/_windows.py|windows
+runtime/build/vc_redist.py|windows
+client/*|client
+plugins/*|client
+install/*|client
+tests/*|client
+tools/sync_launchers.py|client
+tools/build_plugin_archives.py|client
+tools/snapshot_*|client
+*|runtime
+'
+CLASS_RANK="inherit text windows client runtime"
+class_of() {
+  printf '%s\n' "$CHANGE_TABLE" | while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    pattern=${row%|*}
+    # shellcheck disable=SC2254
+    case "$1" in $pattern) echo "${row##*|}"; break ;; esac
+  done
+}
+rank_of() { i=0; for c in $CLASS_RANK; do [ "$c" = "$1" ] && { echo $i; return; }; i=$((i + 1)); done; echo 99; }
+stamped_ancestor() {
+  for c in $(git -C "$ROOT" rev-list --max-count=300 HEAD); do
+    [ -f "$LOGS/green/plugin/$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+targets_of() { # class
+  case "$1" in
+    inherit) echo "secrets" ;;
+    text) echo "secrets archives macos-arm64:shim" ;;
+    windows) echo "secrets archives windows-x64" ;;
+    client) echo "secrets archives network macos-arm64:shim macos-x64:shim linux-x64:shim linux-arm64:shim windows-x64" ;;
+    *) echo "all" ;;
+  esac
+}
+plan() { # sets PLAN_CLASS PLAN_FROM PLAN_FILE; prints the verdict
+  PLAN_CLASS=runtime PLAN_FROM= PLAN_FILE=
+  PLAN_FROM=$(stamped_ancestor) || { echo "runtime: no stamped ancestor within 300 commits: all"; return 0; }
+  if [ "$PLAN_FROM" = "$(commit)" ]; then PLAN_CLASS=green; echo "green: HEAD is stamped"; return 0; fi
+  best=inherit bestfile= n=0
+  for f in $(git -C "$ROOT" diff --name-only --no-renames "$PLAN_FROM" HEAD); do
+    n=$((n + 1)); c=$(class_of "$f")
+    if [ "$(rank_of "$c")" -gt "$(rank_of "$best")" ]; then best=$c bestfile=$f; fi
+  done
+  PLAN_CLASS=$best PLAN_FILE=$bestfile
+  echo "$best: ${bestfile:-only files no check reads} ($n files changed since the stamped $(printf %.12s "$PLAN_FROM")): $(targets_of "$best")"
+}
+record_selected() { # after `selected`: the targets it ran must pass; the stamp names the ancestor for the rest
+  sha=$(commit); short=$(printf %.12s "$sha")
+  dest="$LOGS/$(date +%Y-%m-%d)/plugin-$short-selected-$(date +%H%M%S)"; mkdir -p "$dest"
+  cp "$OUT/summary.txt" "$dest/table.txt" 2>/dev/null
+  bad=
+  for t in $(targets_of "$PLAN_CLASS"); do
+    case "$t" in
+      *:shim) r=$(cat "$OUT/${t%:shim}/shim.result" 2>/dev/null) ;;
+      windows-x64) r=pass; for j in shim runtime; do [ "$(tr -d '\r' < "$OUT/windows-x64/$j.result" 2>/dev/null)" = pass ] || r=fail; done ;;
+      network) r=$(cat "$OUT/network/job.result" 2>/dev/null) ;;
+      secrets) r=$(cat "$OUT/secrets/scan.result" 2>/dev/null) ;;
+      archives) r=$(cat "$OUT/archives/build.result" 2>/dev/null) ;;
+    esac
+    [ "$r" = pass ] || bad="$bad$t "
+  done
+  dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
+  if [ -z "$bad" ] && [ -z "$dirty" ]; then
+    mkdir -p "$LOGS/green/plugin"
+    printf 'checks green at %s\n%s\n%s\ninherited from %s for every row but: %s (plan %s, decided by %s)\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$dest" "$PLAN_FROM" "$(targets_of "$PLAN_CLASS")" "$PLAN_CLASS" "${PLAN_FILE:-none}" > "$LOGS/green/plugin/$sha"
+    line="checks green at $sha (plan $PLAN_CLASS; the rest inherited from $(printf %.12s "$PLAN_FROM"))"
+  elif [ -n "$dirty" ]; then line="checks NOT green at $sha: the tree has uncommitted changes (no stamp)"
+  else line="checks NOT green at $sha: ${bad% }"; fi
+  echo "$line" | tee "$dest/result.txt"
+}
+
 # --- guards: one matrix run at a time on this Mac, a load ceiling, a hard deadline per job ------------------------------
 # The lock is shared by the three repositories' runners ($THEODORE_CI_LOGS/locks/matrix); a lock whose process is gone
 # is taken over. Before each heavy local job the runner waits until the 1- and 5-minute load averages are under
@@ -381,7 +483,7 @@ cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; rel
 trap 'cleanup' EXIT
 trap 'exit 130' INT TERM HUP
 case "$TARGET" in
-  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
+  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all|selected) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
 esac
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
@@ -400,6 +502,35 @@ case "$TARGET" in
   index) run_index ;;
   summary) summary ;;
   stamp) note_parts; stamp_from_parts ;;
+  plan) plan ;;
+  selected)
+    plan
+    case "$PLAN_CLASS" in
+      green) exit 0 ;;
+      runtime) release_lock; exec sh "$0" all ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} ;;
+    esac
+    wanted=" $(targets_of "$PLAN_CLASS") "
+    wpid=
+    case "$wanted" in *" windows-x64 "*)
+      mkdir -p "$OUT/windows-x64"
+      CI_PARENT=$$ sh "$0" windows-x64 ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} > "$OUT/windows-x64.run.log" 2>&1 & wpid=$!
+      say "windows-x64 started (ci/out/windows-x64.run.log)" ;;
+    esac
+    for t in $wanted; do
+      case "$t" in
+        secrets) limited 900 secrets run_secrets ;;
+        archives) heavy 900 archives run_archives ;;
+        network) heavy 900 network run_network ;;
+        macos-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
+        macos-x64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
+        linux-x64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
+        linux-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+      esac
+    done
+    release_lock
+    if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
+    summary
+    record_selected ;;
   all)
     # Windows runs remotely from the start (it is the longest), the local jobs one at a time beside it.
     wpid=
@@ -424,7 +555,7 @@ case "$TARGET" in
     run_index
     summary
     record ;;
-  *) sed -n '2,20p' "$0"; exit 64 ;;
+  *) sed -n '2,24p' "$0"; exit 64 ;;
 esac
 # A target run alone (a rerun after an outside failure) adds its record and writes the stamp when it completes the set.
 case "$TARGET" in
