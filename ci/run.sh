@@ -26,6 +26,10 @@
 #   ci/run.sh stamp                    record this tree's results per target and write the stamp when every target has
 #                                      a green record at this commit (a target that failed for an outside reason is
 #                                      rerun alone; a test failure needs a new commit)
+#   ci/run.sh plan                     what HEAD needs, from what changed since the nearest stamped ancestor, by the table
+#                                      CHANGE_TABLE below (inherit, text, windows, client, runtime), and the targets
+#   ci/run.sh selected [--azure]       run only those targets, then a stamp that names the ancestor the other rows are
+#                                      inherited from (a runtime change runs `all`)
 #   ci/run.sh lock-status              the shared lock's holder and its queue in order (lock-waits: today's waits and holds)
 #
 # Per platform: "shim" is sync_launchers --check and every test suite (on Windows against the real bundle, as the
@@ -77,6 +81,7 @@ run_mac() { # name platform-key arch-prefix
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
     $prefix "$PY" tools/sync_launchers.py --check && $prefix "$PY" -m unittest discover -s tests -v ) > "$dir/shim.log" 2>&1 \
     && result "$name" shim pass || result "$name" shim fail
+  [ -n "${CI_SHIM_ONLY:-}" ] && { result "$name" runtime not-run; rm -rf "${dir:?}/work" "${dir:?}/tmp"; return; }
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
     $prefix "$PY" runtime/build/build_bundle.py --platform "$key" --out "$dir/bundle" --work "$dir/work" --cache "$CACHE/bundle-$key" &&
     $prefix "$PY" runtime/build/smoke_test.py --bundle "$dir/bundle" --platform "$key" &&
@@ -109,6 +114,7 @@ run_linux() { # name docker-platform platform-key
     su tester -c 'cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
       ( \$PY tools/sync_launchers.py --check && \$PY -m unittest discover -s tests -v ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
+      $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'exit 0;' )  # shim only: the runner records runtime as not-run
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
         THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY -m unittest -v tests.test_launcher tests.test_installer ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
@@ -184,13 +190,26 @@ run_windows() {
   SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 ${KNOWN:+-o UserKnownHostsFile=$KNOWN} ${KEY:+-i $KEY}"
   # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
   retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
-  if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' > "$dir/remote.log" 2>&1 &&
+  # On a throwaway Azure machine the pinned CPython and the bundle cache live in C:\theodore-ci-cache, which outlives
+  # the run (a prepared image keeps it). The suites run one after another unless CI_WINDOWS_PARALLEL=1.
+  keep=; [ -z "$AZURE" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
+  # The suites side by side (CI_WINDOWS_PARALLEL=1) failed the first-run tests' 60 s stage-2 wait twice under load on
+  # 8 vCPU (2026-11-13): one after another stays the default until that wait is fixed.
+  mode=serial; [ "${CI_WINDOWS_PARALLEL:-}" != 1 ] || mode=
+  # The poll's limit: the last run that passed here, plus half and 15 min (CI_WINDOWS_TIMEOUT overrides; 3 h without one).
+  limit=${CI_WINDOWS_TIMEOUT:-}
+  if [ -z "$limit" ]; then
+    last=$(cat "$LOGS/history/plugin-windows.seconds" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) limit=10800 ;; *) limit=$(( last * 3 / 2 + 900 )); [ "$limit" -ge 1800 ] || limit=1800 ;; esac
+  fi
+  say "windows-x64: poll limit $limit s"
+  if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\theodore-ci\\repo | Out-Null$keep\"" > "$dir/remote.log" 2>&1 &&
       retry scp -q $SSHO -o ConnectTimeout=20 "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" >> "$dir/remote.log" 2>&1 &&
-      retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "(if not exist C:\\theodore-ci\\started C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo) & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-start.ps1 $pins" >> "$dir/remote.log" 2>&1; then
-    # windows-run.ps1 writes runtime.result last. A failed poll (a dropped connection) is only retried. 3 h at most.
+      retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "(if not exist C:\\theodore-ci\\started C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo) & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-start.ps1 $pins $mode" >> "$dir/remote.log" 2>&1; then
+    # windows-run.ps1 writes runtime.result last. A failed poll (a dropped connection) is only retried, up to the limit.
     wstart=$(date +%s)
     until ssh $SSHO -o ConnectTimeout=20 "$HOST" 'if exist C:\theodore-ci\out\runtime.result echo done' 2>/dev/null | grep -q done; do
-      [ $(( $(date +%s) - wstart )) -lt 10800 ] || { say "windows-x64: no result after 3 h"; break; }
+      [ $(( $(date +%s) - wstart )) -lt "$limit" ] || { say "windows-x64: no result after $limit s"; break; }
       # Not answering: on Azure, this Mac may have changed address; admit the new one (the job runs on regardless).
       ssh $SSHO -o ConnectTimeout=20 "$HOST" 'echo up' >/dev/null 2>&1 || { [ -z "${ADMIT:-}" ] || $ADMIT >> "$dir/remote.log" 2>&1; }
       sleep 30
@@ -198,6 +217,10 @@ run_windows() {
   fi
   retry scp -q -r $SSHO -o ConnectTimeout=20 "$HOST:C:/theodore-ci/out/*" "$dir/" 2>>"$dir/remote.log"
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(tr -d '\r' < "$dir/$job.result")"; done
+  [ -z "${wstart:-}" ] || echo "$(( $(date +%s) - wstart ))" > "$dir/job.seconds"
+  if [ "$(tr -d '\r' < "$dir/shim.result")" = pass ] && [ "$(tr -d '\r' < "$dir/runtime.result")" = pass ] && [ -n "${wstart:-}" ]; then
+    mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows.seconds"
+  fi
   rm -f "$dir/repo.tar"
 }
 
@@ -205,6 +228,9 @@ run_windows() {
 run_windows_azure() {
   state="$OUT/azure-windows"; dir="$OUT/windows-x64"
   mkdir -p "$dir"
+  if [ -f "$state/group" ] && [ "$(az group exists -n "$(cat "$state/group")" -o tsv 2>/dev/null)" = false ]; then
+    say "clearing $state: its group $(cat "$state/group") no longer exists"; rm -rf "${state:?}"
+  fi
   [ ! -f "$state/group" ] || { say "$state still names a machine: ci/azure-windows.sh down $state"; result windows-x64 shim not-run; result windows-x64 runtime not-run; return; }
   # The VM is deleted on every way out: the end of this function, a failure, or a signal (the signal handler exits,
   # which runs the EXIT trap). The trap carries the paths by value.
@@ -221,6 +247,13 @@ run_windows_azure() {
     say "windows-x64: $(cat "$state/size" 2>/dev/null) ready after $(( $(date +%s) - started )) s"
     cp "$dir/azure.log" "$OUT/azure-up.log"
     run_windows
+    # CI_AZURE_CAPTURE=1: a run that passed makes this machine the next version of the prepared image.
+    if [ "${CI_AZURE_CAPTURE:-}" = 1 ]; then
+      if [ "$(tr -d '\r' < "$dir/shim.result")" = pass ] && [ "$(tr -d '\r' < "$dir/runtime.result")" = pass ]; then
+        ssh $SSHO -o ConnectTimeout=20 "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue"' >> "$dir/remote.log" 2>&1
+        bash "$ROOT/ci/azure-windows.sh" capture "$state" >> "$OUT/azure-up.log" 2>&1 && say "windows-x64: image captured" || say "windows-x64: image capture failed"
+      else say "windows-x64: not every job passed: no image captured"; fi
+    fi
     cat "$OUT/azure-up.log" "$dir/azure.log" > "$OUT/azure.tmp" 2>/dev/null; mv "$OUT/azure.tmp" "$dir/azure.log"; rm -f "$OUT/azure-up.log"
   else
     say "windows-x64: the Azure machine could not be made (ci/out/windows-x64/azure.log)"
@@ -305,7 +338,7 @@ note_parts() { # record this run's results as per-target records for the commit
     log="$OUT/$name/$job.log"
     case "$res" in
       pass) [ -f "$parts/$part" ] && [ "$OUT/$name/$job.result" -ot "$parts/$part" ] && continue
-            { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; [ -f "$log" ] && cat "$log"; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
+            { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; cat "$OUT/$name/"*.log 2>/dev/null; true; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
       # Test modules that could not import only because the job's runtime bundle was not built (support.py finds no
       # bundle manifest) are an outside failure, not a test failure.
       fail) if [ -f "$log" ] && grep -E '^(FAIL|ERROR): test' "$log" | { if grep -q 'REAL_BUNDLE).glob' "$log"; then grep -v '_FailedTest'; else cat; fi; } | grep -q .; then
@@ -330,6 +363,102 @@ require() {
   sha=$(git -C "$ROOT" rev-parse "${REQUIRE:-HEAD}") || exit 2
   if [ -f "$LOGS/green/plugin/$sha" ]; then head -n 1 "$LOGS/green/plugin/$sha"; exit 0; fi
   echo "no green check for $sha: run ci/run.sh all --azure at that commit (stamps in $LOGS/green/plugin/)" >&2; exit 1
+}
+
+# --- which checks a commit needs: one table ---------------------------------------------------------------------------
+# Each changed file takes the class of the first row its path matches; the commit needs the highest class of its files.
+#   inherit  nothing that ships or that a test reads: secrets only
+#   text     the skill stubs' and the plugin's text: secrets, archives, macos-arm64 shim (the stub-versus-engine test)
+#   windows  Windows-only files: secrets, archives, windows-x64
+#   client   the client, the launchers, the install files, the build tools or the tests: secrets, archives, network and
+#            the shim job on every platform (bundles untouched, so no runtime job; windows-x64 runs whole)
+#   runtime  the runtime recipe, its locks or anything else: everything (`all`)
+CHANGE_TABLE='
+.github/*|inherit
+README.md|inherit
+SECURITY.md|inherit
+CHANGELOG.md|inherit
+THIRD-PARTY-NOTICES.md|inherit
+ci/run.sh|inherit
+ci/lock.sh|inherit
+plugins/*/skills/*/SKILL.md|text
+plugins/*/README.md|text
+ci/windows-*.ps1|windows
+ci/azure-*.sh|windows
+plugins/*/scripts/*.cmd|windows
+install/install.cmd|windows
+client/truststore/_windows.py|windows
+runtime/build/vc_redist.py|windows
+client/*|client
+plugins/*|client
+install/*|client
+tests/*|client
+tools/sync_launchers.py|client
+tools/build_plugin_archives.py|client
+tools/snapshot_*|client
+*|runtime
+'
+CLASS_RANK="inherit text windows client runtime"
+class_of() {
+  printf '%s\n' "$CHANGE_TABLE" | while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    pattern=${row%|*}
+    # shellcheck disable=SC2254
+    case "$1" in $pattern) echo "${row##*|}"; break ;; esac
+  done
+}
+rank_of() { i=0; for c in $CLASS_RANK; do [ "$c" = "$1" ] && { echo $i; return; }; i=$((i + 1)); done; echo 99; }
+stamped_ancestor() {
+  for c in $(git -C "$ROOT" rev-list --max-count=300 HEAD); do
+    [ -f "$LOGS/green/plugin/$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+targets_of() { # class
+  case "$1" in
+    inherit) echo "secrets" ;;
+    text) echo "secrets archives macos-arm64:shim" ;;
+    windows) echo "secrets archives windows-x64" ;;
+    client) echo "secrets archives network macos-arm64:shim macos-x64:shim linux-x64:shim linux-arm64:shim windows-x64" ;;
+    *) echo "all" ;;
+  esac
+}
+plan() { # sets PLAN_CLASS PLAN_FROM PLAN_FILE; prints the verdict
+  PLAN_CLASS=runtime PLAN_FROM= PLAN_FILE=
+  PLAN_FROM=$(stamped_ancestor) || { echo "runtime: no stamped ancestor within 300 commits: all"; return 0; }
+  if [ "$PLAN_FROM" = "$(commit)" ]; then PLAN_CLASS=green; echo "green: HEAD is stamped"; return 0; fi
+  best=inherit bestfile= n=0
+  for f in $(git -C "$ROOT" diff --name-only --no-renames "$PLAN_FROM" HEAD); do
+    n=$((n + 1)); c=$(class_of "$f")
+    if [ "$(rank_of "$c")" -gt "$(rank_of "$best")" ]; then best=$c bestfile=$f; fi
+  done
+  PLAN_CLASS=$best PLAN_FILE=$bestfile
+  echo "$best: ${bestfile:-only files no check reads} ($n files changed since the stamped $(printf %.12s "$PLAN_FROM")): $(targets_of "$best")"
+}
+record_selected() { # after `selected`: the targets it ran must pass; the stamp names the ancestor for the rest
+  sha=$(commit); short=$(printf %.12s "$sha")
+  dest="$LOGS/$(date +%Y-%m-%d)/plugin-$short-selected-$(date +%H%M%S)"; mkdir -p "$dest"
+  cp "$OUT/summary.txt" "$dest/table.txt" 2>/dev/null
+  bad=
+  for t in $(targets_of "$PLAN_CLASS"); do
+    case "$t" in
+      *:shim) r=$(cat "$OUT/${t%:shim}/shim.result" 2>/dev/null) ;;
+      windows-x64) r=pass; for j in shim runtime; do [ "$(tr -d '\r' < "$OUT/windows-x64/$j.result" 2>/dev/null)" = pass ] || r=fail; done ;;
+      network) r=$(cat "$OUT/network/job.result" 2>/dev/null) ;;
+      secrets) r=$(cat "$OUT/secrets/scan.result" 2>/dev/null) ;;
+      archives) r=$(cat "$OUT/archives/build.result" 2>/dev/null) ;;
+    esac
+    [ "$r" = pass ] || bad="$bad$t "
+  done
+  dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
+  if [ -z "$bad" ] && [ -z "$dirty" ]; then
+    mkdir -p "$LOGS/green/plugin"
+    printf 'checks green at %s\n%s\n%s\ninherited from %s for every row but: %s (plan %s, decided by %s)\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$dest" "$PLAN_FROM" "$(targets_of "$PLAN_CLASS")" "$PLAN_CLASS" "${PLAN_FILE:-none}" > "$LOGS/green/plugin/$sha"
+    line="checks green at $sha (plan $PLAN_CLASS; the rest inherited from $(printf %.12s "$PLAN_FROM"))"
+  elif [ -n "$dirty" ]; then line="checks NOT green at $sha: the tree has uncommitted changes (no stamp)"
+  else line="checks NOT green at $sha: ${bad% }"; fi
+  echo "$line" | tee "$dest/result.txt"
 }
 
 # --- guards: one matrix run at a time on this Mac, a load ceiling, a hard deadline per job ------------------------------
@@ -381,7 +510,7 @@ cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; rel
 trap 'cleanup' EXIT
 trap 'exit 130' INT TERM HUP
 case "$TARGET" in
-  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
+  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all|selected) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
 esac
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
@@ -400,6 +529,35 @@ case "$TARGET" in
   index) run_index ;;
   summary) summary ;;
   stamp) note_parts; stamp_from_parts ;;
+  plan) plan ;;
+  selected)
+    plan
+    case "$PLAN_CLASS" in
+      green) exit 0 ;;
+      runtime) release_lock; exec sh "$0" all ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} ;;
+    esac
+    wanted=" $(targets_of "$PLAN_CLASS") "
+    wpid=
+    case "$wanted" in *" windows-x64 "*)
+      mkdir -p "$OUT/windows-x64"
+      CI_PARENT=$$ sh "$0" windows-x64 ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} > "$OUT/windows-x64.run.log" 2>&1 & wpid=$!
+      say "windows-x64 started (ci/out/windows-x64.run.log)" ;;
+    esac
+    for t in $wanted; do
+      case "$t" in
+        secrets) limited 900 secrets run_secrets ;;
+        archives) heavy 900 archives run_archives ;;
+        network) heavy 900 network run_network ;;
+        macos-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
+        macos-x64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
+        linux-x64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
+        linux-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+      esac
+    done
+    release_lock
+    if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
+    summary
+    record_selected ;;
   all)
     # Windows runs remotely from the start (it is the longest), the local jobs one at a time beside it.
     wpid=
@@ -424,7 +582,7 @@ case "$TARGET" in
     run_index
     summary
     record ;;
-  *) sed -n '2,20p' "$0"; exit 64 ;;
+  *) sed -n '2,24p' "$0"; exit 64 ;;
 esac
 # A target run alone (a rerun after an outside failure) adds its record and writes the stamp when it completes the set.
 case "$TARGET" in

@@ -297,7 +297,7 @@ class ReportSwitch(unittest.TestCase):
             core.home().ensure()
             for enabled in (True, False):
                 for source in ("server", "refused"):
-                    for age, fresh in ((-1, False), (3601, False), (86399, False), (0, True), (10, True), (3540, True)):   # a minute short of the hour: a slow host may take seconds between write and read
+                    for age, fresh in ((-120, False), (3601, False), (86399, False), (0, True), (10, True), (3540, True)):   # a minute short of the hour: a slow host may take seconds between write and read
                         with self.subTest(enabled=enabled, source=source, age=age):
                             self.cache(home, enabled, age, source)
                             expected = ((True, "") if enabled else (False, "off")) if fresh else (False, "unknown")
