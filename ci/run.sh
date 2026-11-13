@@ -114,7 +114,7 @@ run_linux() { # name docker-platform platform-key
     su tester -c 'cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
       ( \$PY tools/sync_launchers.py --check && \$PY -m unittest discover -s tests -v ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
-      $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'echo not-run > \$O/runtime.result; exit 0;' )
+      $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'exit 0;' )  # shim only: the runner records runtime as not-run
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
         THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY -m unittest -v tests.test_launcher tests.test_installer ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
@@ -191,9 +191,11 @@ run_windows() {
   # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
   retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
   # On a throwaway Azure machine the pinned CPython and the bundle cache live in C:\theodore-ci-cache, which outlives
-  # the run (a prepared image keeps it). The suites run side by side unless CI_WINDOWS_SERIAL=1.
+  # the run (a prepared image keeps it). The suites run one after another unless CI_WINDOWS_PARALLEL=1.
   keep=; [ -z "$AZURE" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
-  mode=; [ "${CI_WINDOWS_SERIAL:-}" != 1 ] || mode=serial
+  # The suites side by side (CI_WINDOWS_PARALLEL=1) failed the first-run tests' 60 s stage-2 wait twice under load on
+  # 8 vCPU (2026-11-13): one after another stays the default until that wait is fixed.
+  mode=serial; [ "${CI_WINDOWS_PARALLEL:-}" != 1 ] || mode=
   # The poll's limit: the last run that passed here, plus half and 15 min (CI_WINDOWS_TIMEOUT overrides; 3 h without one).
   limit=${CI_WINDOWS_TIMEOUT:-}
   if [ -z "$limit" ]; then
