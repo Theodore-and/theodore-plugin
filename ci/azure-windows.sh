@@ -24,7 +24,7 @@
 # ci/run.sh windows-x64 --azure starts by sweeping groups older than that deadline plus one hour.
 #
 # Needs the Azure CLI signed in (az login) and an SSH key pair (CI_AZURE_KEY, default ~/.ssh/theodore_ci). What it
-# makes, all in a new resource group theodore-plugin-ci-<UTC time> in CI_AZURE_LOCATION (default eastus2):
+# makes, all in a new resource group theodore-plugin-ci-<UTC time> in CI_AZURE_LOCATION (default centralus):
 #   one VM, Windows Server 2022 Datacenter (gen2), the first size of CI_AZURE_SIZE (space-separated) that Azure has
 #   capacity for (default Standard_D8s_v3, then other 8- and 4-vCPU sizes), its disk, NIC, public IP and a network security
 #   group that admits SSH only from the /24 networks this machine leaves from (probed a dozen times: a connection with
@@ -41,7 +41,9 @@ ACTION=${1:-}
 STATE=${2:-}
 case "$ACTION" in sweep | images) ;; *) [ -n "$ACTION" ] && [ -n "$STATE" ] || { sed -n '2,20p' "$0"; exit 64; } ;; esac
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-LOCATION=${CI_AZURE_LOCATION:-eastus2}
+# centralus: each region allows this subscription 10 vCPU; the release lanes' machines use eastus2 and the engine's
+# build machine and its image use eastus, so this 8-vCPU machine and its image take neither's quota.
+LOCATION=${CI_AZURE_LOCATION:-centralus}
 # Tried in order until Azure has capacity for one (a size can be "not available" in a region for hours).
 # 8 vCPU first (the suites run side by side, five processes); a 4-vCPU size when the region's quota (10 vCPU for this
 # subscription, shared with the engine's and other test machines) or capacity has no room for it.
