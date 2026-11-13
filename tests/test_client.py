@@ -697,6 +697,28 @@ class Engine(ClientCase):
         self.assertIn(str(self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx"), out)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
+    def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
+        """Lane STUDIO: the served pptx entry gets three attempts. One that answers in time on a later attempt is
+        delivered as usual; when none does, the first line after the document header says Theodore's online part
+        could not be reached and how to get it, in `guide pptx` and in the skill body, and `skill` still exits 0."""
+        self.ready()
+        self.api.guides["pptx"][""] = "SERVED-POINTER: first instruction.\n"
+        env = {"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}
+        self.api.guide_delays["pptx"] = [1.2, 1.2]                # the first two attempts time out, the third answers
+        out = self.client("guide", "pptx", env=env).stdout
+        self.assertIn("SERVED-POINTER: first instruction.", out)
+        self.assertNotIn("THEODORE OFFLINE", out)
+        for args in (("guide", "pptx"), ("skill", "pptx")):
+            self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]       # none answers in time
+            result = self.client(*args, env=env)
+            self.assertEqual(result.returncode, 0, args)
+            lines = result.stdout.splitlines()
+            first = lines[1] if args[0] == "guide" else lines[0]
+            self.assertTrue(first.startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), (args, first))
+            self.assertIn("guide pptx again before building.", first)
+            self.assertNotIn("SERVED-POINTER", result.stdout)
+            self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", result.stdout)
+
     def test_server_rollback_is_followed_at_the_next_guide(self):
         self.ready()
         self.api.publish_engine("1.0.1", engine_zip("1.0.1"))

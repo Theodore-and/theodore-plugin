@@ -137,29 +137,52 @@ def _guide_pptx(part: int) -> int:
                   f"          python3 ...  ->  {launcher} python ...",
                   f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"]
         directions = _directions("pptx")
-        if directions:
+        if directions.startswith("THEODORE OFFLINE: "):
+            header.insert(0, directions)         # first thing read: the agent fetches it again before building
+        elif directions:
             header += directions.rstrip("\n").split("\n")
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
                     f"{launcher} guide pptx --part {part + 1}")
     return 0
 
 
+# The served entry of a skill (directions, saved preferences, and for an account with Studio the first instruction of
+# the method) is fetched with a few attempts, never dropped silently: a slow corporate proxy needs 7 to 10 seconds per
+# connection (P33), so the first attempt gets 10 seconds and two more share the rest of a 20-second budget.
+DIRECTIONS_TIMEOUTS = (10.0, 5.0, 5.0)
+DIRECTIONS_PAUSE = 0.5
+
+
 def _directions(skill: str) -> str:
-    """Server-composed directions for this account (beta reporting, saved preferences). Optional: silent on failure."""
+    """Server-composed entry for this account. Empty when the service has none for it; when the service cannot be
+    reached after every attempt, one status line that says so and how to get it, so the agent fetches it again
+    before building instead of going on without it."""
     cred = credentials.load()
     if not cred:
         return ""
-    try:
-        _status, _headers, raw = api.call("guide", bearer=cred["installation_secret"], skill=skill, timeout=3.0)
-        return raw.decode("utf-8", errors="replace")
-    except api.ApiError as error:
-        if error.code in DELETE_CREDENTIAL_ON:      # the device was revoked: no instructions, and the sign-in is already cleared
-            raise account.login_start("this device was signed out; it needs to sign in again.") from None
-        if error.code in DELETE_TOKEN_ON:           # the account no longer has the skill
-            raise api.status_from(error, f"guide {skill}") from None
-        return ""
-    except api.NetworkError:
-        return ""
+    failure = ""
+    timeouts = DIRECTIONS_TIMEOUTS
+    raw_test = os.environ.get("THEODORE_TEST_DIRECTIONS_TIMEOUTS")   # test seam, honoured only against a loopback API
+    if raw_test and core.is_loopback_api():
+        timeouts = tuple(float(value) for value in raw_test.split(","))
+    for attempt, timeout in enumerate(timeouts):
+        if attempt:
+            time.sleep(DIRECTIONS_PAUSE)
+        try:
+            _status, _headers, raw = api.call("guide", bearer=cred["installation_secret"], skill=skill, timeout=timeout)
+            return raw.decode("utf-8", errors="replace")
+        except api.ApiError as error:
+            if error.code in DELETE_CREDENTIAL_ON:      # the device was revoked: no instructions, and the sign-in is already cleared
+                raise account.login_start("this device was signed out; it needs to sign in again.") from None
+            if error.code in DELETE_TOKEN_ON:           # the account no longer has the skill
+                raise api.status_from(error, f"guide {skill}") from None
+            if error.http_status < 500 and error.http_status != 429:
+                return ""                               # the service answered: nothing for this account
+            failure = f"HTTP {error.http_status}"
+        except api.NetworkError as error:
+            failure = error.detail
+    return (f"THEODORE OFFLINE: Theodore's online part for {skill} could not be reached ({failure}); "
+            f"run {quoted_launcher()} guide {skill} again before building.")
 
 
 REFERENCE_LINK = re.compile(r"\]\(references/([A-Za-z0-9_-]{1,64})\.md\)")
@@ -310,7 +333,9 @@ def _pptx_body() -> str:
               f"          python3 ...  ->  {launcher} python ...",
               f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"]
     directions = _directions("pptx")
-    if directions:
+    if directions.startswith("THEODORE OFFLINE: "):
+        header.insert(0, directions)             # first thing read: the agent fetches it again before building
+    elif directions:
         header += directions.rstrip("\n").split("\n")
     body = "\n".join(header) + "\n\n" + _without_frontmatter(text)
     return _bounded(body, f"run {launcher} guide pptx")
