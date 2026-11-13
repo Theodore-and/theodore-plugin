@@ -190,6 +190,12 @@ Working files and the runtime bundles to publish are in `ci/out/`. `all` ends wi
 logs go to `$THEODORE_CI_LOGS/<date>/plugin-<commit>-<time>/` (default `~/theodore-ci`), and when every row passed on
 a clean tree, the stamp `green/plugin/<commit>` ("checks green at <commit>") that `require` looks for.
 
+Guards: one matrix run at a time on this machine (a lock in `$THEODORE_CI_LOGS/locks/`, shared with the other
+repositories' runners); each heavy local job waits until the 1- and 5-minute load averages are under `CI_MAX_LOAD`
+(default 8) and runs under a hard deadline, killed with its containers on the deadline or when the runner dies. The
+Azure VM deallocates itself at `CI_AZURE_DEADLINE_HOURS` (default 4) through Azure's auto-shutdown, and each Azure run
+first sweeps groups older than that.
+
 ```
 python3 -m unittest discover -s tests -v        every suite, in clean temporary homes, against the local fake API
 python3 tools/sync_launchers.py                 after changing the client, the launcher or the pins

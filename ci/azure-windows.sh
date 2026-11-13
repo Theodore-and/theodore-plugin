@@ -5,8 +5,14 @@
 #
 #   ci/azure-windows.sh up <state-dir>     create it; writes <state-dir>/host (user@ip), known_hosts, group
 #   ci/azure-windows.sh down <state-dir>   delete its resource group (and wait), then the state folder
-#   ci/azure-windows.sh sweep              delete every throwaway group left behind (tag purpose=theodore-plugin-ci
-#                                          and a theodore-plugin-ci-<UTC> name)
+#   ci/azure-windows.sh admit <state-dir>  add the /24 this machine leaves from now to the SSH rule (its address can
+#                                          change during a run; ci/run.sh calls it when the machine stops answering)
+#   ci/azure-windows.sh sweep [hours]      delete every throwaway group left behind (tag purpose=theodore-plugin-ci
+#                                          and a theodore-plugin-ci-<UTC> name); with hours, only those older
+#
+# A deadline that does not need this Mac: the VM gets Azure's own auto-shutdown at CI_AZURE_DEADLINE_HOURS (default 4)
+# after it is made, which deallocates it (no compute billed) even if the run that made it is gone, and every
+# ci/run.sh windows-x64 --azure starts by sweeping groups older than that deadline plus one hour.
 #
 # Needs the Azure CLI signed in (az login) and an SSH key pair (CI_AZURE_KEY, default ~/.ssh/theodore_ci). What it
 # makes, all in a new resource group theodore-plugin-ci-<UTC time> in CI_AZURE_LOCATION (default eastus2):
@@ -24,7 +30,7 @@ die() { say "$*"; exit 1; }
 
 ACTION=${1:-}
 STATE=${2:-}
-[ -n "$ACTION" ] && { [ -n "$STATE" ] || [ "$ACTION" = sweep ]; } || { sed -n '2,9p' "$0"; exit 64; }
+[ -n "$ACTION" ] && { [ -n "$STATE" ] || [ "$ACTION" = sweep ]; } || { sed -n '2,11p' "$0"; exit 64; }
 LOCATION=${CI_AZURE_LOCATION:-eastus2}
 # Tried in order until Azure has capacity for one (a size can be "not available" in a region for hours).
 SIZES=${CI_AZURE_SIZE:-Standard_D4s_v3 Standard_F4s_v2 Standard_D4as_v4 Standard_D4s_v4}
@@ -57,7 +63,10 @@ up() {
   say "SSH admitted from: $from"
   # 24 characters from the system's random source, with the four classes Windows asks for
   ( umask 077; printf 'Aa1-%s' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)" > "$STATE/password" )
-  az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE -o none
+  local deadline_h=${CI_AZURE_DEADLINE_HOURS:-4} expires shutdown_at
+  expires=$(date -u -v+"${deadline_h}"H +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "+$deadline_h hours" +%Y-%m-%dT%H:%MZ)
+  shutdown_at=$(date -u -v+"${deadline_h}"H +%H%M 2>/dev/null || date -u -d "+$deadline_h hours" +%H%M)
+  az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE expires="$expires" -o none
   local size made=
   for size in $SIZES; do
     say "creating $group ($size, $LOCATION)"
@@ -72,6 +81,9 @@ up() {
   [ -n "$made" ] || die "no size of '$SIZES' could be made in $LOCATION"
   echo "$made" > "$STATE/size"
   rm -f "$STATE/password"
+  # The deadline Azure keeps by itself: deallocated at that UTC time even if nothing here is left to delete it.
+  az vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" -o none || die "could not set the VM's auto-shutdown deadline"
+  say "auto-shutdown (deallocate) at $shutdown_at UTC"
   az network nsg rule create -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner --priority 100 --direction Inbound \
     --access Allow --protocol Tcp --source-address-prefixes $from --destination-port-ranges 22 -o none
   local pub; pub=$(cut -d' ' -f1-2 "$KEY.pub")
@@ -98,6 +110,8 @@ PS
         "$USER_NAME@$addr" "echo ready" >/dev/null 2>&1; then
       say "ready: $USER_NAME@$addr"; return 0
     fi
+    # This machine may now leave from another address than the ones probed at the start.
+    [ $((i % 6)) -ne 0 ] || admit || true
     sleep 10
   done
   die "no SSH answer from $addr"
@@ -108,15 +122,41 @@ down() {
   local group; group=$(cat "$STATE/group")
   [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || die "refusing to delete '$group': not a group this script made"
   say "deleting $group"
-  az group delete -n "$group" --yes -o none
+  local n=0
+  until az group delete -n "$group" --yes -o none; do
+    n=$((n + 1))
+    [ $n -lt 6 ] || die "could not delete $group (network?): its auto-shutdown deallocates it, and the next run's sweep deletes it"
+    sleep 30
+  done
   rm -rf "${STATE:?}"
   say "deleted $group"
 }
 
+admit() {
+  [ -f "$STATE/group" ] || die "no machine in $STATE"
+  local group ip net cur; group=$(cat "$STATE/group")
+  [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || die "refusing to change '$group': not a group this script made"
+  ip=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null) || { say "cannot read this machine's public address"; return 1; }
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { say "cannot read this machine's public address"; return 1; }
+  net="${ip%.*}.0/24"
+  cur=$(az network nsg rule show -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
+    --query "join(' ', [sourceAddressPrefix || '', join(' ', sourceAddressPrefixes)])" -o tsv)
+  case " $cur " in *" $net "*) return 0 ;; esac
+  az network nsg rule update -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
+    --source-address-prefixes $(printf '%s\n' $cur "$net" | sort -u) -o none
+  say "SSH now also admitted from $net"
+}
+
 sweep() {
-  local group found=0
+  local group found=0 hours=${STATE:-} made age
+  [ -z "$hours" ] || [[ "$hours" =~ ^[0-9]+$ ]] || die "sweep takes a number of hours"
   for group in $(az group list --tag purpose=$PURPOSE --query '[].name' -o tsv); do
     [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || { say "skipping $group: not a name this script makes"; continue; }
+    if [ -n "$hours" ]; then
+      made=${group##*-}
+      age=$(( $(date -u +%s) - $(date -u -j -f %Y%m%d%H%M%S "$made" +%s 2>/dev/null || date -u -d "${made:0:8} ${made:8:2}:${made:10:2}:${made:12:2}" +%s) ))
+      [ "$age" -ge $((hours * 3600)) ] || continue
+    fi
     say "deleting leftover $group"; az group delete -n "$group" --yes -o none; found=$((found + 1))
   done
   say "sweep: $found group(s) deleted"
@@ -127,8 +167,9 @@ sweep() {
   case "$ACTION" in
     up) up ;;
     down) down ;;
+    admit) admit ;;
     sweep) sweep ;;
-    *) sed -n '2,9p' "$0"; exit 64 ;;
+    *) sed -n '2,11p' "$0"; exit 64 ;;
   esac
   exit $?
 }
