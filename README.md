@@ -68,7 +68,10 @@ Outside that folder:
   Windows: a file in `state/` protected with DPAPI for your user. Linux: a file in `state/` readable only by
   you.
 - **The engine's render cache**: `~/Library/Caches/Theodore` (macOS), `%LOCALAPPDATA%\Theodore\Cache` (Windows),
-  `~/.cache/theodore` (Linux); older engines used `pptx-runtime` in the same places, which the uninstall removes too.
+  `~/.cache/theodore` (Linux); older engines used `pptx-runtime` in the same places (and under `$XDG_CACHE_HOME`
+  when set), and engines up to 1.0.0-rc.6 also kept slide images in `~/.cache/pptx-slide-raster` and icon and flag
+  images in `~/.cache/pptx-icons`, `~/.cache/pptx-flags` and the temporary folder's `pptx-icons` (on Windows under
+  `%USERPROFILE%\.cache` and `%TEMP%`); the uninstall removes all of them (only files of the names the engine writes).
 - **Your deck workspaces** get one small file, `.pptx-state/theodore-engine.json`, naming the engine version
   that started the workspace, so an update never changes a deck halfway through.
 - **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
@@ -90,8 +93,10 @@ and the reports and preferences you or your assistant file; never deck content, 
 "%LOCALAPPDATA%\Theodore\bin\theodore.cmd" uninstall  Windows
 ```
 
-This removes the plugin from Claude Code and Codex, takes back exactly what Theodore added or changed in their
-settings (recorded in `state/host-settings.json` when it made the change), and deletes
+This removes the plugin from Claude Code and Codex, also when their `claude` or `codex` command is not on PATH (it
+looks where their installers put it, and where it was at registration; when it is nowhere, it takes out of their
+settings files exactly the entries Theodore's registration added and says so), takes back exactly what Theodore added
+or changed in their settings (recorded in `state/host-settings.json` when it made the change), and deletes
 the keychain item, the engine's render cache and every Theodore subfolder listed above (and the folder itself
 when nothing else is in it). What is left afterwards:
 
