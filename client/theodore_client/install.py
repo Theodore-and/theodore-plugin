@@ -1324,6 +1324,8 @@ def libreoffice_binary() -> Path | None:
 
 
 def system_libreoffice() -> str | None:
+    if os.environ.get("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE") and core.is_loopback_api():     # test seam: a computer without one
+        return None
     if os.environ.get("SOFFICE_BIN") and Path(os.environ["SOFFICE_BIN"]).exists():
         return os.environ["SOFFICE_BIN"]
     found = shutil.which("soffice")
@@ -1354,6 +1356,19 @@ def needs_libreoffice() -> bool:
         and libreoffice_pin() is not None
 
 
+# A background fetch that failed for a reason that passes by itself (the network dropped: the computer slept, the user
+# signed out) is started again by the next command, a minute after the failure at the earliest; one that needs the
+# user (a proxy sign-in, TLS inspection, a full disk, a refusal) is reported instead.
+RESUMABLE_CAUSES = ("NETWORK", "HASH_MISMATCH")
+RESUME_AFTER_FAILURE_S = 60
+
+
+def resumable_failure(state: dict) -> bool:
+    failed = state.get("failed") or {}
+    return failed.get("cause") in RESUMABLE_CAUSES and \
+        core.now() - int(state.get("updated") or state.get("started") or 0) >= RESUME_AFTER_FAILURE_S
+
+
 def _libreoffice_failed(failed: dict) -> Status:
     return Status("SETUP_FAILED", f"LibreOffice, which turns the slides into images, could not be installed "
                   f"({failed.get('detail') or failed.get('cause') or 'unknown error'}).",
@@ -1367,14 +1382,15 @@ RENDERING_CALLS = (("apply",), ("render",), ("slide", "add"))
 
 def wait_for_renderer(args: list[str], wait: float = 25.0) -> None:
     """A rendering call on a Windows computer with no converter: fetch LibreOffice (in the background, as on macOS at
-    install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, not retried."""
+    install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, and started again
+    when its failure passes by itself (resumable_failure)."""
     if not any(tuple(args[:len(call)]) == call for call in RENDERING_CALLS) or not needs_libreoffice():
         return
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_RENDERER_WAIT"):
         wait = float(os.environ["THEODORE_TEST_RENDERER_WAIT"])
     job = Job("libreoffice")
     failed = job.read().get("failed") if not job.alive() else None
-    if failed:
+    if failed and not resumable_failure(job.read()):
         raise _libreoffice_failed(failed)
     if not job.alive():
         job.spawn(["tools", "install", "libreoffice", "--job"])

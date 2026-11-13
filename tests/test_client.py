@@ -1988,6 +1988,65 @@ class HostsOffPath(ClientCase):
                          'a = 1\n\n# about b\n[b]\nc = 2\n\n# trailing note\n')
 
 
+
+class BackgroundResume(ClientCase):
+    """A background download that stopped before it finished (the computer slept, the user signed out) is started
+    again by the next command: the runtime and engine by the setup job, LibreOffice and PortableGit by guide, skill and
+    doctor; doctor says what is still missing and what will fetch it."""
+
+    DEAD_PID = 2 ** 22 + 12345          # no process has it
+
+    def dead_job(self, name: str, **fields) -> Path:
+        path = self.box.home / "state" / "jobs" / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": self.DEAD_PID, "phase": "downloading", "percent": 40, "started": int(time.time()) - 600,
+                                    "updated": int(time.time()) - 600, **fields}))
+        return path
+
+    def test_a_runtime_download_that_died_is_started_again_by_the_next_command(self):
+        self.sign_in()
+        self.dead_job("setup", phase="downloading runtime")
+        self.assertIn(self.client("status", "--wait", "90").returncode, (0, 67))     # the runtime, then the engine
+        self.box.wait_jobs(120)
+        self.assertStatus(self.client("status"), "OK", 0)
+        self.assertTrue(json.loads(self.client("status", "--json").stdout)["engine"], "the engine came with it")
+
+    def test_libreoffice_that_stopped_is_started_again_and_doctor_says_so(self):
+        self.box.env["THEODORE_TEST_NO_SYSTEM_LIBREOFFICE"] = "1"
+        self.ready()
+        missing = {"version": "0.0.9", "url": f"{self.api.base}/dl/upstream/LibreOffice_missing.dmg", "sha256": "1" * 64, "size": 10}
+        state_path = self.box.home / "state" / "update.json"
+        state = json.loads(state_path.read_text())
+        state["tools"] = {"libreoffice": {k: missing for k in ("darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64")}}
+        state_path.write_text(json.dumps(state))
+        record = self.dead_job("libreoffice")
+        out = self.client("doctor").stdout
+        self.assertIn("restarted: downloads that had stopped before they finished were started again: libreoffice", out)
+        self.assertIn("still missing:", out)
+        self.assertIn("LibreOffice (slide previews)", out)
+        self.box.wait_jobs()
+        after = json.loads(record.read_text())
+        self.assertNotEqual(after.get("pid"), self.DEAD_PID, "a new attempt ran")
+        # a failure that passes by itself is retried a minute later at the earliest; the attempt above failed just now
+        tried = len([r for r in self.api.requests if "LibreOffice_missing.dmg" in r["path"]])
+        self.assertGreater(tried, 0)
+        self.assertNotIn("restarted:", self.client("doctor").stdout, "not again within the minute")
+        # one that needs the user is not retried: doctor names it and the command that tries again
+        self.dead_job("libreoffice", failed={"cause": "PROXY_AUTH", "detail": "the proxy asks for a sign-in"})
+        out = self.client("doctor").stdout
+        self.assertNotIn("restarted:", out)
+        self.assertIn("its download failed (the proxy asks for a sign-in)", out)
+        self.assertIn("tools install libreoffice` tries again", out)
+
+    def test_a_download_that_never_started_is_not_begun_by_guide_or_doctor(self):
+        self.ready()
+        self.client("doctor")
+        self.client("guide", "deck-design")
+        self.assertFalse((self.box.home / "state" / "jobs" / "libreoffice.json").exists())
+        self.assertFalse((self.box.home / "state" / "jobs" / "git.json").exists())
+        self.assertIn("still missing: nothing", self.client("doctor").stdout)
+
+
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")
 class LibreOffice(ClientCase):
     def test_install_from_a_disk_image_with_a_pinned_checksum(self):

@@ -92,6 +92,7 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
 
 def guide(skill: str, section: str | None, part: int, license_text: bool) -> int:
     ensure_instructions()
+    resume_background()
     if skill not in SKILLS:
         raise core.usage(f"unknown skill '{skill}'. The skills are: {', '.join(SKILLS)}.")
     if part < 1:
@@ -345,6 +346,7 @@ def skill(name: str) -> int:
     """`theodore skill <name>`: the skill's instructions as a clean document (no framing), or a three-line status.
     Always exit 0: a host that injects this output aborts the whole skill on any other code."""
     ensure_instructions()
+    resume_background()
     try:
         if name not in SKILLS:
             raise core.usage(f"unknown skill '{name}'. The skills are: {', '.join(SKILLS)}.")
@@ -683,6 +685,7 @@ def status(as_json: bool, wait: float) -> int:
 def doctor(as_json: bool) -> int:
     account.import_pending_activation()
     ensure_instructions()
+    resumed = resume_background()
     home = core.home()
     snap = _snapshot()
     checks: list[tuple[str, str, str]] = []
@@ -747,6 +750,10 @@ def doctor(as_json: bool) -> int:
     if core.IS_WINDOWS and core.host_executable("claude") and not claude_git_bash():
         add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
             "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
+    missing = _still_missing(snap)
+    add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
+    if resumed:
+        add("ok", "restarted", f"downloads that had stopped before they finished were started again: {', '.join(resumed)}")
     final = _doctor_verdict(checks, snap, home)
     if as_json:         # the same verdict, as the exit code and in the document
         print(json.dumps({"checks": [{"level": l, "name": n, "detail": d} for l, n, d in checks], "snapshot": snap,
@@ -755,6 +762,41 @@ def doctor(as_json: bool) -> int:
     for level, name, detail in checks:
         print(f"{level.upper():4}  {name}: {detail}")
     return core.emit(final)
+
+
+def _still_missing(snap: dict) -> list[str]:
+    """Each part Theodore still lacks on this computer, in plain words, with what will fetch it."""
+    launcher = quoted_launcher()
+    missing: list[str] = []
+    setup = Job("setup")
+    if not snap["runtime_ready"]:
+        missing.append("the runtime (Python and Node, about 100 MB): " + (
+            "it is downloading in the background now" if setup.alive() else
+            "the next Theodore command starts its download again (it had stopped before it finished)" if setup.read() else
+            "the next Theodore command starts its download"))
+    if not snap["engine"]:
+        missing.append(f"the engine: it comes with the runtime's setup once this computer is signed in, or `{launcher} guide pptx` installs it")
+    published = install.published_packs()
+    waiting = [p for p, info in snap["packs"].items() if info["status"] != "ready" and (published is None or p in published)]
+    if waiting and snap["runtime_ready"]:
+        missing.append(f"the asset packs {', '.join(waiting)}: " + ("downloading in the background now" if Job("packs").alive()
+                       else "the next guide or catalogue call starts their download again"))
+    lo = Job("libreoffice")
+    lo_state = lo.read()
+    if install.needs_libreoffice() or (lo_state and not lo_state.get("done") and not (install.system_libreoffice() or install.libreoffice_binary())):
+        if lo.alive():
+            missing.append("LibreOffice (slide previews): downloading in the background now")
+        elif lo_state.get("failed") and not install.resumable_failure(lo_state):
+            missing.append(f"LibreOffice (slide previews): its download failed ({lo_state['failed'].get('detail') or lo_state['failed'].get('cause')}); "
+                           f"`{launcher} tools install libreoffice` tries again once that is fixed")
+        else:
+            missing.append(f"LibreOffice (slide previews): the next guide, doctor or rendering call starts its download again, "
+                           f"or `{launcher} tools install libreoffice` now")
+    if needs_git_bash():
+        git = Job("git")
+        missing.append("Git Bash for Claude Code: " + ("PortableGit is downloading in the background now" if git.alive() else
+                       f"`{launcher} tools install git` fetches PortableGit into Theodore's folder (or install Git for Windows)"))
+    return missing
 
 
 def claude_git_bash() -> str | None:
@@ -1015,7 +1057,7 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
 
 def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) -> int:
     if name == "git":
-        return _tools_git(if_needed)
+        return _tools_git(if_needed, as_job)
     if name != "libreoffice":
         raise core.usage(f"unknown tool '{name}'. The tools are: libreoffice, git.")
     if if_needed and not install.needs_libreoffice():      # the Windows installer's call: only when nothing can render
@@ -1039,11 +1081,17 @@ def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) ->
         binary = install.install_libreoffice(job)
     except Status as status_:
         if job:
-            job.fail(status_.name, status_.summary)
+            job.fail(_failure_cause(status_), status_.summary)
         raise
     if job:
         job.finish()
     return core.emit(Status("OK", f"LibreOffice is installed at {binary}.", "nothing to do.", "LibreOffice is installed for Theodore's slide previews."))
+
+
+def _failure_cause(status_: Status) -> str:
+    """The cause a SETUP_FAILED status names ("cause NETWORK: ..."), else the status's name."""
+    found = re.match(r"cause ([A-Z_]+):", status_.summary or "")
+    return found.group(1) if found else status_.name
 
 
 def needs_git_bash() -> bool:
@@ -1051,14 +1099,25 @@ def needs_git_bash() -> bool:
     return core.IS_WINDOWS and bool(core.host_executable("claude")) and claude_git_bash() is None
 
 
-def _tools_git(if_needed: bool) -> int:
+def _tools_git(if_needed: bool, as_job: bool = False) -> int:
     """Git Bash for Claude Code on Windows: PortableGit into Theodore's folder, and Claude Code pointed at it through
     the setting its documentation names (env.CLAUDE_CODE_GIT_BASH_PATH in its user settings). Recorded, so the
     uninstall takes it back; a value the user set is never replaced."""
     if if_needed and not needs_git_bash():
+        if as_job:
+            Job("git").clear()
         return core.emit(Status("OK", "Git Bash is not needed here: Claude Code is not on this computer or already finds a Git Bash.",
                                 "nothing to do.", "Nothing to install."))
-    bash = install.install_git()
+    # Recorded as a job also when it runs in the foreground (the Windows installer's call), so a fetch that stopped
+    # before it finished is started again by the next guide, skill or doctor.
+    job = Job("git")
+    job.begin("git")
+    try:
+        bash = install.install_git(job)
+    except Status as status_:
+        job.fail(_failure_cause(status_), status_.summary)
+        raise
+    job.finish()
     line = _claude_git_bash_apply(bash)
     print(line)
     return core.emit(Status("OK", f"Git Bash (PortableGit {install.git_pin()['version']}) is in {bash.parent.parent}; {line}.",
@@ -1417,6 +1476,37 @@ def _take_back_instructions(left: list[str]) -> None:
         _save_host_record(record)
     else:
         core.remove_tree(_host_record_path())
+
+
+# Downloads in the background that stopped before they finished (the computer slept, the user signed out, the process
+# was killed) are started again by the next guide, skill or doctor, as the asset packs are (0.3.3): LibreOffice and
+# PortableGit here; the runtime and the first engine by the setup job, which every command restarts when it is not
+# running. Only a fetch that was started and did not finish: one that never started is not begun here. A failure that
+# needs the user (a proxy sign-in, TLS inspection, a full disk, a refusal) is not retried; doctor names it.
+def resume_background() -> list[str]:
+    """Restart each unfinished background fetch (see above). Returns what was started. Never fails the command."""
+    started: list[str] = []
+    try:
+        for name, argv, present in (
+                ("libreoffice", ["tools", "install", "libreoffice", "--job"],
+                 lambda: install.system_libreoffice() or install.libreoffice_binary()),
+                ("git", ["tools", "install", "git", "--if-needed", "--job"],
+                 lambda: install.theodore_git_bash() or not needs_git_bash())):
+            job = Job(name)
+            state = job.read()
+            if not state or state.get("done") or job.alive():
+                continue
+            if present():
+                job.clear()
+                continue
+            if state.get("failed") and not install.resumable_failure(state):
+                continue
+            job.spawn(argv)
+            core.log(f"resumed the {name} download that had not finished")
+            started.append(name)
+    except Exception as exc:  # a convenience: never the reason a guide or doctor fails
+        core.log(f"resume: not started ({exc.__class__.__name__}: {exc})")
+    return started
 
 
 def ensure_instructions() -> None:
