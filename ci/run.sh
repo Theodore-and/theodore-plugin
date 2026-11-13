@@ -23,6 +23,7 @@
 #                                      (default ~/theodore-ci) and, when every row passed on a clean tree, write the
 #                                      stamp green/plugin/<commit> ("checks green at <commit>")
 #   ci/run.sh require [commit]         exit 0 only when that commit (default HEAD) has the stamp: release steps call it
+#   ci/run.sh lock-status              the shared lock's holder and its queue in order (lock-waits: today's waits and holds)
 #
 # Per platform: "shim" is sync_launchers --check and every test suite (on Windows against the real bundle, as the
 # workflow did); "runtime" is build_bundle, smoke_test, and the launcher and installer suites against that bundle.
@@ -293,18 +294,12 @@ require() {
 # is taken over. Before each heavy local job the runner waits until the 1- and 5-minute load averages are under
 # CI_MAX_LOAD (default 8). Each local job runs in its own process group under a hard deadline, and a watchdog kills it,
 # with its containers (label theodore-ci=<runner pid>), on the deadline or as soon as this runner is gone, however it died.
-LOCKDIR="$LOGS/locks/matrix"
-LOCKED=
-acquire_lock() { # what
-  mkdir -p "$LOGS/locks"
-  while ! mkdir "$LOCKDIR" 2>/dev/null; do
-    holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
-    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$LOCKDIR"; continue; fi
-    say "another matrix run holds the lock (pid ${holder:-?}: $(cat "$LOCKDIR/what" 2>/dev/null)); waiting"; sleep 60
-  done
-  echo $$ > "$LOCKDIR/pid"; echo "$1" > "$LOCKDIR/what"; LOCKED=1
-}
-release_lock() { if [ -n "$LOCKED" ] && [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ]; then rm -rf "$LOCKDIR"; fi; LOCKED=; }
+# The shared lock is a fair queue (ci/lock.sh, the same file in the three repositories): the oldest waiter of the
+# highest priority goes next; CI_LOCK_PRIORITY=release (a release check), normal (default) or low (rehearsals,
+# measurements). `ci/run.sh lock-status` shows the holder and the waiters in order.
+. "$ROOT/ci/lock.sh"
+acquire_lock() { ci_lock_acquire "$1"; }
+release_lock() { ci_lock_release; }
 wait_load() {
   max=${CI_MAX_LOAD:-8}; said=
   while :; do
@@ -353,6 +348,8 @@ case "$TARGET" in
   archives) heavy 900 archives run_archives ;;
   record) record ;;
   require) require ;;
+  lock-status) sh "$ROOT/ci/lock.sh" status ;;
+  lock-waits) sh "$ROOT/ci/lock.sh" waits ;;
   network) heavy 900 network run_network ;;
   secrets) limited 900 secrets run_secrets ;;
   index) run_index ;;
