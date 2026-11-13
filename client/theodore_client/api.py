@@ -292,7 +292,11 @@ def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, si
             if attempt >= DOWNLOAD_ATTEMPTS or error.cause not in ("NETWORK",):
                 raise
             core.log(f"download {dest.name}: {error.detail}, attempt {attempt} of {DOWNLOAD_ATTEMPTS}; fetching it again")
-        time.sleep(2.0 * attempt if not core.is_loopback_api() else 0.1)
+        try:
+            quick = core.is_loopback_api()
+        except core.Status:                 # the installer's plugin step runs before any launcher.json exists
+            quick = False
+        time.sleep(0.1 if quick else 2.0 * attempt)
 
 
 def _download_once(url: str, dest: Path, *, sha256: str, bearer: str | None = None, size: int | None = None,
