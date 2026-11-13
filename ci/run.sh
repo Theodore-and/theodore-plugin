@@ -35,6 +35,9 @@ set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 OUT="$ROOT/ci/out"
 CACHE="$OUT/cache"
+# Verified downloads are kept by their pinned sha256 for every job (bootstrap_python.py, build_bundle.py): a rerun never
+# fetches them again. The containers see the same folder at /repo/ci/out/cache.
+export THEODORE_FETCH_STORE="$CACHE/by-sha256"
 # ubuntu:22.04 (glibc 2.35; the runtime's floor is 2.28): the multi-arch index digest, pulled 2026-11-10.
 UBUNTU="ubuntu@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11"
 GITLEAKS_VERSION=8.30.1
@@ -84,7 +87,7 @@ in_container() { # docker-platform name script
   dplat=$1 name=$2 script=$3
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { say "docker is not running"; return 1; }
   mkdir -p "$OUT/$name" "$CACHE"
-  docker run --rm --label "theodore-ci=$$" --platform "$dplat" -v "$ROOT:/repo:ro" -v "$OUT/$name:/repo/ci/out/$name" -v "$CACHE:/repo/ci/out/cache" \
+  docker run --rm --label "theodore-ci=$$" --platform "$dplat" -v "$ROOT:/repo:ro" -v "$OUT/$name:/repo/ci/out/$name" -v "$CACHE:/repo/ci/out/cache" -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 \
     -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$UBUNTU" sh -c "$script"
 }
 
@@ -139,10 +142,10 @@ run_secrets() {
   dir="$OUT/secrets"; mkdir -p "$dir" "$CACHE"
   case "$(uname -m)" in arm64) asset=darwin_arm64 ;; *) asset=darwin_x64 ;; esac
   tgz="$CACHE/gitleaks_${GITLEAKS_VERSION}_$asset.tar.gz"
-  [ -f "$tgz" ] || curl -sSf --proto =https -L -o "$tgz" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_$asset.tar.gz"
+  [ -f "$tgz" ] || curl -sSf --proto =https -L --retry 5 --retry-all-errors --retry-delay 2 -C - -o "$tgz" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_$asset.tar.gz"
   # The release's own checksum file names the sha256 of every archive; the archive must match it.
   sums="$CACHE/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
-  [ -f "$sums" ] || curl -sSf --proto =https -L -o "$sums" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+  [ -f "$sums" ] || curl -sSf --proto =https -L --retry 5 --retry-all-errors --retry-delay 2 -C - -o "$sums" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
   want=$(grep " gitleaks_${GITLEAKS_VERSION}_$asset.tar.gz\$" "$sums" | cut -d' ' -f1)
   got=$(shasum -a 256 "$tgz" | cut -d' ' -f1)
   if [ -z "$want" ] || [ "$got" != "$want" ]; then rm -f "$tgz"; say "gitleaks archive sha256 $got does not match the release's checksums"; result secrets scan fail; return; fi

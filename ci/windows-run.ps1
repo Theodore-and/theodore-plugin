@@ -19,7 +19,7 @@ $py = "$base\py\python\python.exe"
 if (-not (Test-Path $py)) {
     $archive = "$base\cache\$File"
     $name = [Uri]::EscapeDataString($File)
-    & "$env:SystemRoot\System32\curl.exe" --proto =https -fsSL -o $archive "https://github.com/astral-sh/python-build-standalone/releases/download/$Release/$name"
+    & "$env:SystemRoot\System32\curl.exe" --proto =https -fsSL --retry 5 --retry-all-errors --retry-delay 2 -C - -o $archive "https://github.com/astral-sh/python-build-standalone/releases/download/$Release/$name"
     if ((Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower() -ne $Sha256) { Result shim $false; Result runtime $false; exit 1 }
     $null = New-Item -ItemType Directory -Force -Path "$base\py"
     & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C "$base\py"

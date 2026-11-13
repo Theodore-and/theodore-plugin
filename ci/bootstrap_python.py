@@ -12,6 +12,7 @@ import shutil
 import sys
 import tarfile
 import urllib.parse
+from pathlib import Path
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,9 +32,18 @@ def main():
     if not os.path.exists(archive) or hashlib.sha256(open(archive, "rb").read()).hexdigest() != asset["sha256"]:
         url = "https://github.com/astral-sh/python-build-standalone/releases/download/%s/%s" % (
             pins["pbs_release"], urllib.parse.quote(asset["file"]))
-        with urllib.request.urlopen(url, timeout=300) as resp, open(archive + ".part", "wb") as out:
-            shutil.copyfileobj(resp, out, 1 << 20)
-        os.replace(archive + ".part", archive)
+        store = os.path.join(os.environ.get("THEODORE_FETCH_STORE") or os.path.join(cache, "by-sha256"), asset["sha256"])
+        if os.path.isfile(store) and hashlib.sha256(open(store, "rb").read()).hexdigest() == asset["sha256"]:
+            shutil.copyfile(store, archive)
+        else:
+            sys.path.insert(0, os.path.join(ROOT, "runtime", "build"))
+            import build_bundle          # one downloader: five attempts with backoff, resuming where the server allows
+            build_bundle.download_resuming(url, Path(archive + ".part"), timeout=300.0)
+            os.replace(archive + ".part", archive)
+            if hashlib.sha256(open(archive, "rb").read()).hexdigest() == asset["sha256"]:
+                os.makedirs(os.path.dirname(store), exist_ok=True)
+                shutil.copyfile(archive, store + ".tmp")
+                os.replace(store + ".tmp", store)
     data = open(archive, "rb").read()
     if len(data) != asset["size"] or hashlib.sha256(data).hexdigest() != asset["sha256"]:
         os.remove(archive)

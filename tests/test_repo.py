@@ -708,3 +708,70 @@ class HostParity(unittest.TestCase):
         for value, cloud in (("true", True), ("1", True), ("yes", True), ("no", False), ("0", False), ("false", False), ("", False), ("No", False)):
             done = subprocess.run([sh, "-c", defs + "claude_cloud"], env={"PATH": "/usr/bin:/bin", "CLAUDE_CODE_REMOTE": value})
             self.assertEqual(done.returncode == 0, cloud, value)
+
+
+class Downloads(unittest.TestCase):
+    """The bundle build and the runner survive a flaky network (a TLS reset cost a 75-minute matrix run, 2026-11-13):
+    five attempts with backoff, resuming where the server allows, and a store of verified archives by sha256."""
+
+    def serve(self, payload: bytes, failures: int):
+        import http.server
+        import threading
+        state = {"calls": 0, "ranges": []}
+
+        class Flaky(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                state["calls"] += 1
+                start = int((self.headers.get("Range") or "bytes=0-")[6:].split("-")[0] or 0)
+                state["ranges"].append(start)
+                if state["calls"] <= failures:      # half the file, then the connection drops
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload[: len(payload) // 2])
+                    self.wfile.flush()
+                    self.connection.shutdown(2)
+                    return
+                body = payload[start:]
+                self.send_response(206 if start else 200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Flaky)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}/f.tar.gz", state
+
+    def test_a_dropped_download_is_retried_resumed_and_then_served_from_the_store(self):
+        from unittest import mock
+        import build_bundle
+        payload = os.urandom(300_000)
+        sha = hashlib.sha256(payload).hexdigest()
+        url, state = self.serve(payload, failures=2)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(build_bundle.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"THEODORE_FETCH_STORE": str(Path(tmp) / "store")}):
+            dest = Path(tmp) / "a" / "f.tar.gz"
+            build_bundle.fetch(url, dest, sha, len(payload))
+            self.assertEqual(dest.read_bytes(), payload)
+            self.assertEqual(state["calls"], 3, "two drops, then the third attempt")
+            self.assertGreater(state["ranges"][-1], 0, "the last attempt resumed where the part ended")
+            self.assertTrue((Path(tmp) / "store" / sha).is_file())
+            other = Path(tmp) / "b" / "f.tar.gz"           # another work folder or a rerun: no request at all
+            build_bundle.fetch(url, other, sha, len(payload))
+            self.assertEqual(state["calls"], 3)
+            self.assertEqual(other.read_bytes(), payload)
+
+    def test_five_failures_stop_with_the_url_named(self):
+        from unittest import mock
+        import build_bundle
+        url, state = self.serve(b"x" * 1000, failures=99)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(build_bundle.time, "sleep", lambda s: None), \
+                mock.patch.dict(os.environ, {"THEODORE_FETCH_STORE": str(Path(tmp) / "store")}):
+            with self.assertRaises(SystemExit) as stopped:
+                build_bundle.fetch(url, Path(tmp) / "f.tar.gz", "0" * 64)
+            self.assertEqual(state["calls"], 5)
+            self.assertIn(url, str(stopped.exception))
