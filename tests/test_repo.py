@@ -775,3 +775,67 @@ class Downloads(unittest.TestCase):
                 build_bundle.fetch(url, Path(tmp) / "f.tar.gz", "0" * 64)
             self.assertEqual(state["calls"], 5)
             self.assertIn(url, str(stopped.exception))
+
+
+@unittest.skipIf(os.name == "nt", "the runner is a POSIX shell script on the Mac")
+class StampFromParts(unittest.TestCase):
+    """The green stamp is assembled from per-target records at one commit: a target that failed for an outside reason
+    is rerun alone; a test failure needs a new commit."""
+
+    PARTS = ["secrets/scan", "macos-arm64/shim", "macos-arm64/runtime", "macos-x64/shim", "macos-x64/runtime",
+             "windows-x64/shim", "windows-x64/runtime", "linux-x64/shim", "linux-x64/runtime", "linux-arm64/shim",
+             "linux-arm64/runtime", "network/job", "archives/build"]
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "repo"
+        (self.repo / "ci").mkdir(parents=True)
+        for name in ("run.sh", "lock.sh"):
+            shutil.copy2(ROOT / "ci" / name, self.repo / "ci" / name)
+        (self.repo / ".gitignore").write_text("ci/out/\n")
+        git = ["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "c"], check=True)
+        self.sha = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.logs = self.tmp / "logs"
+
+    def result(self, part: str, value: str, log: str = "ok\n", commit: str | None = None):
+        name, job = part.split("/")
+        folder = self.repo / "ci" / "out" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "commit").write_text((commit or self.sha) + "\n")
+        (folder / f"{job}.result").write_text(value + "\n")
+        (folder / f"{job}.log").write_text(log)
+
+    def stamp(self):
+        return subprocess.run(["sh", str(self.repo / "ci" / "run.sh"), "stamp"], capture_output=True, text=True,
+                              env={**os.environ, "THEODORE_CI_LOGS": str(self.logs)}, timeout=60)
+
+    def test_an_outside_failure_rerun_alone_completes_the_stamp_and_a_test_failure_never_does(self):
+        for part in self.PARTS:
+            self.result(part, "pass")
+        self.result("macos-x64/runtime", "fail", "ConnectionResetError: [Errno 54] Connection reset by peer\n")
+        self.result("linux-x64/shim", "pass", commit="0" * 40)          # a result of another commit
+        out = self.stamp()
+        self.assertIn("no stamp yet", out.stdout)
+        self.assertIn("macos-x64-runtime", out.stdout)
+        self.assertIn("linux-x64-shim", out.stdout)
+        self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())
+        self.result("macos-x64/runtime", "pass")                         # the rerun of that target alone
+        self.result("linux-x64/shim", "pass")
+        out = self.stamp()
+        self.assertIn(f"checks green at {self.sha}", out.stdout)
+        self.assertTrue((self.logs / "green" / "plugin" / self.sha).read_text().startswith(f"checks green at {self.sha}"))
+        self.assertTrue((self.logs / "green" / "plugin-parts" / self.sha / "macos-x64-runtime").is_file(), "each record keeps its log")
+
+    def test_a_test_failure_blocks_the_stamp_at_that_commit(self):
+        for part in self.PARTS:
+            self.result(part, "pass")
+        self.result("linux-arm64/shim", "fail", "FAIL: test_something (tests.test_x.Case.test_something)\nFAILED (failures=1)\n")
+        self.stamp()
+        self.result("linux-arm64/shim", "pass")                          # a flaky pass later does not count
+        out = self.stamp()
+        self.assertIn("test failures at this commit (linux-arm64-shim)", out.stdout)
+        self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())

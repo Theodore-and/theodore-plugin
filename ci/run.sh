@@ -23,6 +23,9 @@
 #                                      (default ~/theodore-ci) and, when every row passed on a clean tree, write the
 #                                      stamp green/plugin/<commit> ("checks green at <commit>")
 #   ci/run.sh require [commit]         exit 0 only when that commit (default HEAD) has the stamp: release steps call it
+#   ci/run.sh stamp                    record this tree's results per target and write the stamp when every target has
+#                                      a green record at this commit (a target that failed for an outside reason is
+#                                      rerun alone; a test failure needs a new commit)
 #   ci/run.sh lock-status              the shared lock's holder and its queue in order (lock-waits: today's waits and holds)
 #
 # Per platform: "shim" is sync_launchers --check and every test suite (on Windows against the real bundle, as the
@@ -173,7 +176,7 @@ run_index() {
 
 # --- Windows over SSH --------------------------------------------------------------------------------------------------------
 run_windows() {
-  name=windows-x64; dir="$OUT/$name"; fresh "$dir"
+  name=windows-x64; dir="$OUT/$name"; fresh "$dir"; commit > "$dir/commit"
   [ -n "$HOST" ] || { say "windows-x64 needs --host user@host"; result "$name" shim not-run; result "$name" runtime not-run; return; }
   pins=$("$(host_python)" -c 'import json,sys; p=json.load(open(sys.argv[1]))["python"]; a=p["assets"]["win32-x64"]; print(p["pbs_release"], a["file"], a["sha256"])' \
     "$ROOT/runtime/locks/versions.json")
@@ -231,7 +234,7 @@ run_windows_azure() {
 
 # --- the archives ----------------------------------------------------------------------------------------------------------
 run_archives() {
-  dir="$OUT/archives"; fresh "$dir"; mkdir -p "$CACHE"
+  dir="$OUT/archives"; fresh "$dir"; commit > "$dir/commit"; mkdir -p "$CACHE"
   case "$(uname -m)" in arm64) key=darwin-arm64 ;; *) key=darwin-x64 ;; esac
   PY=$("$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") || { result archives build fail; return; }
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 &&
@@ -277,14 +280,49 @@ record() {
   # Every row must pass. index is only required when all five bundles were built (it is the publish input).
   bad=$(grep -vE '^platform ' "$OUT/summary.txt" | grep -vE '^ci/out/' | awk '$1 != "index" { for (i = 2; i <= 3 && i <= NF; i++) if ($i == "fail" || $i == "not-run") print $1 } $1 == "index" && $2 == "fail" { print $1 }' | sort -u | tr '\n' ' ')
   dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
-  if [ -z "$bad" ] && [ -z "$dirty" ]; then
-    mkdir -p "$LOGS/green/plugin"
-    printf 'checks green at %s\n%s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$dest" > "$LOGS/green/plugin/$sha"
-    line="checks green at $sha"
-  elif [ -n "$dirty" ]; then line="checks NOT green at $sha: the tree has uncommitted changes (no stamp)"
-  else line="checks NOT green at $sha: ${bad% }"; fi
+  note_parts
+  if [ -n "$dirty" ]; then line="checks NOT green at $sha: the tree has uncommitted changes (no stamp)"
+  elif stamp_from_parts; then line="checks green at $sha"
+  else line="checks NOT green at $sha: ${bad:-a target without a green record at this commit} (rerun a target that failed for an outside reason alone: ci/run.sh <target>)"; fi
   echo "$line" | tee "$dest/result.txt"
   say "record: $dest"
+}
+# The stamp is assembled from per-target records at one commit. Each job that passes on a clean tree leaves a green
+# record of its own ($LOGS/green/plugin-parts/<sha>/<target>-<job>: its time and a copy of its log), so a target that
+# failed for a reason outside the code (a network reset, a VM that did not come up) is rerun alone with
+# `ci/run.sh <target>` at the same commit. A job that failed with a test failure in its log is marked, and no later
+# pass at that commit counts: a test failure needs its fix and a new commit. The stamp is written when every
+# required job has a green record and none is marked.
+REQUIRED_PARTS="secrets-scan macos-arm64-shim macos-arm64-runtime macos-x64-shim macos-x64-runtime windows-x64-shim windows-x64-runtime linux-x64-shim linux-x64-runtime linux-arm64-shim linux-arm64-runtime network-job archives-build"
+note_parts() { # record this run's results as per-target records for the commit
+  sha=$(commit); dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
+  [ -z "$dirty" ] || { say "parts: the tree has uncommitted changes; no records"; return 0; }
+  parts="$LOGS/green/plugin-parts/$sha"; mkdir -p "$parts"
+  for part in $REQUIRED_PARTS; do
+    job=${part##*-}; name=${part%-*}
+    [ "$(cat "$OUT/$name/commit" 2>/dev/null)" = "$sha" ] || continue       # a result of another commit never counts
+    res=$(tr -d '\r' 2>/dev/null < "$OUT/$name/$job.result")
+    log="$OUT/$name/$job.log"
+    case "$res" in
+      pass) [ -f "$parts/$part" ] && [ "$OUT/$name/$job.result" -ot "$parts/$part" ] && continue
+            { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; [ -f "$log" ] && cat "$log"; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
+      fail) if [ -f "$log" ] && grep -Eq '^(FAIL|ERROR): test|^FAILED \(' "$log"; then
+              { printf 'test failure at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; grep -E '^(FAIL|ERROR): ' "$log"; } > "$parts/$part.testfail"
+            fi ;;
+    esac
+  done
+}
+stamp_from_parts() {
+  sha=$(commit); parts="$LOGS/green/plugin-parts/$sha"; missing=; marked=
+  for part in $REQUIRED_PARTS; do
+    [ -f "$parts/$part.testfail" ] && marked="$marked $part"
+    [ -f "$parts/$part" ] || missing="$missing $part"
+  done
+  if [ -n "$marked" ]; then say "no stamp: test failures at this commit (${marked# }): fix them in a new commit"; return 1; fi
+  if [ -n "$missing" ]; then say "no stamp yet: no green record at this commit for${missing}"; return 1; fi
+  mkdir -p "$LOGS/green/plugin"
+  printf 'checks green at %s\n%s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$parts" > "$LOGS/green/plugin/$sha"
+  say "checks green at $sha (every target has a green record: $parts)"
 }
 require() {
   sha=$(git -C "$ROOT" rev-parse "${REQUIRE:-HEAD}") || exit 2
@@ -314,6 +352,7 @@ wait_load() {
 kill_containers() { docker ps -q --filter "label=theodore-ci=$$" 2>/dev/null | xargs docker kill >/dev/null 2>&1; }
 limited() { # seconds label command...: the command in its own process group, killed on the deadline or when this runner dies
   secs=$1 label=$2; shift 2
+  mkdir -p "$OUT/$label"; commit > "$OUT/$label/commit"        # its results count for this commit only
   set -m; "$@" & cpid=$!; set +m
   runner=$$
   ( n=0
@@ -347,7 +386,8 @@ case "$TARGET" in
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
   linux-x64) heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
   linux-arm64) heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
-  windows-x64) if [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
+  windows-x64) mkdir -p "$OUT/windows-x64"; commit > "$OUT/windows-x64/commit"
+               if [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
   archives) heavy 900 archives run_archives ;;
   record) record ;;
   require) require ;;
@@ -357,6 +397,7 @@ case "$TARGET" in
   secrets) limited 900 secrets run_secrets ;;
   index) run_index ;;
   summary) summary ;;
+  stamp) note_parts; stamp_from_parts ;;
   all)
     # Windows runs remotely from the start (it is the longest), the local jobs one at a time beside it.
     wpid=
@@ -382,4 +423,9 @@ case "$TARGET" in
     summary
     record ;;
   *) sed -n '2,20p' "$0"; exit 64 ;;
+esac
+# A target run alone (a rerun after an outside failure) adds its record and writes the stamp when it completes the set.
+case "$TARGET" in
+  macos-arm64|macos-x64|linux-x64|linux-arm64|windows-x64|network|archives|secrets)
+    [ -n "${CI_PARENT:-}" ] || { note_parts; stamp_from_parts || true; } ;;
 esac
