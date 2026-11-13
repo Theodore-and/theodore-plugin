@@ -131,6 +131,31 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
+    def test_the_installer_removes_its_own_download_folder_when_the_cleanup_was_dropped(self):
+        # Codex ran the install line split in two and dropped "rm -rf $d" (lane PORTAL, 2026-11-12): the installer
+        # removes its own download folder when it ends, only a folder of the line's own name holding nothing else.
+        import shutil
+        name = "install.cmd" if IS_WINDOWS else "install.sh"
+        for folder_name in ("theodore-1a2b3c", "tmp.Ab12Cd34") if not IS_WINDOWS else ("theodore-1a2b3c",):
+            folder = self.box.tmp / folder_name
+            folder.mkdir()
+            shutil.copy2(self.box.installer(), folder / name)
+            result = self.install("--uninstall", installer=folder / name)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(status_lines(result.stdout)[0].startswith("THEODORE OK"), result.stdout)
+            self.assertFalse(folder.exists(), f"{folder_name}: the download folder is gone")
+        kept = self.box.tmp / "theodore-keep"
+        kept.mkdir()
+        shutil.copy2(self.box.installer(), kept / name)
+        (kept / "notes.txt").write_text("someone else's")
+        self.assertEqual(self.install("--uninstall", installer=kept / name).returncode, 0)
+        self.assertEqual(sorted(p.name for p in kept.iterdir()), sorted([name, "notes.txt"]), "a folder with anything else stays whole")
+        other = self.box.tmp / "downloads"
+        other.mkdir()
+        shutil.copy2(self.box.installer(), other / name)
+        self.assertEqual(self.install("--uninstall", installer=other / name).returncode, 0)
+        self.assertTrue((other / name).exists(), "a folder of another name is never touched")
+
     def test_uninstall_with_no_installation_still_removes_the_engines_former_caches(self):
         temp = self.box.tmp / "tmp"
         env = {"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)}

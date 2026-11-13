@@ -64,6 +64,20 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$0" ] && say "installer sha256 $(sha256_of "$0") (compare with https://theodoreand.ai/install)"
+# The download folder of the install line (mktemp -d) goes when the installer ends, also when the agent ran the line
+# split in two and dropped its cleanup (Codex does): only a folder named tmp.* or theodore-* that holds nothing but
+# this file. The file stays on disk while the installer runs.
+SELF_DIR=
+case "$0" in */install.sh)
+  self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || self_dir=
+  case "${self_dir##*/}" in tmp.*|theodore-*) [ "$(ls -A "$self_dir" 2>/dev/null)" = install.sh ] && SELF_DIR=$self_dir ;; esac ;;
+esac
+cleanup_self() {
+  [ -n "$SELF_DIR" ] && [ "$(ls -A "$SELF_DIR" 2>/dev/null)" = install.sh ] && rm -f "$SELF_DIR/install.sh" && rmdir "$SELF_DIR" 2>/dev/null
+  return 0
+}
+trap cleanup_self EXIT
+trap 'cleanup_self; exit 130' INT TERM HUP
 
 # A Theodore folder belongs to one service, the one it was set up for (state/environment): this installer does not
 # reuse a folder of another. Uninstalling is the way out, so it is allowed.
@@ -166,6 +180,7 @@ remove_specimens() { # all of them (uninstall)
 }
 if [ -n "$UNINSTALL" ]; then
   if [ -f "$HOME_DIR/bin/theodore" ]; then
+    cleanup_self
     exec sh "$HOME_DIR/bin/theodore" uninstall
   fi
   # No launcher left: the specimen folders the client recorded still go, and the record with them.
@@ -233,8 +248,8 @@ if [ ! -e "$HOME_DIR/state/environment" ]; then
 fi
 foreign && { rm -rf "$WORK"; refuse_foreign; }
 # The installer's own files live in one private folder (mktemp -d makes it 0700) and go when it ends, whatever happens.
-trap 'rm -rf "$WORK"' EXIT
-trap 'rm -rf "$WORK"; exit 130' INT TERM HUP
+trap 'rm -rf "$WORK"; cleanup_self' EXIT
+trap 'rm -rf "$WORK"; cleanup_self; exit 130' INT TERM HUP
 
 # curl: HTTPS only (plain HTTP only for a loopback test server), no redirect followed (no -L), 20 s to connect,
 # abort when slower than 1 KB/s for 60 s, 30 minutes at most.

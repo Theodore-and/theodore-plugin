@@ -21,6 +21,27 @@ rem never follow a redirect. Lines starting with THEODORE are statuses for the a
 setlocal EnableExtensions DisableDelayedExpansion
 rem Before any SHIFT: SHIFT moves %0 too.
 set "SELF=%~f0"
+rem The download folder of the install line goes when the installer ends, also when the agent ran the line split and
+rem dropped its cleanup (Codex does): only a folder named theodore-* that holds nothing but this file. The installer runs
+rem as a call of itself, so the file stays on disk while it runs; then this outer run deletes the file and the folder
+rem from memory ((goto) ends the batch context first) and passes the exit code on.
+if defined THEODORE_INSTALL_INNER goto :installer_body
+set "IDIR=%~dp0"
+if not defined IDIR goto :installer_body
+set "IDIR=%IDIR:~0,-1%"
+set "INAME="
+for %%I in ("%IDIR%") do set "INAME=%%~nxI"
+if /i not "%INAME:~0,9%"=="theodore-" goto :installer_body
+if /i not "%~nx0"=="install.cmd" goto :installer_body
+set "ICOUNT=0"
+for /f %%N in ('dir /b /a "%IDIR%" 2^>nul ^| "%SystemRoot%\System32\find.exe" /c /v ""') do set "ICOUNT=%%N"
+if not "%ICOUNT%"=="1" goto :installer_body
+set "THEODORE_INSTALL_INNER=1"
+call "%SELF%" %*
+set "IRC=%ERRORLEVEL%"
+set "THEODORE_INSTALL_INNER="
+(goto) 2>nul & del /f /q "%IDIR%\install.cmd" >nul 2>&1 & rmdir "%IDIR%" >nul 2>&1 & "%SystemRoot%\System32\cmd.exe" /d /c exit %IRC%
+:installer_body
 rem The inbox tools by full path: a Git or MSYS tar.exe or curl.exe earlier on PATH behaves differently (GNU tar
 rem reads C:\... as a remote host name).
 set "SYS32=%SystemRoot%\System32"
