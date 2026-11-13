@@ -305,7 +305,7 @@ note_parts() { # record this run's results as per-target records for the commit
     log="$OUT/$name/$job.log"
     case "$res" in
       pass) [ -f "$parts/$part" ] && [ "$OUT/$name/$job.result" -ot "$parts/$part" ] && continue
-            { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; [ -f "$log" ] && cat "$log"; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
+            { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; cat "$OUT/$name/"*.log 2>/dev/null; true; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
       # Test modules that could not import only because the job's runtime bundle was not built (support.py finds no
       # bundle manifest) are an outside failure, not a test failure.
       fail) if [ -f "$log" ] && grep -E '^(FAIL|ERROR): test' "$log" | { if grep -q 'REAL_BUNDLE).glob' "$log"; then grep -v '_FailedTest'; else cat; fi; } | grep -q .; then

@@ -852,6 +852,18 @@ class StampFromParts(unittest.TestCase):
         self.result("windows-x64/shim", "pass")                          # the rerun once the bundle builds
         self.assertIn(f"checks green at {self.sha}", self.stamp().stdout)
 
+    def test_a_target_whose_log_has_another_name_still_gets_its_record(self):
+        # network and archives write network.log and archives.log, not <job>.log (2026-11-13: their records stayed .tmp).
+        for part in self.PARTS:
+            self.result(part, "pass")
+        for name, job in (("network", "job"), ("archives", "build")):
+            folder = self.repo / "ci" / "out" / name
+            (folder / f"{job}.log").unlink()
+            (folder / f"{name}.log").write_text("Ran 3 tests\nOK\n")
+        self.assertIn(f"checks green at {self.sha}", self.stamp().stdout)
+        record = (self.logs / "green" / "plugin-parts" / self.sha / "network-job").read_text()
+        self.assertIn("Ran 3 tests", record)
+
     def test_a_test_failure_blocks_the_stamp_at_that_commit(self):
         for part in self.PARTS:
             self.result(part, "pass")
