@@ -101,7 +101,9 @@ for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%SELF%
 if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with https://theodoreand.ai/install)
 
 if not defined UNINSTALL goto :env_check
-if exist "%HOME_DIR%\bin\theodore.cmd" "%HOME_DIR%\bin\theodore.cmd" uninstall
+rem The launcher's uninstall stops Theodore's processes and starts the cleanup that removes the folder once the last
+rem files are released; its status is the answer (checking the folder now would race that cleanup).
+if exist "%HOME_DIR%\bin\theodore.cmd" (call "%HOME_DIR%\bin\theodore.cmd" uninstall & exit /b)
 rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
 rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
 set "LEFTOVER="

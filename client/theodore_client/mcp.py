@@ -488,6 +488,23 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None) -> int:
     raw_in = stdin or sys.stdin.buffer
     out = stdout or sys.stdout.buffer
     sys.stdout = sys.stderr                 # anything printed by accident goes to standard error
+    # Named by its process id while it runs, so `theodore uninstall` can stop it (Windows cannot delete the runtime a
+    # running server uses). Removed at exit; one left by a killed server names a dead process, which is ignored.
+    marker = None
+    if stdin is None:
+        with contextlib.suppress(OSError):
+            marker = core.home().state / "servers" / str(os.getpid())
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        return _serve_lines(raw_in, out)
+    finally:
+        if marker:
+            with contextlib.suppress(OSError):
+                marker.unlink()
+
+
+def _serve_lines(raw_in, out) -> int:
     for line in raw_in:
         line = line.strip()
         if not line:

@@ -1499,6 +1499,27 @@ class StatusDoctorUninstall(ClientCase):
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["loose-file.txt", "memory"])
         self.assertEqual(foreign.read_text(), "not Theodore's")
 
+    def test_uninstall_stops_theodores_own_running_processes_first(self):
+        # ACCEPT-LOCAL2 D-C: a background job (and a tool server) still running from Theodore's folder. Each is found by
+        # the file Theodore wrote for it, never by name; this test's own processes of the same name are untouched.
+        self.ready()
+        sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
+        job = subprocess.Popen(sleeper, start_new_session=True)
+        server = subprocess.Popen(sleeper, start_new_session=True)
+        bystander = subprocess.Popen(sleeper, start_new_session=True)
+        for proc in (job, server, bystander):
+            self.addCleanup(lambda p=proc: p.poll() is None and p.kill())
+        jobs = self.box.home / "state" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "libreoffice.json").write_text(json.dumps({"pid": job.pid, "phase": "downloading", "started": int(time.time())}))
+        (self.box.home / "state" / "servers").mkdir(parents=True, exist_ok=True)
+        (self.box.home / "state" / "servers" / str(server.pid)).write_text(str(server.pid))
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIsNotNone(job.wait(timeout=20))
+        self.assertIsNotNone(server.wait(timeout=20))
+        self.assertIsNone(bystander.poll(), "a process Theodore did not record is never stopped")
+        self.assertFalse(self.box.home.exists())
+
     def test_uninstall_leaves_nothing_behind(self):
         self.ready()
         (self.box.home / "plugin.partial" / "plugins").mkdir(parents=True)          # an interrupted plugin unpack
@@ -2131,6 +2152,33 @@ class AutoUpdate(ClientCase):
         out = self.client("skill", "deck-design").stdout.splitlines()
         self.assertTrue(out[0].startswith("THEODORE NOTICE: Theodore updated itself: engine 2.0.0"), out[:2])
         self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design").stdout)
+
+    def test_two_sessions_starting_together_run_one_job_and_say_it_once(self):
+        # ACCEPT-LOCAL2 D-A: session 3 started while session 2's plugin job ran; it ran a second job and the line came twice.
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        a, b = {"CLAUDE_CODE_SESSION_ID": "s-a", "CLAUDECODE": "1"}, {"CLAUDE_CODE_SESSION_ID": "s-b", "CLAUDECODE": "1"}
+        said = [self.client("skill", "pptx", env=a).stdout,
+                self.client("skill", "pptx", env=b).stdout]      # starts while (or right after) a's job runs, on the old files
+        self.box.wait_jobs()
+        said.append(self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-c", "CLAUDECODE": "1"}).stdout)
+        self.box.wait_jobs()
+        self.assertEqual(log.read_text().splitlines().count("claude plugin update theodore@theodore"), 1, "one job per release")
+        said += [self.client("skill", "deck-design", env=env).stdout for env in (a, b, a)]
+        self.assertEqual(sum(out.count("Theodore updated itself") for out in said), 1, said)
+
+    def test_the_client_and_the_plugin_files_move_in_the_same_first_session(self):
+        # The first session's check starts both; the next session runs entirely on the new version and hears one line.
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        self.api.publish_client("9.9.9", UpdateApplySays.client_tar(self, "9.9.9"))
+        env = {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}
+        self.client("skill", "pptx", env=env)
+        self.box.wait_jobs()
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text(), "9.9.9")
+        self.assertIn("claude plugin update theodore@theodore", log.read_text().splitlines())
 
     def test_a_current_plugin_hears_nothing(self):
         self.ready()
