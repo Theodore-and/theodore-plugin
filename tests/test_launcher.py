@@ -330,9 +330,12 @@ class Failures(LauncherCase):
         self.assertIn("cause NETWORK", first)
         self.assertIn("running ", nxt)
         self.assertIn("again is right (not before)", nxt)
-        self.assertIn('Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add '
-                      'theodoreand.ai and *.theodoreand.ai', tell)
-        self.assertIn("ChatGPT Work mode does", tell)
+        self.assertIn("Settings > Capabilities, and under Allowed websites add theodoreand.ai and *.theodoreand.ai, then ask again", tell)
+        # the setting first, the connector second (lane accept-web, 2026-11-13: the user must learn the one setting)
+        self.assertLess(tell.index("Allowed websites"), tell.index("connector"))
+        self.assertIn("Until then I can build with Theodore's design guidance through its connector, without its engine.", tell)
+        self.assertLess(nxt.index("again is right"), nxt.index("connector"))
+        self.assertNotIn("CONNECTOR_REQUIRED", result.stdout)
         # the same through a proxy that answers 403 for the host, in any sandbox
         import http.server, threading
         class Refuse(http.server.BaseHTTPRequestHandler):
@@ -349,6 +352,25 @@ class Failures(LauncherCase):
         first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
         self.assertIn("Allowed websites", tell)
         self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
+        # a proxy that lets the tunnel open and then is not the host (an interception with a certificate the sandbox
+        # does not trust, or a block page): curl fails in the TLS step, which is the same refusal
+        import socketserver
+        class Garbage(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(4096)
+                self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                self.request.recv(4096)
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nBlocked page")
+        tunnel = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Garbage)
+        threading.Thread(target=tunnel.serve_forever, daemon=True).start()
+        self.addCleanup(tunnel.shutdown)
+        url = f"http://127.0.0.1:{tunnel.server_address[1]}"
+        self.box.write_launcher_json(stage1_client_url="https://theodore.invalid/client.tar")
+        result = self.run_launcher("guide", "deck-design", env={"CLAUDE_CODE_REMOTE": "true", "HTTPS_PROXY": url, "https_proxy": url,
+                                                                "no_proxy": "", "NO_PROXY": ""})
+        first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
+        self.assertIn("cause NETWORK", first)
+        self.assertIn("Allowed websites", tell)
 
     @unittest.skipIf(IS_WINDOWS, "a POSIX sh launcher test")
     def test_a_flag_set_to_no_is_not_a_sandbox(self):

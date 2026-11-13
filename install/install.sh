@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.4"
-PIN_CLIENT="client/client-0.3.4.tar ac1368d6be0f2a68e7d7420b9f126426399aec804903e9bcce1413ecc56d5c91"
+PIN_CLIENT="client/client-0.3.4.tar 336562ba94369094cf6e21fd3c948fa0108375dd6c3a955b252178c42b1a5054"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -250,8 +250,8 @@ fetch() { # url dest what
   case "$(cat "$WORK/http" 2>/dev/null)" in 3??) detail="it answered with a redirect, which is not followed" ;; *) detail="curl exit $rc, HTTP $(cat "$WORK/http" 2>/dev/null)" ;; esac
   if [ "$cause" = NETWORK ] && in_sandbox; then
     status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail); this cloud workspace's network refuses or cannot resolve it." \
-      "tell the user the setting below; once they have changed it, running the same installer line again is right (not before)." \
-      "This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under \"Use the internet while making files\" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does."
+      "tell the user the setting below; once they have changed it, running the same installer line again is right (not before). Until then, if a Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design), without the engine." \
+      "This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under Allowed websites add theodoreand.ai and *.theodoreand.ai, then ask again. Until then I can build with Theodore's design guidance through its connector, without its engine. In ChatGPT, the ordinary chat has no internet access; Work mode does."
   fi
   status SETUP_FAILED 68 "cause $cause: $3 could not be downloaded from $DL_BASE ($detail)." \
     "if the download host is blocked, register the plugin directly instead (step 2 of the install page); otherwise check the connection and run the installer again." \

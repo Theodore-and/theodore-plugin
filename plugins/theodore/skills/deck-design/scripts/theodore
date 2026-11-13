@@ -575,7 +575,8 @@ claude_cloud() {
 in_sandbox() {
   [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || claude_cloud
 }
-SANDBOX_TELL='This workspace'"'"'s network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT'"'"'s ordinary chat has no internet access; ChatGPT Work mode does.'
+SANDBOX_TELL='This workspace'"'"'s network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under Allowed websites add theodoreand.ai and *.theodoreand.ai, then ask again. Until then I can build with Theodore'"'"'s design guidance through its connector, without its engine. In ChatGPT, the ordinary chat has no internet access; Work mode does.'
+SANDBOX_NEXT='Until then, if a Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design), without the engine.'
 
 failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes it, exits 68
   cause=$(sed -n 1p "$B/failed"); detail=$(sed -n 2p "$B/failed")
@@ -584,7 +585,7 @@ failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes
     NETWORK) next="check the internet connection, then run $RUN again."
              tell="Theodore could not download its files. Please check the internet connection."
              if in_sandbox; then
-               next="this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once they have changed it, running $RUN again is right (not before)."
+               next="this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once they have changed it, running $RUN again is right (not before). $SANDBOX_NEXT"
                tell=$SANDBOX_TELL
              fi ;;
     TLS_INTERCEPT) next="this network inspects HTTPS with a certificate this computer does not trust. Ask the user to have their IT team install the company root certificate, or to try another network; then run $RUN again."
@@ -642,7 +643,7 @@ if in_sandbox && command -v curl >/dev/null 2>&1; then
         "This chat has no internet access, so Theodore's engine cannot run in it. In ChatGPT, Work mode can install and run Theodore."
     fi
     status SETUP_FAILED 68 "cause NETWORK: this cloud workspace's network refuses or cannot resolve Theodore's download host (curl exit $rc)." \
-      "tell the user the setting below; once they have changed it, running $RUN again is right (not before)." \
+      "tell the user the setting below; once they have changed it, running $RUN again is right (not before). $SANDBOX_NEXT" \
       "$SANDBOX_TELL"
   fi
 fi

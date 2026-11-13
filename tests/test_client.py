@@ -2649,7 +2649,8 @@ class ProxiesAndSandboxes(ClientCase):
         self.assertEqual(status.name, "OFFLINE")
         for s in (status, failed):
             self.assertIn('Allowed websites add theodoreand.ai and *.theodoreand.ai', s.tell_user)
-            self.assertIn("ChatGPT Work mode", s.tell_user)
+            self.assertIn("Work mode does", s.tell_user)
+            self.assertLess(s.tell_user.index("Allowed websites"), s.tell_user.index("connector"))
             self.assertIn("running the same command again is right (not before)", s.next_step)
         with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": ""}), \
                 mock.patch.object(Path, "is_dir", lambda p: False):

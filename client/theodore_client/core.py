@@ -265,7 +265,9 @@ def cloud_sandbox() -> bool:
 
 # What the user changes when a cloud sandbox cannot reach Theodore's sites (installers and launcher say the same).
 SANDBOX_NETWORK_NEXT = ("this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once "
-                        "they have changed it, running the same command again is right (not before).")
+                        "they have changed it, running the same command again is right (not before). Until then, if a "
+                        "Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design), "
+                        "without the engine.")
 
 
 def sandbox_network_tell() -> str:
@@ -276,8 +278,8 @@ def sandbox_network_tell() -> str:
     root = ".".join(host.split(".")[-2:]) or host
     sites = f"{host} and *.{root}" if host else "Theodore's website and its subdomains"
     return (f"This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and "
-            f"under \"Use the internet while making files\" > Allowed websites add {sites}, then try again. "
-            "ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does.")
+            f"under Allowed websites add {sites}, then ask again. Until then I can build with Theodore's design guidance "
+            "through its connector, without its engine. In ChatGPT, the ordinary chat has no internet access; Work mode does.")
 
 
 # --- data directory ------------------------------------------------------------------------------------------------------
