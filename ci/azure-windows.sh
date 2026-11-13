@@ -25,14 +25,16 @@
 #
 # Needs the Azure CLI signed in (az login) and an SSH key pair (CI_AZURE_KEY, default ~/.ssh/theodore_ci). What it
 # makes, all in a new resource group theodore-plugin-ci-<UTC time> in CI_AZURE_LOCATION (default centralus):
-#   one VM, Windows Server 2022 Datacenter (gen2), the first size of CI_AZURE_SIZE (space-separated) that Azure has
-#   capacity for (default Standard_D8s_v3, then other 8- and 4-vCPU sizes), its disk, NIC, public IP and a network security
+#   one VM, Windows Server 2022 Datacenter (gen2), 8 vCPU where a region has the quota free, else 4 (placed by
+#   ci/azure-place.sh, the engine repository's scripts/azure-place.sh copied as is), its disk, NIC, public IP and a network security
 #   group that admits SSH only from the /24 networks this machine leaves from (probed a dozen times: a connection with
 #   two uplinks alternates; CI_AZURE_SSH_FROM overrides). OpenSSH server is enabled through the VM agent
 #   (az vm run-command) and trusts the one public key.
 # The administrator password is random, lives in <state-dir> (mode 700) for the az call only (read by az from the
 # file, never on a command line), and is deleted right after; logins use the key.
 set -euo pipefail
+# shellcheck source=azure-place.sh
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/azure-place.sh"
 
 say() { printf 'azure-windows: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
@@ -45,9 +47,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 # build machine and its image use eastus, so this 8-vCPU machine and its image take neither's quota.
 LOCATION=${CI_AZURE_LOCATION:-centralus}
 # Tried in order until Azure has capacity for one (a size can be "not available" in a region for hours).
-# 8 vCPU first (the suites run side by side, five processes); a 4-vCPU size when the region's quota (10 vCPU for this
-# subscription, shared with the engine's and other test machines) or capacity has no room for it.
-SIZES=${CI_AZURE_SIZE:-Standard_D8s_v3 Standard_D8s_v4 Standard_D8as_v4 Standard_D4s_v3 Standard_F4s_v2 Standard_D4as_v4 Standard_D4s_v4}
+# Where the VM goes: ci/azure-place.sh (AZ_PLACE_REGIONS, default here centralus westus2 eastus eastus2;
+# AZ_PLACE_SIZES; CI_AZURE_CORES, default 8, then 4). LOCATION is the group's (its metadata) and the image's.
 MARKETPLACE=MicrosoftWindowsServer:WindowsServer:2022-datacenter-g2:latest
 IMAGE=${CI_AZURE_IMAGE:-}
 IMG_GROUP=${CI_AZURE_IMAGE_GROUP:-theodore-ci-images}
@@ -112,30 +113,31 @@ up() {
     az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE expires="$expires" -o none && break
     [ "$t" -lt 4 ] || die "could not create $group"; sleep 15
   done
-  local size made=
-  for size in $SIZES; do
-    say "creating $group ($size, $LOCATION)"
-    if [ -n "$specialized" ]; then
-      set -- --specialized $(image_security "$image")
-    else
-      set -- --admin-username "$USER_NAME" --admin-password "@$STATE/password"
-    fi
-    local try
-    for try in 1 2 3; do
-      if az vm create -g "$group" -n "$VM" --image "$image" --size "$size" "$@" --public-ip-sku Standard --nsg-rule NONE \
-          --os-disk-size-gb 128 --storage-sku Premium_LRS -o none 2>"$STATE/create.err"; then
-        made=$size; break
-      fi
-      # This Mac's connection to Azure dropped (not the size): the same size again
+  # Where: scripts/azure-place.sh's shared region-and-size fallback (free quota read first; the next region or size on
+  # a quota, SKU or capacity refusal). CI_AZURE_CORES cores (default 8), then 4 when no region has 8 free.
+  # A prepared image lives in one region: the VM goes there only.
+  if [ -n "$specialized" ]; then
+    set -- --specialized $(image_security "$image")
+    export AZ_PLACE_REGIONS=$(az sig image-version show --ids "$image" --query "publishingProfile.targetRegions[0].name" -o tsv 2>/dev/null | tr -d ' ' | tr 'A-Z' 'a-z')
+  else
+    set -- --admin-username "$USER_NAME" --admin-password "@$STATE/password"
+  fi
+  export AZ_PLACE_REGIONS=${AZ_PLACE_REGIONS:-centralus westus2 eastus eastus2}
+  local placed= cores try
+  for cores in ${CI_AZURE_CORES:-8} 4; do
+    for try in 1 2 3; do  # again when this Mac's connection to Azure dropped mid-way (not a refusal)
+      placed=$(az_vm_create_placed "$group" "$VM" "$cores" --image "$image" "$@" --public-ip-sku Standard --nsg-rule NONE \
+        --os-disk-size-gb 128 --storage-sku Premium_LRS 2>"$STATE/create.err") && break
+      grep -v '^WARNING' "$STATE/create.err" | tail -n 4 >&2
       grep -q 'Connection aborted\|Connection reset\|ConnectionError\|timed out\|RemoteDisconnected' "$STATE/create.err" || break
-      say "the connection to Azure dropped; trying $size again"; sleep 20
-      az vm delete -g "$group" -n "$VM" --yes -o none 2>/dev/null || true
+      say "the connection to Azure dropped; placing again"; az_place_clear_group "$group"; sleep 20
     done
-    [ -z "$made" ] || break
-    grep -o 'SkuNotAvailable[^.]*\|QuotaExceeded[^.]*\|OperationNotAllowed[^.]*' "$STATE/create.err" | head -n 1 >&2 || tail -n 3 "$STATE/create.err" >&2
-    az vm delete -g "$group" -n "$VM" --yes -o none 2>/dev/null || true
+    [ -z "$placed" ] || break
   done
-  [ -n "$made" ] || die "no size of '$SIZES' could be made in $LOCATION"
+  [ -n "$placed" ] || die "no region and size had room (regions $AZ_PLACE_REGIONS)"
+  grep '^azure-place:' "$STATE/create.err" >&2 || true
+  local made=${placed#* }
+  say "made $made in ${placed% *}"
   echo "$made" > "$STATE/size"
   rm -f "$STATE/password"
   # The deadline Azure keeps by itself: deallocated at that UTC time even if nothing here is left to delete it.
