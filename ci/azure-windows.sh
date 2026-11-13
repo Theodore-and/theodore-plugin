@@ -94,7 +94,11 @@ up() {
   local deadline_h=${CI_AZURE_DEADLINE_HOURS:-4} expires shutdown_at
   expires=$(date -u -v+"${deadline_h}"H +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "+$deadline_h hours" +%Y-%m-%dT%H:%MZ)
   shutdown_at=$(date -u -v+"${deadline_h}"H +%H%M 2>/dev/null || date -u -d "+$deadline_h hours" +%H%M)
-  az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE expires="$expires" -o none
+  local t
+  for t in 1 2 3 4; do  # retried: this Mac's connection to Azure can drop
+    az group create -n "$group" -l "$LOCATION" --tags purpose=$PURPOSE expires="$expires" -o none && break
+    [ "$t" -lt 4 ] || die "could not create $group"; sleep 15
+  done
   local size made=
   for size in $SIZES; do
     say "creating $group ($size, $LOCATION)"
@@ -103,10 +107,18 @@ up() {
     else
       set -- --admin-username "$USER_NAME" --admin-password "@$STATE/password"
     fi
-    if az vm create -g "$group" -n "$VM" --image "$image" --size "$size" "$@" --public-ip-sku Standard --nsg-rule NONE \
-        --os-disk-size-gb 128 --storage-sku Premium_LRS -o none 2>"$STATE/create.err"; then
-      made=$size; break
-    fi
+    local try
+    for try in 1 2 3; do
+      if az vm create -g "$group" -n "$VM" --image "$image" --size "$size" "$@" --public-ip-sku Standard --nsg-rule NONE \
+          --os-disk-size-gb 128 --storage-sku Premium_LRS -o none 2>"$STATE/create.err"; then
+        made=$size; break
+      fi
+      # This Mac's connection to Azure dropped (not the size): the same size again
+      grep -q 'Connection aborted\|Connection reset\|ConnectionError\|timed out\|RemoteDisconnected' "$STATE/create.err" || break
+      say "the connection to Azure dropped; trying $size again"; sleep 20
+      az vm delete -g "$group" -n "$VM" --yes -o none 2>/dev/null || true
+    done
+    [ -z "$made" ] || break
     grep -o 'SkuNotAvailable[^.]*\|QuotaExceeded[^.]*\|OperationNotAllowed[^.]*' "$STATE/create.err" | head -n 1 >&2 || tail -n 3 "$STATE/create.err" >&2
     az vm delete -g "$group" -n "$VM" --yes -o none 2>/dev/null || true
   done
