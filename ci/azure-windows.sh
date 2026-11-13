@@ -8,7 +8,16 @@
 #   ci/azure-windows.sh admit <state-dir>  add the /24 this machine leaves from now to the SSH rule (its address can
 #                                          change during a run; ci/run.sh calls it when the machine stops answering)
 #   ci/azure-windows.sh sweep [hours]      delete every throwaway group left behind (tag purpose=theodore-plugin-ci
-#                                          and a theodore-plugin-ci-<UTC> name); with hours, only those older
+#                                          and a theodore-plugin-ci-<UTC> name); with hours, only those older; and
+#                                          clear ci/out/azure-windows when the group it names no longer exists
+#   ci/azure-windows.sh capture <state-dir>  the machine (deallocated) becomes the next version of the prepared image;
+#                                          older versions are deleted once it exists (one image is kept)
+#   ci/azure-windows.sh images             the prepared image's versions
+#
+# The prepared image: a specialized copy of a test machine after a run that passed (ci/run.sh with CI_AZURE_CAPTURE=1),
+# in the gallery theodorePluginImages (resource group theodore-ci-images, kept, never swept): OpenSSH and the key set
+# up, Git for Windows installed, the pinned CPython and the bundle download cache in C:\theodore-ci-cache. `up` uses
+# its newest version when there is one (CI_AZURE_IMAGE overrides; CI_AZURE_IMAGE=marketplace forces the stock image).
 #
 # A deadline that does not need this Mac: the VM gets Azure's own auto-shutdown at CI_AZURE_DEADLINE_HOURS (default 4)
 # after it is made, which deallocates it (no compute billed) even if the run that made it is gone, and every
@@ -17,7 +26,7 @@
 # Needs the Azure CLI signed in (az login) and an SSH key pair (CI_AZURE_KEY, default ~/.ssh/theodore_ci). What it
 # makes, all in a new resource group theodore-plugin-ci-<UTC time> in CI_AZURE_LOCATION (default eastus2):
 #   one VM, Windows Server 2022 Datacenter (gen2), the first size of CI_AZURE_SIZE (space-separated) that Azure has
-#   capacity for (default Standard_D4s_v3, then other 4-vCPU sizes), its disk, NIC, public IP and a network security
+#   capacity for (default Standard_D8s_v3, then other 8- and 4-vCPU sizes), its disk, NIC, public IP and a network security
 #   group that admits SSH only from the /24 networks this machine leaves from (probed a dozen times: a connection with
 #   two uplinks alternates; CI_AZURE_SSH_FROM overrides). OpenSSH server is enabled through the VM agent
 #   (az vm run-command) and trusts the one public key.
@@ -30,11 +39,18 @@ die() { say "$*"; exit 1; }
 
 ACTION=${1:-}
 STATE=${2:-}
-[ -n "$ACTION" ] && { [ -n "$STATE" ] || [ "$ACTION" = sweep ]; } || { sed -n '2,11p' "$0"; exit 64; }
+case "$ACTION" in sweep | images) ;; *) [ -n "$ACTION" ] && [ -n "$STATE" ] || { sed -n '2,20p' "$0"; exit 64; } ;; esac
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 LOCATION=${CI_AZURE_LOCATION:-eastus2}
 # Tried in order until Azure has capacity for one (a size can be "not available" in a region for hours).
-SIZES=${CI_AZURE_SIZE:-Standard_D4s_v3 Standard_F4s_v2 Standard_D4as_v4 Standard_D4s_v4}
-IMAGE=${CI_AZURE_IMAGE:-MicrosoftWindowsServer:WindowsServer:2022-datacenter-g2:latest}
+# 8 vCPU first (the suites run side by side, five processes); a 4-vCPU size when the region's quota (10 vCPU for this
+# subscription, shared with the engine's and other test machines) or capacity has no room for it.
+SIZES=${CI_AZURE_SIZE:-Standard_D8s_v3 Standard_D8s_v4 Standard_D8as_v4 Standard_D4s_v3 Standard_F4s_v2 Standard_D4as_v4 Standard_D4s_v4}
+MARKETPLACE=MicrosoftWindowsServer:WindowsServer:2022-datacenter-g2:latest
+IMAGE=${CI_AZURE_IMAGE:-}
+IMG_GROUP=${CI_AZURE_IMAGE_GROUP:-theodore-ci-images}
+GALLERY=${CI_AZURE_GALLERY:-theodorePluginImages}
+IMG_DEF=${CI_AZURE_IMAGE_DEF:-win2022-plugin-ci}
 KEY=${CI_AZURE_KEY:-$HOME/.ssh/theodore_ci}
 PREFIX=theodore-plugin-ci
 PURPOSE=theodore-plugin-ci
@@ -46,7 +62,19 @@ up() {
   az account show >/dev/null 2>&1 || die "az is not signed in (az login)"
   [ -f "$KEY" ] && [ -f "$KEY.pub" ] || die "no SSH key pair at $KEY"
   mkdir -p "$STATE"; chmod 700 "$STATE"
-  [ ! -f "$STATE/group" ] || die "$STATE already names a machine ($(cat "$STATE/group")); run down first"
+  if [ -f "$STATE/group" ]; then
+    # Left by a run whose group was deleted since (by sweep or by hand): nothing to keep.
+    if [ "$(az group exists -n "$(cat "$STATE/group")" -o tsv 2>/dev/null)" = false ]; then
+      say "clearing $STATE: its group $(cat "$STATE/group") no longer exists"; rm -rf "${STATE:?}"; mkdir -p "$STATE"; chmod 700 "$STATE"
+    else
+      die "$STATE already names a machine ($(cat "$STATE/group")); run down first"
+    fi
+  fi
+  local image=$IMAGE specialized=
+  [ -n "$image" ] || image=$(latest_image)
+  [ -n "$image" ] && [ "$image" != marketplace ] || image=$MARKETPLACE
+  case "$image" in */galleries/*) specialized=1 ;; esac
+  say "image: ${image##*/galleries/}"
   local group; group="$PREFIX-$(date -u +%Y%m%d%H%M%S)"
   echo "$group" > "$STATE/group"
   # Who may connect: CI_AZURE_SSH_FROM (space-separated prefixes), else every /24 this machine was seen leaving
@@ -62,7 +90,7 @@ up() {
   [ -n "${from// /}" ] || die "cannot read this machine's public address"
   say "SSH admitted from: $from"
   # 24 characters from the system's random source, with the four classes Windows asks for
-  ( umask 077; printf 'Aa1-%s' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)" > "$STATE/password" )
+  [ -n "$specialized" ] || ( umask 077; printf 'Aa1-%s' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)" > "$STATE/password" )
   local deadline_h=${CI_AZURE_DEADLINE_HOURS:-4} expires shutdown_at
   expires=$(date -u -v+"${deadline_h}"H +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "+$deadline_h hours" +%Y-%m-%dT%H:%MZ)
   shutdown_at=$(date -u -v+"${deadline_h}"H +%H%M 2>/dev/null || date -u -d "+$deadline_h hours" +%H%M)
@@ -70,9 +98,13 @@ up() {
   local size made=
   for size in $SIZES; do
     say "creating $group ($size, $LOCATION)"
-    if az vm create -g "$group" -n "$VM" --image "$IMAGE" --size "$size" --admin-username "$USER_NAME" \
-        --admin-password "@$STATE/password" --public-ip-sku Standard --nsg-rule NONE --os-disk-size-gb 128 \
-        --storage-sku Premium_LRS -o none 2>"$STATE/create.err"; then
+    if [ -n "$specialized" ]; then
+      set -- --specialized $(image_security "$image")
+    else
+      set -- --admin-username "$USER_NAME" --admin-password "@$STATE/password"
+    fi
+    if az vm create -g "$group" -n "$VM" --image "$image" --size "$size" "$@" --public-ip-sku Standard --nsg-rule NONE \
+        --os-disk-size-gb 128 --storage-sku Premium_LRS -o none 2>"$STATE/create.err"; then
       made=$size; break
     fi
     grep -o 'SkuNotAvailable[^.]*\|QuotaExceeded[^.]*\|OperationNotAllowed[^.]*' "$STATE/create.err" | head -n 1 >&2 || tail -n 3 "$STATE/create.err" >&2
@@ -98,9 +130,11 @@ icacls C:\\ProgramData\\ssh\\administrators_authorized_keys /inheritance:r /gran
 if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name sshd -DisplayName sshd -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }
 'sshd ready'
 PS
-  say "enabling OpenSSH server"
-  az vm run-command invoke -g "$group" -n "$VM" --command-id RunPowerShellScript --scripts "@$STATE/sshd.ps1" \
-    --query 'value[0].message' -o tsv | tail -n 1 >&2
+  if [ -z "$specialized" ]; then
+    say "enabling OpenSSH server"
+    az vm run-command invoke -g "$group" -n "$VM" --command-id RunPowerShellScript --scripts "@$STATE/sshd.ps1" \
+      --query 'value[0].message' -o tsv | tail -n 1 >&2
+  fi
   local addr; addr=$(az vm show -d -g "$group" -n "$VM" --query publicIps -o tsv)
   echo "$USER_NAME@$addr" > "$STATE/host"
   : > "$STATE/known_hosts"
@@ -147,6 +181,44 @@ admit() {
   say "SSH now also admitted from $net"
 }
 
+# --- the prepared image (kept: resource group theodore-ci-images) ------------------------------------------------------
+latest_image() { # the newest version of the image definition, as an id; empty when there is none
+  az sig image-version list -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" --query "sort_by([?provisioningState=='Succeeded'], &name)[-1].id" -o tsv 2>/dev/null || true
+}
+image_security() { # the --security-type the image's definition asks for (Trusted Launch), if any
+  local def=${1%/versions/*} t
+  t=$(az sig image-definition show --ids "$def" --query "features[?name=='SecurityType'].value | [0]" -o tsv 2>/dev/null) || return 0
+  case "$t" in TrustedLaunch*) echo "--security-type TrustedLaunch" ;; esac
+}
+
+capture() {
+  [ -f "$STATE/group" ] || die "no machine in $STATE"
+  local group vmid sec version t0 old; group=$(cat "$STATE/group"); t0=$(date +%s)
+  [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || die "refusing to capture '$group': not a group this script made"
+  vmid=$(az vm show -g "$group" -n "$VM" --query id -o tsv)
+  sec=$(az vm show -g "$group" -n "$VM" --query securityProfile.securityType -o tsv 2>/dev/null)
+  az group show -n "$IMG_GROUP" -o none 2>/dev/null || az group create -n "$IMG_GROUP" -l "$LOCATION" --tags purpose=theodore-ci-image -o none
+  az sig show -g "$IMG_GROUP" -r "$GALLERY" -o none 2>/dev/null || az sig create -g "$IMG_GROUP" -r "$GALLERY" -l "$LOCATION" -o none
+  if ! az sig image-definition show -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" -o none 2>/dev/null; then
+    az sig image-definition create -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" --publisher theodore --offer ci --sku "$IMG_DEF" \
+      --os-type Windows --os-state Specialized --hyper-v-generation V2 ${sec:+--features SecurityType=$sec} -l "$LOCATION" -o none
+  fi
+  say "capturing $group into $GALLERY/$IMG_DEF"
+  az vm deallocate -g "$group" -n "$VM" -o none
+  version="1.$(date -u +%Y%m%d).$((10#$(date -u +%H%M)))"
+  az sig image-version create -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" -e "$version" --virtual-machine "$vmid" -l "$LOCATION" \
+    --target-regions "$LOCATION" --replica-count 1 --storage-account-type Standard_LRS -o none || die "the image version could not be made"
+  for old in $(az sig image-version list -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" --query "[?name!='$version'].name" -o tsv); do
+    az sig image-version delete -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" -e "$old" -o none && say "deleted the older image version $old"
+  done
+  say "image $GALLERY/$IMG_DEF/$version made in $(( $(date +%s) - t0 )) s"
+}
+
+images() {
+  az sig image-version list -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" \
+    --query "[].{version:name, state:provisioningState, regions:join(',', publishingProfile.targetRegions[].name)}" -o table 2>/dev/null
+}
+
 sweep() {
   local group found=0 hours=${STATE:-} made age
   [ -z "$hours" ] || [[ "$hours" =~ ^[0-9]+$ ]] || die "sweep takes a number of hours"
@@ -160,6 +232,10 @@ sweep() {
     say "deleting leftover $group"; az group delete -n "$group" --yes -o none; found=$((found + 1))
   done
   say "sweep: $found group(s) deleted"
+  local dir="$ROOT/ci/out/azure-windows"
+  if [ -f "$dir/group" ] && [ "$(az group exists -n "$(cat "$dir/group")" -o tsv 2>/dev/null)" = false ]; then
+    say "clearing $dir: its group $(cat "$dir/group") no longer exists"; rm -rf "${dir:?}"
+  fi
 }
 
 # One compound command, read whole before it runs: editing this file during a run cannot shift what runs next.
@@ -169,7 +245,9 @@ sweep() {
     down) down ;;
     admit) admit ;;
     sweep) sweep ;;
-    *) sed -n '2,11p' "$0"; exit 64 ;;
+    capture) capture ;;
+    images) images ;;
+    *) sed -n '2,20p' "$0"; exit 64 ;;
   esac
   exit $?
 }

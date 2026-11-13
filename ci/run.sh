@@ -178,13 +178,24 @@ run_windows() {
   SSHO="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=60 ${KNOWN:+-o UserKnownHostsFile=$KNOWN} ${KEY:+-i $KEY}"
   # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
   retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
-  if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\theodore-ci\repo | Out-Null"' > "$dir/remote.log" 2>&1 &&
+  # On a throwaway Azure machine the pinned CPython and the bundle cache live in C:\theodore-ci-cache, which outlives
+  # the run (a prepared image keeps it). The suites run side by side unless CI_WINDOWS_SERIAL=1.
+  keep=; [ -z "$AZURE" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
+  mode=; [ "${CI_WINDOWS_SERIAL:-}" != 1 ] || mode=serial
+  # The poll's limit: the last run that passed here, plus half and 15 min (CI_WINDOWS_TIMEOUT overrides; 3 h without one).
+  limit=${CI_WINDOWS_TIMEOUT:-}
+  if [ -z "$limit" ]; then
+    last=$(cat "$LOGS/history/plugin-windows.seconds" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) limit=10800 ;; *) limit=$(( last * 3 / 2 + 900 )); [ "$limit" -ge 1800 ] || limit=1800 ;; esac
+  fi
+  say "windows-x64: poll limit $limit s"
+  if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\theodore-ci\\repo | Out-Null$keep\"" > "$dir/remote.log" 2>&1 &&
       retry scp -q $SSHO -o ConnectTimeout=20 "$dir/repo.tar" "$HOST:C:/theodore-ci/repo.tar" >> "$dir/remote.log" 2>&1 &&
-      retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "(if not exist C:\\theodore-ci\\started C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo) & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-start.ps1 $pins" >> "$dir/remote.log" 2>&1; then
-    # windows-run.ps1 writes runtime.result last. A failed poll (a dropped connection) is only retried. 3 h at most.
+      retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "(if not exist C:\\theodore-ci\\started C:\\Windows\\System32\\tar.exe -xf C:\\theodore-ci\\repo.tar -C C:\\theodore-ci\\repo) & powershell -NoProfile -ExecutionPolicy Bypass -File C:\\theodore-ci\\repo\\ci\\windows-start.ps1 $pins $mode" >> "$dir/remote.log" 2>&1; then
+    # windows-run.ps1 writes runtime.result last. A failed poll (a dropped connection) is only retried, up to the limit.
     wstart=$(date +%s)
     until ssh $SSHO -o ConnectTimeout=20 "$HOST" 'if exist C:\theodore-ci\out\runtime.result echo done' 2>/dev/null | grep -q done; do
-      [ $(( $(date +%s) - wstart )) -lt 10800 ] || { say "windows-x64: no result after 3 h"; break; }
+      [ $(( $(date +%s) - wstart )) -lt "$limit" ] || { say "windows-x64: no result after $limit s"; break; }
       # Not answering: on Azure, this Mac may have changed address; admit the new one (the job runs on regardless).
       ssh $SSHO -o ConnectTimeout=20 "$HOST" 'echo up' >/dev/null 2>&1 || { [ -z "${ADMIT:-}" ] || $ADMIT >> "$dir/remote.log" 2>&1; }
       sleep 30
@@ -192,6 +203,10 @@ run_windows() {
   fi
   retry scp -q -r $SSHO -o ConnectTimeout=20 "$HOST:C:/theodore-ci/out/*" "$dir/" 2>>"$dir/remote.log"
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(tr -d '\r' < "$dir/$job.result")"; done
+  [ -z "${wstart:-}" ] || echo "$(( $(date +%s) - wstart ))" > "$dir/job.seconds"
+  if [ "$(tr -d '\r' < "$dir/shim.result")" = pass ] && [ "$(tr -d '\r' < "$dir/runtime.result")" = pass ] && [ -n "${wstart:-}" ]; then
+    mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows.seconds"
+  fi
   rm -f "$dir/repo.tar"
 }
 
@@ -199,6 +214,9 @@ run_windows() {
 run_windows_azure() {
   state="$OUT/azure-windows"; dir="$OUT/windows-x64"
   mkdir -p "$dir"
+  if [ -f "$state/group" ] && [ "$(az group exists -n "$(cat "$state/group")" -o tsv 2>/dev/null)" = false ]; then
+    say "clearing $state: its group $(cat "$state/group") no longer exists"; rm -rf "${state:?}"
+  fi
   [ ! -f "$state/group" ] || { say "$state still names a machine: ci/azure-windows.sh down $state"; result windows-x64 shim not-run; result windows-x64 runtime not-run; return; }
   # The VM is deleted on every way out: the end of this function, a failure, or a signal (the signal handler exits,
   # which runs the EXIT trap). The trap carries the paths by value.
@@ -215,6 +233,13 @@ run_windows_azure() {
     say "windows-x64: $(cat "$state/size" 2>/dev/null) ready after $(( $(date +%s) - started )) s"
     cp "$dir/azure.log" "$OUT/azure-up.log"
     run_windows
+    # CI_AZURE_CAPTURE=1: a run that passed makes this machine the next version of the prepared image.
+    if [ "${CI_AZURE_CAPTURE:-}" = 1 ]; then
+      if [ "$(tr -d '\r' < "$dir/shim.result")" = pass ] && [ "$(tr -d '\r' < "$dir/runtime.result")" = pass ]; then
+        ssh $SSHO -o ConnectTimeout=20 "$HOST" 'powershell -NoProfile -Command "Remove-Item -Recurse -Force C:\theodore-ci -ErrorAction SilentlyContinue"' >> "$dir/remote.log" 2>&1
+        bash "$ROOT/ci/azure-windows.sh" capture "$state" >> "$OUT/azure-up.log" 2>&1 && say "windows-x64: image captured" || say "windows-x64: image capture failed"
+      else say "windows-x64: not every job passed: no image captured"; fi
+    fi
     cat "$OUT/azure-up.log" "$dir/azure.log" > "$OUT/azure.tmp" 2>/dev/null; mv "$OUT/azure.tmp" "$dir/azure.log"; rm -f "$OUT/azure-up.log"
   else
     say "windows-x64: the Azure machine could not be made (ci/out/windows-x64/azure.log)"
