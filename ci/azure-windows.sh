@@ -57,6 +57,17 @@ PURPOSE=theodore-plugin-ci
 USER_NAME=theoci
 VM=theo-plugin-ci
 
+# az, retried when this Mac's connection to Azure drops (connection reset, timeout); any other failure is returned
+azr() {
+  local n errf; errf=$(mktemp)
+  for n in 1 2 3 4 5; do
+    if az "$@" 2>"$errf"; then rm -f "$errf"; return 0; fi
+    grep -q 'Connection aborted\|Connection reset\|ConnectionError\|RemoteDisconnected\|timed out\|Max retries' "$errf" || break
+    say "the connection to Azure dropped (az $1 $2); again in 15 s"; sleep 15
+  done
+  grep -v '^WARNING' "$errf" >&2; rm -f "$errf"; return 1
+}
+
 up() {
   command -v az >/dev/null || die "the Azure CLI (az) is not installed"
   az account show >/dev/null 2>&1 || die "az is not signed in (az login)"
@@ -126,9 +137,9 @@ up() {
   echo "$made" > "$STATE/size"
   rm -f "$STATE/password"
   # The deadline Azure keeps by itself: deallocated at that UTC time even if nothing here is left to delete it.
-  az vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" -o none || die "could not set the VM's auto-shutdown deadline"
+  azr vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" -o none || die "could not set the VM's auto-shutdown deadline"
   say "auto-shutdown (deallocate) at $shutdown_at UTC"
-  az network nsg rule create -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner --priority 100 --direction Inbound \
+  azr network nsg rule create -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner --priority 100 --direction Inbound \
     --access Allow --protocol Tcp --source-address-prefixes $from --destination-port-ranges 22 -o none
   local pub; pub=$(cut -d' ' -f1-2 "$KEY.pub")
   [[ "$pub" =~ ^ssh-(ed25519|rsa)\ [A-Za-z0-9+/=]+$ ]] || die "$KEY.pub is not an ssh-ed25519 or ssh-rsa public key"
@@ -144,10 +155,10 @@ if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) { New-N
 PS
   if [ -z "$specialized" ]; then
     say "enabling OpenSSH server"
-    az vm run-command invoke -g "$group" -n "$VM" --command-id RunPowerShellScript --scripts "@$STATE/sshd.ps1" \
+    azr vm run-command invoke -g "$group" -n "$VM" --command-id RunPowerShellScript --scripts "@$STATE/sshd.ps1" \
       --query 'value[0].message' -o tsv | tail -n 1 >&2
   fi
-  local addr; addr=$(az vm show -d -g "$group" -n "$VM" --query publicIps -o tsv)
+  local addr; addr=$(azr vm show -d -g "$group" -n "$VM" --query publicIps -o tsv)
   echo "$USER_NAME@$addr" > "$STATE/host"
   : > "$STATE/known_hosts"
   local i
@@ -185,10 +196,10 @@ admit() {
   ip=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null) || { say "cannot read this machine's public address"; return 1; }
   [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { say "cannot read this machine's public address"; return 1; }
   net="${ip%.*}.0/24"
-  cur=$(az network nsg rule show -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
+  cur=$(azr network nsg rule show -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
     --query "join(' ', [sourceAddressPrefix || '', join(' ', sourceAddressPrefixes)])" -o tsv)
   case " $cur " in *" $net "*) return 0 ;; esac
-  az network nsg rule update -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
+  azr network nsg rule update -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner \
     --source-address-prefixes $(printf '%s\n' $cur "$net" | sort -u) -o none
   say "SSH now also admitted from $net"
 }
@@ -216,9 +227,9 @@ capture() {
       --os-type Windows --os-state Specialized --hyper-v-generation V2 ${sec:+--features SecurityType=$sec} -l "$LOCATION" -o none
   fi
   say "capturing $group into $GALLERY/$IMG_DEF"
-  az vm deallocate -g "$group" -n "$VM" -o none
+  azr vm deallocate -g "$group" -n "$VM" -o none
   version="1.$(date -u +%Y%m%d).$((10#$(date -u +%H%M)))"
-  az sig image-version create -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" -e "$version" --virtual-machine "$vmid" -l "$LOCATION" \
+  azr sig image-version create -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" -e "$version" --virtual-machine "$vmid" -l "$LOCATION" \
     --target-regions "$LOCATION" --replica-count 1 --storage-account-type Standard_LRS -o none || die "the image version could not be made"
   for old in $(az sig image-version list -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" --query "[?name!='$version'].name" -o tsv); do
     az sig image-version delete -g "$IMG_GROUP" -r "$GALLERY" -i "$IMG_DEF" -e "$old" -o none && say "deleted the older image version $old"
@@ -241,7 +252,7 @@ sweep() {
       age=$(( $(date -u +%s) - $(date -u -j -f %Y%m%d%H%M%S "$made" +%s 2>/dev/null || date -u -d "${made:0:8} ${made:8:2}:${made:10:2}:${made:12:2}" +%s) ))
       [ "$age" -ge $((hours * 3600)) ] || continue
     fi
-    say "deleting leftover $group"; az group delete -n "$group" --yes -o none; found=$((found + 1))
+    say "deleting leftover $group"; azr group delete -n "$group" --yes -o none; found=$((found + 1))
   done
   say "sweep: $found group(s) deleted"
   local dir="$ROOT/ci/out/azure-windows"
