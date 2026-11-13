@@ -128,7 +128,8 @@ FETCH_ATTEMPTS = 5
 
 
 def _store(dest: Path, sha256: str) -> Path:
-    return Path(os.environ.get("THEODORE_FETCH_STORE") or dest.parent / "by-sha256") / sha256
+    # Never inside a folder that is packed whole (the licence folders are): main() sets the default to <cache>/by-sha256.
+    return Path(os.environ.get("THEODORE_FETCH_STORE") or dest.parent.parent / "by-sha256") / sha256
 
 
 def download_resuming(url: str, part: Path, attempts: int = FETCH_ATTEMPTS, timeout: float = 120.0) -> None:
@@ -333,7 +334,7 @@ def build_wheels(python: Path, runtime_root: Path, wheel_dir: Path, tags: list[s
             licences[f"licenses/python-packages/{dist}/{'/'.join(rel)}"] = path
     entries = list(licences.items())
     entries += [(f"python/{rel}", python_root / rel) for rel in added if rel.startswith(site_rel + "/")]
-    entries += [(f"licenses/python-build-standalone/{path.name}", path) for path in sorted(licence_dir.iterdir())]
+    entries += [(f"licenses/python-build-standalone/{path.name}", path) for path in sorted(licence_dir.iterdir()) if path.is_file()]
     return entries
 
 
@@ -624,7 +625,9 @@ def main() -> int:
     temporary = None if args.work else tempfile.mkdtemp(prefix="theodore-runtime-")
     work = (args.work or Path(temporary)).resolve()
     try:
-        build(args.platform, args.out.resolve(), work, (args.cache or work / "cache").resolve())
+        cache = (args.cache or work / "cache").resolve()
+        os.environ.setdefault("THEODORE_FETCH_STORE", str(cache / "by-sha256"))     # one store, outside every packed folder
+        build(args.platform, args.out.resolve(), work, cache)
     finally:
         if temporary:
             shutil.rmtree(temporary, ignore_errors=True)

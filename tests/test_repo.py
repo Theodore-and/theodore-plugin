@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -765,6 +766,15 @@ class Downloads(unittest.TestCase):
             self.assertEqual(state["calls"], 3)
             self.assertEqual(other.read_bytes(), payload)
 
+    def test_the_store_is_never_inside_a_folder_that_is_packed_whole(self):
+        # 2026-11-13: the store defaulted to <dest folder>/by-sha256, so the licence folder (packed whole) held a
+        # folder and the Windows and macOS bundle builds failed. The default is now outside the destination folder.
+        import build_bundle
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("THEODORE_FETCH_STORE", None)
+            dest = Path("/c/cache/python-build-standalone-x-licences/LICENSE.txt")
+            self.assertEqual(build_bundle._store(dest, "ab"), Path("/c/cache/by-sha256/ab"))
+
     def test_five_failures_stop_with_the_url_named(self):
         from unittest import mock
         import build_bundle
@@ -829,6 +839,18 @@ class StampFromParts(unittest.TestCase):
         self.assertIn(f"checks green at {self.sha}", out.stdout)
         self.assertTrue((self.logs / "green" / "plugin" / self.sha).read_text().startswith(f"checks green at {self.sha}"))
         self.assertTrue((self.logs / "green" / "plugin-parts" / self.sha / "macos-x64-runtime").is_file(), "each record keeps its log")
+
+    def test_modules_that_failed_to_import_for_want_of_a_bundle_are_an_outside_failure(self):
+        for part in self.PARTS:
+            self.result(part, "pass")
+        self.result("windows-x64/shim", "fail", "ERROR: test_client (unittest.loader._FailedTest.test_client)\n"
+                    '  File "C:\\theodore-ci\\repo\\tests\\support.py", line 119, in <module>\n'
+                    '    _manifest = json.loads(next(Path(REAL_BUNDLE).glob("*.manifest.json")).read_text(encoding="utf-8"))\n'
+                    "StopIteration\nFAILED (errors=7, skipped=6)\n")
+        out = self.stamp()
+        self.assertIn("no stamp yet", out.stdout)
+        self.result("windows-x64/shim", "pass")                          # the rerun once the bundle builds
+        self.assertIn(f"checks green at {self.sha}", self.stamp().stdout)
 
     def test_a_test_failure_blocks_the_stamp_at_that_commit(self):
         for part in self.PARTS:
