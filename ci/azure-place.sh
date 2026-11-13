@@ -44,7 +44,10 @@ az_place_candidates() { # cores
     for size in $(az_place_sizes "$cores"); do
       family=$(az_place_family "$size")
       free_family=$(printf '%s\n' "$usage" | awk -F'\t' -v f="$family" '$1==f{print $3-$2}')
-      [ -n "$free_family" ] && [ -n "$free_total" ] || continue
+      [ -n "$free_total" ] || continue
+      # a family the usage list does not report (newer sizes): only the region's total decides; az vm create still
+      # refuses it if the family has no room, and the next pair is tried
+      [ -n "$free_family" ] || free_family=$free_total
       if [ "$free_family" -ge "$cores" ] && [ "$free_total" -ge "$cores" ]; then echo "$region $size"; fi
     done
   done
