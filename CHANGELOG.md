@@ -1,5 +1,24 @@
 # Changes
 
+## 0.3.6
+
+- Uninstall stops Theodore's own running processes first: every background job, the launcher's bootstrap and each
+  tool server, each found by the file Theodore wrote for it (never by name), with the processes they started. On
+  Windows a cleanup removes the folder in one run, retrying for up to two minutes while Windows releases the last
+  files, outside the console's job so a closed console or SSH session does not stop it; the status is OK and never
+  asks to run the launcher again (it was already deleted). Before, the background LibreOffice download's python.exe
+  kept the runtime, the folder stayed, and the status asked to run a command that no longer existed.
+- Uninstall removes the engine's LibreOffice profile, its warm copy and lock, and its lock files from the temporary
+  folder (only by the engine's names).
+- "Theodore updated itself" is said once per update, also when two sessions start together, and one plugin update
+  runs per release.
+- The routing block (version 2) adds one clause naming Theodore's own uninstall command with the launcher's quoted
+  path: asked to uninstall Theodore, Claude Code on macOS and Windows used to remove the plugin by hand and leave
+  Theodore's folder, sign-in and block. Existing blocks are updated in place.
+- `guide pptx <section>`: a section the service serves to this account, held in memory like deck-design's sections;
+  a section it does not serve is a clean USAGE (lane STUDIO, PR #7).
+- The runner's per-target record copies whatever logs the target wrote (PR #12).
+
 ## 0.3.5
 
 - Uninstall takes Theodore out of Claude Code and Codex also when `claude` or `codex` is not on PATH (Claude Code's
