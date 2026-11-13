@@ -78,8 +78,19 @@ Outside that folder:
   (automatic plugin updates for the Theodore marketplace; permission to run `~/.theodore/bin/theodore`
   without a prompt).
 
-Nothing is installed system-wide and nothing runs in the background after setup has finished. There are no
-hooks: Theodore runs only when your assistant calls it.
+Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
+download or an update in the background, which ends when it is done. There are no hooks.
+
+## Updates
+
+Theodore keeps itself up to date with nothing for you to do. The first Theodore command of each assistant session
+checks once; a newer client, engine or asset pack is fetched and used from the next deck (a deck in progress keeps the
+engine that started it). When a newer plugin is published, Theodore updates the plugin's files in Claude Code and
+Codex through their own plugin command, in the background; the new files are used from the assistant's next session.
+The assistant tells you once, in one line, what was updated. A claude.ai account's plugin can only be updated in
+claude.ai (Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > Check for updates); the skill
+says so once per release. If an update cannot be fetched or applied, the current version keeps working and
+`theodore doctor` says what is pending and why. `theodore uninstall` stops all of it.
 
 ## What Theodore sends and does not send
 

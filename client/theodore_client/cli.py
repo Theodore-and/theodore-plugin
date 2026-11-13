@@ -69,6 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--unpin", action="store_true")
     mode.add_argument("--reset-state", action="store_true")
     mode.add_argument("--engine-job", action="store_true")
+    mode.add_argument("--plugin-job", action="store_true")
     mode.add_argument("--client-job", nargs="+")         # version sha256 runtime-id [issued]
     rp = sub.add_parser("report", add_help=False)
     rp.add_argument("--kind", choices=("bug", "feedback"), required=True)
@@ -149,6 +150,8 @@ def _dispatch(argv: list[str]) -> int:
             return commands.engine_update_job()
         if args.client_job:
             return commands.client_update_job(*args.client_job)
+        if args.plugin_job:
+            return commands.plugin_update_job()
         action = "check" if args.check else "rollback" if args.rollback else "pin" if args.pin else "unpin" if args.unpin \
             else "reset" if args.reset_state \
             else "channel" if args.channel else "apply"

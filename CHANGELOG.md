@@ -33,9 +33,15 @@
   setup job; a failure that passes by itself is retried a minute later at the earliest, one that needs the user is
   reported with the command that tries again. `doctor` has a "still missing" line naming each missing part and what
   will fetch it.
-- An assistant that runs older plugin files than the current release (claude.ai keeps the copy a user added until
-  they press Check for updates) is told so in one line at skill load and guide, at most once a day, and by `doctor`,
-  with that assistant's update action.
+- Updates need no user action. The first Theodore command of each assistant session checks the channel (one request;
+  the six-hour rule stays the floor within a session), so a release reaches a user at their next session; nothing is
+  applied in the middle of a build. When a newer plugin is published, a background job updates the plugin's files
+  through each assistant's own command (Claude Code: `claude plugin marketplace update theodore`, then
+  `claude plugin update theodore@theodore`; Codex: Theodore's own copy refreshed, then `codex plugin add`), used
+  from the next session. What updated itself (client, engine, asset packs, plugin files, with the release's note when
+  it has one) is said once, in one line, at the next skill load or guide. Where an assistant cannot be updated from
+  outside (claude.ai's account-level plugin) or its command failed, one line with that assistant's action, once per
+  release; `doctor` says what is pending and why. install.md, README and SECURITY say so.
 - Claude Code starts the plugin's tool server by the launcher's path instead of `sh <path>`: on Windows there is no
   `sh` on PATH, so every Windows user saw Theodore's server as failed; the path resolves to `theodore.cmd` there and
   the server connects (Windows Server 2022, Claude Code; macOS too).

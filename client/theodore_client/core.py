@@ -252,6 +252,15 @@ def host_executable(name: str) -> str | None:
     return None
 
 
+def session_id() -> str:
+    """The assistant session this command runs in, when the assistant says (Claude Code, Codex); else empty."""
+    for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value[:128]
+    return ""
+
+
 # Hosts that run Theodore on a machine of the assistant's own (a cloud sandbox), never on the user's computer.
 CLOUD_HOSTS = ("claude-web", "chatgpt")
 

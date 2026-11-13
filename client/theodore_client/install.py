@@ -638,8 +638,11 @@ def activate_checked(version: str, issued: float, why: str) -> bool:
         if forbidden(version):
             core.log(f"{why}: engine {version} not activated: withdrawn or below the channel's minimum")
             return False
+        before = current_engine()
         activate_engine(version)
-        return True
+    if before and before != version:
+        announce("engine", version, update_state().get("latest_notes"))
+    return True
 
 
 def save_restrictions(manifest: dict) -> None:
@@ -674,12 +677,58 @@ def forbidden(version: str | None, rules: dict | None = None) -> bool:
                               bool(rules.get("min_version") and core.version_key(version) < core.version_key(str(rules["min_version"]))))
 
 
-# The plugin's files live in each assistant's own plugin folder and are updated by the assistant, never by Theodore:
-# claude.ai keeps the copy a user added until they ask it to check for updates, so an old launcher there kept giving
-# old messages. The current plugin version (the signed plugin/latest.json the installer reads) is noted at each update
-# check, and the skill load and guide say once a day, in one line, when the calling plugin is older, with that host's
-# update action; doctor says it every time.
-PLUGIN_NOTICE_INTERVAL_S = 24 * 3600
+# How a release reaches a user without any action of theirs:
+# - Guidance is fetched on use. The client, the engine and the packs update themselves: the first Theodore command of
+#   each assistant session checks the channel (check_updates), and what it brings applies between builds.
+# - The plugin's own files (the skill stubs, the launcher, the tool-server configuration) live in each assistant's plugin
+#   folder. When the signed plugin/latest.json names a newer plugin than an assistant runs, a background job updates
+#   them through that assistant's own command (Claude Code: `claude plugin marketplace update theodore`, then
+#   `claude plugin update theodore@theodore`; Codex: Theodore's own copy refreshed, then `codex plugin add`), found
+#   with core.host_executable. It takes effect at the assistant's next session. The installer says Theodore keeps
+#   itself up to date; the user turned that on by installing it, and uninstalling is one command.
+# - What changed is said once, in one line, at the next skill load or guide (announce / take_announcement).
+# - Where an assistant cannot be updated from outside (claude.ai's account-level plugin), or its command failed (a
+#   managed setting forbids it), the skill load says once per release, in one line, what the user can do there.
+# - Nothing is applied in the middle of a build, and a failure never blocks work: the current version keeps working
+#   and doctor says what is pending and why.
+
+
+def _first_line(text) -> str | None:
+    line = str(text or "").strip().splitlines()[0].strip() if str(text or "").strip() else ""
+    return line[:200] or None
+
+
+def announce(kind: str, version: str, note: str | None = None) -> None:
+    """Note an update to say once at the next skill load or guide."""
+    try:
+        state = update_state()
+        pending = dict(state.get("announce") or {})
+        pending[kind] = {"version": version, **({"note": note} if note else {})}
+        save_update_state(announce=pending)
+    except Exception as exc:  # an announcement never fails an update
+        core.log(f"announce: {exc.__class__.__name__}")
+
+
+def take_announcement() -> str | None:
+    """The one line saying what updated itself since the last one, then forgotten."""
+    try:
+        pending = update_state().get("announce") or {}
+        if not pending:
+            return None
+        save_update_state(announce={})
+        names = {"client": "client", "engine": "engine", "packs": "asset pack", "plugin": "plugin files"}
+        parts = []
+        for kind in ("plugin", "client", "engine", "packs"):
+            item = pending.get(kind)
+            if item:
+                parts.append(f"{names[kind]} {item['version']}" + (f" ({item['note']})" if item.get("note") else "")
+                             + ((", now in use" if core.plugin_version() == item["version"] else ", used from your next session")
+                                if kind == "plugin" else ""))
+        return (f"THEODORE NOTICE: Theodore updated itself: {'; '.join(parts)}. "
+                f"Tell the user once, in one line; it does not stop this task.")
+    except Exception as exc:
+        core.log(f"announcement: {exc.__class__.__name__}")
+        return None
 
 
 def refresh_plugin_latest(timeout: float) -> None:
@@ -697,6 +746,32 @@ def refresh_plugin_latest(timeout: float) -> None:
         core.log(f"plugin version check: {exc.__class__.__name__}")
 
 
+def _newer(a: str, b: str) -> bool:
+    return bool(a) and core._SEMVER.match(a) is not None and (not b or core.version_key(a) > core.version_key(b))
+
+
+def start_plugin_update() -> None:
+    """Start the background plugin update when the published plugin is newer than this computer's and it was not tried
+    for that version in this session (a failed try is tried again next session). Never fails the caller."""
+    try:
+        state = update_state()
+        latest = str(state.get("plugin_latest") or "")
+        done = state.get("plugin_update") or {}
+        if not _newer(latest, core.plugin_version()):
+            return
+        if core.cloud_sandbox():          # a cloud chat's plugin is the account's: only its owner can update it there
+            return
+        session = core.session_id() or "-"
+        if done.get("version") == latest and done.get("session") == session:
+            return
+        if Job("plugin-update").alive():
+            return
+        save_update_state(plugin_update={**done, "version": latest, "session": session, "ok": False, "started": int(core.now())})
+        Job("plugin-update").spawn(["update", "--plugin-job"])
+    except Exception as exc:
+        core.log(f"plugin update: not started ({exc.__class__.__name__}: {exc})")
+
+
 def plugin_update_action(host: str | None = None) -> str:
     host = host or core.host_name()
     if host == "claude-web":
@@ -711,18 +786,30 @@ def plugin_update_action(host: str | None = None) -> str:
 
 
 def plugin_notice(daily: bool) -> str | None:
-    """One line when the calling plugin is older than the current one; with `daily`, at most once a day per installation."""
+    """When the calling plugin is older than the current one and Theodore could not update it itself (an assistant it
+    cannot reach, like claude.ai's account-level plugin, or its command failed): one line with that assistant's action,
+    once per release (`daily` False: every time, for doctor). None when the update succeeded (it is announced instead)."""
     try:
         state = update_state()
         latest, mine = str(state.get("plugin_latest") or ""), core.plugin_version()
         if not latest or mine == "0.0.0" or core.version_key(mine) >= core.version_key(latest):
             return None
+        done = state.get("plugin_update") or {}
+        host = core.host_name()
+        reached = (done.get("hosts") or {}).get(host)
+        if done.get("version") == latest and reached == "updated":
+            return None                                   # the new files are there: they load at the next session
+        if done.get("version") == latest and Job("plugin-update").alive():
+            return None                                   # being updated now
+        if host not in core.CLOUD_HOSTS and reached is None and done.get("version") != latest:
+            return None                                   # not tried yet: the update runs first
         if daily:
-            if core.now() - float(state.get("plugin_notice_at") or 0) < PLUGIN_NOTICE_INTERVAL_S:
+            if state.get("plugin_notice_version") == latest:
                 return None
-            save_update_state(plugin_notice_at=int(core.now()))
-        return (f"THEODORE NOTICE: Theodore's plugin files on this assistant ({mine}) are older than the current version ({latest}); "
-                f"{plugin_update_action()}. Tell the user once; it does not stop this task.")
+            save_update_state(plugin_notice_version=latest)
+        why = f" ({reached})" if reached and reached != "updated" else ""
+        return (f"THEODORE NOTICE: Theodore's plugin files on this assistant ({mine}) are older than the current version ({latest}) "
+                f"and could not be updated automatically{why}; {plugin_update_action()}. Tell the user once; it does not stop this task.")
     except Exception as exc:  # a notice is never the reason a skill fails to load
         core.log(f"plugin notice: {exc.__class__.__name__}")
         return None
@@ -780,7 +867,13 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
                 save_update_state(pending=None)
         state = update_state()
     last = max(float(state.get("last_check") or 0), float(state.get("last_attempt") or 0))
-    if not force and core.now() - last < UPDATE_CHECK_INTERVAL_S:
+    # The first Theodore command of each assistant session checks (one request), so a release reaches a user at their
+    # next session; within a session the six-hour rule stays the floor for repeated checks.
+    session = core.session_id()
+    new_session = bool(session) and state.get("checked_session") != session
+    if new_session:
+        save_update_state(checked_session=session)
+    if not force and not new_session and core.now() - last < UPDATE_CHECK_INTERVAL_S:
         enforce_restrictions(current_engine())
         return None
     save_update_state(last_attempt=int(core.now()))
@@ -801,8 +894,11 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
         enforce_restrictions(current_engine())
         return None
     save_update_state(last_check=int(core.now()), latest=manifest.get("engine", {}).get("version"),
-                      guides=manifest.get("guides") or {}, tools=manifest.get("tools") or {})
+                      guides=manifest.get("guides") or {}, tools=manifest.get("tools") or {},
+                      latest_notes=_first_line((manifest.get("engine") or {}).get("notes")),
+                      client_notes=_first_line((manifest.get("client") or {}).get("notes")))
     refresh_plugin_latest(timeout)
+    start_plugin_update()
     save_restrictions(manifest)
     enforce_restrictions()          # kill switch and plugin minimum; the engine's own case is handled below
     engine = engine_artifact(manifest)
@@ -900,7 +996,10 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None, issu
         if floor.get("client") and when < float(floor.get("since") or 0) and core.version_key(version) < core.version_key(str(floor["client"])):
             core.log(f"client {version} not switched to: below the client installed at the last reset")
             return
+        previous = core.read_text(home.client / "current.txt")
         core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
+    if previous and previous != version:
+        announce("client", version, update_state().get("client_notes"))
     for child in home.client.iterdir():
         if child.is_dir() and child.name not in (version, __version__, core.read_text(home.client / "current.txt")):
             core.remove_tree(child)
@@ -1069,9 +1168,13 @@ def _save_pack(pack_id: str, **fields) -> None:
     with core.lock("packs-state", timeout=30):
         state = packs_state()
         entry = state.setdefault(pack_id, {})
+        moved = fields.get("status") == "ready" and entry.get("status") == "ready" and entry.get("version") \
+            and fields.get("version") and entry["version"] != fields["version"]
         entry.update(fields)
         entry["updated"] = int(time.time())
         core.write_json(core.home().packs / "state.json", state)
+    if moved:
+        announce("packs", f"{pack_id} {fields['version']}")
 
 
 def pack_ready(pack_id: str) -> bool:

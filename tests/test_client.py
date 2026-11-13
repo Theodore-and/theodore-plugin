@@ -2048,32 +2048,89 @@ class BackgroundResume(ClientCase):
 
 
 
-class PluginNotice(ClientCase):
-    """An assistant that keeps an old copy of the plugin (claude.ai keeps the copy a user added until they press Check
-    for updates) is told once a day, in one line at skill load and guide, and by doctor every time, with that host's
-    update action."""
+class AutoUpdate(ClientCase):
+    """A release reaches a user with no action of theirs: the first Theodore command of each assistant session checks;
+    the plugin's files are updated through the assistant's own command in the background; what changed is said once;
+    an assistant that cannot be updated from outside gets one line with its action, once per release."""
 
     def publish_plugin(self, version: str) -> None:
         doc = {"schema": "theodore-plugin-latest@1", "version": version, "archive": f"theodore-plugin-{version}.tar.gz",
                "sha256": "0" * 64, "size": 1}
         self.api.files["plugin/latest.json"] = json.dumps(self.api.signed(doc)).encode()
 
-    def test_an_older_plugin_is_named_once_a_day_with_the_hosts_update_action(self):
+    def fake_claude(self, update_rc: int = 0) -> Path:
+        bin_dir = self.box.tmp / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        log = self.box.tmp / "claude-calls.log"
+        (bin_dir / "claude").write_text(f'#!/bin/sh\necho "claude $*" >> "{log}"\ncase "$*" in\n'
+                                        '"plugin list --json") echo \'[{"id": "theodore@theodore", "version": "0.3.4"}]\';;\n'
+                                        f'"plugin update theodore@theodore") [ {update_rc} -eq 0 ] || {{ echo "Error: managed settings forbid plugin updates" >&2; exit {update_rc}; }};;\n'
+                                        'esac\nexit 0\n')
+        (bin_dir / "claude").chmod(0o755)
+        self.box.env["PATH"] = f"{bin_dir}{os.pathsep}{self.box.env['PATH']}"
+        return log
+
+    def manifest_calls(self) -> int:
+        return len([r for r in self.api.requests if "releases" in r["path"] and "manifest" in r["path"]])
+
+    def test_the_first_command_of_each_session_checks_and_a_repeat_within_the_session_does_not(self):
+        self.ready()
+        before = self.manifest_calls()
+        self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-1"})
+        self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-1"})
+        self.assertEqual(self.manifest_calls(), before + 1, "once in a session (the six-hour floor within it)")
+        self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-2"})
+        self.assertEqual(self.manifest_calls(), before + 2, "a new session checks at its first command")
+
+    def test_plugin_files_are_updated_through_claude_code_and_said_once(self):
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        env = {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}
+        self.client("skill", "pptx", env=env)
+        self.box.wait_jobs()
+        calls = log.read_text().splitlines()
+        self.assertIn("claude plugin marketplace update theodore", calls)
+        self.assertIn("claude plugin update theodore@theodore", calls)
+        out = self.client("skill", "deck-design", env=env).stdout.splitlines()
+        self.assertEqual(out[0], "THEODORE NOTICE: Theodore updated itself: plugin files 9.9.9, used from your next session. "
+                                 "Tell the user once, in one line; it does not stop this task.")
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once")
+        self.assertIn("plugin files: last update to 9.9.9: claude-code updated", self.client("doctor", env=env).stdout)
+
+    def test_a_host_that_refuses_gets_one_line_with_its_action_once_per_release_and_doctor_says_why(self):
+        self.fake_claude(update_rc=1)
+        self.ready()
+        self.publish_plugin("9.9.9")
+        env = {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}
+        self.client("skill", "pptx", env=env)
+        self.box.wait_jobs()
+        first = self.client("skill", "deck-design", env=env).stdout.splitlines()[0]
+        self.assertTrue(first.startswith("THEODORE NOTICE: Theodore's plugin files on this assistant ("), first)
+        self.assertIn("could not be updated automatically (claude plugin update failed: Error: managed settings forbid plugin updates)", first)
+        self.assertIn("claude plugin update theodore@theodore", first)
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once per release")
+        self.assertIn("plugin files: Theodore's plugin files", self.client("doctor", env=env).stdout)
+
+    def test_claude_ai_is_never_touched_and_hears_its_update_path_once(self):
+        log = self.fake_claude()
         self.ready()
         self.publish_plugin("9.9.9")
         self.client("update", "--check")
-        env = {"THEODORE_HOST": "claude-web"}
+        env = {"THEODORE_HOST": "claude-web", "THEODORE_EPHEMERAL": "1"}
         first = self.client("skill", "deck-design", env=env).stdout.splitlines()[0]
-        self.assertTrue(first.startswith("THEODORE NOTICE: Theodore's plugin files on this assistant ("), first)
-        self.assertIn("are older than the current version (9.9.9)", first)
         self.assertIn("Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > ... > Check for updates", first)
-        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once a day")
-        self.assertNotIn("THEODORE NOTICE", self.client("guide", "deck-design", env=env).stdout, "once a day, guide too")
-        doctor = self.client("doctor", env={"THEODORE_HOST": "claude-code"}).stdout
-        self.assertIn("plugin files: Theodore's plugin files on this assistant", doctor)
-        self.assertIn("claude plugin update theodore@theodore", doctor)
-        later = self.client("guide", "deck-design", env={**env, "THEODORE_TEST_CLOCK_OFFSET": str(25 * 3600)}).stdout.splitlines()
-        self.assertTrue(later[1].startswith("THEODORE NOTICE: "), later[:3])       # the next day, in guide, after its header
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout)
+        self.box.wait_jobs()
+        self.assertNotIn("plugin update", log.read_text() if log.exists() else "")
+
+    def test_a_client_and_engine_update_is_said_once(self):
+        self.ready()
+        self.api.publish_engine("2.0.0", engine_zip("2.0.0"))
+        self.assertStatus(self.client("update", "--apply"), "OK", 0)
+        out = self.client("skill", "deck-design").stdout.splitlines()
+        self.assertTrue(out[0].startswith("THEODORE NOTICE: Theodore updated itself: engine 2.0.0"), out[:2])
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design").stdout)
 
     def test_a_current_plugin_hears_nothing(self):
         self.ready()

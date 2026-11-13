@@ -82,9 +82,8 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
-    notice = install.plugin_notice(daily=True) if part == 1 else None
-    if notice:
-        out.append(notice)
+    if part == 1:
+        out += [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
     out += header_lines
     out.append(f"--- {name} ---")
     sys.stdout.write("\n".join(out) + "\n")
@@ -357,9 +356,9 @@ def skill(name: str) -> int:
     except Status as status:
         core.emit(status)               # a revoked or suspended device gets that refusal instead, once
         return 0
-    notice = install.plugin_notice(daily=True)
-    if notice:
-        body = notice + "\n" + body
+    notices = [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
+    if notices:
+        body = "\n".join(notices) + "\n" + body
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
     sys.stdout.flush()
     return 0
@@ -757,8 +756,17 @@ def doctor(as_json: bool) -> int:
         add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
             "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
     notice = install.plugin_notice(daily=False)
-    if notice:
+    update = install.update_state().get("plugin_update") or {}
+    if Job("plugin-update").alive():
+        add("ok", "plugin files", f"updating to {update.get('version')} in the background; used from the next session")
+    elif notice:
         add("warn", "plugin files", notice.removeprefix("THEODORE NOTICE: ").removesuffix(" Tell the user once; it does not stop this task."))
+    elif update.get("hosts"):
+        add("ok", "plugin files", f"last update to {update.get('version')}: " + "; ".join(f"{h} {r}" for h, r in sorted(update["hosts"].items())))
+    engine_failed = install.update_state().get("failed") or {}
+    if engine_failed.get("version") and engine_failed.get("version") != snap.get("engine"):
+        add("warn", "engine update", f"engine {engine_failed['version']} is pending: it failed its check ({engine_failed.get('reason', 'unknown')}); "
+            f"engine {snap.get('engine')} keeps working and the update is tried again after six hours")
     missing = _still_missing(snap)
     add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
     if resumed:
@@ -972,6 +980,45 @@ def update(action: str, value: str | None) -> int:
     return core.emit(Status("OK", summary,
                             f"run {launcher} guide pptx again before continuing." if updated else "nothing to do.",
                             f"Theodore is updated ({'; '.join(u.split(' (')[0] for u in updated)})." if updated else "Theodore is up to date."))
+
+
+def plugin_update_job() -> int:
+    """Background: bring the plugin's files up to the published version in each assistant Theodore is registered in,
+    through that assistant's own command (see install.py, "How a release reaches a user"). Records per assistant
+    "updated" or why not; announces a success once."""
+    job = Job("plugin-update")
+    job.begin("plugin")
+    state = install.update_state()
+    latest = str(state.get("plugin_latest") or "")
+    record = _host_record()
+    results: dict[str, str] = {}
+    try:                                    # Theodore's own copy (Codex's local marketplace; Claude Code's fallback one)
+        keys = " ".join(f"{kid}={x}" for kid, x in core.manifest_keys().items())
+        with contextlib.redirect_stdout(sys.stderr):
+            install_plugin(str(core.config().get("dl_base") or ""), keys)
+        results["theodore"] = "updated"
+    except Status as status_:
+        results["theodore"] = f"its copy could not be refreshed: {status_.summary}"[:200]
+    claude = core.host_executable("claude")
+    if claude and record.get("claude_registered") is not False and _listed([claude, "plugin", "list", "--json"], "theodore@theodore"):
+        _run([claude, "plugin", "marketplace", "update", "theodore"], timeout=300)
+        code, out = _run([claude, "plugin", "update", "theodore@theodore"], timeout=300)
+        results["claude-code"] = "updated" if code == 0 else f"claude plugin update failed: {(out.splitlines() or ['no output'])[-1]}"[:200]
+    codex = core.host_executable("codex")
+    if codex and record.get("codex_registered") is not False and _listed([codex, "plugin", "list"], "theodore@theodore"):
+        if not _listed([codex, "plugin", "marketplace", "list"], str(core.home().plugin)):
+            _run([codex, "plugin", "marketplace", "upgrade", "theodore"], timeout=300)
+        code, out = _run([codex, "plugin", "add", "theodore@theodore"], timeout=300)
+        results["codex"] = "updated" if code == 0 else f"codex plugin add failed: {(out.splitlines() or ['no output'])[-1]}"[:200]
+    hosts = {k: v for k, v in results.items() if k != "theodore"}
+    ok = bool(hosts) and all(v == "updated" for v in hosts.values())
+    done = install.update_state().get("plugin_update") or {}
+    install.save_update_state(plugin_update={**done, "version": latest, "ok": ok, "hosts": results, "finished": int(core.now())})
+    if any(v == "updated" for v in hosts.values()):
+        install.announce("plugin", latest)
+    core.log(f"plugin update to {latest}: {results}")
+    job.finish()
+    return 0
 
 
 def _stale_status(stale) -> Status:
@@ -1242,7 +1289,7 @@ def _codex_config() -> Path:
 
 def _listed(command: list[str], name: str = "theodore") -> bool:
     code, out = _run(command, timeout=60)
-    return code == 0 and re.search(rf"(?<![A-Za-z0-9_-]){name}(?![A-Za-z0-9_-])", out) is not None
+    return code == 0 and re.search(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", out) is not None
 
 
 def hosts(action: str, apply: bool) -> int:

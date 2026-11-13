@@ -19,7 +19,8 @@ installer's are in `install/`.
 | --- | --- | --- |
 | Sign-in | An activation code or a browser approval, once per computer | once |
 | Licence refresh | Renews the signed licence | at most once per 12 hours, when you use Theodore |
-| Update check | Asks which engine, client and asset-pack versions are current | at most once per 6 hours, when the pptx instructions are loaded |
+| Update check | Asks which engine, client and asset-pack versions are current, and reads the signed `plugin/latest.json` (the current plugin version) | at the first Theodore command of each assistant session that loads the pptx instructions, then at most once per 6 hours |
+| Plugin update | When the published plugin is newer than an assistant's copy: Theodore's own copy of the plugin is downloaded (signed document, pinned sha256) and the assistant's own command updates its copy (`claude plugin marketplace update theodore` and `claude plugin update theodore@theodore`; `codex plugin add theodore@theodore`) | once per release and session, in the background |
 | Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
 | Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private temporary folder, removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
@@ -30,6 +31,12 @@ installer's are in `install/`.
 Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand.ai` (installer and sign-in
 pages). LibreOffice, when Theodore fetches it, comes unmodified from The Document Foundation
 (`download.documentfoundation.org`) and is checked against a pinned SHA-256.
+
+What the client changes on this computer by itself: its own folder (client, runtime, engines, packs, its copy of
+the plugin), and, through the assistants' own plugin commands, the Theodore plugin in Claude Code and Codex when a
+newer one is published (it takes effect at their next session). It changes nothing else in their settings without
+your yes (`hosts settings --apply`). A claude.ai account's plugin is never changed from a computer: the skill says
+once per release how to update it there.
 
 ## What is sent
 
