@@ -69,7 +69,9 @@ def ids(suite):
 print("\n".join(ids(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]))))
 '@
     $launcherIds = @(& "$env:SystemRoot\System32\cmd.exe" /d /s /c "`"`"$py`" `"$lister`" tests.test_launcher 2>nul`"" | Where-Object { $_ -match '^tests\.test_launcher\.[A-Za-z0-9_.]+$' })
-    $n = [Math]::Max(2, [Environment]::ProcessorCount - 2)
+    # (CPUs / 2) - 1 launcher groups: with 6 on 8 vCPU, the first-run tests' 60 s wait for the background stage 2
+    # ran out under the load (4 failures); with 5 processes in all, none did.
+    $n = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount / 2) - 1)
     $groups = [ordered]@{}
     for ($i = 0; $i -lt $n; $i++) { $groups["launcher-$i"] = @() }
     for ($i = 0; $i -lt $launcherIds.Count; $i++) { $groups["launcher-$($i % $n)"] += $launcherIds[$i] }
@@ -87,6 +89,7 @@ print("\n".join(ids(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]))))
         $env:TEMP = "$own\t"; $env:TMP = "$own\t"; $env:TMPDIR = "$own\t"; $env:LOCALAPPDATA = "$own\lad"; $env:APPDATA = "$own\ad"
         $procs[$g] = Start-Process -FilePath $py -ArgumentList (@('-m', 'unittest', '-v') + $groups[$g]) -WorkingDirectory $repo -NoNewWindow -PassThru `
             -RedirectStandardOutput "$out\$g.out" -RedirectStandardError "$out\$g.part"
+        $null = $procs[$g].Handle  # kept, or Windows PowerShell 5.1 loses the exit code
     }
     $env:TEMP = "$base\t"; $env:TMP = "$base\t"; $env:TMPDIR = "$base\t"; $env:LOCALAPPDATA = $lad0; $env:APPDATA = $ad0
     foreach ($p in $procs.Values) { $p.WaitForExit() }
