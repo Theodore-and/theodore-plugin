@@ -371,7 +371,10 @@ case "$TARGET" in
     heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64
     heavy 900 network run_network
     heavy 900 archives run_archives
-    if [ -n "$wpid" ]; then say "waiting for windows-x64"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
+    # The local heavy jobs are done: the lock is released now, so the other repositories' runners do not wait on a
+    # Windows job that runs on its own VM (the VM's deletion stays with that job's own trap).
+    release_lock
+    if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     run_index
     summary
     record ;;
