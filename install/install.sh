@@ -28,7 +28,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.4"
-PIN_CLIENT="client/client-0.3.4.tar 77394cf525f135f1ba609eec0a2b862bf8dd4d9f81955f31d9c711a04d6b7d60"
+PIN_CLIENT="client/client-0.3.4.tar ac1368d6be0f2a68e7d7420b9f126426399aec804903e9bcce1413ecc56d5c91"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -131,6 +131,32 @@ remove_recorded() { # all | expired: the folders the record names
   done < "$reg"
   return 0
 }
+# The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): ~/.cache/pptx-slide-raster (images of
+# the user's slides), ~/.cache/pptx-icons, ~/.cache/pptx-flags and the icons' fallback in Node's temporary folder. Only
+# files of the names the engine writes go; a folder goes once nothing else is in it, else it is named in $left.
+remove_old_engine_caches() {
+  old_removed=
+  for d in "${HOME:-/nonexistent}/.cache/pptx-slide-raster" "${HOME:-/nonexistent}/.cache/pptx-icons" \
+           "${HOME:-/nonexistent}/.cache/pptx-flags" "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/pptx-icons"; do
+    [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || continue
+    for e in "$d"/*; do
+      [ -e "$e" ] && [ ! -L "$e" ] || continue
+      case "${d##*/}" in
+        pptx-slide-raster)
+          [ -d "$e" ] && printf '%s\n' "${e##*/}" | grep -Eqx '[0-9a-f]{64}' || continue
+          for f in "$e"/*; do
+            [ -f "$f" ] && [ ! -L "$f" ] && printf '%s\n' "${f##*/}" | grep -Eqx 'slide-[0-9]{4}-[0-9]+\.jpg' && rm -f "$f"
+          done
+          rmdir "$e" 2>/dev/null ;;
+        *) [ -f "$e" ] && printf '%s\n' "${e##*/}" | grep -Eqx '[0-9a-f]{40}\.(png|uri)' && rm -f "$e" ;;
+      esac
+    done
+    if rmdir "$d" 2>/dev/null; then old_removed="$old_removed, $d"
+    else left="$left; the folder $d (a cache of the engine before 1.0.0-rc.7: its files of the engine's were removed, and what else it holds is not Theodore's and was left)"; fi
+  done
+  old_removed=${old_removed#, }
+}
+
 remove_specimens() { # all of them (uninstall)
   remove_recorded all
   sc=$(specimen_cache)
@@ -146,6 +172,7 @@ if [ -n "$UNINSTALL" ]; then
   left=
   remove_specimens
   [ -n "$left" ] || rm -f "$HOME_DIR/state/specimens.txt" 2>/dev/null
+  remove_old_engine_caches
   rec="$HOME_DIR/state/host-settings.json"
   if grep -qE '"(rules|marketplace|created_marketplace|set_auto_update|created_keys|git_bash|instructions)":' "$rec" 2>/dev/null; then
     left="$left; Theodore's changes to the Claude Code settings.json and its marked lines in CLAUDE.md or AGENTS.md (theodore:begin to theodore:end), which need Theodore's runtime to take back exactly: what it added and the values before are kept in $rec. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
@@ -153,7 +180,9 @@ if [ -n "$UNINSTALL" ]; then
   rmdir "$HOME_DIR/state" "$HOME_DIR" 2>/dev/null
   [ -z "$left" ] || status RETRY 75 "Theodore is not installed in $HOME_DIR, but these could not be removed: ${left#; }." \
     "tell the user what is left; each item is a folder that can be deleted by hand." "A few of Theodore's temporary files could not be removed: ${left#; }."
-  status OK 0 "Theodore is not installed in $HOME_DIR." "nothing to do." "Theodore was not installed on this computer."
+  done_old=
+  if [ -n "$old_removed" ]; then done_old="; the engine's former caches were removed ($old_removed)"; fi
+  status OK 0 "Theodore is not installed in $HOME_DIR$done_old." "nothing to do." "Theodore was not installed on this computer."
 fi
 
 if [ -n "$CODE" ]; then

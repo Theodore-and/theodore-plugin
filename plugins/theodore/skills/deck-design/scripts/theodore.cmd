@@ -645,6 +645,20 @@ call %1 %2 %3 %4 %5 >"%UOUT%" 2>&1 && exit /b 0
 set "LEFT=%LEFT%; the %UNAME% registration"
 exit /b 0
 
+:host_cmd
+rem %1 claude or codex: its command on PATH, else the path recorded at registration, else where its installer puts it.
+rem Result in HC.
+set "HC="
+for /f "delims=" %%P in ('%SYS32%\where.exe %1 2^>nul') do if not defined HC set "HC=%%P"
+if defined HC exit /b 0
+set "JV="
+if exist "%REC%" call :jget %1_path "%REC%"
+if defined JV set "JV=%JV:\\=\%"
+if defined JV if exist "%JV%" set "HC=%JV%"
+if defined HC exit /b 0
+for %%C in ("%USERPROFILE%\.local\bin\%1.exe" "%APPDATA%\npm\%1.cmd" "%LOCALAPPDATA%\Microsoft\WinGet\Links\%1.exe") do if not defined HC if exist "%%~C" set "HC=%%~C"
+exit /b 0
+
 :uninstall_bare
 rem Theodore's Python is not there: do what the client's uninstall does, as far as batch can, and say exactly what is
 rem left. The DPAPI credential is a file in state\, which goes with the folders.
@@ -663,15 +677,35 @@ if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"claude_added_marketplace\": false" 
 if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"codex_added_marketplace\": false" "%REC%" >nul 2>&1 && set "KEEP_CODEX_MARKET=1"
 if defined KEEP_CLAUDE_PLUGIN set "NOTES=%NOTES%; the Claude Code plugin registration was there before Theodore's installer and was kept"
 if defined KEEP_CODEX_PLUGIN set "NOTES=%NOTES%; the Codex plugin registration was there before Theodore's installer and was kept"
-if not defined KEEP_CLAUDE_PLUGIN (where claude >nul 2>&1 && call :unreg claude-code claude plugin uninstall theodore@theodore)
-if not defined KEEP_CLAUDE_MARKET (where claude >nul 2>&1 && call :unreg claude-code claude plugin marketplace remove theodore)
-if not defined KEEP_CODEX_PLUGIN (where codex >nul 2>&1 && call :unreg codex codex plugin remove theodore@theodore)
-if not defined KEEP_CODEX_MARKET (where codex >nul 2>&1 && call :unreg codex codex plugin marketplace remove theodore)
+rem Claude Code's Windows installer puts claude.exe in %USERPROFILE%\.local\bin without adding it to PATH.
+call :host_cmd claude
+set "CLAUDE_CMD=%HC%"
+call :host_cmd codex
+set "CODEX_CMD=%HC%"
+if not defined KEEP_CLAUDE_PLUGIN if defined CLAUDE_CMD call :unreg claude-code "%CLAUDE_CMD%" plugin uninstall theodore@theodore
+if not defined KEEP_CLAUDE_MARKET if defined CLAUDE_CMD call :unreg claude-code "%CLAUDE_CMD%" plugin marketplace remove theodore
+if not defined KEEP_CODEX_PLUGIN if defined CODEX_CMD call :unreg codex "%CODEX_CMD%" plugin remove theodore@theodore
+if not defined KEEP_CODEX_MARKET if defined CODEX_CMD call :unreg codex "%CODEX_CMD%" plugin marketplace remove theodore
 del /q "%UOUT%" >nul 2>&1
 rem Settings Theodore changed cannot be taken back exactly without its Python: the record of what was there is kept.
 set "SETTINGS_LEFT="
-if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" /c:"\"created_keys\":" /c:"\"git_bash\":" /c:"\"instructions\":" "%REC%" >nul 2>&1 && set "SETTINGS_LEFT=1"
-if defined SETTINGS_LEFT set "LEFT=%LEFT%; Theodore's changes to the Claude Code settings.json and its marked lines in CLAUDE.md or AGENTS.md (theodore:begin to theodore:end), which need Theodore's runtime to take back exactly: what it added and the values before are kept in %REC%. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
+set "SETTINGS_CHANGED="
+rem A registration Theodore made whose assistant command is nowhere: named, and its record kept.
+set "UNFOUND_CLAUDE="
+set "UNFOUND_CODEX="
+if not defined CLAUDE_CMD if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"claude_registered\": true" /c:"\"claude_added_marketplace\": true" "%REC%" >nul 2>&1 && set "UNFOUND_CLAUDE=1"
+if not defined CODEX_CMD if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"codex_registered\": true" /c:"\"codex_added_marketplace\": true" "%REC%" >nul 2>&1 && set "UNFOUND_CODEX=1"
+set "CC_DIR=%CLAUDE_CONFIG_DIR%"
+if not defined CC_DIR set "CC_DIR=%USERPROFILE%\.claude"
+set "CX_DIR=%CODEX_HOME%"
+if not defined CX_DIR set "CX_DIR=%USERPROFILE%\.codex"
+if defined UNFOUND_CLAUDE set "LEFT=%LEFT%; Theodore's registration in Claude Code, whose claude command was not found: the enabledPlugins theodore@theodore and extraKnownMarketplaces theodore entries in %CC_DIR%\settings.json; in Claude Code, /plugin uninstall theodore@theodore removes them"
+if defined UNFOUND_CODEX set "LEFT=%LEFT%; Theodore's registration in Codex, whose codex command was not found: the marketplaces.theodore and plugins.theodore@theodore tables in %CX_DIR%\config.toml; codex plugin remove theodore@theodore removes them"
+if defined UNFOUND_CLAUDE set "SETTINGS_LEFT=1"
+if defined UNFOUND_CODEX set "SETTINGS_LEFT=1"
+if exist "%REC%" "%SYS32%\findstr.exe" /c:"\"rules\":" /c:"\"marketplace\":" /c:"\"created_marketplace\":" /c:"\"set_auto_update\":" /c:"\"created_keys\":" /c:"\"git_bash\":" /c:"\"instructions\":" "%REC%" >nul 2>&1 && set "SETTINGS_CHANGED=1"
+if defined SETTINGS_CHANGED set "SETTINGS_LEFT=1"
+if defined SETTINGS_CHANGED set "LEFT=%LEFT%; Theodore's changes to the Claude Code settings.json and its marked lines in CLAUDE.md or AGENTS.md (theodore:begin to theodore:end), which need Theodore's runtime to take back exactly: what it added and the values before are kept in %REC%. To take them back, install Theodore again and run its uninstall, or edit that settings file by that record"
 call :remove_specimens
 if defined SPLEFT set "LEFT=%LEFT%%SPLEFT%"
 set "OWNED_DIRS=client runtime engines packs tools state logs staging plugin plugin.partial bin"
@@ -685,6 +719,44 @@ if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime"
 if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\pptx-runtime"
 if exist "%LOCALAPPDATA%\Theodore\Cache" rmdir /s /q "%LOCALAPPDATA%\Theodore\Cache" >nul 2>&1
 if exist "%LOCALAPPDATA%\Theodore\Cache" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\Theodore\Cache"
+call :old_engine_caches
+if defined OCLEFT set "LEFT=%LEFT%%OCLEFT%"
+set "OCMSG="
+if defined OCDONE set "OCMSG=; the engine's former caches were removed: %OCDONE:~2%"
 rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this file
 rem may be inside one of them: delete, then report what is still there (if defined and call echo run late enough).
-(for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
+(for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (call echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed%%OCMSG%%.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
+
+:old_engine_caches
+rem The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): %USERPROFILE%\.cache\pptx-slide-raster
+rem (images of the user's slides), pptx-icons and pptx-flags beside it, and %TEMP%\pptx-icons. Only files of the names
+rem the engine writes go (names listed by dir and filtered by findstr, never echoed); a folder goes once nothing else is
+rem in it. Results in OCLEFT (what stays) and OCDONE (the folders removed).
+set "OCLEFT="
+set "OCDONE="
+if not defined USERPROFILE exit /b 0
+set "OCR=%USERPROFILE%\.cache\pptx-slide-raster"
+if exist "%OCR%\" for /f "delims=" %%S in ('dir /b /ad "%OCR%" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "[0-9a-f]*"') do call :old_raster_dir "%OCR%\%%S"
+call :old_cache_dir "%OCR%"
+call :old_icon_files "%USERPROFILE%\.cache\pptx-icons"
+call :old_icon_files "%USERPROFILE%\.cache\pptx-flags"
+if defined TEMP call :old_icon_files "%TEMP%\pptx-icons"
+exit /b 0
+
+:old_raster_dir
+for /f "delims=" %%N in ('dir /b /a-d "%~1" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "slide-[0-9]*-[0-9]*\.jpg"') do del /f /q "%~1\%%N" >nul 2>&1
+rmdir "%~1" >nul 2>&1
+exit /b 0
+
+:old_icon_files
+if not exist "%~1\" exit /b 0
+for /f "delims=" %%N in ('dir /b /a-d "%~1" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "[0-9a-f]*\.png [0-9a-f]*\.uri"') do del /f /q "%~1\%%N" >nul 2>&1
+call :old_cache_dir "%~1"
+exit /b 0
+
+:old_cache_dir
+if not exist "%~1\" exit /b 0
+rmdir "%~1" >nul 2>&1
+if exist "%~1\" set "OCLEFT=%OCLEFT%; the folder %~1, a cache of the engine before 1.0.0-rc.7: its files of the engine's were removed, and what else it holds is not Theodore's and was left"
+if not exist "%~1\" set "OCDONE=%OCDONE%, %~1"
+exit /b 0

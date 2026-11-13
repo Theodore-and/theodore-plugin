@@ -1496,6 +1496,47 @@ class StatusDoctorUninstall(ClientCase):
         self.assertTrue((workspace / ".pptx-state" / "theodore-engine.json").exists(), "the user's workspaces are not touched")
 
 
+    def old_engine_caches(self, foreign: bool = False) -> list[Path]:
+        """The engine's caches before 1.0.0-rc.7, as the accept-local run found them, and (foreign) a file of someone else."""
+        cache = self.box.user_home / ".cache"
+        raster = cache / "pptx-slide-raster" / ("a" * 64)
+        raster.mkdir(parents=True)
+        (raster / "slide-0001-150.jpg").write_bytes(b"jpg")
+        (cache / "pptx-icons").mkdir()
+        (cache / "pptx-icons" / f"{'1' * 40}.png").write_bytes(b"png")
+        (cache / "pptx-flags").mkdir()
+        (cache / "pptx-flags" / f"{'2' * 40}.uri").write_text("data:")
+        temp_icons = Path(self.box.env["TMPDIR"]) / "pptx-icons"
+        temp_icons.mkdir()
+        (temp_icons / f"{'3' * 40}.png").write_bytes(b"png")
+        if foreign:
+            (cache / "pptx-icons" / "my-notes.txt").write_text("mine")
+        folders = [cache / "pptx-slide-raster", cache / "pptx-icons", cache / "pptx-flags", temp_icons]
+        if sys.platform == "darwin":            # engines up to rc.6 honoured XDG_CACHE_HOME on macOS for their runtime cache
+            xdg = Path(self.box.env["XDG_CACHE_HOME"]) / "pptx-runtime" / "workspaces"
+            xdg.mkdir(parents=True)
+            folders.append(xdg.parent)
+        return folders
+
+    def test_uninstall_removes_the_engines_former_caches(self):
+        self.ready()
+        folders = self.old_engine_caches()
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("the engine's former caches were removed", first)
+        for folder in folders:
+            self.assertFalse(folder.exists(), folder)
+        for folder in folders[:4]:
+            self.assertIn(str(folder), first)
+
+    def test_uninstall_leaves_and_names_what_is_not_the_engines_in_a_former_cache(self):
+        self.ready()
+        folders = self.old_engine_caches(foreign=True)
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "RETRY", 75)
+        self.assertEqual([p.name for p in folders[1].iterdir()], ["my-notes.txt"], "only the engine's files went")
+        self.assertIn(f"the folder {folders[1]}", first)
+        self.assertFalse(folders[0].exists())
+
+
 class Hosts(ClientCase):
     def test_uninstall_says_what_it_could_not_remove(self):
         self.ready()
@@ -1743,6 +1784,186 @@ class Hosts(ClientCase):
         settings.write_text("{ not json")
         self.client("hosts", "settings", "--apply")
         self.assertEqual(settings.read_text(), "{ not json")
+
+
+# A stand-in for Claude Code's and Codex's plugin commands that writes what the real ones write (measured with Claude
+# Code 2.1.292 and codex-cli 0.160.1, 2026-11-13): Claude Code's settings.json entries, installed_plugins.json,
+# known_marketplaces.json and its plugin copy; Codex's two config.toml tables and its plugin copy.
+FAKE_HOST = r'''
+import json, os, sys, shutil
+name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+with open(os.environ["FAKE_HOST_LOG"], "a") as log:
+    log.write(name + " " + " ".join(args) + "\n")
+cmd = " ".join(args)
+def load(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except OSError:
+        return default
+def save(path, value):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(value, f, indent=2)
+if name == "claude":
+    base = os.environ["CLAUDE_CONFIG_DIR"]
+    settings, plugins = os.path.join(base, "settings.json"), os.path.join(base, "plugins")
+    if cmd == "plugin list --json":
+        print("[]")
+    elif cmd.startswith("plugin install"):
+        url = args[args.index("--marketplace") + 1] if "--marketplace" in args else "https://x.test/marketplace.json"
+        s = load(settings, {})
+        s.setdefault("extraKnownMarketplaces", {})["theodore"] = {"source": {"source": "url", "url": url}}
+        s.setdefault("enabledPlugins", {})["theodore@theodore"] = True
+        save(settings, s)
+        k = load(os.path.join(plugins, "known_marketplaces.json"), {})
+        k["theodore"] = {"source": {"source": "url", "url": url}, "installLocation": "x", "lastUpdated": "t"}
+        save(os.path.join(plugins, "known_marketplaces.json"), k)
+        i = load(os.path.join(plugins, "installed_plugins.json"), {"version": 2, "plugins": {}})
+        i["plugins"]["theodore@theodore"] = [{"scope": "user", "version": "0.3.5"}]
+        save(os.path.join(plugins, "installed_plugins.json"), i)
+        os.makedirs(os.path.join(plugins, "cache", "theodore", "theodore", "0.3.5"), exist_ok=True)
+    elif cmd.startswith("plugin uninstall"):
+        s = load(settings, {}); s.get("enabledPlugins", {}).pop("theodore@theodore", None); save(settings, s)
+        i = load(os.path.join(plugins, "installed_plugins.json"), {"plugins": {}}); i["plugins"].pop("theodore@theodore", None)
+        save(os.path.join(plugins, "installed_plugins.json"), i)
+    elif cmd.startswith("plugin marketplace remove"):
+        s = load(settings, {}); s.get("extraKnownMarketplaces", {}).pop("theodore", None); save(settings, s)
+        k = load(os.path.join(plugins, "known_marketplaces.json"), {}); k.pop("theodore", None)
+        save(os.path.join(plugins, "known_marketplaces.json"), k)
+else:
+    base = os.environ["CODEX_HOME"]
+    config = os.path.join(base, "config.toml")
+    text = open(config).read() if os.path.exists(config) else ""
+    if cmd.startswith("plugin marketplace add") and "[marketplaces.theodore]" not in text:
+        text += ("\n" if text else "") + '[marketplaces.theodore]\nsource_type = "local"\nsource = "%s"\n' % args[-1]
+    elif cmd == "plugin add theodore@theodore" and '[plugins."theodore@theodore"]' not in text:
+        text += '\n[plugins."theodore@theodore"]\nenabled = true\n'
+        os.makedirs(os.path.join(base, "plugins", "cache", "theodore", "theodore", "0.3.5"), exist_ok=True)
+    os.makedirs(base, exist_ok=True)
+    open(config, "w").write(text)
+'''
+
+
+class HostsOffPath(ClientCase):
+    """Claude Code's Windows installer leaves claude off PATH; npm and nvm leave codex off PATH outside a login shell.
+    The uninstall must still take Theodore out of both, and nothing of it may come back by itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = self.box.tmp / "host-calls.log"
+        self.box.env["FAKE_HOST_LOG"] = str(self.log)
+        self.claude_dir = Path(self.box.env["CLAUDE_CONFIG_DIR"])
+        self.codex_config = Path(self.box.env["CODEX_HOME"]) / "config.toml"
+        plugin = self.box.home / "plugin"
+        (plugin / ".agents" / "plugins").mkdir(parents=True, exist_ok=True)
+        (plugin / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+
+    def tools_in(self, folder: Path, names=("claude", "codex")) -> Path:
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (folder / name).write_text(f"#!{sys.executable}\n{FAKE_HOST}")
+            (folder / name).chmod(0o755)
+        return folder
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def register_then_lose_the_tools(self, user_settings: str, user_config: str = "") -> None:
+        settings = self.claude_dir / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(user_settings)
+        if user_config:
+            self.codex_config.parent.mkdir(parents=True, exist_ok=True)
+            self.codex_config.write_text(user_config)
+        tools = self.tools_in(self.box.tmp / "fakebin")
+        path = self.box.env["PATH"]
+        self.assertStatus(self.client("hosts", "register", env={"PATH": f"{tools}{os.pathsep}{path}"}), "OK", 0)
+        self.assertTrue(json.loads(settings.read_text())["enabledPlugins"]["theodore@theodore"])
+        shutil.rmtree(tools)            # claude and codex are nowhere this client can find them
+
+    def test_uninstall_takes_the_registration_back_from_the_files_when_claude_and_codex_cannot_be_found(self):
+        user_settings = '{\n  "theme": "dark",\n  "enabledPlugins": {"other@x": true}\n}\n'
+        user_config = '# mine\nmodel = "gpt-5"\n\n# my server\n[mcp_servers.docs]\ncommand = "docs"\n'
+        self.register_then_lose_the_tools(user_settings, user_config)
+        self.assertIn("[marketplaces.theodore]", self.codex_config.read_text())
+        before = len(self.calls())
+        first, _n, tell = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(len(self.calls()), before, "nothing was run: the tools are gone")
+        self.assertIn("claude command was not found, so Theodore took back its registration by editing", first)
+        self.assertIn("spacing may differ", first)
+        self.assertIn("codex command was not found", first)
+        settings = json.loads((self.claude_dir / "settings.json").read_text())
+        self.assertEqual(settings, {"theme": "dark", "enabledPlugins": {"other@x": True}}, "only Theodore's entries went")
+        self.assertEqual(json.loads((self.claude_dir / "plugins" / "installed_plugins.json").read_text()), {"version": 2, "plugins": {}})
+        self.assertEqual(json.loads((self.claude_dir / "plugins" / "known_marketplaces.json").read_text()), {})
+        self.assertFalse((self.claude_dir / "plugins" / "cache" / "theodore").exists(), "no copy is left that could start Theodore again")
+        self.assertEqual(self.codex_config.read_text(), user_config, "the user's Codex configuration, byte for byte")
+        self.assertFalse((Path(self.box.env["CODEX_HOME"]) / "plugins" / "cache" / "theodore").exists())
+        self.assertIn("Theodore is uninstalled", tell)
+
+    def test_a_record_from_before_0_3_5_is_taken_back_too(self):
+        self.register_then_lose_the_tools('{"theme": "dark"}')
+        record_path = self.box.home / "state" / "host-settings.json"
+        record = json.loads(record_path.read_text())
+        for key in ("claude_entries", "claude_path", "codex_entries", "codex_path"):
+            record.pop(key, None)
+        record_path.write_text(json.dumps(record, indent=2, sort_keys=True))
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(json.loads((self.claude_dir / "settings.json").read_text()), {"theme": "dark"})
+        self.assertNotIn("theodore", self.codex_config.read_text() if self.codex_config.exists() else "")
+
+    def test_an_entry_changed_since_is_named_and_left(self):
+        self.register_then_lose_the_tools('{"theme": "dark"}')
+        path = self.claude_dir / "settings.json"
+        settings = json.loads(path.read_text())
+        settings["enabledPlugins"]["theodore@theodore"] = {"mine": True}
+        path.write_text(json.dumps(settings))
+        first, _n, tell = self.assertStatus(self.client("uninstall"), "RETRY", 75)
+        self.assertIn('enabledPlugins."theodore@theodore"', first)
+        self.assertIn(str(path), first)
+        self.assertIn("/plugin uninstall theodore@theodore", first)
+        self.assertNotIn("Theodore is uninstalled", tell)
+        after = json.loads(path.read_text())
+        self.assertEqual(after["enabledPlugins"]["theodore@theodore"], {"mine": True}, "never a value Theodore did not write")
+        self.assertNotIn("extraKnownMarketplaces", after, "what is still Theodore's goes")
+
+    def test_the_path_recorded_at_registration_is_used_when_the_tool_is_off_path(self):
+        tools = self.tools_in(self.box.tmp / "elsewhere")
+        self.assertStatus(self.client("hosts", "register", env={"PATH": f"{tools}{os.pathsep}{self.box.env['PATH']}"}), "OK", 0)
+        record = json.loads((self.box.home / "state" / "host-settings.json").read_text())
+        self.assertEqual(record["claude_path"], str(tools / "claude"))
+        self.assertStatus(self.client("uninstall"), "OK", 0)            # PATH without it
+        self.assertIn("claude plugin uninstall theodore@theodore", self.calls())
+        self.assertIn("codex plugin remove theodore@theodore", self.calls())
+
+    def test_claude_is_found_where_its_installer_puts_it_for_register_doctor_and_uninstall(self):
+        self.tools_in(self.box.user_home / ".local" / "bin", names=("claude",))
+        self.tools_in(self.box.user_home / ".nvm" / "versions" / "node" / "v24.0.0" / "bin", names=("codex",))
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.calls())
+        self.assertIn("codex plugin add theodore@theodore", self.calls())
+        self.assertTrue((self.claude_dir / "CLAUDE.md").exists(), "the routing line too")
+        doctor = self.client("doctor").stdout
+        self.assertIn(f"assistant claude: {self.box.user_home / '.local' / 'bin' / 'claude'} (not on PATH", doctor)
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("claude plugin uninstall theodore@theodore", self.calls())
+        self.assertIn("claude plugin marketplace remove theodore", self.calls())
+        self.assertIn("codex plugin remove theodore@theodore", self.calls())
+
+    def test_register_inside_claude_code_without_its_command_is_not_a_silent_success(self):
+        result = self.client("hosts", "register", env={"CLAUDECODE": "1"})
+        first, nxt, _t = self.assertStatus(result, "RETRY", 75)
+        self.assertIn("claude-code: FAILED (this runs inside Claude Code", first)
+        self.assertIn("register by hand", nxt)
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)        # elsewhere: no Claude Code is simply not there
+
+    def test_codex_tables_go_without_touching_the_rest_of_the_file(self):
+        from theodore_client import commands
+        text = ('a = 1\n\n[marketplaces.theodore]\nsource_type = "local"\nsource = "/x"\n\n# about b\n[b]\nc = 2\n'
+                '\n[plugins."theodore@theodore"]\nenabled = true\n# trailing note\n')
+        self.assertEqual(commands._toml_without(text, {"[marketplaces.theodore]", '[plugins."theodore@theodore"]'}),
+                         'a = 1\n\n# about b\n[b]\nc = 2\n\n# trailing note\n')
 
 
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")

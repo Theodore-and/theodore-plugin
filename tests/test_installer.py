@@ -131,6 +131,26 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
+    def test_uninstall_with_no_installation_still_removes_the_engines_former_caches(self):
+        temp = self.box.tmp / "tmp"
+        env = {"TEMP": str(temp), "TMP": str(temp), "TMPDIR": str(temp)}
+        cache = self.box.user_home / ".cache"
+        raster = cache / "pptx-slide-raster" / ("c" * 64)
+        raster.mkdir(parents=True)
+        (raster / "slide-0001-150.jpg").write_bytes(b"jpg")
+        (cache / "pptx-icons").mkdir()
+        (cache / "pptx-icons" / f"{'1' * 40}.png").write_bytes(b"png")
+        (cache / "pptx-icons" / "mine.txt").write_text("not the engine's")
+        result = self.install("--uninstall", env=env)
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        self.assertIn(str(cache / "pptx-icons"), status_lines(result.stdout)[0])
+        self.assertFalse((cache / "pptx-slide-raster").exists())
+        self.assertEqual([p.name for p in (cache / "pptx-icons").iterdir()], ["mine.txt"])
+        (cache / "pptx-icons" / "mine.txt").unlink()
+        done = self.install("--uninstall", env=env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertFalse((cache / "pptx-icons").exists())
+
     def test_without_a_code_it_prints_the_sign_in_link_opens_no_browser_and_still_sets_up(self):
         opened = self.box.tmp / "opened.log"
         if IS_WINDOWS:

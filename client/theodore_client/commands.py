@@ -714,10 +714,12 @@ def doctor(as_json: bool) -> int:
         add("ok" if info["status"] == "ready" else "warn", f"pack {pack}",
             f"{info['version']}" if info["status"] == "ready" else f"{info['status']} ({info['percent']}%)")
     for name in ("claude", "codex"):
-        add("ok", f"assistant {name}", shutil.which(name) or "not found on PATH")
+        found = core.host_executable(name)
+        add("ok", f"assistant {name}", (found + ("" if shutil.which(name) else " (not on PATH; found where its installer puts it)"))
+            if found else "not found on PATH or where its installers put it")
     written = _host_record().get(routing.RECORD_KEY) or {}
     add("ok", "instructions", "; ".join(f"{n}: {e.get('path')}" for n, e in sorted(written.items())) or "none written")
-    if core.IS_WINDOWS and shutil.which("claude") and not claude_git_bash():
+    if core.IS_WINDOWS and core.host_executable("claude") and not claude_git_bash():
         add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
             "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
     final = _doctor_verdict(checks, snap, home)
@@ -1021,7 +1023,7 @@ def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) ->
 
 def needs_git_bash() -> bool:
     """Claude Code on Windows with no Git Bash where it looks: it would run Theodore's skill commands in PowerShell."""
-    return core.IS_WINDOWS and bool(shutil.which("claude")) and claude_git_bash() is None
+    return core.IS_WINDOWS and bool(core.host_executable("claude")) and claude_git_bash() is None
 
 
 def _tools_git(if_needed: bool) -> int:
@@ -1128,11 +1130,12 @@ def _listed(command: list[str], name: str = "theodore") -> bool:
 def hosts(action: str, apply: bool) -> int:
     cfg, home = core.config(), core.home()
     lines: list[str] = []
-    claude, codex = shutil.which("claude"), shutil.which("codex")
+    claude, codex = core.host_executable("claude"), core.host_executable("codex")
     plugin_dir = home.plugin
     if action == "register":
         record = _host_record()
         if claude:
+            record["claude_path"] = claude                              # found again at uninstall, also when off PATH
             code, out = _run([claude, "plugin", "list", "--json"])
             if code == 0 and '"theodore@theodore"' in out:
                 lines.append("claude-code: already registered")
@@ -1156,17 +1159,30 @@ def hosts(action: str, apply: bool) -> int:
                     record.setdefault("claude_registered", True)       # "not ours" (False) is never overwritten
                     record.setdefault("claude_added_marketplace", not market_before)
                     record["path"] = str(settings_path)
+                    entries = record.get("claude_entries") or {}        # the entries it added, with their values
+                    for parent, key in (("extraKnownMarketplaces", "theodore"), ("enabledPlugins", "theodore@theodore")):
+                        was, now = before.get(parent), after.get(parent)
+                        if isinstance(now, dict) and key in now and not (isinstance(was, dict) and key in was):
+                            entries.setdefault(parent, {}).setdefault(key, now[key])
+                    if entries:
+                        record["claude_entries"] = entries
                     record["created_keys"] = sorted(set(record.get("created_keys") or []) | {k for k in after if k not in before})
                     record["file_created"] = bool(record.get("file_created")) or (not before_file and settings_path.exists())
                     if record["file_created"]:
                         record["file_identity"] = _identity(settings_path)
+        elif core.host_name() == "claude-code" and not core.cloud_sandbox():
+            # Claude Code runs this, so it is on the computer: never "not found" and a success with no skills.
+            lines.append("claude-code: FAILED (this runs inside Claude Code, but its claude command was not found on PATH "
+                         "or where Claude Code's installers put it)")
         else:
             lines.append("claude-code: not found on this computer")
         if codex:
             if not (plugin_dir / ".agents" / "plugins" / "marketplace.json").exists():
                 lines.append(f"codex: FAILED (no plugin copy in {plugin_dir}; run the installer again)")
             else:
+                record["codex_path"] = codex
                 config_before = _codex_config().exists()
+                tables_before = _codex_tables()
                 market_before = _listed([codex, "plugin", "marketplace", "list"])
                 if _listed([codex, "plugin", "list"], "theodore@theodore"):
                     record.setdefault("codex_registered", False)       # there before Theodore's own: not ours to remove
@@ -1178,6 +1194,17 @@ def hosts(action: str, apply: bool) -> int:
                     record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
                     record.setdefault("codex_added_marketplace", not market_before)
                     record["codex_config_created"] = bool(record.get("codex_config_created")) or (not config_before and _codex_config().exists())
+                    entries, tables_after = record.get("codex_entries") or {}, _codex_tables()
+                    for parent, key in _CODEX_TABLES:
+                        was, now = (tables_before or {}).get(parent), (tables_after or {}).get(parent)
+                        if tables_before is not None and isinstance(now, dict) and key in now and not (isinstance(was, dict) and key in was):
+                            entries.setdefault(parent, {}).setdefault(key, now[key])
+                    if entries:
+                        record["codex_entries"] = entries
+        elif any(os.environ.get(v) for v in ("CODEX_SANDBOX", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_MANAGED_BY_NPM")) \
+                and not core.cloud_sandbox():          # Codex runs this (CODEX_HOME alone is also a user's setting)
+            lines.append("codex: FAILED (this runs inside Codex, but its codex command was not found on PATH or where Codex's "
+                         "installers put it)")
         else:
             lines.append("codex: not found on this computer")
         record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
@@ -1186,9 +1213,10 @@ def hosts(action: str, apply: bool) -> int:
             _save_host_record(record)
     elif action == "unregister":
         left: list[str] = []
-        notes = _unregister_hosts(claude, codex, left)
+        edits: list[str] = []
+        notes = _unregister_hosts(claude, codex, left, edits)
         lines += [f"{name}: removed" for name, tool in (("claude-code", claude), ("codex", codex)) if tool]
-        lines += [f"not removed: {item}" for item in left] + notes
+        lines += edits + [f"not removed: {item}" for item in left] + notes
     elif action == "settings":
         if not claude:
             lines.append("claude-code: not found; nothing to set")
@@ -1280,11 +1308,14 @@ def _identity(path: Path) -> list | None:
     return [info.st_ino, info.st_mtime_ns, info.st_size]
 
 
-def _claude_settings_restore(file_ours: bool = False) -> tuple[str | None, list[str]]:
+def _claude_settings_restore(file_ours: bool = False, registration: dict | None = None,
+                             unremoved: list[str] | None = None) -> tuple[str | None, list[str]]:
     """Take back exactly what the record says Theodore added or changed: its rules, the marketplace entry it created
     (only if nobody changed it since) or the autoUpdate value it changed (restored, unless changed since), and the
-    keys and the file it created, only when they hold nothing. Anything else, empty or not, stays. Returns (a problem
-    when the file could not be read or written, notes for what was left on purpose)."""
+    keys and the file it created, only when they hold nothing. Anything else, empty or not, stays. With `registration`
+    ({parent: {key: [accepted values]}}, when the assistant's own command could not be found) also the entries the
+    registration added, each only while it still holds a value Theodore's registration wrote; any other is named in
+    `unremoved`. Returns (a problem when the file could not be read or written, notes for what was left on purpose)."""
     record = _host_record()
     path = Path(record.get("path") or _claude_settings_path())
     notes: list[str] = []
@@ -1327,6 +1358,15 @@ def _claude_settings_restore(file_ours: bool = False) -> tuple[str | None, list[
                     entry.pop("autoUpdate", None)
             else:
                 notes.append(f"extraKnownMarketplaces.theodore.autoUpdate in {path} was changed after Theodore set it, so it was left as it is")
+    for parent, keys in (registration or {}).items():
+        holder = settings.get(parent)
+        for key, accepted in keys.items():
+            if not isinstance(holder, dict) or key not in holder:
+                continue
+            if holder[key] in accepted:
+                del holder[key]
+            elif unremoved is not None:
+                unremoved.append(f'{parent}."{key}"')
     for key in sorted(record.get("created_keys") or [], key=lambda k: -k.count(".")):        # the deepest first
         parent, _, leaf = key.rpartition(".")
         holder = settings.get(parent) if parent else settings
@@ -1368,10 +1408,199 @@ def ensure_instructions() -> None:
         core.log(f"instructions: not written ({exc.__class__.__name__}: {exc})")
 
 
-def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) -> list[str]:
+def _claude_registration(record: dict) -> dict:
+    """The entries Theodore's registration added to Claude Code's settings.json, as {parent: {key: [accepted values]}}:
+    those it recorded with their values, or, for a record written before 0.3.5 (which says only that Theodore registered
+    the plugin and added the marketplace), the values a registration writes. Nothing that was there before."""
+    found: dict = {}
+    entries = record.get("claude_entries") if isinstance(record.get("claude_entries"), dict) else None
+    ours = {"enabledPlugins": record.get("claude_registered") is True or bool(entries and "enabledPlugins" in entries),
+            "extraKnownMarketplaces": record.get("claude_added_marketplace") is True or bool(entries and "extraKnownMarketplaces" in entries)}
+    if record.get("claude_registered") is False:
+        ours["enabledPlugins"] = False
+    if record.get("claude_added_marketplace") is False:
+        ours["extraKnownMarketplaces"] = False
+    url = str(core.config().get("marketplace_url") or "")
+    legacy = {"enabledPlugins": {"theodore@theodore": [True]},
+              "extraKnownMarketplaces": {"theodore": [{"source": {"source": "url", "url": url}},
+                                                      {"source": {"source": "directory", "path": str(core.home().plugin)}}]}}
+    for parent, keys in legacy.items():
+        if not ours[parent]:
+            continue
+        recorded = (entries or {}).get(parent)
+        found[parent] = {k: [v] for k, v in recorded.items()} if isinstance(recorded, dict) and recorded else keys
+    return found
+
+
+def _claude_files_take_back(registration: dict, left: list[str], config_dir: Path) -> list[str]:
+    """Without Claude Code's command: what `claude plugin uninstall` and `claude plugin marketplace remove` would also
+    change in its plugins folder for an entry Theodore's registration added: the theodore@theodore entry in
+    installed_plugins.json, the theodore entry in known_marketplaces.json, and the plugin's copies (cache/theodore,
+    marketplaces/theodore). Returns the files changed; problems go to `left`."""
+    base = config_dir / "plugins"
+    changed: list[str] = []
+    for name, ours, path_keys in (("installed_plugins.json", "enabledPlugins" in registration, ("plugins", "theodore@theodore")),
+                                  ("known_marketplaces.json", "extraKnownMarketplaces" in registration, (None, "theodore"))):
+        path = base / name
+        if not ours or not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            left.append(f'the theodore entry in {path} (not readable as JSON, so not changed)')
+            continue
+        parent, key = path_keys
+        holder = data.get(parent) if parent and isinstance(data, dict) else data
+        if not isinstance(holder, dict) or key not in holder:
+            continue
+        del holder[key]
+        try:
+            core.write_atomic(path, json.dumps(data, indent=2) + ("\n" if raw.endswith("\n") else ""), 0o644)
+            changed.append(str(path))
+        except OSError as exc:
+            left.append(f'the "{key}" entry in {path} ({exc.__class__.__name__})')
+    for sub, ours in (("cache", "enabledPlugins" in registration), ("marketplaces", "extraKnownMarketplaces" in registration)):
+        folder = base / sub / "theodore"
+        if ours and folder.is_dir() and not folder.is_symlink():
+            core.remove_tree(folder)
+            if folder.exists():
+                left.append(f"Claude Code's copy of the Theodore plugin in {folder}")
+    return changed
+
+
+# Codex keeps its registration in config.toml as two tables.
+_CODEX_TABLES = (("marketplaces", "theodore"), ("plugins", "theodore@theodore"))
+
+
+def _codex_tables() -> dict | None:
+    """Codex's config.toml parsed ({} for no file), or None when it cannot be read or parsed."""
+    try:
+        import tomllib
+    except ImportError:             # Python before 3.11: Theodore's runtime has 3.12
+        return None
+    path = _codex_config()
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        return None
+
+
+def _codex_take_back(record: dict, left: list[str]) -> list[str]:
+    """Without Codex's command: remove from config.toml the two tables Theodore's registration added
+    ([marketplaces.theodore], [plugins."theodore@theodore"]), each only while it holds what the registration wrote, by
+    deleting exactly their lines (everything else in the file stays byte for byte; the result is parsed again and
+    must equal the file without those two tables), and Codex's copy of the plugin. Returns the files changed."""
+    entries = record.get("codex_entries") if isinstance(record.get("codex_entries"), dict) else {}
+    ours = {"marketplaces": record.get("codex_added_marketplace") is True or "marketplaces" in entries,
+            "plugins": record.get("codex_registered") is True or "plugins" in entries}
+    if record.get("codex_added_marketplace") is False:
+        ours["marketplaces"] = False
+    if record.get("codex_registered") is False:
+        ours["plugins"] = False
+    if not any(ours.values()):
+        return []
+    path = _codex_config()
+    parsed = _codex_tables()
+    changed: list[str] = []
+    if parsed is None:
+        left.append(f'Theodore\'s tables [marketplaces.theodore] and [plugins."theodore@theodore"] in {path} '
+                    f"(the file could not be read as TOML, so it was not changed)")
+        return changed
+    accepted = {"marketplaces": [entries.get("marketplaces", {}).get("theodore")] if "marketplaces" in entries else
+                [{"source_type": "local", "source": str(core.home().plugin)}],
+                "plugins": [entries.get("plugins", {}).get("theodore@theodore")] if "plugins" in entries else [{"enabled": True}]}
+    drop, kept = [], []
+    for parent, key in _CODEX_TABLES:
+        holder = parsed.get(parent)
+        if not ours[parent] or not isinstance(holder, dict) or key not in holder:
+            continue
+        (drop if holder[key] in accepted[parent] else kept).append((parent, key))
+    for parent, key in kept:
+        left.append(f'the [{parent}.{_toml_key(key)}] table in {path} (changed after Theodore\'s registration wrote it, so it was left as it is)')
+    if drop:
+        text = path.read_text(encoding="utf-8")
+        headers = {f"[{parent}.{_toml_key(key)}]" for parent, key in drop}
+        new = _toml_without(text, headers)
+        expected = json.loads(json.dumps(parsed))
+        for parent, key in drop:
+            expected[parent].pop(key, None)
+            if not expected[parent]:
+                expected.pop(parent)
+        try:
+            import tomllib
+            same = tomllib.loads(new) == expected
+        except ValueError:
+            same = False
+        if not same:
+            left.append(f"Theodore's tables {', '.join(sorted(headers))} in {path} (they could not be removed without changing anything else)")
+        else:
+            try:
+                core.write_atomic(path, new, 0o600 if core.IS_WINDOWS else (path.stat().st_mode & 0o777))
+                changed.append(str(path))
+            except OSError as exc:
+                left.append(f"Theodore's tables {', '.join(sorted(headers))} in {path} ({exc.__class__.__name__})")
+    folder = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "plugins" / "cache" / "theodore"
+    if ours["plugins"] and folder.is_dir() and not folder.is_symlink():
+        core.remove_tree(folder)
+        if folder.exists():
+            left.append(f"Codex's copy of the Theodore plugin in {folder}")
+    return changed
+
+
+def _toml_without(text: str, headers: set[str]) -> str:
+    """The text without the tables whose header line is one of `headers`, each from its header to the next header. The
+    blank lines before a removed table go with it unless a kept table or a comment follows, and the comments just above
+    the next table stay with that table."""
+    out: list[str] = []
+    blanks: list[str] = []          # blank lines not yet written: they separate what comes before from what comes next
+    pending: list[str] = []         # blank and comment lines at the end of a removed table
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            drop = stripped.split("#", 1)[0].strip() in headers
+            if drop:
+                skipping, pending = True, []
+                continue
+            if skipping:
+                while pending and not pending[0].strip():
+                    pending.pop(0)
+                out += blanks + pending
+                blanks, pending, skipping = [], [], False
+            out += blanks + [line]
+            blanks = []
+            continue
+        if skipping:
+            if not stripped or stripped.startswith("#"):
+                pending.append(line)
+            else:
+                pending = []
+            continue
+        if not stripped:
+            blanks.append(line)
+        else:
+            out += blanks + [line]
+            blanks = []
+    if skipping:
+        comments = [line for line in pending if line.strip()]
+        out += (blanks + comments) if comments else []
+    else:
+        out += blanks
+    return "".join(out)
+
+
+def _toml_key(key: str) -> str:
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else f'"{key}"'
+
+
+def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], edits: list[str] | None = None) -> list[str]:
     """Remove the plugin from each assistant; its marketplace only when Theodore added it (or when no record says);
-    then the settings Theodore recorded. Problems go to `left`; returns notes for what stays on purpose."""
+    then the settings Theodore recorded. An assistant whose command cannot be found (off PATH and not where its
+    installers put it) has the entries Theodore's registration added taken out of its files directly, said in `edits`.
+    Problems go to `left`; returns notes for what stays on purpose."""
     record = _host_record()
+    edits = [] if edits is None else edits
     notes: list[str] = []
     problems_before = len(left)
     settings_path = Path(record.get("path") or _claude_settings_path())
@@ -1382,7 +1611,7 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) ->
             ("claude-code", claude, "claude", ["plugin", "uninstall", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"]),
             ("codex", codex, "codex", ["plugin", "remove", "theodore@theodore"], ["plugin", "marketplace", "remove", "theodore"])):
         if not tool:
-            continue
+            continue                # taken back from the files below
         steps = []
         if record.get(f"{key}_registered") is False:
             notes.append(f"{name}: its Theodore plugin registration was there before Theodore's installer and was kept")
@@ -1396,10 +1625,31 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str]) ->
             problem = _unregistered([tool, *args])
             if problem:
                 left.append(f"the {name} registration ({' '.join(args)}: {problem})")
-    problem, settings_notes = _claude_settings_restore(file_ours)
+    registration = _claude_registration(record) if not claude else {}
+    unremoved: list[str] = []
+    settings_text = settings_path.read_bytes() if registration and settings_path.is_file() else None
+    problem, settings_notes = _claude_settings_restore(file_ours, registration, unremoved)
     if problem:
-        left.append(f"the Theodore entries in {_claude_settings_path()} ({problem})")
+        left.append(f"the Theodore entries in {settings_path} ({problem})")
     notes += settings_notes
+    if not claude:
+        changed = _claude_files_take_back(registration, left, settings_path.parent) if registration else []
+        if settings_text is not None and (not settings_path.exists() or settings_path.read_bytes() != settings_text):
+            changed.insert(0, str(settings_path))
+        if changed:
+            edits.append(f"claude-code: its claude command was not found, so Theodore took back its registration by editing "
+                         f"{', '.join(changed)} directly (read and written again as JSON: the same content, the spacing may differ)")
+        residue = unremoved + [f'{p}."{k}"' for p, k in (("enabledPlugins", "theodore@theodore"),) if record.get("claude_registered") is not False
+                               and _theodore_entry(settings_path, p, k) and f'{p}."{k}"' not in unremoved]
+        if residue:
+            left.append(f"Theodore's registration in Claude Code: {' and '.join(residue)} in {settings_path} (Claude Code's claude command "
+                        f"was not found, and these entries no longer hold what Theodore's registration wrote; in Claude Code, "
+                        f"/plugin uninstall theodore@theodore removes them)")
+    if not codex:
+        changed = _codex_take_back(record, left)
+        if changed:
+            edits.append(f"codex: its codex command was not found, so Theodore took back its registration by removing its two tables "
+                         f"from {', '.join(changed)} directly (nothing else in the file changed)")
     _take_back_instructions(left)
     _codex_leftovers()                      # reads the record: before it goes
     if len(left) == problems_before:
@@ -1488,12 +1738,64 @@ def _render_cache_dirs() -> list[Path]:
     """The engine's render caches: its current folder (Theodore) and the one engines before 1.0.0-rc.4 used."""
     if sys.platform == "darwin":
         caches = Path.home() / "Library" / "Caches"
-        return [caches / "pptx-runtime", caches / "Theodore"]
+        found = [caches / "pptx-runtime", caches / "Theodore"]
+        if os.environ.get("XDG_CACHE_HOME"):          # engines up to rc.6 honoured it on macOS too
+            found.append(Path(os.environ["XDG_CACHE_HOME"]) / "pptx-runtime")
+        return found
     if core.IS_WINDOWS:
         local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         return [local / "pptx-runtime", local / "Theodore" / "Cache"]
     cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return [cache / "pptx-runtime", cache / "theodore"]
+
+
+# The engine's caches before 1.0.0-rc.7, outside its render cache: ~/.cache/pptx-slide-raster (images of the user's
+# slides, <sha256 of the deck>/slide-<nnnn>-<dpi>.jpg), ~/.cache/pptx-icons and ~/.cache/pptx-flags (<sha1>.png and
+# <sha1>.uri), and the icons' fallback in the temporary folder. Node's os.homedir() is %USERPROFILE% on Windows, so the
+# same names there. Only files of the names the engine writes are removed; a folder goes once nothing else is in it.
+_ICON_NAME = re.compile(r"[0-9a-f]{40}\.(png|uri)")
+_RASTER_DIR = re.compile(r"[0-9a-f]{64}")
+_RASTER_NAME = re.compile(r"slide-[0-9]{4}-[0-9]+\.jpg")
+
+
+def _old_engine_caches() -> list[Path]:
+    user = Path.home()
+    folders = [user / ".cache" / "pptx-slide-raster", user / ".cache" / "pptx-icons", user / ".cache" / "pptx-flags"]
+    # Node's os.tmpdir(): TMPDIR, TMP or TEMP (on Windows TEMP or TMP), else /tmp.
+    names = ("TEMP", "TMP") if core.IS_WINDOWS else ("TMPDIR", "TMP", "TEMP")
+    temp = next((os.environ[n] for n in names if os.environ.get(n)), None if core.IS_WINDOWS else "/tmp")
+    if temp:
+        folders.append(Path(temp.rstrip("/\\") or "/") / "pptx-icons")
+    return folders
+
+
+def _remove_old_engine_caches(left: list[str]) -> list[str]:
+    """Remove the engine's former caches (see above). Returns the folders removed; a folder that still holds anything
+    else is named in `left`."""
+    removed: list[str] = []
+    for folder in _old_engine_caches():
+        try:
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            if not core.IS_WINDOWS and folder.stat().st_uid != os.getuid():       # a shared /tmp: another user's
+                continue
+            raster = folder.name == "pptx-slide-raster"
+            for entry in list(folder.iterdir()):
+                if raster and _RASTER_DIR.fullmatch(entry.name) and entry.is_dir() and not entry.is_symlink():
+                    for item in list(entry.iterdir()):
+                        if _RASTER_NAME.fullmatch(item.name) and item.is_file() and not item.is_symlink():
+                            item.unlink()
+                    with contextlib.suppress(OSError):
+                        entry.rmdir()
+                elif not raster and _ICON_NAME.fullmatch(entry.name) and entry.is_file() and not entry.is_symlink():
+                    entry.unlink()
+            folder.rmdir()
+            removed.append(str(folder))
+        except OSError:
+            if folder.exists():
+                left.append(f"the folder {folder} (a cache of the engine before 1.0.0-rc.7: its files of the engine's were removed, "
+                            f"and what else it holds is not Theodore's and was left)")
+    return removed
 
 
 # An assistant that is on the computer but never had Theodore registered: nothing to remove, not a failure.
@@ -1507,6 +1809,11 @@ def _unregistered(command: list[str]) -> str | None:
     if code == 0 or any(text in out.lower() for text in _NOT_THERE):
         return None
     return (out.splitlines()[-1] if out else f"exit {code}")[:160]
+
+
+def _theodore_entry(path: Path, parent: str, key: str) -> bool:
+    settings = _load_settings(path) if path.exists() else None
+    return isinstance(settings, dict) and isinstance(settings.get(parent), dict) and key in settings[parent]
 
 
 def _codex_leftovers() -> None:
@@ -1527,8 +1834,9 @@ def uninstall(keep_hosts: bool) -> int:
     home = core.home()
     left: list[str] = []
     notes: list[str] = []
+    edits: list[str] = []
     if not keep_hosts:
-        notes = _unregister_hosts(shutil.which("claude"), shutil.which("codex"), left)
+        notes = _unregister_hosts(core.host_executable("claude"), core.host_executable("codex"), left, edits)
     else:
         _take_back_instructions(left)           # its record goes with state/: the block cannot be left without it
     for name in ("setup", "packs", "engine-update", "client-update", "libreoffice"):
@@ -1544,6 +1852,9 @@ def uninstall(keep_hosts: bool) -> int:
         core.remove_tree(cache)
         if cache.exists():
             left.append(f"the render cache {cache}")
+    old_caches = _remove_old_engine_caches(left)
+    if old_caches:
+        edits.append(f"the engine's former caches were removed ({', '.join(old_caches)})")
     specimens_left = specimens.sweep(everything=True)
     for folder in specimens_left:
         left.append(f"the specimen folder {folder} (its record is kept in {specimens.registry()}; running uninstall again retries it)")
@@ -1567,6 +1878,7 @@ def uninstall(keep_hosts: bool) -> int:
         # run (by then without Theodore's Python: the launcher's or the installer's own uninstall) confirm it.
         print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed; its folders in {root} are deleted a few "
               f"seconds after this command ends, which is scheduled but not confirmed"
+              + (f"; {'; '.join(edits)}" if edits else "")
               + (f"; also not removed: {'; '.join(left)}" if left else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "") + ".\n"
               "NEXT: run the same command again in 15 seconds; it confirms the deletion (or removes what is left) and says so.\n"
               "TELL THE USER: Theodore is being removed from this computer; I am checking that its files are gone. Your decks were not touched.",
@@ -1589,6 +1901,8 @@ def uninstall(keep_hosts: bool) -> int:
             except OSError:
                 pass
     what = f"its folders in {root} were deleted; {len(kept)} other item(s) there were not Theodore's and were left alone" if kept else f"{root} was deleted"
+    if edits:           # registrations taken back by editing an assistant's files (its command was not found)
+        what += "; " + "; ".join(edits)
     if notes:           # what was left on purpose because it was not Theodore's to take back
         what += "; left as they are: " + "; ".join(notes)
     if left:          # say exactly what is still there, never "removed"

@@ -33,7 +33,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.4"
-set "PIN_CLIENT=client/client-0.3.4.tar 77394cf525f135f1ba609eec0a2b862bf8dd4d9f81955f31d9c711a04d6b7d60"
+set "PIN_CLIENT=client/client-0.3.4.tar ac1368d6be0f2a68e7d7420b9f126426399aec804903e9bcce1413ecc56d5c91"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -102,6 +102,8 @@ if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Theodore\Cache" rmdir /s /q "%L
 for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFTOVER=%LEFTOVER%; Theodore's folders in %HOME_DIR%"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\pptx-runtime"
 if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Theodore\Cache" set "LEFTOVER=%LEFTOVER%; the render cache %LOCALAPPDATA%\Theodore\Cache"
+call :old_engine_caches
+if defined OCLEFT set "LEFTOVER=%LEFTOVER%%OCLEFT%"
 if exist "%HOME_DIR%" rmdir "%HOME_DIR%" >nul 2>&1
 if defined LEFTOVER goto :uninstall_left
 echo THEODORE OK: Theodore is not installed on this computer.
@@ -490,3 +492,37 @@ echo NEXT: tell the user to write to support@theodoreand.ai.
 echo TELL THE USER: Theodore's download is incomplete.
 set "RC=78"
 goto :finish
+
+:old_engine_caches
+rem The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): %USERPROFILE%\.cache\pptx-slide-raster
+rem (images of the user's slides), pptx-icons and pptx-flags beside it, and %TEMP%\pptx-icons. Only files of the names
+rem the engine writes go (names listed by dir and filtered by findstr, never echoed); a folder goes once nothing else is
+rem in it. Results in OCLEFT (what stays) and OCDONE (the folders removed).
+set "OCLEFT="
+set "OCDONE="
+if not defined USERPROFILE exit /b 0
+set "OCR=%USERPROFILE%\.cache\pptx-slide-raster"
+if exist "%OCR%\" for /f "delims=" %%S in ('dir /b /ad "%OCR%" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "[0-9a-f]*"') do call :old_raster_dir "%OCR%\%%S"
+call :old_cache_dir "%OCR%"
+call :old_icon_files "%USERPROFILE%\.cache\pptx-icons"
+call :old_icon_files "%USERPROFILE%\.cache\pptx-flags"
+if defined TEMP call :old_icon_files "%TEMP%\pptx-icons"
+exit /b 0
+
+:old_raster_dir
+for /f "delims=" %%N in ('dir /b /a-d "%~1" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "slide-[0-9]*-[0-9]*\.jpg"') do del /f /q "%~1\%%N" >nul 2>&1
+rmdir "%~1" >nul 2>&1
+exit /b 0
+
+:old_icon_files
+if not exist "%~1\" exit /b 0
+for /f "delims=" %%N in ('dir /b /a-d "%~1" 2^>nul ^| "%SYS32%\findstr.exe" /r /i /x "[0-9a-f]*\.png [0-9a-f]*\.uri"') do del /f /q "%~1\%%N" >nul 2>&1
+call :old_cache_dir "%~1"
+exit /b 0
+
+:old_cache_dir
+if not exist "%~1\" exit /b 0
+rmdir "%~1" >nul 2>&1
+if exist "%~1\" set "OCLEFT=%OCLEFT%; the folder %~1, a cache of the engine before 1.0.0-rc.7: its files of the engine's were removed, and what else it holds is not Theodore's and was left"
+if not exist "%~1\" set "OCDONE=%OCDONE%, %~1"
+exit /b 0
