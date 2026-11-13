@@ -674,6 +674,60 @@ def forbidden(version: str | None, rules: dict | None = None) -> bool:
                               bool(rules.get("min_version") and core.version_key(version) < core.version_key(str(rules["min_version"]))))
 
 
+# The plugin's files live in each assistant's own plugin folder and are updated by the assistant, never by Theodore:
+# claude.ai keeps the copy a user added until they ask it to check for updates, so an old launcher there kept giving
+# old messages. The current plugin version (the signed plugin/latest.json the installer reads) is noted at each update
+# check, and the skill load and guide say once a day, in one line, when the calling plugin is older, with that host's
+# update action; doctor says it every time.
+PLUGIN_NOTICE_INTERVAL_S = 24 * 3600
+
+
+def refresh_plugin_latest(timeout: float) -> None:
+    """Note the current plugin version from the signed plugin/latest.json. Silent on any failure."""
+    from .contract import PLUGIN_LATEST_SCHEMA
+    try:
+        base = str(core.config().get("dl_base") or "").rstrip("/")
+        _status, _headers, raw = api.request("GET", f"{base}/plugin/latest.json", timeout=timeout, redirects=False)
+        envelope = json.loads(raw.decode("utf-8"))
+        doc = account.verify_signed(envelope, "the plugin release document", PLUGIN_LATEST_SCHEMA, platform=False)
+        version = str(doc.get("version") or "")
+        if core._SEMVER.match(version):
+            save_update_state(plugin_latest=version)
+    except (api.NetworkError, api.ApiError, ValueError, AttributeError, Status) as exc:
+        core.log(f"plugin version check: {exc.__class__.__name__}")
+
+
+def plugin_update_action(host: str | None = None) -> str:
+    host = host or core.host_name()
+    if host == "claude-web":
+        return ("in Claude: Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > ... > Check for updates, "
+                "then start a new chat")
+    if host == "claude-code":
+        return "in Claude Code: run `claude plugin update theodore@theodore` (or /plugin > Marketplaces > theodore > Update), then start a new session"
+    if host in ("codex", "chatgpt"):
+        return ("in Codex: run `codex plugin marketplace upgrade theodore` (an install by Theodore's installer: run the installer "
+                "again), then start a new session")
+    return "update the Theodore plugin in your assistant, then start a new session"
+
+
+def plugin_notice(daily: bool) -> str | None:
+    """One line when the calling plugin is older than the current one; with `daily`, at most once a day per installation."""
+    try:
+        state = update_state()
+        latest, mine = str(state.get("plugin_latest") or ""), core.plugin_version()
+        if not latest or mine == "0.0.0" or core.version_key(mine) >= core.version_key(latest):
+            return None
+        if daily:
+            if core.now() - float(state.get("plugin_notice_at") or 0) < PLUGIN_NOTICE_INTERVAL_S:
+                return None
+            save_update_state(plugin_notice_at=int(core.now()))
+        return (f"THEODORE NOTICE: Theodore's plugin files on this assistant ({mine}) are older than the current version ({latest}); "
+                f"{plugin_update_action()}. Tell the user once; it does not stop this task.")
+    except Exception as exc:  # a notice is never the reason a skill fails to load
+        core.log(f"plugin notice: {exc.__class__.__name__}")
+        return None
+
+
 def plugin_too_old(shim_min) -> Status:
     shim = core.plugin_version()
     return Status("UPDATE_REQUIRED", f"the Theodore plugin {shim} is older than the minimum {shim_min}.",
@@ -748,6 +802,7 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
         return None
     save_update_state(last_check=int(core.now()), latest=manifest.get("engine", {}).get("version"),
                       guides=manifest.get("guides") or {}, tools=manifest.get("tools") or {})
+    refresh_plugin_latest(timeout)
     save_restrictions(manifest)
     enforce_restrictions()          # kill switch and plugin minimum; the engine's own case is handled below
     engine = engine_artifact(manifest)

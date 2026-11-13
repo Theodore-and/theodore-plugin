@@ -717,6 +717,8 @@ for %%F in ("%HOME_DIR%\state\*") do call :del_state_file "%%~fF"
 :bare_state_done
 if exist "%LOCALAPPDATA%\pptx-runtime" rmdir /s /q "%LOCALAPPDATA%\pptx-runtime" >nul 2>&1
 if exist "%LOCALAPPDATA%\pptx-runtime" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\pptx-runtime"
+if defined XDG_CACHE_HOME if exist "%XDG_CACHE_HOME%\pptx-runtime" rmdir /s /q "%XDG_CACHE_HOME%\pptx-runtime" >nul 2>&1
+if defined XDG_CACHE_HOME if exist "%XDG_CACHE_HOME%\pptx-runtime" set "LEFT=%LEFT%; the render cache %XDG_CACHE_HOME%\pptx-runtime"
 if exist "%LOCALAPPDATA%\Theodore\Cache" rmdir /s /q "%LOCALAPPDATA%\Theodore\Cache" >nul 2>&1
 if exist "%LOCALAPPDATA%\Theodore\Cache" set "LEFT=%LEFT%; the render cache %LOCALAPPDATA%\Theodore\Cache"
 call :old_engine_caches

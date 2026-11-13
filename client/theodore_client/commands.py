@@ -82,6 +82,9 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
+    notice = install.plugin_notice(daily=True) if part == 1 else None
+    if notice:
+        out.append(notice)
     out += header_lines
     out.append(f"--- {name} ---")
     sys.stdout.write("\n".join(out) + "\n")
@@ -354,6 +357,9 @@ def skill(name: str) -> int:
     except Status as status:
         core.emit(status)               # a revoked or suspended device gets that refusal instead, once
         return 0
+    notice = install.plugin_notice(daily=True)
+    if notice:
+        body = notice + "\n" + body
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
     sys.stdout.flush()
     return 0
@@ -750,6 +756,9 @@ def doctor(as_json: bool) -> int:
     if core.IS_WINDOWS and core.host_executable("claude") and not claude_git_bash():
         add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
             "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
+    notice = install.plugin_notice(daily=False)
+    if notice:
+        add("warn", "plugin files", notice.removeprefix("THEODORE NOTICE: ").removesuffix(" Tell the user once; it does not stop this task."))
     missing = _still_missing(snap)
     add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
     if resumed:
@@ -911,6 +920,7 @@ def update(action: str, value: str | None) -> int:
             raise api.offline(error, "update check") from None
         except api.ApiError as error:
             raise api.status_from(error, "update check") from None
+        install.refresh_plugin_latest(20.0)
         latest = manifest.get("engine", {}).get("version")
         same = latest == current
         return core.emit(Status("OK", f"installed engine {current or 'none'}; channel {manifest.get('channel')} offers {latest}."
@@ -1854,12 +1864,15 @@ def _render_cache_dirs() -> list[Path]:
     if sys.platform == "darwin":
         caches = Path.home() / "Library" / "Caches"
         found = [caches / "pptx-runtime", caches / "Theodore"]
-        if os.environ.get("XDG_CACHE_HOME"):          # engines up to rc.6 honoured it on macOS too
+        if os.environ.get("XDG_CACHE_HOME"):          # engines up to rc.6 honoured it on every OS
             found.append(Path(os.environ["XDG_CACHE_HOME"]) / "pptx-runtime")
         return found
     if core.IS_WINDOWS:
         local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        return [local / "pptx-runtime", local / "Theodore" / "Cache"]
+        found = [local / "pptx-runtime", local / "Theodore" / "Cache"]
+        if os.environ.get("XDG_CACHE_HOME"):          # engines up to rc.6 honoured it on every OS
+            found.append(Path(os.environ["XDG_CACHE_HOME"]) / "pptx-runtime")
+        return found
     cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return [cache / "pptx-runtime", cache / "theodore"]
 

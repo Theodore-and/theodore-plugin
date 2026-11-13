@@ -2047,6 +2047,42 @@ class BackgroundResume(ClientCase):
         self.assertIn("still missing: nothing", self.client("doctor").stdout)
 
 
+
+class PluginNotice(ClientCase):
+    """An assistant that keeps an old copy of the plugin (claude.ai keeps the copy a user added until they press Check
+    for updates) is told once a day, in one line at skill load and guide, and by doctor every time, with that host's
+    update action."""
+
+    def publish_plugin(self, version: str) -> None:
+        doc = {"schema": "theodore-plugin-latest@1", "version": version, "archive": f"theodore-plugin-{version}.tar.gz",
+               "sha256": "0" * 64, "size": 1}
+        self.api.files["plugin/latest.json"] = json.dumps(self.api.signed(doc)).encode()
+
+    def test_an_older_plugin_is_named_once_a_day_with_the_hosts_update_action(self):
+        self.ready()
+        self.publish_plugin("9.9.9")
+        self.client("update", "--check")
+        env = {"THEODORE_HOST": "claude-web"}
+        first = self.client("skill", "deck-design", env=env).stdout.splitlines()[0]
+        self.assertTrue(first.startswith("THEODORE NOTICE: Theodore's plugin files on this assistant ("), first)
+        self.assertIn("are older than the current version (9.9.9)", first)
+        self.assertIn("Customize > Plugins > Add plugin > Manage marketplaces > theodore-plugin > ... > Check for updates", first)
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once a day")
+        self.assertNotIn("THEODORE NOTICE", self.client("guide", "deck-design", env=env).stdout, "once a day, guide too")
+        doctor = self.client("doctor", env={"THEODORE_HOST": "claude-code"}).stdout
+        self.assertIn("plugin files: Theodore's plugin files on this assistant", doctor)
+        self.assertIn("claude plugin update theodore@theodore", doctor)
+        later = self.client("guide", "deck-design", env={**env, "THEODORE_TEST_CLOCK_OFFSET": str(25 * 3600)}).stdout.splitlines()
+        self.assertTrue(later[1].startswith("THEODORE NOTICE: "), later[:3])       # the next day, in guide, after its header
+
+    def test_a_current_plugin_hears_nothing(self):
+        self.ready()
+        self.publish_plugin("0.0.1")
+        self.client("update", "--check")
+        self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design").stdout)
+        self.assertNotIn("plugin files:", self.client("doctor").stdout)
+
+
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")
 class LibreOffice(ClientCase):
     def test_install_from_a_disk_image_with_a_pinned_checksum(self):
