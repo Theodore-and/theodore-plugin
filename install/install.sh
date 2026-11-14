@@ -29,8 +29,8 @@ PIN_API_BASE="https://api.theodoreand.ai"
 PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
-PIN_CLIENT_VERSION="0.3.7"
-PIN_CLIENT="client/client-0.3.7.tar a8e12d778eddeb21cacbcccff6d6a74db2c82f77daed0c663ef529ed30575853"
+PIN_CLIENT_VERSION="0.3.8"
+PIN_CLIENT="client/client-0.3.8.tar 6126bd821ec0873906beea04b7c750d56c0eb77f6a00ef1bc97cd8e8cf6f417f"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -276,8 +276,80 @@ trap 'rm -rf "$WORK"; cleanup_self; exit 130' INT TERM HUP
 # curl: HTTPS only (plain HTTP only for a loopback test server), no redirect followed (no -L), 20 s to connect,
 # abort when slower than 1 KB/s for 60 s, 30 minutes at most.
 proto() { case "$1" in http://127.0.0.1[:/]*|http://localhost[:/]*) echo =https,http ;; *) echo =https ;; esac; }
+# --- every address of Theodore's hosts (begin) ---
+# Theodore's hosts resolve to several addresses, and from some networks one of them does not answer, or completes the
+# TCP connection but never the TLS handshake (or resets it), while another works. curl moves to the next address only
+# when the TCP connection fails: after a handshake that hangs or is reset it gives up (exit 28 or 35), and --retry starts
+# again from the same first address. So, without a proxy, each address is tried in turn (curl --resolve: the name, its
+# SNI and its certificate check stay those of the host), 4 s each to connect and finish the handshake; the address that
+# worked is tried first for the rest of this run. When every address only ran out of time (a slow link, not a dead
+# address), the first is tried once more with the caller's own connect timeout. With a proxy (which chooses the address itself), for a loopback test
+# server, or when the addresses cannot be listed, curl runs as before.
+host_addresses() { # host: its addresses, IPv4 first, one per line, at most six
+  if command -v getent >/dev/null 2>&1; then
+    { getent ahostsv4 "$1" 2>/dev/null; getent ahostsv6 "$1" 2>/dev/null | grep -iv '^::ffff:'; } | awk '{ print $1 }'
+  elif command -v dscacheutil >/dev/null 2>&1; then
+    dscacheutil -q host -a name "$1" 2>/dev/null | sed -n 's/^ip_address: *//p'
+    dscacheutil -q host -a name "$1" 2>/dev/null | sed -n 's/^ipv6_address: *//p'
+  fi | grep -E '^[0-9A-Fa-f.:]+$' | awk '!seen[$0]++' | head -n 6
+}
+# curl_host tries url [curl options]: prints the HTTP status (000 when nothing answered) and returns curl's exit status.
+# The options carry -o; CURL_DATA, when set, is the body (sent on stdin, so it is never on a command line). `tries`
+# rounds at most (the earlier `--retry`): a round ends at the first address that answered.
+CURL_DATA=
+curl_once() { # url [curl options]
+  ch_u=$1; shift
+  if [ -n "$CURL_DATA" ]; then printf '%s' "$CURL_DATA" | curl "$@" --data-binary @- -w '%{http_code} %{time_appconnect}' "$ch_u"
+  else curl "$@" -w '%{http_code} %{time_appconnect}' "$ch_u"; fi
+}
+curl_host() {
+  ch_tries=$1 ch_url=$2; shift 2
+  ch_hostport=${ch_url#https://}; ch_hostport=${ch_hostport%%/*}; ch_host=${ch_hostport%%:*}; ch_port=443
+  case "$ch_hostport" in *:*) ch_port=${ch_hostport##*:} ;; esac
+  ch_addrs=
+  case "$ch_url" in https://*)
+    if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ]; then
+      case "$ch_host$ch_port" in ''|*[!A-Za-z0-9.-]*) ;; *) ch_addrs=$(host_addresses "$ch_host") ;; esac
+    fi ;;
+  esac
+  if [ -z "$ch_addrs" ]; then
+    ch_out=$(curl_once "$ch_url" "$@" --retry $((ch_tries - 1))); ch_rc=$?
+    printf '%s' "${ch_out%% *}"; return "$ch_rc"
+  fi
+  ch_key=$(printf '%s' "$ch_host" | tr '.-' '__')
+  eval "ch_good=\${GOOD_ADDR_$ch_key:-}"
+  [ -n "$ch_good" ] && ch_addrs=$(printf '%s\n%s\n' "$ch_good" "$ch_addrs" | awk '!seen[$0]++')
+  ch_round=1
+  while :; do
+    ch_slow=1
+    for ch_a in $ch_addrs; do
+      case "$ch_a" in *:*) ch_r="[$ch_a]" ;; *) ch_r=$ch_a ;; esac
+      ch_out=$(curl_once "$ch_url" "$@" --retry 0 --connect-timeout 4 --resolve "$ch_host:$ch_port:$ch_r"); ch_rc=$?
+      ch_http=${ch_out%% *} ch_appc=${ch_out#* }
+      if [ "$ch_rc" -ne 0 ] && [ "$ch_http" = 000 ] && [ "${ch_appc%%[1-9]*}" = "$ch_appc" ]; then
+        [ "$ch_rc" = 28 ] || ch_slow=
+        case "$ch_rc" in 7|28|35|52|55|56) continue ;; esac      # this address did not connect or finish the handshake
+      fi
+      ch_slow=
+      eval "GOOD_ADDR_$ch_key=\$ch_a"
+      break
+    done
+    [ "$ch_round" -lt "$ch_tries" ] || break
+    case "$ch_http:$ch_rc" in 408:*|429:*|5??:*|000:7|000:18|000:28|000:35|000:52|000:55|000:56) ;; *) break ;; esac  # as --retry
+    sleep "$ch_round"; ch_round=$((ch_round + 1))
+  done
+  if [ -n "$ch_slow" ]; then      # every address only ran out of its 4 s: a slow link, given the caller's own time once
+    for ch_a in $ch_addrs; do break; done
+    case "$ch_a" in *:*) ch_r="[$ch_a]" ;; *) ch_r=$ch_a ;; esac
+    ch_out=$(curl_once "$ch_url" "$@" --retry 0 --resolve "$ch_host:$ch_port:$ch_r"); ch_rc=$?
+    ch_http=${ch_out%% *}
+    [ "$ch_rc" -eq 0 ] && eval "GOOD_ADDR_$ch_key=\$ch_a"
+  fi
+  printf '%s' "$ch_http"; return "$ch_rc"
+}
+# --- every address of Theodore's hosts (end) ---
 fetch() { # url dest what
-  curl -q -fsS --proto "$(proto "$1")" --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2 -o "$2" -w '%{http_code}' "$1" \
+  curl_host 3 "$1" -q -fsS --proto "$(proto "$1")" --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 -o "$2" \
     >"$WORK/http" 2>"$WORK/err" && [ "$(cat "$WORK/http")" = 200 ] && return 0
   rc=$?
   cause=NETWORK
@@ -343,7 +415,9 @@ if [ -n "$CODE" ]; then
   # code was accepted: a refused code (spent by an earlier run of the same line) never touches the sign-in that run saved.
   pending="$HOME_DIR/state/activation.pending" answer="$WORK/activation.answer"
   ( umask 077; : > "$answer" )
-  http=$(printf '%s' "$body" | curl -q -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$answer" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$API_BASE/v1/device/activate" 2>/dev/null) || http=000
+  CURL_DATA=$body
+  http=$(curl_host 1 "$API_BASE/v1/device/activate" -q -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$answer" -H 'Content-Type: application/json' 2>/dev/null) || http=000
+  CURL_DATA=
   if [ "$http" = 200 ] && [ -s "$answer" ] && mv -f "$answer" "$pending"; then
     say "this computer is signed in (the one-time code was accepted)"
   else

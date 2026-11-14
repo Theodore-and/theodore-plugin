@@ -165,6 +165,10 @@ changed since the client last learned it, the service refuses the report, stores
   lasts more than 30 minutes. The installation credential is sent only to the API host over HTTPS, never to the download host.
 - TLS uses the operating system's certificate store, so a company's inspecting proxy works when its root
   certificate is installed on the computer, and fails closed (`TLS_INTERCEPT`) when it is not.
+- Theodore's own hosts resolve to several addresses; without a proxy, the client and the installers try each in turn
+  when one does not connect or finish the TLS handshake (a few seconds each). The name sent in the handshake and the
+  name the certificate is checked against stay the host's name, never the address; a certificate that fails the check
+  is not retried on another address. With a proxy, the proxy chooses the address as before.
 - Archives are unpacked only inside Theodore's folder; entries that point outside it are refused, and an asset
   pack whose name would leave the packs folder is refused before anything is deleted or unpacked.
 

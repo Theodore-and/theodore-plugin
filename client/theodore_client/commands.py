@@ -1972,6 +1972,7 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
     home = core.home()
     home.ensure()
     base = dl_base.rstrip("/")
+    api.OWN_BASES.append(base)                  # its addresses are tried in turn (api._connect_any)
     what = "the plugin release document"
     try:
         _status, _headers, raw = api.request("GET", f"{base}/plugin/latest.json", timeout=60.0, redirects=False)
