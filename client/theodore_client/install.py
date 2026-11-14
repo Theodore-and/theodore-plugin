@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import __version__, account, api, core, credentials
+from . import __version__, account, api, core, credentials, usage
 from .contract import (CHANNEL_MANIFEST_SCHEMA, ENGINE_KEEP_MAX, ENGINE_KEEP_PINNED_DAYS, ENGINE_KEEP_USED_DAYS, ENGINE_REFUSALS,
                        PACK_ORDER, RUNTIME_MANIFEST_SCHEMA, RUNTIME_PARTS, UPDATE_CHECK_INTERVAL_S, UPDATE_CHECK_TIMEOUT_S)
 from .core import IS_WINDOWS, Job, Status, quoted_launcher
@@ -300,6 +300,7 @@ def engine_env(directory: Path) -> dict:
     env["THEODORE_HOME"] = str(core.home().root)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
+    usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
     if not system_libreoffice():
         local = libreoffice_binary()
         if local:
@@ -1138,9 +1139,14 @@ def _engine_refusal(directory: Path) -> Status | None:
     except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):
         return None
     code = answer.get("code") if isinstance(answer, dict) else None
-    name = ENGINE_REFUSALS.get(code)
-    if not name:
+    if not ENGINE_REFUSALS.get(code):
         return None
+    status = _refusal_status(code)
+    status.cause = code         # the engine's refusal code, for the usage counts
+    return status
+
+
+def _refusal_status(code: str) -> Status:
     launcher = quoted_launcher()
     if code == "entitlement_missing":
         return account.login_start()

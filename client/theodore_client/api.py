@@ -182,21 +182,24 @@ def _read_bounded(response, limit: int) -> bytes:
 
 
 def request(method: str, url: str, *, bearer: str | None = None, body=None, headers: dict | None = None,
-            timeout: float = 20.0, redirects: bool = True, limit: int | None = None):
+            timeout: float = 20.0, redirects: bool = True, limit: int | None = None, exact_timeout: bool = False,
+            learn_refusals: bool = True):
     """One HTTP exchange. Returns (status, headers, bytes) for 2xx and 304; raises ApiError or NetworkError.
     Every body is bounded: a success body longer than `limit` (DEFAULT_LIMIT when not given), or an error body longer
-    than ERROR_LIMIT, raises TooLarge and is not read further."""
+    than ERROR_LIMIT, raises TooLarge and is not read further. A `body` given as bytes is sent as it is (JSON).
+    `exact_timeout`: the wait is not raised for a proxy. `learn_refusals=False`: a 401 or 403 changes nothing on this
+    computer (the usage counts, which must never change what a command does)."""
     data = None
     hdrs = {"User-Agent": core.user_agent(), "Accept": "application/json, text/markdown;q=0.9, */*;q=0.1"}
     if body is not None:
-        data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        data = body if isinstance(body, bytes) else json.dumps(body, separators=(",", ":")).encode("utf-8")
         hdrs["Content-Type"] = "application/json"
     if bearer and may_carry_bearer(url):
         hdrs["Authorization"] = f"Bearer {bearer}"
     hdrs.update(headers or {})
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
-        with _opener(redirects).open(req, timeout=_timeout(url, timeout)) as resp:
+        with _opener(redirects).open(req, timeout=timeout if exact_timeout else _timeout(url, timeout)) as resp:
             return resp.status, resp.headers, _read_bounded(resp, DEFAULT_LIMIT if limit is None else limit)
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
@@ -214,7 +217,7 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
                 code, message = err, str(parsed.get("error_description") or "")
         except (ValueError, AttributeError):
             pass
-        if "Authorization" in hdrs:
+        if "Authorization" in hdrs and learn_refusals:
             _signed_out(exc.code, code)
         raise ApiError(exc.code, code, message, exc.headers.get("Retry-After")) from None
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as exc:
@@ -251,12 +254,14 @@ def url_for(route: str, query: dict | None = None, **params) -> str:
 
 
 def call(route: str, *, bearer: str | None = None, body=None, query: dict | None = None, headers: dict | None = None,
-         timeout: float = 20.0, redirects: bool = True, limit: int | None = None, **params):
+         timeout: float = 20.0, redirects: bool = True, limit: int | None = None, exact_timeout: bool = False,
+         learn_refusals: bool = True, **params):
     method, _template, needs_auth = ROUTES[route]
     if needs_auth and not bearer:
         raise sign_in_required()
     return request(method, url_for(route, query, **params), bearer=bearer if needs_auth else None, body=body,
-                   headers=headers, timeout=timeout, redirects=redirects, limit=limit)
+                   headers=headers, timeout=timeout, redirects=redirects, limit=limit, exact_timeout=exact_timeout,
+                   learn_refusals=learn_refusals)
 
 
 def call_json(route: str, **kwargs):
@@ -385,11 +390,20 @@ def setup_failed(cause: str, detail: str) -> Status:
         "HASH_MISMATCH": "A Theodore download arrived damaged. I am trying again.",
     }
     if cause == "NETWORK" and sandbox_blocked(detail):
-        return Status("SETUP_FAILED", f"cause {cause}: {detail}", core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
-    return Status("SETUP_FAILED", f"cause {cause}: {detail}", nexts[cause], tells[cause])
+        status = Status("SETUP_FAILED", f"cause {cause}: {detail}", core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
+    else:
+        status = Status("SETUP_FAILED", f"cause {cause}: {detail}", nexts[cause], tells[cause])
+    status.cause = cause
+    return status
 
 
 def offline(error: NetworkError, what: str) -> Status:
+    status = _offline(error, what)
+    status.cause = error.cause
+    return status
+
+
+def _offline(error: NetworkError, what: str) -> Status:
     if error.cause in ("TLS_INTERCEPT", "PROXY_AUTH"):
         failed = setup_failed(error.cause, f"{what}: {error.detail}")
         return Status("OFFLINE", failed.summary, failed.next_step, failed.tell_user)
@@ -402,7 +416,13 @@ def offline(error: NetworkError, what: str) -> Status:
 
 
 def status_from(error: ApiError, what: str) -> Status:
-    """Map an API error code to the status the assistant acts on (contract.API_ERRORS)."""
+    """Map an API error code to the status the assistant acts on (contract.API_ERRORS); the code is its cause."""
+    status = _status_from(error, what)
+    status.cause = error.code
+    return status
+
+
+def _status_from(error: ApiError, what: str) -> Status:
     name = API_ERRORS.get(error.code, (0, None))[1]
     if name is None:
         name = "RETRY" if error.http_status >= 500 else "INTERNAL"

@@ -6,7 +6,7 @@ import argparse
 import contextlib
 import sys
 
-from . import account, api, commands, core, specimens
+from . import account, api, commands, core, specimens, usage
 from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
@@ -23,6 +23,7 @@ HELP = """Theodore client commands (run through the launcher):
   prefs add "<text>" | list | remove <id>
   packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
   hosts register | unregister | settings [--apply]          activate --grant - | --grant-file F          uninstall
+  usage [--show]                 where the usage counts stand; --show prints the next batch exactly as it would be sent
 """
 
 
@@ -110,6 +111,8 @@ def _parser() -> argparse.ArgumentParser:
     ip.add_argument("--keys", required=True)
     un = sub.add_parser("uninstall", add_help=False)
     un.add_argument("--keep-hosts", action="store_true")
+    us = sub.add_parser("usage", add_help=False)
+    us.add_argument("--show", action="store_true")
     return parser
 
 
@@ -174,6 +177,8 @@ def _dispatch(argv: list[str]) -> int:
         return commands.uninstall(args.keep_hosts)
     if cmd == "install-plugin":
         return commands.install_plugin(args.dl_base, args.keys)
+    if cmd == "usage":
+        return usage.show(args.show)
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 
@@ -217,6 +222,21 @@ def _main(argv: list[str]) -> int:
     except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run
         pass
     specimens.sweep()       # specimen sheets older than an hour go before anything else is done
+    if argv[:1] and argv[0] not in _NO_USAGE_FLUSH:
+        usage.flush()           # only when the oldest waiting usage event is older than 15 minutes; never raises
+    code = _run(argv)
+    last = core.last_emitted()
+    if last is not None and last.name != "OK" and code == last.code:
+        usage.record_status(argv[0] if argv else None, last.name, last.cause)     # only while usage is on; never raises
+    return code
+
+
+# Commands that never send the usage counts at their start: the one that shows them, and those that end the sign-in or
+# the installation (logout and uninstall remove the ledger).
+_NO_USAGE_FLUSH = ("usage", "logout", "uninstall", "install-plugin", "help", "-h", "--help")
+
+
+def _run(argv: list[str]) -> int:
     try:
         code = _dispatch(argv)
         if core.refused():          # learned on the way and not answered yet (a job, a swallowed refusal)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -205,6 +206,11 @@ def refresh(timeout: float = 20.0) -> dict:
     release = answer.get("release") or {}
     switch = answer.get("auto_report_enabled", release.get("auto_report_enabled"))
     save_token(token, release, switch if isinstance(switch, bool) else None, asked_at)
+    try:            # usage counts: on only when this answer says usage_enabled: true (absent is an older server: off)
+        from . import usage
+        usage.remember(answer.get("usage_enabled"), asked_at)
+    except Exception as exc:        # noqa: BLE001  never in the way of the licence
+        core.log(f"usage: switch not recorded ({exc.__class__.__name__})")
     if release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine):
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
         from . import install          # imported here: install imports this module
@@ -476,6 +482,9 @@ def logout() -> Status:
     delete_token()
     _fresh_update_state("signed out")
     core.remove_tree(core.home().state / "device.json")
+    from . import usage
+    with contextlib.suppress(Exception):
+        usage.forget()          # a later sign-in may be another account: nothing recorded for this one stays
     return Status("OK", "this computer is signed out of Theodore.",
                   f"to sign in again run {quoted_launcher()} login --start.",
                   "Theodore is signed out on this computer.")

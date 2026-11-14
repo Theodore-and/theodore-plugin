@@ -41,6 +41,13 @@ HERE = Path(__file__).resolve()
 ROOT = HERE.parents[3]
 VERSION = (ROOT / "VERSION").read_text().strip()
 args = sys.argv[1:]
+LEDGER = os.environ.get("THEODORE_USAGE_LEDGER")
+if LEDGER and args and args[0] in ("start", "apply", "finish", "render"):      # one usage line per command, as the engine
+    import time, uuid
+    with open(LEDGER, "a", encoding="utf-8") as ledger:
+        ledger.write(json.dumps({"type": "command", "event_id": str(uuid.uuid4()), "ts": int(time.time() * 1000), "verb": args[0],
+                                 "deck_id": None, "workspace": "task", "kind": "blank", "outcome": "ok", "code": None,
+                                 "duration_ms": 5}) + "\n")
 if (ROOT / "REFUSE").exists():          # stands in for the real engine's licence check: one JSON object, exit code 1
     print(json.dumps({"ok": False, "error": "refused for the test", "code": (ROOT / "REFUSE").read_text().strip()})); sys.exit(1)
 if "--help" in args or not args:
@@ -61,6 +68,7 @@ elif verb == "exit":
     sys.exit(int(args[1]))
 elif verb == "env":
     print(json.dumps({"path0": os.environ["PATH"].split(os.pathsep)[0], "home": os.environ.get("THEODORE_HOME"),
+                      "usage_ledger": os.environ.get("THEODORE_USAGE_LEDGER"),
                       "soffice": os.environ.get("SOFFICE_BIN"), "node_modules": (ROOT / "node_modules").is_dir(),
                       "venv": sys.prefix != sys.base_prefix, "exe": sys.executable}))
 else:

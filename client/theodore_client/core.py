@@ -28,7 +28,10 @@ class Status(Exception):
     """A three-line message for the assistant and the exit code that goes with it.
 
     tell_user is None only for automatic problem reports, which are silent by design: the third line
-    then says there is nothing to tell the user. Every status is three lines."""
+    then says there is nothing to tell the user. Every status is three lines. `cause` is a short code (a SETUP_FAILED
+    cause, an API error code, an engine refusal code) for the usage counts; never a message."""
+
+    cause: str | None = None
 
     def __init__(self, name: str, summary: str, next_step: str, tell_user: str | None):
         super().__init__(summary)
@@ -68,7 +71,17 @@ def emit(status: Status) -> int:
             return status.code
         _REFUSAL_EMITTED = True
     print(status.render(), flush=True)
+    global _LAST_EMITTED
+    _LAST_EMITTED = status
     return status.code
+
+
+_LAST_EMITTED: Status | None = None
+
+
+def last_emitted() -> Status | None:
+    """The last status this process printed (the usage counts record a non-OK one)."""
+    return _LAST_EMITTED
 
 
 # --- refusals: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------

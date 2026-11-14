@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install, routing, specimens
+from . import __version__, account, api, core, credentials, install, routing, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -456,7 +456,10 @@ def run_pptx(args: list[str]) -> int:
     install.require_runtime()
     install.wait_for_packs(args)
     install.wait_for_renderer(args)
-    return install.run_engine(args)
+    code = install.run_engine(args)
+    if args[:1] == ["finish"]:
+        usage.flush(force=True)         # the usage counts go at the end of a deck (never raises, never prints)
+    return code
 
 
 def run_python(args: list[str]) -> int:
