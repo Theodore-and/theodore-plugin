@@ -128,6 +128,7 @@ class FakeApi:
         self.dl_status: dict[str, int] = {}           # /dl/<key> -> forced HTTP status (for example 407)
         self.dl_redirect: dict[str, str] = {}         # /dl/<key> -> Location of a 302
         self.dl_delay = 0.0                           # seconds to stall every /dl/ download (a slow connection)
+        self.dl_delays: dict[str, float] = {}         # /dl/<key> -> seconds to stall that one download (a large file on a slow link)
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
         self.devices: dict[str, dict] = {}            # device_code -> {user_code, status}
         self.installations: dict[str, dict] = {}      # id -> {secret, revoked, gen}
@@ -373,10 +374,10 @@ class FakeApi:
                 return self._send(h, 302, b"", {"Location": self.dl_redirect[key]}, content_type="text/plain")
             if key in self.dl_status:
                 return self._send(h, self.dl_status[key], b"refused", content_type="text/plain")
-            if self.dl_delay:
+            if self.dl_delay or self.dl_delays.get(key):
                 self.lock.release()
                 try:
-                    time.sleep(self.dl_delay)
+                    time.sleep(self.dl_delay + self.dl_delays.get(key, 0.0))
                 finally:
                     self.lock.acquire()
             if content is None:

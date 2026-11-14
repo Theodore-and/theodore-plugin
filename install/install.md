@@ -10,7 +10,7 @@ decks there too, and that workspace is the computer this page means.
 1. Download the installer into a new private folder, then run it. It needs no admin rights and installs into
    ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
    present, adds one marked line naming Theodore for every deck to their global instructions (~/.claude/CLAUDE.md,
-   ~/.codex/AGENTS.md; uninstalling removes it), downloads about 100 to 130 MB now and about 95 MB of assets in the background (on a Mac without LibreOffice,
+   ~/.codex/AGENTS.md; uninstalling removes it), downloads about 100 to 130 MB (what is not done within about three minutes goes on in the background after the installer has ended) and about 95 MB of assets in the background (on a Mac without LibreOffice,
    also LibreOffice, about 300 MB, and on Windows with neither LibreOffice nor PowerPoint, about 350 MB, both in the
    background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
    no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and

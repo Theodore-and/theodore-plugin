@@ -164,6 +164,34 @@ class Installer(unittest.TestCase):
         if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
             self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
 
+    def test_on_a_slow_link_the_installer_returns_and_the_download_goes_on_in_the_background(self):
+        # ACCEPT-RC8 D1: Claude Code stopped the installer at its 10-minute limit while the runtime was still downloading,
+        # before the plugin was registered. The long downloads are a background job the installer waits for only briefly.
+        import time
+        self.api.issue_activation_code("ABCD-1234")
+        for part in self.api.runtime["parts"]:
+            if part["part"] != "python":
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+        began = time.monotonic()
+        result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2"})
+        took = time.monotonic() - began
+        self.assertEqual(result.returncode, 67, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        self.assertTrue(first.startswith("THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime"), first)
+        stable = self.box.home / "bin" / STABLE
+        self.assertIn(f'run "{stable}" doctor in 20 seconds', nxt)
+        self.assertIn("not this installer", nxt)
+        self.assertLess(took, 45, "the installer does not wait for the whole download")
+        self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.host_calls(),
+                      "the plugin is registered before the installer ends")
+        self.assertFalse((self.box.home / "state" / "hosts.pending").exists())
+        self.box.wait_jobs(timeout=180)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
+        doctor = self.box.run_launcher("doctor", launcher=stable)
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertTrue(status_lines(doctor.stdout)[0].startswith("THEODORE OK: Theodore is ready"), doctor.stdout)
+
     def test_running_the_line_again_with_its_spent_code_keeps_the_sign_in_the_first_run_saved(self):
         # ACCEPT-RC8 D1: the first run redeemed the code and was stopped; the agent ran the same line again, whose step 1
         # emptied state/activation.pending before the (refused) activation and then deleted it: the sign-in was lost.

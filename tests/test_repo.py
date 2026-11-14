@@ -340,6 +340,38 @@ class HostLimits(unittest.TestCase):
             self.assertNotIn(b"\x00", data, f"{path.relative_to(ROOT)} is not text")
             data.decode("utf-8")
 
+    def test_both_installers_wait_for_the_background_setup_only_briefly_and_keep_a_saved_login(self):
+        # ACCEPT-RC8 D1, also where install.cmd cannot run (Windows runs test_installer's end-to-end cases in CI): the
+        # long downloads are a background job waited for a few minutes at most, below a host's 10-minute command limit;
+        # the plugin is registered also when that job is still running; doctor's "run the same command again" is
+        # replaced by a status naming doctor; a refused code never touches state/activation.pending.
+        sh = (ROOT / "install" / "install.sh").read_text(encoding="utf-8")
+        cmd = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
+        self.assertNotIn("--wait 1800", sh + cmd)
+        self.assertIn('SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}', sh)
+        self.assertIn('set "SETUP_WAIT=180"', cmd)
+        for text, setup, marker, register, doctor in (
+                (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
+                (cmd, 'call "%LAUNCHER%" setup --wait %SETUP_WAIT% >"%WORK%\\setup.txt"', 'state\\hosts.pending', '\ncall "%T%" hosts register',
+                 'call "%T%" doctor >"%WORK%\\doctor.txt"')):
+            self.assertLess(text.index(marker), text.index(setup), "the marker is written before the long step")
+            self.assertLess(text.index(setup), text.index(register))
+            self.assertLess(text.index(register), text.index(doctor))
+            self.assertIn("run the same command again", text[text.index(doctor):], "doctor's in-progress status is replaced")
+            self.assertIn("doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer).", text)
+        # 67 (still downloading) goes on to the registration; 68 is reported after it.
+        self.assertIn('  67) say "the download goes on in the background after this installer has ended" ;;', sh)
+        self.assertIn('  68) SETUP_FAILED_OUT=$setup_out ;;', sh)
+        self.assertIn('if "%RC%"=="67" goto :setup_background', cmd)
+        self.assertIn('if "%RC%"=="68" goto :setup_failed_later', cmd)
+        # The activation answer: written beside, moved into place only when the code was accepted.
+        self.assertNotIn(': > "$pending"', sh)
+        self.assertNotIn('rm -f "$pending"', sh)
+        self.assertIn('mv -f "$answer" "$pending"', sh)
+        refused = cmd[cmd.index(":code_refused\n"):cmd.index(":stage1\n")]
+        self.assertNotRegex(refused, r"(?i)del[^\n]*activation\.pending")
+        self.assertIn('-o "%SAFE%\\activation.pending"', cmd, "the answer goes to the private folder first")
+
     def test_line_endings(self):
         for path in (SCRIPTS / "theodore", ROOT / "install" / "install.sh"):
             self.assertNotIn(b"\r", path.read_bytes(), path.name)

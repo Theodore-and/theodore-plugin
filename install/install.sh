@@ -10,10 +10,12 @@
 # What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
 # Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 # plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive it
-# names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 100 to 130 MB in all
-# before the first deck); registers the plugin in Claude Code and Codex when they are installed; starts the asset
-# packs (about 95 MB) and, on a Mac without LibreOffice, LibreOffice (about 300 MB) in the background; ends with
-# `theodore doctor`. Running it again is safe.
+# names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
+# before the first deck) as a background job and waits for it a few minutes at most, so that a host's time limit on
+# the assistant's command never stops it; registers the plugin in Claude Code and Codex when they are installed; starts
+# the asset packs (about 95 MB) and, on a Mac without LibreOffice, LibreOffice (about 300 MB) in the background; ends
+# with `theodore doctor`, or with SETUP_IN_PROGRESS while the background download goes on. Running it again is safe:
+# a code that was already used never removes the sign-in an earlier run saved.
 #
 # Trust: this file is the root. Everything it runs was checked first: Python and the client against the pinned
 # SHA-256 values, the plugin against a document signed with a pinned key (verified by that Python, because a stock
@@ -387,12 +389,25 @@ rc=$?
 [ "$rc" -eq 0 ] || exit "$rc"
 SCRIPTS="$HOME_DIR/plugin/plugins/theodore/skills/pptx/scripts"
 LAUNCHER="$SCRIPTS/theodore"
+# Until step 5 has registered the plugin, this marker says so: if this installer is stopped before then, the next
+# Theodore command registers it (as `theodore hosts register` does, which removes the marker).
+[ -e "$HOME_DIR/state/hosts.pending" ] || ( umask 077; : > "$HOME_DIR/state/hosts.pending" )
 
-# --- 4. runtime and engine now, so the first deck request does not wait --------------------------------------------
-say "downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all); this is the long step"
-THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=1800 sh "$LAUNCHER" setup --wait 1800
+# --- 4. runtime and engine: a background job, so the first deck request does not wait -------------------------------
+# The job outlives this installer. It is waited for a few minutes at most: an assistant's command has a time limit
+# (Claude Code stops a command after 10 minutes), and the job must not be what that limit stops.
+SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}
+case "$SETUP_WAIT" in ''|*[!0-9]*) SETUP_WAIT=180 ;; esac
+say "downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step"
+setup_out=$(THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=$SETUP_WAIT sh "$LAUNCHER" setup --wait "$SETUP_WAIT")
 rc=$?
-[ "$rc" -eq 0 ] || exit "$rc"
+SETUP_FAILED_OUT=
+case "$rc" in
+  0) ;;
+  67) say "the download goes on in the background after this installer has ended" ;;
+  68) SETUP_FAILED_OUT=$setup_out ;;          # reported after the plugin is registered: the next command resumes it
+  *) printf '%s\n' "$setup_out"; exit "$rc" ;;
+esac
 T="$HOME_DIR/bin/theodore"
 [ -f "$T" ] || T=$LAUNCHER
 theodore() { THEODORE_HOME=$HOME_DIR sh "$T" "$@"; }
@@ -403,6 +418,11 @@ theodore hosts register
 HOSTS_RC=$?
 [ -n "$ACCEPT" ] && theodore hosts settings --apply
 [ -z "$ACCEPT" ] && theodore hosts settings
+if [ -n "$SETUP_FAILED_OUT" ]; then
+  say "the stable launcher is $T"
+  printf '%s\n' "$SETUP_FAILED_OUT"
+  exit 68
+fi
 
 # --- 6. background downloads -----------------------------------------------------------------------------------------------
 if theodore whoami >/dev/null 2>&1; then
@@ -423,8 +443,18 @@ if ! theodore whoami >/dev/null 2>&1; then
   theodore login --start
   exit $?
 fi
-theodore doctor
+doctor_out=$(theodore doctor)
 rc=$?
+if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the same command again'; then
+  # Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
+  # "the same command", which here would be this installer).
+  printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'
+  where=$(printf '%s\n' "$doctor_out" | sed -n 's/^THEODORE SETUP_IN_PROGRESS: \(.*\)\.$/\1/p' | tail -n 1)
+  status SETUP_IN_PROGRESS 67 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
+    "run \"$T\" doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer)." \
+    "Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it."
+fi
+printf '%s\n' "$doctor_out"
 [ "$rc" -eq 0 ] || exit "$rc"
 if [ "$HOSTS_RC" -ne 0 ]; then
   status RETRY 75 "Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above)." \
