@@ -894,7 +894,9 @@ class AzureUp(unittest.TestCase):
                 '  "vm create") echo "ERROR: (QuotaExceeded) exceeding approved standardDSv3Family Cores quota" >&2; exit 1 ;;\n'
                 'esac\nexit 0\n')
             (tmp / "bin" / "az").chmod(0o755)
-            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp / "key")], check=True)
+            # A key pair in the form the script checks (no ssh-keygen in the Linux containers).
+            (tmp / "key").write_text("not a real key\n")
+            (tmp / "key.pub").write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake test\n")
             env = {**os.environ, "PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "CI_AZURE_KEY": str(tmp / "key"),
                    "CI_AZURE_SSH_FROM": "203.0.113.0/24", "CI_AZURE_IMAGE": "marketplace"}
             result = subprocess.run(["bash", str(ROOT / "ci" / "azure-windows.sh"), "up", str(tmp / "state")], env=env,
