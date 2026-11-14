@@ -160,6 +160,128 @@ def make_certificate(folder: Path) -> tuple[str, str]:
     return str(cert), str(key)
 
 
+class AddressBench:
+    """A host with one working address and three kinds of dead one, all on this computer: `live` serves HTTPS for
+    `host` (a certificate no store trusts but `cert`); `refused` has nothing listening; `no_accept` is a listening
+    socket whose queue is full, so a connection to it times out; `silent` accepts and never speaks TLS; `slow` is the
+    live host on a slow link (its handshake starts SLOW_HANDSHAKE seconds late). Each is a port on 127.0.0.1. `accepted["silent"]` counts the connections the silent one took."""
+
+    def __init__(self, folder: Path, host: str):
+        import socket
+        import ssl
+        import threading
+        import http.server
+        openssl = shutil.which("openssl")
+        if not openssl:
+            raise unittest.SkipTest("openssl is not installed")
+        self.cert, key = str(folder / "host-cert.pem"), str(folder / "host-key.pem")
+        done = subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", self.cert, "-days", "2",
+                               "-subj", f"/CN={host}", "-addext", f"subjectAltName=DNS:{host}"], capture_output=True, text=True)
+        if done.returncode != 0:
+            raise unittest.SkipTest(f"openssl could not make a certificate: {done.stderr.strip()[-200:]}")
+        self.host, self.accepted, self._closing = host, {"silent": 0}, []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(self.cert, key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self._server, self.live = server, server.server_address[1]
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        self.refused = probe.getsockname()[1]
+        probe.close()
+
+        full = socket.socket()
+        full.bind(("127.0.0.1", 0))
+        full.listen(1)
+        self.no_accept = full.getsockname()[1]
+        self._closing.append(full)
+        for _ in range(64):         # fill its queue: the next connection is neither accepted nor refused
+            filler = socket.socket()
+            filler.settimeout(0.3)
+            try:
+                filler.connect(("127.0.0.1", self.no_accept))
+            except OSError:
+                filler.close()
+                break
+            self._closing.append(filler)
+        else:
+            raise unittest.SkipTest("this system accepts every connection to a full listening queue")
+
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(16)
+        self.silent = silent.getsockname()[1]
+        self._closing.append(silent)
+
+        def hold():
+            while True:
+                try:
+                    conn, _ = silent.accept()
+                except OSError:
+                    return
+                self.accepted["silent"] += 1
+                self._closing.append(conn)
+        threading.Thread(target=hold, daemon=True).start()
+
+        slow = socket.socket()
+        slow.bind(("127.0.0.1", 0))
+        slow.listen(16)
+        self.slow = slow.getsockname()[1]
+        self._closing.append(slow)
+
+        def late(conn):         # a slow link: the handshake starts SLOW_HANDSHAKE seconds after the connection
+            import time
+            try:
+                time.sleep(self.SLOW_HANDSHAKE)
+                tls = context.wrap_socket(conn, server_side=True)
+                tls.recv(65536)
+                tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                tls.close()
+            except OSError:
+                conn.close()
+
+        def answer_late():
+            while True:
+                try:
+                    conn, _ = slow.accept()
+                except OSError:
+                    return
+                threading.Thread(target=late, args=(conn,), daemon=True).start()
+        threading.Thread(target=answer_late, daemon=True).start()
+
+    SLOW_HANDSHAKE = 4.5         # past both the client's 3 s and the installers' 4 s
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        for sock in self._closing:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
 SITE = "https://site.example.test"       # the stamped site base of the test build: texts must name it, never production
 
 

@@ -545,5 +545,122 @@ class Installer(unittest.TestCase):
             self.assertNotIn("latest.txt", text)
 
 
+@unittest.skipIf(IS_WINDOWS, "install.sh's address loop; install.cmd's runs on Windows")
+class InstallerEveryAddress(unittest.TestCase):
+    """RC9: install.sh's downloads from Theodore's hosts try each address in turn. curl itself moves to the next
+    address only when the TCP connection fails, never after a TLS handshake that hangs or is reset, and --retry starts
+    from the same first address again. The installer's own loop (curl_host) is run here with the real curl; a stand-in
+    curl only turns each `--resolve host:port:ADDRESS` into a `--connect-to` the local port that plays that address,
+    and trusts the test certificate. A stand-in getent is the resolver."""
+
+    HOST = "dl.theodore.test"
+    DEAD, LIVE = "198.51.100.7", "198.51.100.8"
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from support import AddressBench
+        self.real_curl = shutil.which("curl")
+        if not self.real_curl:
+            self.skipTest("curl is not installed")
+        self.dir = Path(tempfile.mkdtemp(prefix="theodore-addr-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.bench = AddressBench(self.dir, self.HOST)
+        self.addCleanup(self.bench.close)
+        text = (ROOT / "install" / "install.sh").read_text()
+        begin = text.index("# --- every address of Theodore's hosts (begin) ---")
+        end = text.index("# --- every address of Theodore's hosts (end) ---")
+        (self.dir / "block.sh").write_text(text[begin:end])
+        fake = self.dir / "bin"
+        fake.mkdir()
+        (fake / "curl").write_text(f"""#!{sys.executable}
+import os, sys
+ports = dict(pair.split("=") for pair in os.environ["FAKE_PORTS"].split())
+args, address, connect = [], "-", "-"
+words = iter(sys.argv[1:])
+for word in words:
+    if word == "--resolve":
+        host, port, ip = next(words).split(":", 2)
+        address = ip.strip("[]")
+        args += ["--connect-to", f"{{host}}:{{port}}:127.0.0.1:{{ports[address]}}"]
+        continue
+    if word == "--connect-timeout":
+        connect = next(words)
+        args += [word, connect]
+        continue
+    args.append(word)
+with open(os.environ["CURL_LOG"], "a") as log:
+    log.write(f"{{address}} {{connect}}\\n")
+first = ["-q"] if args[:1] == ["-q"] else []
+os.execv(os.environ["REAL_CURL"], [os.environ["REAL_CURL"], *first, "--cacert", os.environ["FAKE_CA"], *args[len(first):]])
+""")
+        (fake / "getent").write_text('#!/bin/sh\necho "getent $*" >> "$RESOLVER_LOG"\n'
+                                     '[ "$1" = ahostsv4 ] && for a in $FAKE_V4; do echo "$a STREAM $2"; done\nexit 0\n')
+        for name in ("curl", "getent"):
+            (fake / name).chmod(0o755)
+        self.env = {"PATH": f"{fake}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(self.dir),
+                    "REAL_CURL": self.real_curl, "FAKE_CA": self.bench.cert, "CURL_LOG": str(self.dir / "curl.log"),
+                    "RESOLVER_LOG": str(self.dir / "resolver.log"), "FAKE_V4": f"{self.DEAD} {self.LIVE}"}
+        self.url = f"https://{self.HOST}:{self.bench.live}/x"
+
+    def run_block(self, script: str, dead_port: int, env: dict | None = None):
+        import subprocess
+        import time
+        for log in ("curl.log", "resolver.log"):
+            (self.dir / log).write_text("")
+        env = {**self.env, "FAKE_PORTS": f"{self.DEAD}={dead_port} {self.LIVE}={self.bench.live}", "URL": self.url,
+               "OUT": str(self.dir / "out"), **(env or {})}
+        began = time.monotonic()
+        done = subprocess.run(["/bin/sh", "-c", f'. "{self.dir / "block.sh"}"\n{script}'], env=env, capture_output=True,
+                              text=True, timeout=120, cwd=str(self.dir))
+        return done, time.monotonic() - began, (self.dir / "curl.log").read_text().split("\n")[:-1]
+
+    def test_a_dead_first_address_falls_over_to_the_next_and_is_remembered(self):
+        twice = ('curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"\n'
+                 'curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"')
+        for dead in ("silent", "no_accept", "refused"):         # the handshake that hangs: the case a user met
+            with self.subTest(dead=dead):
+                done, took, calls = self.run_block(twice, getattr(self.bench, dead))
+                self.assertEqual(done.stdout.split(), ["200", "rc=0", "200", "rc=0"], done.stdout + done.stderr)
+                self.assertEqual((self.dir / "out").read_bytes(), b"ok")
+                # 4 s for the dead address at most, then the live one; the second request starts with the live one
+                self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4", f"{self.LIVE} 4"])
+                self.assertLess(took, 9.0, f"{dead}: {took:.1f} s")
+
+    def test_the_body_is_sent_again_to_the_next_address(self):
+        script = 'CURL_DATA=\'{"code":"ABCD-1234"}\'\ncurl_host 1 "$URL" -q -sS --proto =https -m 60 -o "$OUT"; echo " rc=$?"'
+        done, _took, calls = self.run_block(script, self.bench.refused)
+        self.assertEqual(done.stdout.split(), ["200", "rc=0"], done.stdout + done.stderr)
+        self.assertEqual((self.dir / "out").read_text(), '{"code":"ABCD-1234"}')
+        self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4"])
+
+    def test_every_address_dead_fails_within_bounds(self):
+        script = 'curl_host 1 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"'
+        done, took, calls = self.run_block(script, self.bench.silent, {"FAKE_PORTS": f"{self.DEAD}={self.bench.silent} "
+                                                                                     f"{self.LIVE}={self.bench.refused}"})
+        self.assertEqual(done.stdout.split()[0], "000", done.stdout + done.stderr)
+        self.assertNotEqual(done.stdout.split()[1], "rc=0")
+        self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4"])
+        self.assertLess(took, 9.0)
+
+    def test_a_slow_link_gets_the_callers_own_connect_time_once(self):
+        # every address only ran out of its 4 s: the first is tried once more with the caller's own connect timeout
+        script = 'curl_host 1 "$URL" -q -fsS --proto =https --connect-timeout 8 -m 60 -o "$OUT"; echo " rc=$?"'
+        done, _took, calls = self.run_block(script, self.bench.slow, {"FAKE_PORTS": f"{self.DEAD}={self.bench.slow} "
+                                                                                   f"{self.LIVE}={self.bench.slow}"})
+        self.assertEqual(done.stdout.split(), ["200", "rc=0"], done.stdout + done.stderr)
+        self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4", f"{self.DEAD} 8"])
+
+    def test_with_a_proxy_curl_runs_as_before(self):
+        script = 'curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 20 -o "$OUT"; echo " rc=$?"'
+        proxy = f"http://127.0.0.1:{self.bench.refused}"
+        for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY"):
+            with self.subTest(proxy=name):
+                done, _took, calls = self.run_block(script, self.bench.silent, {name: proxy})
+                self.assertNotEqual(done.stdout.split()[-1], "rc=0")
+                self.assertEqual(calls, ["- 20"], "one curl, its own address choice, its own wait")
+                self.assertEqual((self.dir / "resolver.log").read_text(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

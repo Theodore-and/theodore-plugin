@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import re
 import os
 import socket
+import sys
 import time
 import ssl
 import urllib.error
@@ -114,12 +116,132 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
         raise RedirectRefused(f"the server answered with a redirect (HTTP {code}), which is not followed for this download")
 
 
+# --- every address of Theodore's own hosts ------------------------------------------------------------------------------
+# Theodore's hosts resolve to several addresses. From some networks one of them is unreachable, or completes the TCP
+# connection but never the TLS handshake (or resets it), while another works; http.client tries only the connection,
+# and a handshake that hangs or is reset on the first address failed every request. So, for Theodore's own hosts and
+# without a proxy (which chooses the address itself), each address is tried in turn with CONNECT_EACH seconds to connect
+# and finish the handshake, within the request's own timeout; the address that worked is tried first for the rest of
+# this process. The certificate is verified for the host name (SNI and verification on the name, never the address).
+CONNECT_EACH = 3.0
+_GOOD_ADDRESS: dict[tuple[str, int], tuple] = {}
+OWN_BASES: list[str] = []      # bases known before launcher.json exists (the installer's --dl-base)
+
+
+def _domain(host: str) -> str:
+    """A name's last two labels (its registrable domain for Theodore's hosts); an address stays itself."""
+    host = (host or "").lower().rstrip(".")
+    if not host or host.replace(".", "").isdigit() or ":" in host:
+        return host
+    return ".".join(host.split(".")[-2:])
+
+
+def _own_host(host: str) -> bool:
+    """Theodore's site, API and download hosts and the other names of their domain (the staging forms): the domain of
+    the bases this installation was set up for (launcher.json) or given (OWN_BASES). A third party's host
+    (LibreOffice's mirror) is reached as before."""
+    bases = list(OWN_BASES)
+    try:
+        cfg = core.config()
+        bases += [str(cfg.get(key) or "") for key in ("api_base", "dl_base", "site_base")]
+    except Exception:       # noqa: BLE001  the installer's plugin step runs before any launcher.json exists
+        pass
+    host = (host or "").lower().rstrip(".")
+    for base in bases:
+        own = (urllib.parse.urlsplit(base).hostname or "").lower().rstrip(".")
+        if own and (host == own or (_domain(own) != own and _domain(host) == _domain(own))):
+            return True
+    return False
+
+
+def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSLContext):
+    """A TLS socket to `host`, from the first of its addresses that connects and completes the handshake. When every
+    address only timed out (a slow link rather than a dead address), they are tried once more with what is left of the
+    request's own time, as one connection was before."""
+    budget = timeout if isinstance(timeout, (int, float)) else None
+    found, order = set(), []
+    for family, kind, proto, _canon, address in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        if (family, address[:2]) not in found:
+            found.add((family, address[:2]))
+            order.append((family, kind, proto, address))
+    good = _GOOD_ADDRESS.get((host, port))
+    order.sort(key=lambda entry: entry[3][:2] != good)          # the address that worked last time first (stable)
+    began, failures, slow = time.monotonic(), [], []
+
+    def left():
+        return None if budget is None else budget - (time.monotonic() - began)
+
+    def attempt(entry, each):
+        family, kind, proto, address = entry
+        deadline = time.monotonic() + each
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(each)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(address)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+            sock.settimeout(max(deadline - time.monotonic(), 0.05))
+            tls = context.wrap_socket(sock, server_hostname=host)
+        except BaseException:
+            sock.close()
+            raise
+        tls.settimeout(timeout if budget is not None else socket.getdefaulttimeout())
+        _GOOD_ADDRESS[(host, port)] = address[:2]
+        return tls
+
+    tried = 0
+    for entry in order:
+        remaining = left()
+        if tried and remaining is not None and remaining <= 0:
+            break
+        tried += 1
+        try:
+            return attempt(entry, CONNECT_EACH if remaining is None else max(min(CONNECT_EACH, remaining), 0.05))
+        except ssl.SSLCertVerificationError:
+            raise                                               # the same on every address: a TLS-inspecting network
+        except OSError as exc:
+            failures.append(f"{entry[3][0]}: {str(exc) or exc.__class__.__name__}")
+            if isinstance(exc, TimeoutError) or "timed out" in str(exc):
+                slow.append(entry)
+    if slow and len(slow) == tried:
+        for entry in slow:
+            remaining = left()
+            if remaining is not None and remaining <= CONNECT_EACH / 10:
+                break
+            try:
+                return attempt(entry, remaining if remaining is not None else 3 * CONNECT_EACH)
+            except ssl.SSLCertVerificationError:
+                raise
+            except OSError:
+                continue
+    untried = len(order) - tried
+    raise ConnectionError(f"all {len(order)} addresses of {host} failed ({'; '.join(failures)}"
+                          + (f"; {untried} not tried: the request's {budget:g} s were spent" if untried else "") + ")")
+
+
+class _AnyAddressHTTPS(http.client.HTTPSConnection):
+    def connect(self):
+        if self._tunnel_host or not _own_host(self.host):       # through a proxy, or a third party's host: as before
+            return super().connect()
+        sys.audit("http.client.connect", self, self.host, self.port)
+        self.sock = _connect_any(self.host, self.port, self.timeout, self.source_address, self._context)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_AnyAddressHTTPS, req, context=self._context)
+
+
 _OPENERS: dict = {}
 
 
 def _opener(redirects: bool = True):
     if redirects not in _OPENERS:
-        _OPENERS[redirects] = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()),
+        _OPENERS[redirects] = urllib.request.build_opener(_HTTPSHandler(context=_ssl_context()),
                                                           _Redirects() if redirects else _NoRedirects())
     return _OPENERS[redirects]
 

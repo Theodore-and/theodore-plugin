@@ -2,6 +2,11 @@
 
 ## 0.3.8
 
+- Theodore now tries every address of its service before reporting a connection failure, so a network that cannot
+  reach one of them still works. The client tries each address of Theodore's hosts in turn (3 s each to connect and
+  finish the TLS handshake, within the request's own time) and starts with the one that worked; install.sh and
+  install.cmd do the same with curl (4 s each), since curl moves on only when the connection itself fails, not when
+  the handshake hangs or is reset. With a proxy nothing changes; the certificate is still checked for the host name.
 - Usage counts start with a new installation: the first licensed command after a log in (the served entry the skill
   reads first) makes one licence refresh to learn whether the account records usage, instead of waiting up to 12
   hours for the first scheduled one. At most one try an hour while it fails; the command's outcome never depends on it.

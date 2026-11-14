@@ -60,7 +60,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.8"
-set "PIN_CLIENT=client/client-0.3.8.tar adb0cee2ba03a5ce1b594306f697cf45a44e2cf4a0cbcb1de8cc59b1d9a6fb7a"
+set "PIN_CLIENT=client/client-0.3.8.tar 6126bd821ec0873906beea04b7c750d56c0eb77f6a00ef1bc97cd8e8cf6f417f"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -76,10 +76,12 @@ set "ACCEPT="
 set "WORK="
 set "RC=0"
 rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
-rem abort below 1 KB/s for 60 s, 30 minutes at most.
+rem abort below 1 KB/s for 60 s, 30 minutes at most; three tries (:curl_host, which also tries each address in turn).
 set "PROTO==https"
 if /i "%API_BASE:~0,17%"=="http://127.0.0.1:" set "PROTO==https,http"
-set "CURL_OPTS=-q -fsS --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 --retry 2"
+set "CURL_OPTS=-q -fsS --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800"
+set "CURL_BODY="
+set "CH_MEMO="
 
 :parse
 if "%~1"=="" goto :parsed
@@ -202,8 +204,11 @@ if not defined SAFE goto :no_safe_folder
 if "%SAFE%"=="none" goto :no_safe_folder
 set "HTTP=000"
 rem The body goes through a pipe: no file holds the code.
-echo {"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}| "%CURL%" -q -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%SAFE%\activation.pending" -w "%%{http_code}" -H "Content-Type: application/json" --data-binary @- "%API_BASE%/v1/device/activate" >"%WORK%\http.txt" 2>nul
-set /p HTTP=<"%WORK%\http.txt"
+set "CURL_BODY={"code":"%CODE%","device_name":"%COMPUTERNAME%","platform":"win32","arch":"x64","host":"installer","client_version":"%PIN_CLIENT_VERSION%"}"
+set "CURL_ARGS=-q -sS --proto %PROTO% --connect-timeout 20 -m 60 -o "%SAFE%\activation.pending" -H "Content-Type: application/json""
+set "CURL_ERR=nul"
+call :curl_host 1 "%API_BASE%/v1/device/activate"
+set "CURL_BODY="
 if not "%HTTP%"=="200" goto :code_refused
 move /y "%SAFE%\activation.pending" "%HOME_DIR%\state\activation.pending" >nul 2>&1
 rmdir /s /q "%SAFE%" >nul 2>&1
@@ -483,14 +488,130 @@ exit /b 0
 :fetch
 rem %1 url, %2 destination. Errorlevel 0 when the server answered 200 with the file; DETAIL says why not.
 set "HTTP=000"
-"%CURL%" %CURL_OPTS% --proto %PROTO% -o "%~2" -w "%%{http_code}" "%~1" >"%WORK%\http.txt" 2>"%WORK%\err.txt"
-set "CRC=%ERRORLEVEL%"
-set /p HTTP=<"%WORK%\http.txt"
+set "CURL_ARGS=%CURL_OPTS% --proto %PROTO% -o "%~2""
+set "CURL_ERR=%WORK%\err.txt"
+type nul >"%WORK%\err.txt"
+call :curl_host 3 "%~1"
 if "%CRC%"=="0" if "%HTTP%"=="200" exit /b 0
 set "DETAIL=curl exit %CRC%, HTTP %HTTP%"
 if "%HTTP:~0,1%"=="3" set "DETAIL=it answered with a redirect, which is not followed"
 del /q "%~2" >nul 2>&1
 exit /b 1
+
+:curl_host
+rem %1 tries, %2 url. CURL_ARGS: curl's options (the URL, -w and the address are added here); CURL_BODY: a body sent on
+rem stdin, if any; CURL_ERR: where curl's messages go. Sets HTTP (000 when nothing answered) and CRC (curl's exit status).
+rem Theodore's hosts resolve to several addresses, and from some networks one of them does not answer, or completes the
+rem TCP connection but never the TLS handshake (or resets it), while another works. curl moves to the next address only
+rem when the TCP connection fails: after a handshake that hangs or is reset it gives up (exit 28 or 35), and --retry
+rem starts again from the same first address. So, without a proxy, each address is tried in turn (curl --resolve: the
+rem name, its SNI and its certificate check stay the host's), 4 s each to connect and finish the handshake; the address
+rem that worked is tried first for the rest of this run; when every address only ran out of time (a slow link), the first
+rem is tried once more with the caller's own connect timeout. With a proxy (which chooses the address itself), for a loopback
+rem test server, or when nslookup lists no address for the name, curl runs as before.
+set "CH_TRIES=%~1"
+set "CH_URL=%~2"
+set "CH_HOST="
+set "CH_PORT="
+set "CH_ADDRS="
+set "CH_FIRST="
+if /i not "%CH_URL:~0,8%"=="https://" goto :curl_plain
+if defined HTTPS_PROXY goto :curl_plain
+if defined ALL_PROXY goto :curl_plain
+for /f "tokens=1 delims=/" %%H in ("%CH_URL:~8%") do set "CH_HP=%%H"
+for /f "tokens=1,2 delims=:" %%H in ("%CH_HP%") do set "CH_HOST=%%H" & set "CH_PORT=%%I"
+if not defined CH_PORT set "CH_PORT=443"
+if not defined CH_HOST goto :curl_plain
+echo %CH_HOST%| "%SYS32%\findstr.exe" /r /x /i "[a-z0-9.-]*" >nul || goto :curl_plain
+call :host_addresses "%CH_HOST%"
+if not defined CH_ADDRS goto :curl_plain
+set "CH_GOOD="
+for %%M in (%CH_MEMO%) do for /f "tokens=1,2 delims=#" %%P in ("%%M") do if /i "%%P"=="%CH_HOST%" set "CH_GOOD=%%Q"
+set "CH_LIST=%CH_GOOD%"
+for %%A in (%CH_ADDRS%) do if /i not "%%A"=="%CH_GOOD%" call set "CH_LIST=%%CH_LIST%% %%A"
+set "CH_ROUND=1"
+:curl_round
+set "CH_DONE="
+set "CH_SLOW=1"
+for %%A in (%CH_LIST%) do if not defined CH_DONE call :curl_address %%A
+if %CH_ROUND% geq %CH_TRIES% goto :curl_slow
+rem what --retry retries: 408, 429, 5xx, and no answer at all
+set "CH_AGAIN="
+if "%HTTP%"=="408" set "CH_AGAIN=1"
+if "%HTTP%"=="429" set "CH_AGAIN=1"
+if "%HTTP:~0,1%"=="5" set "CH_AGAIN=1"
+if "%HTTP%"=="000" for %%C in (7 18 28 35 52 55 56) do if "%CRC%"=="%%C" set "CH_AGAIN=1"
+if not defined CH_AGAIN goto :curl_slow
+set /a CH_WAIT=CH_ROUND+1
+ping -n %CH_WAIT% 127.0.0.1 >nul
+set /a CH_ROUND+=1
+goto :curl_round
+:curl_slow
+rem every address only ran out of its 4 s: a slow link (not a dead address), given the caller's own time once
+if not defined CH_SLOW exit /b 0
+for %%A in (%CH_LIST%) do if not defined CH_FIRST set "CH_FIRST=%%A"
+set "CH_R=%CH_FIRST%"
+if not "%CH_FIRST::=%"=="%CH_FIRST%" set "CH_R=[%CH_FIRST%]"
+call :curl_once --retry 0 --resolve "%CH_HOST%:%CH_PORT%:%CH_R%"
+if "%CRC%"=="0" set "CH_MEMO=%CH_MEMO% %CH_HOST%#%CH_FIRST%"
+set "CH_FIRST="
+exit /b 0
+:curl_plain
+set /a CH_RETRY=CH_TRIES-1
+call :curl_once --retry %CH_RETRY%
+exit /b 0
+
+:curl_address
+rem %1 one address. CH_DONE once it answered (and it is remembered); not when it did not connect or finish the handshake.
+set "CH_A=%~1"
+set "CH_R=%~1"
+if not "%CH_A::=%"=="%CH_A%" set "CH_R=[%~1]"
+call :curl_once --retry 0 --connect-timeout 4 --resolve "%CH_HOST%:%CH_PORT%:%CH_R%"
+if not "%CRC%"=="28" set "CH_SLOW="
+if not "%CRC%"=="0" if "%HTTP%"=="000" if "%CH_APPC%"=="0.000000" for %%C in (7 28 35 52 55 56) do if "%CRC%"=="%%C" exit /b 0
+set "CH_SLOW="
+set "CH_DONE=1"
+set "CH_MEMO=%CH_MEMO% %CH_HOST%#%CH_A%"
+exit /b 0
+
+:curl_once
+rem one curl: CURL_ARGS, then this call's own options, the status line and the URL
+set "HTTP=000"
+set "CH_APPC="
+if defined CURL_BODY goto :curl_once_body
+"%CURL%" %CURL_ARGS% %* -w "%%{http_code} %%{time_appconnect}" "%CH_URL%" >"%WORK%\http.txt" 2>>"%CURL_ERR%"
+set "CRC=%ERRORLEVEL%"
+goto :curl_once_read
+:curl_once_body
+echo %CURL_BODY%| "%CURL%" %CURL_ARGS% %* --data-binary @- -w "%%{http_code} %%{time_appconnect}" "%CH_URL%" >"%WORK%\http.txt" 2>>"%CURL_ERR%"
+set "CRC=%ERRORLEVEL%"
+:curl_once_read
+for /f "usebackq tokens=1,2" %%P in ("%WORK%\http.txt") do set "HTTP=%%P" & set "CH_APPC=%%Q"
+exit /b 0
+
+:host_addresses
+rem %1 host: CH_ADDRS = its addresses, IPv4 first, from the inbox nslookup; empty when it lists none. nslookup's labels
+rem are in the system's language, so the answer is found by the name itself: the addresses after the line that names it.
+set "CH_V4="
+set "CH_V6="
+set "CH_IN="
+for /f "tokens=1,2" %%P in ('%SYS32%\nslookup.exe %~1 2^>nul') do call :address_line "%~1" "%%P" "%%Q"
+set "CH_ADDRS=%CH_V4% %CH_V6%"
+if "%CH_ADDRS%"==" " set "CH_ADDRS="
+exit /b 0
+:address_line
+rem %1 host, %2 and %3 the line's first two words
+if /i "%~3"=="%~1" set "CH_IN=1" & exit /b 0
+if /i "%~3"=="%~1." set "CH_IN=1" & exit /b 0
+if not defined CH_IN exit /b 0
+call :address_word "%~2"
+call :address_word "%~3"
+exit /b 0
+:address_word
+if "%~1"=="" exit /b 0
+echo %~1| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul && set "CH_V4=%CH_V4% %~1" && exit /b 0
+echo %~1| "%SYS32%\findstr.exe" /r /x /i "[0-9a-f:]*:[0-9a-f:]*" >nul && set "CH_V6=%CH_V6% %~1"
+exit /b 0
 
 :fetch_checked
 rem %1 url, %2 file, %3 expected sha256. A damaged download (a flaky network) is fetched afresh, three times at most.
