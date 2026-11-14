@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install, routing, specimens
+from . import __version__, account, api, core, credentials, install, routing, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -93,6 +93,7 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
 
 
 def guide(skill: str, section: str | None, part: int, license_text: bool) -> int:
+    ensure_hosts()
     ensure_instructions()
     resume_background()
     if skill not in SKILLS:
@@ -118,13 +119,7 @@ def _guide_pptx(part: int) -> int:
     install.check_updates(force=first, wait=wait, timeout=20.0 if first else 3.0)
     version = install.selected_engine()          # the global pin's instructions when pinned: they belong to that engine
     if not version:
-        state = Job("engine-update").read()
-        if state.get("failed") and not Job("engine-update").alive():
-            Job("engine-update").clear()
-            raise core.internal(f"the engine could not be installed: {state['failed'].get('detail', 'unknown error')}")
-        raise Status("SETUP_IN_PROGRESS", f"Theodore's engine is still downloading ({int(state.get('percent') or 0)}%).",
-                     "run the same command again in 20 seconds. Do not use another slide tool meanwhile.",
-                     "Theodore is downloading its PowerPoint engine. I will continue as soon as it is ready.")
+        raise _engine_downloading("run the same command again in 20 seconds. Do not use another slide tool meanwhile.")
     directory = install.engine_dir(version)
     try:
         text = (directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8")
@@ -149,6 +144,25 @@ def _guide_pptx(part: int) -> int:
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
                     f"{launcher} guide pptx --part {part + 1}")
     return 0
+
+
+def _engine_downloading(next_step: str) -> Status:
+    """No engine yet: SETUP_IN_PROGRESS with the download that is getting it (the setup job's first engine, or an
+    update job). An update job that gave up because another Theodore process held the engine lock (the setup job,
+    downloading the same engine on a slow link) is not an error: it is cleared, and the next call starts it again if
+    the engine is still missing. Any other failure of that job is reported as before."""
+    update, setup = Job("engine-update"), Job("setup")
+    state = update.read()
+    failed = state.get("failed") or {}
+    if failed and not update.alive():
+        update.clear()
+        if not (failed.get("cause") in ("RETRY", "SETUP_IN_PROGRESS") or core.lock_busy(failed.get("detail", ""))):
+            raise core.internal(f"the engine could not be installed: {failed.get('detail', 'unknown error')}")
+        state = {}
+    if setup.alive():
+        state = setup.read()
+    return Status("SETUP_IN_PROGRESS", f"Theodore's engine is still downloading ({int(state.get('percent') or 0)}%).", next_step,
+                  "Theodore is downloading its PowerPoint engine. I will continue as soon as it is ready.")
 
 
 # The served entry of a skill (directions, saved preferences, and for an account with Studio the first instruction of
@@ -323,10 +337,7 @@ def _pptx_body() -> str:
     install.check_updates(force=first, wait=15.0, timeout=20.0 if first else 3.0)
     version = install.selected_engine()
     if not version:
-        state = Job("engine-update").read()
-        raise Status("SETUP_IN_PROGRESS", f"Theodore's engine is still downloading ({int(state.get('percent') or 0)}%).",
-                     f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. Do not use another slide tool meanwhile.",
-                     "Theodore is downloading its PowerPoint engine. I will continue as soon as it is ready.")
+        raise _engine_downloading(f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. Do not use another slide tool meanwhile.")
     directory = install.engine_dir(version)
     try:
         text = (directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8")
@@ -352,6 +363,7 @@ def _pptx_body() -> str:
 def skill(name: str) -> int:
     """`theodore skill <name>`: the skill's instructions as a clean document (no framing), or a three-line status.
     Always exit 0: a host that injects this output aborts the whole skill on any other code."""
+    ensure_hosts()
     ensure_instructions()
     resume_background()
     try:
@@ -456,7 +468,10 @@ def run_pptx(args: list[str]) -> int:
     install.require_runtime()
     install.wait_for_packs(args)
     install.wait_for_renderer(args)
-    return install.run_engine(args)
+    code = install.run_engine(args)
+    if args[:1] == ["finish"]:
+        usage.flush(force=True)         # the usage counts go at the end of a deck (never raises, never prints)
+    return code
 
 
 def run_python(args: list[str]) -> int:
@@ -662,6 +677,12 @@ def _blocking_status(snap: dict) -> Status | None:
         return install.setup_status()
     if not snap["signed_in"]:
         return api.sign_in_required()
+    if not snap["engine"] and Job("setup").alive():          # the setup job is fetching it in the background
+        state = Job("setup").read()
+        return Status("SETUP_IN_PROGRESS", f"the engine is downloading in the background ({state.get('phase', 'starting')}, "
+                                           f"{int(state.get('percent') or 0)}%).",
+                      "run the same command again in 20 seconds. Do not use another slide tool meanwhile.",
+                      "Theodore is downloading its PowerPoint engine. This takes a few minutes; I will continue when it is ready.")
     if not snap["engine"]:
         return Status("SETUP_IN_PROGRESS", "the engine is not installed yet.",
                       f"run {quoted_launcher()} guide pptx; it installs the engine and prints the instructions.",
@@ -694,6 +715,7 @@ def status(as_json: bool, wait: float) -> int:
 
 def doctor(as_json: bool) -> int:
     account.import_pending_activation()
+    ensure_hosts()
     ensure_instructions()
     resumed = resume_background()
     home = core.home()
@@ -753,8 +775,19 @@ def doctor(as_json: bool) -> int:
             f"{info['version']}" if info["status"] == "ready" else f"{info['status']} ({info['percent']}%)")
     for name in ("claude", "codex"):
         found = core.host_executable(name)
-        add("ok", f"assistant {name}", (found + ("" if shutil.which(name) else " (not on PATH; found where its installer puts it)"))
-            if found else "not found on PATH or where its installers put it")
+        if not found:
+            add("ok", f"assistant {name}", "not found on PATH or where its installers put it")
+            continue
+        where = found + ("" if shutil.which(name) else " (not on PATH; found where its installer puts it)")
+        # A cloud session's plugins come from the account, not from this command: nothing to check there.
+        registered = None if core.cloud_sandbox() else _host_registration(name, found)
+        if registered is False:
+            add("warn", f"assistant {name}", f"{where}; Theodore's plugin is not registered in it: run {quoted_launcher()} hosts register, "
+                "then start a new session")
+        else:
+            add("ok", f"assistant {name}", where + ("; Theodore's plugin is registered" if registered else
+                                                    "" if core.cloud_sandbox() else
+                                                    "; whether Theodore's plugin is registered could not be checked (its command did not answer)"))
     written = _host_record().get(routing.RECORD_KEY) or {}
     add("ok", "instructions", "; ".join(f"{n}: {e.get('path')}" for n, e in sorted(written.items())) or "none written")
     if core.IS_WINDOWS and core.host_executable("claude") and not claude_git_bash():
@@ -850,6 +883,13 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     failed = [(n, d) for l, n, d in checks if l == "fail"]
     if any(n == "data directory" for n, _d in failed):
         return api.setup_failed("DISK", f"{home.root} is not writable")
+    # Never "ready" while an assistant on this computer would start its next session without Theodore's skills.
+    unregistered = [n.removeprefix("assistant ") for l, n, d in checks if l == "warn" and n.startswith("assistant ") and "not registered" in d]
+    if unregistered and not failed:
+        names = " and ".join({"claude": "Claude Code", "codex": "Codex"}.get(n, n) for n in unregistered)
+        return Status("RETRY", f"Theodore is installed, but its plugin is not registered in {names} on this computer.",
+                      f"run {quoted_launcher()} hosts register, then tell the user to start a new session.",
+                      f"Theodore is installed, but it is not added to {names} yet. I am adding it; then start a new session.")
     if failed:          # the last line never says ready when a check failed
         what = "; ".join(f"{n} ({d})" for n, d in failed)
         return (Status("INTERNAL", f"Theodore is installed but not ready: {what}.",
@@ -1297,90 +1337,142 @@ def _listed(command: list[str], name: str = "theodore") -> bool:
     return code == 0 and re.search(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", out) is not None
 
 
-def hosts(action: str, apply: bool) -> int:
+def _hosts_pending_path() -> Path:
+    return core.home().state / "hosts.pending"
+
+
+# The installer leaves state/hosts.pending before its long downloads and `hosts register` removes it. When a host's time
+# limit stopped the installer before it registered the plugin, the next guide, skill or doctor does it, as `hosts
+# register` does; a registration that failed is tried again at most once an hour.
+HOSTS_RETRY_S = 3600
+
+
+def ensure_hosts() -> None:
+    """Finish the registration an installer left undone (see above). Never fails or prints in the command it runs in."""
+    marker = _hosts_pending_path()
+    try:
+        if not marker.exists():
+            return
+        tried = core.read_text(marker)
+        if tried and tried.isdigit() and core.now() - int(tried) < HOSTS_RETRY_S:
+            return
+        core.write_atomic(marker, str(int(core.now())), 0o600)
+        for line in _register_hosts():
+            core.log(f"hosts: {line}")
+    except Exception as exc:  # a convenience: never the reason a guide or doctor fails
+        core.log(f"hosts: not registered ({exc.__class__.__name__}: {exc})")
+
+
+def _host_registration(name: str, command: str) -> bool | None:
+    """Whether Theodore's plugin is registered in this assistant, asked the way `hosts register` asks it; None when the
+    assistant's command did not answer."""
+    if name == "claude":
+        code, out = _run([command, "plugin", "list", "--json"], timeout=60)
+        return None if code != 0 else '"theodore@theodore"' in out
+    code, out = _run([command, "plugin", "list"], timeout=60)
+    return None if code != 0 else re.search(r"(?<![A-Za-z0-9_-])theodore@theodore(?![A-Za-z0-9_-])", out) is not None
+
+
+def _register_hosts() -> list[str]:
+    """Register the plugin in Claude Code and Codex when they are on this computer, and write the lines naming Theodore
+    in their instructions. One line per assistant ("... FAILED (...)" when it did not work); prints nothing. Done, the
+    installer's marker (state/hosts.pending) goes: nothing is left for the next command to register."""
     cfg, home = core.config(), core.home()
     lines: list[str] = []
     claude, codex = core.host_executable("claude"), core.host_executable("codex")
     plugin_dir = home.plugin
+    record = _host_record()
+    if claude:
+        record["claude_path"] = claude                              # found again at uninstall, also when off PATH
+        code, out = _run([claude, "plugin", "list", "--json"])
+        if code == 0 and '"theodore@theodore"' in out:
+            lines.append("claude-code: already registered")
+            record.setdefault("claude_registered", False)          # there before Theodore's own: not ours to remove
+            record.setdefault("claude_added_marketplace", False)
+        else:
+            settings_path = _claude_settings_path()
+            before_file, before = settings_path.exists(), _load_settings(settings_path) or {}
+            market_before = _listed([claude, "plugin", "marketplace", "list"])
+            url = str(cfg.get("marketplace_url") or "")
+            code, out = _run([claude, "plugin", "install", "theodore", "--marketplace", url]) if url else (1, "")
+            if code != 0 and url:
+                _run([claude, "plugin", "marketplace", "add", url])
+                code, out = _run([claude, "plugin", "install", "theodore@theodore"])
+            if code != 0 and (plugin_dir / ".claude-plugin" / "marketplace.json").exists():
+                _run([claude, "plugin", "marketplace", "add", str(plugin_dir)])
+                code, out = _run([claude, "plugin", "install", "theodore@theodore"])
+            lines.append("claude-code: registered" if code == 0 else f"claude-code: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+            if code == 0:           # what the registration itself added to the settings file
+                after = _load_settings(settings_path) or {}
+                record.setdefault("claude_registered", True)       # "not ours" (False) is never overwritten
+                record.setdefault("claude_added_marketplace", not market_before)
+                record["path"] = str(settings_path)
+                entries = record.get("claude_entries") or {}        # the entries it added, with their values
+                for parent, key in (("extraKnownMarketplaces", "theodore"), ("enabledPlugins", "theodore@theodore")):
+                    was, now = before.get(parent), after.get(parent)
+                    if isinstance(now, dict) and key in now and not (isinstance(was, dict) and key in was):
+                        entries.setdefault(parent, {}).setdefault(key, now[key])
+                if entries:
+                    record["claude_entries"] = entries
+                record["created_keys"] = sorted(set(record.get("created_keys") or []) | {k for k in after if k not in before})
+                record["file_created"] = bool(record.get("file_created")) or (not before_file and settings_path.exists())
+                if record["file_created"]:
+                    record["file_identity"] = _identity(settings_path)
+    elif core.host_name() == "claude-code" and not core.cloud_sandbox():
+        # Claude Code runs this, so it is on the computer: never "not found" and a success with no skills.
+        lines.append("claude-code: FAILED (this runs inside Claude Code, but its claude command was not found on PATH "
+                     "or where Claude Code's installers put it)")
+    else:
+        lines.append("claude-code: not found on this computer")
+    if codex:
+        if not (plugin_dir / ".agents" / "plugins" / "marketplace.json").exists():
+            lines.append(f"codex: FAILED (no plugin copy in {plugin_dir}; run the installer again)")
+        else:
+            record["codex_path"] = codex
+            config_before = _codex_config().exists()
+            tables_before = _codex_tables()
+            market_before = _listed([codex, "plugin", "marketplace", "list"])
+            if _listed([codex, "plugin", "list"], "theodore@theodore"):
+                record.setdefault("codex_registered", False)       # there before Theodore's own: not ours to remove
+                record.setdefault("codex_added_marketplace", False)
+            _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
+            code, out = _run([codex, "plugin", "add", "theodore@theodore"])
+            lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+            if code == 0:
+                record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
+                record.setdefault("codex_added_marketplace", not market_before)
+                record["codex_config_created"] = bool(record.get("codex_config_created")) or (not config_before and _codex_config().exists())
+                entries, tables_after = record.get("codex_entries") or {}, _codex_tables()
+                for parent, key in _CODEX_TABLES:
+                    was, now = (tables_before or {}).get(parent), (tables_after or {}).get(parent)
+                    if tables_before is not None and isinstance(now, dict) and key in now and not (isinstance(was, dict) and key in was):
+                        entries.setdefault(parent, {}).setdefault(key, now[key])
+                if entries:
+                    record["codex_entries"] = entries
+    elif any(os.environ.get(v) for v in ("CODEX_SANDBOX", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_MANAGED_BY_NPM")) \
+            and not core.cloud_sandbox():          # Codex runs this (CODEX_HOME alone is also a user's setting)
+        lines.append("codex: FAILED (this runs inside Codex, but its codex command was not found on PATH or where Codex's "
+                     "installers put it)")
+    else:
+        lines.append("codex: not found on this computer")
+    record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
+    lines += routed
+    if record:
+        _save_host_record(record)
+    marker = _hosts_pending_path()
+    if not any("FAILED" in line for line in lines):
+        core.remove_tree(marker)
+    elif marker.exists():           # tried now: the next commands try again only after HOSTS_RETRY_S
+        core.write_atomic(marker, str(int(core.now())), 0o600)
+    return lines
+
+
+def hosts(action: str, apply: bool) -> int:
+    home = core.home()
+    lines: list[str] = []
+    claude, codex = core.host_executable("claude"), core.host_executable("codex")
     if action == "register":
-        record = _host_record()
-        if claude:
-            record["claude_path"] = claude                              # found again at uninstall, also when off PATH
-            code, out = _run([claude, "plugin", "list", "--json"])
-            if code == 0 and '"theodore@theodore"' in out:
-                lines.append("claude-code: already registered")
-                record.setdefault("claude_registered", False)          # there before Theodore's own: not ours to remove
-                record.setdefault("claude_added_marketplace", False)
-            else:
-                settings_path = _claude_settings_path()
-                before_file, before = settings_path.exists(), _load_settings(settings_path) or {}
-                market_before = _listed([claude, "plugin", "marketplace", "list"])
-                url = str(cfg.get("marketplace_url") or "")
-                code, out = _run([claude, "plugin", "install", "theodore", "--marketplace", url]) if url else (1, "")
-                if code != 0 and url:
-                    _run([claude, "plugin", "marketplace", "add", url])
-                    code, out = _run([claude, "plugin", "install", "theodore@theodore"])
-                if code != 0 and (plugin_dir / ".claude-plugin" / "marketplace.json").exists():
-                    _run([claude, "plugin", "marketplace", "add", str(plugin_dir)])
-                    code, out = _run([claude, "plugin", "install", "theodore@theodore"])
-                lines.append("claude-code: registered" if code == 0 else f"claude-code: FAILED ({out.splitlines()[-1] if out else 'no output'})")
-                if code == 0:           # what the registration itself added to the settings file
-                    after = _load_settings(settings_path) or {}
-                    record.setdefault("claude_registered", True)       # "not ours" (False) is never overwritten
-                    record.setdefault("claude_added_marketplace", not market_before)
-                    record["path"] = str(settings_path)
-                    entries = record.get("claude_entries") or {}        # the entries it added, with their values
-                    for parent, key in (("extraKnownMarketplaces", "theodore"), ("enabledPlugins", "theodore@theodore")):
-                        was, now = before.get(parent), after.get(parent)
-                        if isinstance(now, dict) and key in now and not (isinstance(was, dict) and key in was):
-                            entries.setdefault(parent, {}).setdefault(key, now[key])
-                    if entries:
-                        record["claude_entries"] = entries
-                    record["created_keys"] = sorted(set(record.get("created_keys") or []) | {k for k in after if k not in before})
-                    record["file_created"] = bool(record.get("file_created")) or (not before_file and settings_path.exists())
-                    if record["file_created"]:
-                        record["file_identity"] = _identity(settings_path)
-        elif core.host_name() == "claude-code" and not core.cloud_sandbox():
-            # Claude Code runs this, so it is on the computer: never "not found" and a success with no skills.
-            lines.append("claude-code: FAILED (this runs inside Claude Code, but its claude command was not found on PATH "
-                         "or where Claude Code's installers put it)")
-        else:
-            lines.append("claude-code: not found on this computer")
-        if codex:
-            if not (plugin_dir / ".agents" / "plugins" / "marketplace.json").exists():
-                lines.append(f"codex: FAILED (no plugin copy in {plugin_dir}; run the installer again)")
-            else:
-                record["codex_path"] = codex
-                config_before = _codex_config().exists()
-                tables_before = _codex_tables()
-                market_before = _listed([codex, "plugin", "marketplace", "list"])
-                if _listed([codex, "plugin", "list"], "theodore@theodore"):
-                    record.setdefault("codex_registered", False)       # there before Theodore's own: not ours to remove
-                    record.setdefault("codex_added_marketplace", False)
-                _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
-                code, out = _run([codex, "plugin", "add", "theodore@theodore"])
-                lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
-                if code == 0:
-                    record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
-                    record.setdefault("codex_added_marketplace", not market_before)
-                    record["codex_config_created"] = bool(record.get("codex_config_created")) or (not config_before and _codex_config().exists())
-                    entries, tables_after = record.get("codex_entries") or {}, _codex_tables()
-                    for parent, key in _CODEX_TABLES:
-                        was, now = (tables_before or {}).get(parent), (tables_after or {}).get(parent)
-                        if tables_before is not None and isinstance(now, dict) and key in now and not (isinstance(was, dict) and key in was):
-                            entries.setdefault(parent, {}).setdefault(key, now[key])
-                    if entries:
-                        record["codex_entries"] = entries
-        elif any(os.environ.get(v) for v in ("CODEX_SANDBOX", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_MANAGED_BY_NPM")) \
-                and not core.cloud_sandbox():          # Codex runs this (CODEX_HOME alone is also a user's setting)
-            lines.append("codex: FAILED (this runs inside Codex, but its codex command was not found on PATH or where Codex's "
-                         "installers put it)")
-        else:
-            lines.append("codex: not found on this computer")
-        record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
-        lines += routed
-        if record:
-            _save_host_record(record)
+        lines += _register_hosts()
     elif action == "unregister":
         left: list[str] = []
         edits: list[str] = []

@@ -3,14 +3,17 @@ the limits the hosts put on a plugin (no bin/, no lockfile at the plugin root, n
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -336,6 +339,38 @@ class HostLimits(unittest.TestCase):
             self.assertLess(len(data), 256 * 1024, f"{path.relative_to(ROOT)} is {len(data)} bytes")
             self.assertNotIn(b"\x00", data, f"{path.relative_to(ROOT)} is not text")
             data.decode("utf-8")
+
+    def test_both_installers_wait_for_the_background_setup_only_briefly_and_keep_a_saved_login(self):
+        # ACCEPT-RC8 D1, also where install.cmd cannot run (Windows runs test_installer's end-to-end cases in CI): the
+        # long downloads are a background job waited for a few minutes at most, below a host's 10-minute command limit;
+        # the plugin is registered also when that job is still running; doctor's "run the same command again" is
+        # replaced by a status naming doctor; a refused code never touches state/activation.pending.
+        sh = (ROOT / "install" / "install.sh").read_text(encoding="utf-8")
+        cmd = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
+        self.assertNotIn("--wait 1800", sh + cmd)
+        self.assertIn('SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}', sh)
+        self.assertIn('set "SETUP_WAIT=180"', cmd)
+        for text, setup, marker, register, doctor in (
+                (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
+                (cmd, 'call "%LAUNCHER%" setup --wait %SETUP_WAIT% >"%WORK%\\setup.txt"', 'state\\hosts.pending', '\ncall "%T%" hosts register',
+                 'call "%T%" doctor >"%WORK%\\doctor.txt"')):
+            self.assertLess(text.index(marker), text.index(setup), "the marker is written before the long step")
+            self.assertLess(text.index(setup), text.index(register))
+            self.assertLess(text.index(register), text.index(doctor))
+            self.assertIn("run the same command again", text[text.index(doctor):], "doctor's in-progress status is replaced")
+            self.assertIn("doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer).", text)
+        # 67 (still downloading) goes on to the registration; 68 is reported after it.
+        self.assertIn('  67) say "the download goes on in the background after this installer has ended" ;;', sh)
+        self.assertIn('  68) SETUP_FAILED_OUT=$setup_out ;;', sh)
+        self.assertIn('if "%RC%"=="67" goto :setup_background', cmd)
+        self.assertIn('if "%RC%"=="68" goto :setup_failed_later', cmd)
+        # The activation answer: written beside, moved into place only when the code was accepted.
+        self.assertNotIn(': > "$pending"', sh)
+        self.assertNotIn('rm -f "$pending"', sh)
+        self.assertIn('mv -f "$answer" "$pending"', sh)
+        refused = cmd[cmd.index(":code_refused\n"):cmd.index(":stage1\n")]
+        self.assertNotRegex(refused, r"(?i)del[^\n]*activation\.pending")
+        self.assertIn('-o "%SAFE%\\activation.pending"', cmd, "the answer goes to the private folder first")
 
     def test_line_endings(self):
         for path in (SCRIPTS / "theodore", ROOT / "install" / "install.sh"):
@@ -873,6 +908,51 @@ class StampFromParts(unittest.TestCase):
         out = self.stamp()
         self.assertIn("test failures at this commit (linux-arm64-shim)", out.stdout)
         self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())
+
+
+@unittest.skipIf(os.name == "nt", "the runner is a POSIX shell script run from the Mac")
+class SelectedStartsWindowsFirst(unittest.TestCase):
+    """ci/run.sh selected starts its Windows job before it waits for the shared lock: that job runs on its own machine,
+    and another runner holding the lock must not delay it."""
+
+    def test_the_windows_job_starts_while_the_lock_is_held_by_another_runner(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        repo, logs, marker = tmp / "repo", tmp / "logs", tmp / "azure-up"
+        (repo / "ci").mkdir(parents=True)
+        for name in ("run.sh", "lock.sh"):
+            shutil.copy2(ROOT / "ci" / name, repo / "ci" / name)
+        (repo / ".gitignore").write_text("ci/out/\n")
+        fake = repo / "ci" / "azure-windows.sh"
+        fake.write_text(f'#!/bin/bash\n[ "$1" = up ] && echo up >> "{marker}"\nexit 1\n')
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "a"], check=True)
+        stamped = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        (logs / "green" / "plugin").mkdir(parents=True)
+        (logs / "green" / "plugin" / stamped).write_text("checks green\n")
+        fake.write_text(fake.read_text() + "# a Windows-only change\n")       # plan: windows (secrets, archives, windows-x64)
+        subprocess.run([*git, "commit", "-q", "-am", "b"], check=True)
+        holder = subprocess.Popen(["sleep", "120"])
+        self.addCleanup(holder.kill)
+        (logs / "locks" / "matrix").mkdir(parents=True)
+        (logs / "locks" / "matrix" / "pid").write_text(f"{holder.pid}\n")
+        runner = subprocess.Popen(["sh", str(repo / "ci" / "run.sh"), "selected", "--azure"], cwd=str(repo), start_new_session=True,
+                                  env={**os.environ, "THEODORE_CI_LOGS": str(logs), "CI_LOCK_POLL": "1"},
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def stop():
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(runner.pid, signal.SIGKILL)
+            runner.wait()
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.2)
+        self.assertTrue(marker.exists(), "the Windows job did not start while another runner held the lock")
+        self.assertEqual((logs / "locks" / "matrix" / "pid").read_text().strip(), str(holder.pid), "the lock is still the other runner's")
+        self.assertIsNone(runner.poll(), "the runner waits for the lock for its local jobs")
 
 
 @unittest.skipIf(os.name == "nt", "the Azure helper is a bash script run from the Mac")

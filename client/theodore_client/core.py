@@ -28,7 +28,10 @@ class Status(Exception):
     """A three-line message for the assistant and the exit code that goes with it.
 
     tell_user is None only for automatic problem reports, which are silent by design: the third line
-    then says there is nothing to tell the user. Every status is three lines."""
+    then says there is nothing to tell the user. Every status is three lines. `cause` is a short code (a SETUP_FAILED
+    cause, an API error code, an engine refusal code) for the usage counts; never a message."""
+
+    cause: str | None = None
 
     def __init__(self, name: str, summary: str, next_step: str, tell_user: str | None):
         super().__init__(summary)
@@ -68,7 +71,17 @@ def emit(status: Status) -> int:
             return status.code
         _REFUSAL_EMITTED = True
     print(status.render(), flush=True)
+    global _LAST_EMITTED
+    _LAST_EMITTED = status
     return status.code
+
+
+_LAST_EMITTED: Status | None = None
+
+
+def last_emitted() -> Status | None:
+    """The last status this process printed (the usage counts record a non-OK one)."""
+    return _LAST_EMITTED
 
 
 # --- refusals: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------
@@ -672,6 +685,15 @@ def version_key(version: str) -> tuple:
 _HELD = threading.local()
 
 
+LOCK_BUSY = "another Theodore process holds the"
+
+
+def lock_busy(status) -> bool:
+    """True for the RETRY a lock gives when another Theodore process holds it (a status, or its recorded summary)."""
+    summary = status if isinstance(status, str) else getattr(status, "summary", "")
+    return str(summary).startswith(LOCK_BUSY)
+
+
 @contextlib.contextmanager
 def lock(name: str, timeout: float = 600.0):
     """An exclusive lock file under state/lock, shared by every assistant session on the machine. A thread that
@@ -705,7 +727,7 @@ def lock(name: str, timeout: float = 600.0):
                 break
             except OSError:
                 if time.monotonic() > deadline:
-                    raise Status("RETRY", f"another Theodore process holds the {name} lock.",
+                    raise Status("RETRY", f"{LOCK_BUSY} {name} lock.",
                                  "run the same command again in 30 seconds.",
                                  "Theodore is busy finishing another step; I will retry shortly.")
                 time.sleep(0.05 if timeout < 5 else 0.2)
@@ -794,12 +816,28 @@ class Job:
         log = open(home().logs / "client.log", "ab")
         kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": log, "stderr": log, "env": dict(os.environ), "cwd": str(home().root)}
         if IS_WINDOWS:
-            kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # detached, new group, no window
-        else:
-            kwargs["start_new_session"] = True
-        child = subprocess.Popen(command, **kwargs)
+            # Detached, new group, no window; and out of the job object the assistant's command may run in (one that is
+            # closed at a time limit takes its processes with it), when that job allows it.
+            kwargs["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000 | 0x01000000
+            try:
+                child = subprocess.Popen(command, **kwargs)
+            except OSError:                  # a job that forbids breaking away: detached all the same
+                kwargs["creationflags"] &= ~0x01000000
+                child = subprocess.Popen(command, **kwargs)
+            log.close()
+            self.update(pid=child.pid)
+            return
+        # Through a shell that starts the job in its own session and exits at once: the job is then nobody's child, so a
+        # host that stops the assistant's command with the whole process tree under it (a time limit) does not stop it.
         log.close()
-        self.update(pid=child.pid)
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        relay = ["/bin/sh", "-c", 'log=$1; shift; "$@" </dev/null >>"$log" 2>&1 & echo $!', "sh", str(home().logs / "client.log"), *command]
+        try:
+            out = subprocess.run(relay, timeout=30, **kwargs).stdout
+            pid = int(out.decode("ascii", "replace").strip() or 0)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pid = 0
+        self.update(pid=pid)
 
     def wait(self, seconds: float) -> bool:
         """Wait until the job is no longer running. True when it finished (done or failed)."""

@@ -510,8 +510,10 @@ cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; rel
 trap 'cleanup' EXIT
 trap 'exit 130' INT TERM HUP
 case "$TARGET" in
-  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all|selected) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
+  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
 esac
+# `selected` takes the lock itself, after its Windows job has started: that job runs on its own machine, and waiting in
+# the queue first only delayed the longest job of the run.
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
@@ -534,7 +536,7 @@ case "$TARGET" in
     plan
     case "$PLAN_CLASS" in
       green) exit 0 ;;
-      runtime) release_lock; exec sh "$0" all ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} ;;
+      runtime) exec sh "$0" all ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} ;;
     esac
     wanted=" $(targets_of "$PLAN_CLASS") "
     wpid=
@@ -543,6 +545,7 @@ case "$TARGET" in
       CI_PARENT=$$ sh "$0" windows-x64 ${AZURE:+--azure} ${HOST:+--host "$HOST"} ${KEY:+--key "$KEY"} > "$OUT/windows-x64.run.log" 2>&1 & wpid=$!
       say "windows-x64 started (ci/out/windows-x64.run.log)" ;;
     esac
+    acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)"
     for t in $wanted; do
       case "$t" in
         secrets) limited 900 secrets run_secrets ;;

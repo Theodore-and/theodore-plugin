@@ -26,6 +26,7 @@ installer's are in `install/`.
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
 | `theodore report` | A bug report or feedback, see below | when filed |
+| Usage counts | What Theodore did, as counts and names from a fixed list, see below; only while your account's usage counts are on | at the end of a deck (`pptx finish`), otherwise at most when the oldest waiting count is 15 minutes old and you use Theodore |
 | `theodore prefs` | Saving, listing or removing a preference you asked to keep | when used |
 
 Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand.ai` (installer and sign-in
@@ -50,6 +51,43 @@ part of your environment is sent.
 ## What is never sent
 
 Deck content, slide text, images, file names, folder paths, renders, or anything else from your workspaces.
+
+## Usage counts
+
+While usage counts are on for your account (the licence refresh says so; they are off when it does not say so), the
+engine and the client write one line per command to a file in Theodore's folder:
+
+- macOS and Linux: `~/.theodore/state/usage-ledger.jsonl`
+- Windows: `%LOCALAPPDATA%\Theodore\state\usage-ledger.jsonl`
+
+Next to it, `state/usage.json` holds whether the counts are on, how many lines were dropped and the batch being sent.
+
+A line holds only these fields, each a name from a fixed list, a number, a yes or no, a short code or a random id:
+
+- an engine command: `type` ("command"), `event_id` (random), `ts` (when it ended), `verb` (start, apply, finish, ...),
+  `deck_id` (128 random bits made when a deck is started; never taken from a name or a path), `workspace` (task or
+  project), `kind` (blank, template, existing, translation or comments), `reopen`, `outcome` (ok, failed, refused or
+  interrupted), `code` (an error name such as `entitlement_expired`, never a message), `retryable`, `duration_ms`,
+  `slides_total`, `slides_added`, `slides_changed`;
+- a launcher command that ended with a status other than OK: `type` ("client_status"), `event_id`, `ts`, `command`
+  (the launcher's command name), `status` (for example `OFFLINE`) and `cause` (a code such as `NETWORK`, or none).
+
+No text from your work is ever in it: no prompt, slide text, deck, file, folder, template or client name, path, hash
+or size of your files. The client checks every line against that list before sending and drops any line that does not
+match it exactly. The file keeps at most 2,000 lines or 1 MB and nothing older than 30 days; what is dropped is only
+counted.
+
+The client sends what is waiting to `api.theodoreand.ai/v1/usage` with the installation credential, in batches of at
+most 200 lines, together with the client, plugin and engine versions, the assistant's name, the operating system's
+family and major version (for example `macos-15`), the processor type and the number of lines dropped. It sends at the
+end of a deck (`pptx finish`), and otherwise at the start of a Theodore command when the oldest waiting line is 15
+minutes old. It waits two seconds at most, tries once, never prints anything about it and never changes the outcome of
+your command; nothing runs in the background. Sent lines are deleted once the service confirms them.
+
+`theodore usage --show` prints the next batch exactly as it would be sent, and `theodore usage` says whether the counts
+are on and how many lines are waiting. To switch usage counts off, write to support@theodoreand.ai: the service then
+refuses the next batch, the client deletes the file and writes nothing more until the switch is on again. Logging out
+of Theodore on this computer (`theodore logout`) and the uninstall also delete it.
 
 ## Bug reports (beta)
 

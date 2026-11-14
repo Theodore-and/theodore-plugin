@@ -128,6 +128,7 @@ class FakeApi:
         self.dl_status: dict[str, int] = {}           # /dl/<key> -> forced HTTP status (for example 407)
         self.dl_redirect: dict[str, str] = {}         # /dl/<key> -> Location of a 302
         self.dl_delay = 0.0                           # seconds to stall every /dl/ download (a slow connection)
+        self.dl_delays: dict[str, float] = {}         # /dl/<key> -> seconds to stall that one download (a large file on a slow link)
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
         self.devices: dict[str, dict] = {}            # device_code -> {user_code, status}
         self.installations: dict[str, dict] = {}      # id -> {secret, revoked, gen}
@@ -170,6 +171,11 @@ class FakeApi:
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
         self.heartbeats: list[dict] = []
+        self.usage_enabled = None         # what the licence refresh answers as usage_enabled; None: absent (an older server)
+        self.usage_answer = None          # (HTTP status, error code) for POST /v1/usage; None: 200 {accepted, duplicates}
+        self.usage_delay = 0.0            # seconds each usage answer waits
+        self.usage_bodies: list[bytes] = []   # every POST /v1/usage body exactly as it arrived
+        self.usage_events: dict[str, dict] = {}   # event_id -> event, as the server keeps one per id
         self.activations: list[dict] = []             # /v1/device/activate bodies, without the code
         self.refreshes = 0
         api = self
@@ -347,6 +353,8 @@ class FakeApi:
             body = {}
         with self.lock:
             self.requests.append({"method": method, "path": path, "auth": bool(h.headers.get("Authorization")), "query": query})
+            if path == "/v1/usage":
+                self.usage_bodies.append(raw)
         if self.down or path in self.drop_paths:
             h.close_connection = True
             try:
@@ -366,10 +374,10 @@ class FakeApi:
                 return self._send(h, 302, b"", {"Location": self.dl_redirect[key]}, content_type="text/plain")
             if key in self.dl_status:
                 return self._send(h, self.dl_status[key], b"refused", content_type="text/plain")
-            if self.dl_delay:
+            if self.dl_delay or self.dl_delays.get(key):
                 self.lock.release()
                 try:
-                    time.sleep(self.dl_delay)
+                    time.sleep(self.dl_delay + self.dl_delays.get(key, 0.0))
                 finally:
                     self.lock.acquire()
             if content is None:
@@ -434,6 +442,8 @@ class FakeApi:
             latest = (self.engine or {}).get("version")
             withdrawn = body.get("engine_version") in ((self.engine or {}).get("revoked") or [])
             extra = {"auto_report_enabled": self.auto_reports} if self.refresh_carries_report_switch else {}
+            if self.usage_enabled is not None:
+                extra["usage_enabled"] = self.usage_enabled
             return self._send(h, 200, {**extra, "entitlement_token": self.mint_entitlement(installation_id), "server_time": iso(self.now()),
                                        "release": {"channel": self.channel_name, "latest_version": latest, "min_version": self.min_version,
                                                    "update_required": withdrawn, "kill": self.kill, "kill_message": self.kill_message or None}})
@@ -568,6 +578,23 @@ class FakeApi:
                 finally:
                     self.lock.acquire()
             return self._send(h, 200, data, content_type="application/zip")
+        if route == ["usage"] and method == "POST":
+            if self.usage_delay:
+                self.lock.release()
+                try:
+                    time.sleep(self.usage_delay)
+                finally:
+                    self.lock.acquire()
+            if self.usage_answer:
+                return self._error(h, self.usage_answer[0], self.usage_answer[1])
+            keys = {"batch_id", "client_version", "plugin_version", "engine_version", "host", "os", "arch", "dropped", "events"}
+            events = body.get("events") if isinstance(body, dict) else None
+            if set(body) != keys or not isinstance(events, list) or not 1 <= len(events) <= 200:
+                return self._error(h, 422, "validation_failed", "batch")
+            duplicates = sum(1 for e in events if e.get("event_id") in self.usage_events)
+            for event in events:
+                self.usage_events.setdefault(event.get("event_id"), event)
+            return self._send(h, 200, {"accepted": len(events) - duplicates, "duplicates": duplicates})
         if route == ["heartbeat"] and method == "POST":
             problem = _check(body, {"engine_version": _semver, "plugin_version": _semver, "client_version": _semver, "host": _slug})
             if problem:

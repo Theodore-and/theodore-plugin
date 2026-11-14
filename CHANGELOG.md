@@ -1,5 +1,27 @@
 # Changes
 
+## 0.3.7
+
+- Usage counts (lane ANALYTICS): while the licence refresh says `usage_enabled: true`, the client gives the engine a
+  ledger path (`THEODORE_USAGE_LEDGER`, the file `state/usage-ledger.jsonl` in Theodore's folder) and records its own
+  non-OK statuses there as codes. It sends what waits to `/v1/usage` at the end of `pptx finish`, otherwise at the
+  start of a command once the oldest line is 15 minutes old: one attempt, two seconds at most, nothing printed, the
+  command's outcome unchanged. Every line is checked against the contract's strict shapes first; the ledger keeps at
+  most 2,000 lines, 1 MB and 30 days. A `usage_off` answer deletes the ledger; so does a refresh that does not say
+  true, and logging out. `theodore usage --show` prints the next batch exactly as it would be sent. SECURITY.md names
+  the file, its fields and when it is sent.
+- `ci/run.sh selected` starts its Windows job before it waits for the shared lock.
+- Install on a slow connection: the long downloads run as a background job that outlives the installer's command; the
+  installer waits for it at most three minutes, registers the plugin meanwhile and ends with `SETUP_IN_PROGRESS` and
+  the doctor command to poll, so a host's time limit on a command no longer cuts the install.
+- Running the install line again with a code already used keeps the login the earlier run saved.
+- `doctor` checks that the plugin is registered with each assistant it finds and says what to run when it is not; the
+  next Theodore command finishes a registration an interrupted install left undone.
+- An engine install that finds another Theodore process holding the update lock answers `SETUP_IN_PROGRESS`, not
+  `INTERNAL`.
+- The runtime build refuses a node_modules that lacks a package the lockfile lists for the platform (npm skips an
+  optional dependency it could not fetch without an error; a bundle without mathjax-full was made that way).
+
 ## 0.3.6
 
 - Uninstall stops Theodore's own running processes first: every background job, the launcher's bootstrap and each

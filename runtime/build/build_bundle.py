@@ -472,6 +472,62 @@ def install_vc_runtime(node_modules: Path, pin: dict, installer: Path, licence_o
     log(f"VC++ runtime {pin['version']}: {', '.join(names)} next to {pin['next_to']}/skia.node")
 
 
+def _platform_matches(allowed, value: str) -> bool:
+    """npm's os/cpu rule for one field: no list matches everything; "!x" excludes x; plain names list the only ones."""
+    if not allowed:
+        return True
+    allowed = [allowed] if isinstance(allowed, str) else list(allowed)
+    if f"!{value}" in allowed:
+        return False
+    plain = [name for name in allowed if not name.startswith("!")]
+    return not plain or value in plain
+
+
+def missing_lock_packages(root: Path, lock: Path, platform_key: str) -> list[str]:
+    """The packages npm ci must install for this platform (optional ones included) that are not in ``root``'s tree.
+
+    npm skips an optional dependency it could not fetch without failing `npm ci` (a dropped connection left a
+    darwin-x64 bundle without mathjax-full). Required here: every lockfile package reachable from the root through
+    dependencies, optional dependencies and non-optional peers, by Node's resolution, whose os and cpu fit the target.
+    """
+    os_name, _, cpu = platform_key.partition("-")
+    packages = json.loads(lock.read_text(encoding="utf-8")).get("packages") or {}
+
+    def resolve(owner: str, name: str) -> str | None:
+        base = owner
+        while True:
+            key = f"{base}/node_modules/{name}" if base else f"node_modules/{name}"
+            if key in packages:
+                return key
+            if not base:
+                return None
+            cut = base.rfind("/node_modules/")
+            base = base[:cut] if cut >= 0 else ""
+
+    def edges(meta: dict) -> list[str]:
+        names = list(meta.get("dependencies") or {}) + list(meta.get("optionalDependencies") or {})
+        optional_peers = {n for n, m in (meta.get("peerDependenciesMeta") or {}).items() if isinstance(m, dict) and m.get("optional")}
+        names += [n for n in (meta.get("peerDependencies") or {}) if n not in optional_peers]
+        return names
+
+    wanted: set[str] = set()
+    queue = [""]
+    while queue:
+        owner = queue.pop()
+        for name in edges(packages.get(owner) or {}):
+            key = resolve(owner, name)
+            if key is None or key in wanted:
+                continue
+            meta = packages[key] if isinstance(packages[key], dict) else {}
+            if meta.get("dev") or meta.get("link") or meta.get("libc"):
+                continue  # a libc-specific package depends on the build host's C library: not required here
+            if not (_platform_matches(meta.get("os"), os_name) and _platform_matches(meta.get("cpu"), cpu)):
+                continue
+            wanted.add(key)
+            queue.append(key)
+    return sorted(key for key in wanted if not (root / key / "package.json").is_file())
+
+
 def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, platform_key: str,
                        skia_pin: dict, skia_archive: Path) -> Path:
     scratch.mkdir(parents=True)
@@ -491,6 +547,14 @@ def build_node_modules(node: Path, npm_cli: Path, scratch: Path, cache: Path, pl
     # --ignore-scripts: nothing from a package runs at build time. The one native binary an install script would
     # have fetched (skia-canvas) is placed by install_skia_binary below instead; see README.md.
     run([node, npm_cli, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=scratch, env=env)
+    missing = missing_lock_packages(scratch, scratch / "package-lock.json", platform_key)
+    if missing:  # once more: npm ci starts from an empty node_modules, from its cache
+        log(f"npm ci left out {len(missing)} package(s) the lockfile lists for {platform_key}: {', '.join(missing[:8])}; running it again")
+        run([node, npm_cli, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], cwd=scratch, env=env)
+        missing = missing_lock_packages(scratch, scratch / "package-lock.json", platform_key)
+    if missing:
+        die(f"npm ci left out {len(missing)} package(s) the lockfile lists for {platform_key}: {', '.join(missing)} "
+            "(an optional dependency npm could not fetch is skipped without an error); no bundle is made without them")
     node_modules = scratch / "node_modules"
     install_skia_binary(node_modules, skia_pin, skia_archive)
     removed = prune_node_modules(node_modules, platform_key)

@@ -3008,3 +3008,109 @@ class UpdateApplySays(ClientCase):
         self.assertIn("already current: asset packs", first)
         self.assertNotIn("nothing", first)
         self.assertIn("client 9.9.9", tell)
+
+
+class SlowLinkAndLocks(ClientCase):
+    """ACCEPT-RC8 D1: on a slow link the background setup outlives the command that started it, and a command that meets
+    the engine lock held by that setup answers a status the assistant can act on, quickly, never INTERNAL."""
+
+    def without_engine(self):
+        self.ready()
+        shutil.rmtree(self.box.home / "engines")
+
+    def sleeper(self) -> subprocess.Popen:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        return proc
+
+    def hold_lock(self, name: str) -> None:
+        import fcntl
+        path = self.box.home / "state" / "lock" / f"{name}.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(handle.close)
+
+    def test_the_setup_job_is_not_a_child_of_the_command_that_started_it(self):
+        # Claude Code stops a command at its time limit with the process tree under it: the job must not be in that tree.
+        self.sign_in()
+        for part in self.api.runtime["parts"]:
+            if part["part"] != "python":
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 6
+        command = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve().parents[1] / "client"), "setup", "--wait", "60"],
+                                   env=self.box.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   cwd=str(self.box.tmp), start_new_session=True)
+        self.addCleanup(lambda: command.poll() is None and command.kill())
+        job = self.box.home / "state" / "jobs" / "setup.json"
+        deadline, pid = time.monotonic() + 20, 0
+        while time.monotonic() < deadline and not pid:
+            try:
+                pid = int(json.loads(job.read_text()).get("pid") or 0)
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
+        self.assertTrue(pid, "the setup job started")
+        parent = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(parent, str(command.pid), "the job is not a child of the command")
+        os.killpg(command.pid, signal.SIGKILL)          # the host stops the command and its process group
+        command.wait(timeout=10)
+        time.sleep(1)
+        os.kill(pid, 0)                                 # the job goes on
+        self.box.wait_jobs(timeout=120)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the runtime arrived after the command was stopped")
+
+    def test_a_guide_that_meets_the_engine_lock_of_the_setup_job_answers_setup_in_progress_quickly(self):
+        # ACCEPT-RC8: "THEODORE INTERNAL: the engine could not be installed: another Theodore process holds the update lock"
+        # while the background setup was still downloading the engine on a slow link.
+        self.without_engine()
+        busy = self.sleeper()
+        (self.box.home / "state" / "jobs" / "setup.json").write_text(json.dumps(
+            {"pid": busy.pid, "phase": "downloading engine 1.0.0-rc.3", "percent": 40, "started": int(time.time())}))
+        self.hold_lock("update")                         # the setup job holds the engine lock while it downloads
+        began = time.monotonic()
+        result = self.client("guide", "pptx", timeout=150)
+        took = time.monotonic() - began
+        first, nxt, _tell = self.assertStatus(result, "SETUP_IN_PROGRESS", 67)
+        self.assertIn("40%", first)
+        self.assertIn("run the same command again in 20 seconds", nxt)
+        self.assertLess(took, 40, "a held lock is waited for briefly, not for minutes")
+        self.assertFalse(_job_alive(self.box.home, "engine-update"), "no second engine download waits behind the setup job's lock")
+
+    def test_an_engine_update_that_gave_up_on_the_lock_is_not_an_internal_error(self):
+        self.without_engine()
+        jobs = self.box.home / "state" / "jobs"
+        (jobs / "engine-update.json").write_text(json.dumps(
+            {"pid": 0, "phase": "engine", "failed": {"cause": "RETRY", "detail": "another Theodore process holds the update lock."}}))
+        self.api.drop_paths = {"/v1/releases/manifest"}  # the update check cannot reach the service (a slow link)
+        result = self.client("guide", "pptx", timeout=150)
+        first, nxt, _tell = self.assertStatus(result, "SETUP_IN_PROGRESS", 67)
+        self.assertNotIn("INTERNAL", result.stdout)
+        self.assertFalse((jobs / "engine-update.json").exists(), "the job that gave up is cleared; the next guide starts it again")
+        self.api.drop_paths = set()
+        again = self.client("guide", "pptx", timeout=150)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("=== THEODORE pptx", again.stdout)
+
+    def test_any_other_failure_of_the_engine_update_is_still_reported(self):
+        self.without_engine()
+        (self.box.home / "state" / "jobs" / "engine-update.json").write_text(json.dumps(
+            {"pid": 0, "phase": "engine", "failed": {"cause": "SELF_TEST", "detail": "the engine failed its self-test"}}))
+        self.api.drop_paths = {"/v1/releases/manifest"}
+        first, _nxt, _tell = self.assertStatus(self.client("guide", "pptx", timeout=150), "INTERNAL", 78)
+        self.assertIn("self-test", first)
+
+
+def _job_alive(home: Path, name: str) -> bool:
+    try:
+        state = json.loads((home / "state" / "jobs" / f"{name}.json").read_text())
+    except (OSError, ValueError):
+        return False
+    pid = int(state.get("pid") or 0)
+    if state.get("done") or state.get("failed") or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True

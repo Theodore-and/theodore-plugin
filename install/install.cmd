@@ -10,9 +10,12 @@ rem
 rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
 rem Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 rem plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive
-rem it names and checks its SHA-256 and size; downloads the rest of the runtime and the engine (about 100 to 130 MB in all
-rem before the first deck); registers the plugin in Claude Code and Codex when they are installed; starts the asset
-rem packs (about 95 MB) in the background; ends with "theodore doctor". Running it again is safe.
+rem it names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
+rem before the first deck) as a background job and waits for it a few minutes at most, so that a host's time limit on
+rem the assistant's command never stops it; registers the plugin in Claude Code and Codex when they are installed;
+rem starts the asset packs (about 95 MB) in the background; ends with "theodore doctor", or with SETUP_IN_PROGRESS while
+rem the background download goes on. Running it again is safe: a code that was already used never removes the sign-in
+rem an earlier run saved.
 rem
 rem Trust: this file is the root. Everything it runs was checked first: Python and the client against the pinned
 rem SHA-256 values (certutil), the plugin against a document signed with a pinned key (verified by that Python:
@@ -56,8 +59,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.3.6"
-set "PIN_CLIENT=client/client-0.3.6.tar ba2757d4f85e63ee13cd5817de3c8e718dbcc562e4309ef428d7fdeb8e33c2bd"
+set "PIN_CLIENT_VERSION=0.3.7"
+set "PIN_CLIENT=client/client-0.3.7.tar a8e12d778eddeb21cacbcccff6d6a74db2c82f77daed0c663ef529ed30575853"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -207,9 +210,15 @@ rmdir /s /q "%SAFE%" >nul 2>&1
 echo theodore-install: this computer is signed in (the one-time code was accepted)
 goto :stage1
 :code_refused
+rem The answer was written into the private folder only: a refused code (spent by an earlier run of the same line) never
+rem touches the sign-in that run saved in state\activation.pending.
 rmdir /s /q "%SAFE%" >nul 2>&1
-echo theodore-install: the one-time code was not accepted (it may have expired or been used); a browser sign-in will be offered instead
 set "CODE="
+if not exist "%HOME_DIR%\state\activation.pending" goto :code_refused_new
+echo theodore-install: the one-time code was not accepted (it was used already, by an earlier run of this installer); the login that run saved is kept
+goto :stage1
+:code_refused_new
+echo theodore-install: the one-time code was not accepted (it may have expired or been used); if this computer is not logged in already, a login link follows at the end
 goto :stage1
 :no_safe_folder
 echo theodore-install: the sign-in answer could not be given a private folder (icacls failed), so the one-time code was not used; a browser sign-in will be offered instead
@@ -266,14 +275,35 @@ if not "%RC%"=="0" goto :finish
 set "SCRIPTS=%HOME_DIR%\plugin\plugins\theodore\skills\pptx\scripts"
 set "LAUNCHER=%SCRIPTS%\theodore.cmd"
 if not exist "%LAUNCHER%" goto :no_launcher
+rem Until step 5 has registered the plugin, this marker says so: if this installer is stopped before then, the next
+rem Theodore command registers it (as "theodore hosts register" does, which removes the marker).
+if not exist "%HOME_DIR%\state\hosts.pending" type nul >"%HOME_DIR%\state\hosts.pending"
 
-rem --- 4. runtime and engine now, so the first deck request does not wait ------------------------------------------
-echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all); this is the long step
-set "THEODORE_BOOTSTRAP_WAIT=1800"
-call "%LAUNCHER%" setup --wait 1800
+rem --- 4. runtime and engine: a background job, so the first deck request does not wait ----------------------------
+rem The job outlives this installer. It is waited for a few minutes at most: an assistant's command has a time limit
+rem (Claude Code stops a command after 10 minutes), and the job must not be what that limit stops.
+set "SETUP_WAIT=180"
+if defined THEODORE_INSTALL_WAIT set "SETUP_WAIT=%THEODORE_INSTALL_WAIT%"
+echo.%SETUP_WAIT%| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*" >nul || set "SETUP_WAIT=180"
+echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step
+set "THEODORE_BOOTSTRAP_WAIT=%SETUP_WAIT%"
+call "%LAUNCHER%" setup --wait %SETUP_WAIT% >"%WORK%\setup.txt"
 set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" goto :finish
 set "THEODORE_BOOTSTRAP_WAIT="
+set "SETUP_FAILED="
+if "%RC%"=="0" goto :setup_done
+if "%RC%"=="67" goto :setup_background
+rem A failed download (68) is reported after the plugin is registered: the next command resumes it.
+if "%RC%"=="68" goto :setup_failed_later
+type "%WORK%\setup.txt"
+goto :finish
+:setup_background
+echo theodore-install: the download goes on in the background after this installer has ended
+goto :setup_done
+:setup_failed_later
+set "SETUP_FAILED=1"
+:setup_done
+set "RC=0"
 set "T=%HOME_DIR%\bin\theodore.cmd"
 if not exist "%T%" set "T=%LAUNCHER%"
 
@@ -286,6 +316,12 @@ rem Claude Code on Windows with no Git Bash cannot load the skills: PortableGit 
 call "%T%" tools install git --if-needed
 if defined ACCEPT call "%T%" hosts settings --apply
 if not defined ACCEPT call "%T%" hosts settings
+if not defined SETUP_FAILED goto :background
+echo theodore-install: the stable launcher is %T%
+type "%WORK%\setup.txt"
+set "RC=68"
+goto :finish
+:background
 
 rem --- 6. background downloads -------------------------------------------------------------------------------------------
 call "%T%" whoami >nul 2>&1
@@ -303,8 +339,19 @@ rem Not signed in (no code, or it was not accepted): the last block carries the 
 rem relay. The installer never opens a browser; only "theodore login --open", asked for by the user, does.
 call "%T%" whoami >nul 2>&1
 if errorlevel 1 goto :sign_in_last
-call "%T%" doctor
+call "%T%" doctor >"%WORK%\doctor.txt"
 set "RC=%ERRORLEVEL%"
+if not "%RC%"=="67" goto :doctor_shown
+"%SYS32%\findstr.exe" /b /c:"NEXT: run the same command again" "%WORK%\doctor.txt" >nul || goto :doctor_shown
+rem Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
+rem "the same command", which here would be this installer).
+"%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
+echo THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended.
+echo NEXT: run "%T%" doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer).
+echo TELL THE USER: Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it.
+goto :finish
+:doctor_shown
+type "%WORK%\doctor.txt"
 if not "%RC%"=="0" goto :finish
 if "%HOSTS_RC%"=="0" goto :finish
 echo THEODORE RETRY: Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above).

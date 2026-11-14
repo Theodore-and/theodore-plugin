@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import __version__, account, api, core, credentials
+from . import __version__, account, api, core, credentials, usage
 from .contract import (CHANNEL_MANIFEST_SCHEMA, ENGINE_KEEP_MAX, ENGINE_KEEP_PINNED_DAYS, ENGINE_KEEP_USED_DAYS, ENGINE_REFUSALS,
                        PACK_ORDER, RUNTIME_MANIFEST_SCHEMA, RUNTIME_PARTS, UPDATE_CHECK_INTERVAL_S, UPDATE_CHECK_TIMEOUT_S)
 from .core import IS_WINDOWS, Job, Status, quoted_launcher
@@ -300,6 +300,7 @@ def engine_env(directory: Path) -> dict:
     env["THEODORE_HOME"] = str(core.home().root)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
+    usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
     if not system_libreoffice():
         local = libreoffice_binary()
         if local:
@@ -383,11 +384,16 @@ def engine_artifact(manifest: dict) -> dict:
     return entry
 
 
-def stage_engine(entry: dict, job: Job | None = None) -> str:
+# A command the assistant waits for gives up on the engine lock after this long, with RETRY (a background download may
+# hold it for many minutes on a slow link); the background jobs wait for it as long as core.lock allows.
+ENGINE_LOCK_WAIT_S = 25.0
+
+
+def stage_engine(entry: dict, job: Job | None = None, lock_timeout: float = 600.0) -> str:
     """Download, verify, unpack and self-test the engine named by a manifest entry. Does not make it current."""
     version = str(entry["version"])
     home = core.home()
-    with core.lock("update"):
+    with core.lock("update", timeout=lock_timeout):
         target = engine_dir(version)
         if core.read_json(target / ".theodore-engine.json").get("sha256") == entry["sha256"]:
             return version
@@ -953,7 +959,9 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
             save_update_state(pending={"version": target, "sha256": engine.get("sha256"), "issued": issued})
         if act and held and held != target:
             save_update_state(held=None)
-    if act and not have_exact:      # the download runs without the lock; its activation takes it again and rechecks
+    # The setup job is fetching the first engine itself (it holds the engine lock while it downloads): a second download
+    # would only wait for that lock. The pending item stays; the next guide activates what setup leaves on disk.
+    if act and not have_exact and not Job("setup").alive():   # without the lock; its activation takes it again and rechecks
         job = Job("engine-update")
         if not job.alive():
             core.write_json(core.home().state / "engine-update.json", engine)
@@ -1047,10 +1055,13 @@ def _restore_engine(workspace: Path, record: dict) -> str:
     reason = "its pin does not name the build's checksum"
     if sha:
         try:
-            return stage_engine({"version": version, "sha256": sha, "kind": record.get("kind"), "runtime_id": record.get("runtime_id")})
+            return stage_engine({"version": version, "sha256": sha, "kind": record.get("kind"), "runtime_id": record.get("runtime_id")},
+                                lock_timeout=ENGINE_LOCK_WAIT_S)
         except EngineError as exc:
             reason = str(exc)
         except Status as status:
+            if core.lock_busy(status):
+                raise                       # another Theodore process is installing an engine: RETRY, nothing refused
             reason = status.summary
     other = selected_engine() or "the current version"
     raise Status("UPDATE_REQUIRED", f"this workspace was started with engine {version}, which is no longer on this computer and could not be "
@@ -1138,9 +1149,14 @@ def _engine_refusal(directory: Path) -> Status | None:
     except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):
         return None
     code = answer.get("code") if isinstance(answer, dict) else None
-    name = ENGINE_REFUSALS.get(code)
-    if not name:
+    if not ENGINE_REFUSALS.get(code):
         return None
+    status = _refusal_status(code)
+    status.cause = code         # the engine's refusal code, for the usage counts
+    return status
+
+
+def _refusal_status(code: str) -> Status:
     launcher = quoted_launcher()
     if code == "entitlement_missing":
         return account.login_start()

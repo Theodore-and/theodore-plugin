@@ -45,6 +45,7 @@
     "session_not_fresh": 403,
     "unauthenticated": 401,
     "update_required": 426,
+    "usage_off": 403,
     "validation_failed": 422
   },
   "guide_headers": [
@@ -132,7 +133,7 @@
     "channel": "theodore-channel-manifest@1",
     "runtime": "theodore-runtime-manifest@1"
   },
-  "openapi_sha256": "fd865a5ba9a2a89a3fadbd01dc08a66441ea090b42ac20c7c6889e671abeaf5b",
+  "openapi_sha256": "fc5dd0e9bc8e920f3c36f394cfd483105c27bc9357467b6d9982932e420610e7",
   "origins": {
     "production": {
       "api": "https://api.theodoreand.ai",
@@ -435,6 +436,21 @@
       "responses": [
         "200",
         "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.usage.create": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/usage",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "413",
         "422",
         "429",
         "500",

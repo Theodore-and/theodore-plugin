@@ -1,7 +1,7 @@
 {
   "name": "theodore",
   "displayName": "Theodore",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Build, edit and translate PowerPoint decks in the assistant you already use, with a consultant's design method. This plugin is a small loader: it sets up Theodore's runtime in your user folder, signs this computer in, and prints the skill instructions.",
   "author": { "name": "Theodore&", "url": "https://theodoreand.ai" },
   "homepage": "https://theodoreand.ai",

@@ -13,3 +13,5 @@ c5d790d689e7497f589f26e53c9fae1bd67d7df7:plugins/theodore/skills/deck-design/scr
 c5d790d689e7497f589f26e53c9fae1bd67d7df7:plugins/theodore/skills/pptx/scripts/launcher.json:generic-api-key:9
 plugins/theodore/skills/deck-design/scripts/launcher.json:generic-api-key:9
 plugins/theodore/skills/pptx/scripts/launcher.json:generic-api-key:9
+8c8759b0f780a51e3cfe886e6a95e50878333e3a:tests/fixtures/contract-v1.json:generic-api-key:136
+72484731ed1d7551abdcd4836184247ee42aff0b:tests/fixtures/contract-v1.json:generic-api-key:136

@@ -50,6 +50,7 @@ ROUTES = {
     "heartbeat": ("POST", "/v1/heartbeat", True),
     "runtime_manifest": ("GET", "/v1/runtime/manifest", False),
     "keys": ("GET", "/v1/keys", False),
+    "usage": ("POST", "/v1/usage", True),
 }
 
 # Routes the backend is adding and its published contract (openapi.json, snapshotted in tests/fixtures) does not list
@@ -142,3 +143,27 @@ ENGINE_REFUSALS = {
     # recreates state/.
     "entitlement_state_unavailable": "NO_ENTITLEMENT",
 }
+
+# --- usage events (lane ANALYTICS; the backend's packages/contracts/src/usage.ts) ---------------------------------------
+# The client gives the engine a ledger path in this variable only when the last licence refresh said usage_enabled: true.
+USAGE_LEDGER_ENV = "THEODORE_USAGE_LEDGER"
+USAGE_VERBS = ("start", "apply", "finish", "split", "rebase", "slide", "render", "comments", "assets", "doctor", "list",
+               "cache", "project", "task")
+USAGE_KINDS = ("blank", "template", "existing", "translation", "comments")
+USAGE_WORKSPACES = ("task", "project")
+USAGE_OUTCOMES = ("ok", "failed", "refused", "interrupted")
+# The launcher's commands as the usage contract names them (launcher.ts CLIENT_COMMANDS); a client_status event for any
+# other command would fail the whole batch, so none is written.
+CLIENT_COMMANDS = ("guide", "pptx", "python", "login", "logout", "whoami", "status", "doctor", "version", "update", "report",
+                   "prefs", "tools", "packs", "activate", "uninstall")
+USAGE_CODE_PATTERN = r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"
+USAGE_OS_PATTERN = r"^(macos|windows|linux)-[0-9]{1,3}$"
+USAGE_TS_MIN, USAGE_TS_MAX = 1_700_000_000_000, 4_102_444_800_000
+USAGE_BATCH_MAX_EVENTS = 200
+USAGE_BATCH_MAX_BYTES = 64 * 1024
+USAGE_DROPPED_MAX = 1_000_000
+USAGE_LEDGER_MAX_LINES = 2000
+USAGE_LEDGER_MAX_BYTES = 1 << 20
+USAGE_MAX_AGE_S = 30 * 86400
+USAGE_FLUSH_AGE_S = 15 * 60
+USAGE_TIMEOUT_S = 2.0
