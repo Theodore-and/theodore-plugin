@@ -873,3 +873,37 @@ class StampFromParts(unittest.TestCase):
         out = self.stamp()
         self.assertIn("test failures at this commit (linux-arm64-shim)", out.stdout)
         self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())
+
+
+@unittest.skipIf(os.name == "nt", "the Azure helper is a bash script run from the Mac")
+class AzureUp(unittest.TestCase):
+    """ci/azure-windows.sh up never leaves a group behind when it fails, and the auto-shutdown schedule is made in the
+    VM's own region (centralus refused one made in the group's region, InvalidScheduleLocation, 2026-11-14)."""
+
+    def test_a_failed_up_deletes_its_group_and_the_schedule_names_the_vms_region(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "bin").mkdir()
+            log = tmp / "calls.log"
+            (tmp / "bin" / "az").write_text(
+                "#!/bin/sh\n"
+                f'echo "az $*" >> "{log}"\n'
+                'case "$1 $2" in\n'
+                '  "account show"|"group create"|"group delete") exit 0 ;;\n'
+                '  "group exists") echo false; exit 0 ;;\n'
+                '  "vm create") echo "ERROR: (QuotaExceeded) exceeding approved standardDSv3Family Cores quota" >&2; exit 1 ;;\n'
+                'esac\nexit 0\n')
+            (tmp / "bin" / "az").chmod(0o755)
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp / "key")], check=True)
+            env = {**os.environ, "PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "CI_AZURE_KEY": str(tmp / "key"),
+                   "CI_AZURE_SSH_FROM": "203.0.113.0/24", "CI_AZURE_IMAGE": "marketplace"}
+            result = subprocess.run(["bash", str(ROOT / "ci" / "azure-windows.sh"), "up", str(tmp / "state")], env=env,
+                                    capture_output=True, text=True, timeout=120)
+            self.assertNotEqual(result.returncode, 0)
+            calls = log.read_text().splitlines()
+            self.assertTrue(any(c.startswith("az group create") for c in calls))
+            self.assertTrue(any(c.startswith("az group delete") for c in calls), result.stderr)
+            self.assertFalse((tmp / "state").exists(), "nothing of the failed machine is left to clear by hand")
+        script = (ROOT / "ci" / "azure-windows.sh").read_text()
+        self.assertIn('vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" --location "${placed% *}"', script)
+        self.assertNotIn("die \"could not set the VM's auto-shutdown deadline\"", script)

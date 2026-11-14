@@ -91,6 +91,8 @@ up() {
   say "image: ${image##*/galleries/}"
   local group; group="$PREFIX-$(date -u +%Y%m%d%H%M%S)"
   echo "$group" > "$STATE/group"
+  # Any way out of `up` before the machine answers deletes the group again (a failed up never leaves one behind).
+  trap 'st=$?; if [ "$st" -ne 0 ] && [ -f "$STATE/group" ]; then say "up failed: deleting its group"; down || true; fi' EXIT
   # Who may connect: CI_AZURE_SSH_FROM (space-separated prefixes), else every /24 this machine was seen leaving
   # from in a dozen probes (a connection with more than one uplink alternates between them).
   local from=${CI_AZURE_SSH_FROM:-} ip i
@@ -140,9 +142,15 @@ up() {
   say "made $made in ${placed% *}"
   echo "$made" > "$STATE/size"
   rm -f "$STATE/password"
-  # The deadline Azure keeps by itself: deallocated at that UTC time even if nothing here is left to delete it.
-  azr vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" -o none || die "could not set the VM's auto-shutdown deadline"
-  say "auto-shutdown (deallocate) at $shutdown_at UTC"
+  # The deadline Azure keeps by itself: deallocated at that UTC time even if nothing here is left to delete it. The
+  # schedule must be in the VM's own region, which the placement may have moved away from the group's (centralus
+  # refused a schedule made in the group's region: InvalidScheduleLocation). Not fatal: the group's expires tag and
+  # every run's sweep still delete a group left behind.
+  if azr vm auto-shutdown -g "$group" -n "$VM" --time "$shutdown_at" --location "${placed% *}" -o none; then
+    say "auto-shutdown (deallocate) at $shutdown_at UTC"
+  else
+    say "the auto-shutdown deadline could not be set in ${placed% *}; the expires tag ($expires) and the sweep still apply"
+  fi
   azr network nsg rule create -g "$group" --nsg-name "${VM}NSG" -n ssh-from-runner --priority 100 --direction Inbound \
     --access Allow --protocol Tcp --source-address-prefixes $from --destination-port-ranges 22 -o none
   local pub; pub=$(cut -d' ' -f1-2 "$KEY.pub")
@@ -169,7 +177,7 @@ PS
   for i in $(seq 1 30); do
     if ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$STATE/known_hosts" \
         "$USER_NAME@$addr" "echo ready" >/dev/null 2>&1; then
-      say "ready: $USER_NAME@$addr"; return 0
+      say "ready: $USER_NAME@$addr"; trap - EXIT; return 0
     fi
     # This machine may now leave from another address than the ones probed at the start.
     [ $((i % 6)) -ne 0 ] || admit || true
