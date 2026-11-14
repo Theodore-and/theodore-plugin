@@ -207,9 +207,15 @@ rmdir /s /q "%SAFE%" >nul 2>&1
 echo theodore-install: this computer is signed in (the one-time code was accepted)
 goto :stage1
 :code_refused
+rem The answer was written into the private folder only: a refused code (spent by an earlier run of the same line) never
+rem touches the sign-in that run saved in state\activation.pending.
 rmdir /s /q "%SAFE%" >nul 2>&1
-echo theodore-install: the one-time code was not accepted (it may have expired or been used); a browser sign-in will be offered instead
 set "CODE="
+if not exist "%HOME_DIR%\state\activation.pending" goto :code_refused_new
+echo theodore-install: the one-time code was not accepted (it was used already, by an earlier run of this installer); the login that run saved is kept
+goto :stage1
+:code_refused_new
+echo theodore-install: the one-time code was not accepted (it may have expired or been used); if this computer is not logged in already, a login link follows at the end
 goto :stage1
 :no_safe_folder
 echo theodore-install: the sign-in answer could not be given a private folder (icacls failed), so the one-time code was not used; a browser sign-in will be offered instead

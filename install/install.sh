@@ -337,14 +337,20 @@ if [ -n "$CODE" ]; then
   name=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-60)
   body=$(printf '{"code":"%s","device_name":"%s","platform":"%s","arch":"%s","host":"%s","client_version":"%s"}' \
     "$CODE" "${name:-computer}" "$PLAT" "$ARCH" "$(host_of)" "$PIN_CLIENT_VERSION")
-  pending="$HOME_DIR/state/activation.pending"
-  ( umask 077; : > "$pending" )
-  http=$(printf '%s' "$body" | curl -q -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$pending" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$API_BASE/v1/device/activate" 2>/dev/null) || http=000
-  if [ "$http" = 200 ]; then
+  # The answer goes to a file of this installer's private folder and replaces state/activation.pending only when the
+  # code was accepted: a refused code (spent by an earlier run of the same line) never touches the sign-in that run saved.
+  pending="$HOME_DIR/state/activation.pending" answer="$WORK/activation.answer"
+  ( umask 077; : > "$answer" )
+  http=$(printf '%s' "$body" | curl -q -sS --proto "$(proto "$API_BASE")" --connect-timeout 20 -m 60 -o "$answer" -w '%{http_code}' -H 'Content-Type: application/json' --data-binary @- "$API_BASE/v1/device/activate" 2>/dev/null) || http=000
+  if [ "$http" = 200 ] && [ -s "$answer" ] && mv -f "$answer" "$pending"; then
     say "this computer is signed in (the one-time code was accepted)"
   else
-    rm -f "$pending"
-    say "the one-time code was not accepted (it may have expired or been used); a browser sign-in will be offered instead"
+    rm -f "$answer"
+    if [ -s "$pending" ]; then
+      say "the one-time code was not accepted (it was used already, by an earlier run of this installer); the login that run saved is kept"
+    else
+      say "the one-time code was not accepted (it may have expired or been used); if this computer is not logged in already, a login link follows at the end"
+    fi
     CODE=
   fi
 fi

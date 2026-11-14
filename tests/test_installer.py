@@ -164,6 +164,26 @@ class Installer(unittest.TestCase):
         if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
             self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
 
+    def test_running_the_line_again_with_its_spent_code_keeps_the_sign_in_the_first_run_saved(self):
+        # ACCEPT-RC8 D1: the first run redeemed the code and was stopped; the agent ran the same line again, whose step 1
+        # emptied state/activation.pending before the (refused) activation and then deleted it: the sign-in was lost.
+        self.api.issue_activation_code("ABCD-1234")
+        broken = {k: "0" * 64 for k in json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+                  if k.startswith("stage1_python_") and k.endswith("_sha256")}
+        cut = self.install("--code", "ABCD-1234", installer=self.box.installer(**broken))     # stops right after step 1
+        self.assertEqual(cut.returncode, 68, cut.stdout + cut.stderr)
+        pending = self.box.home / "state" / "activation.pending"
+        saved = pending.read_bytes()
+        self.assertIn(b"installation_secret", saved)
+        again = self.install("--code", "ABCD-1234", installer=self.box.installer(**broken))
+        self.assertIn("the login that run saved is kept", again.stdout)
+        self.assertEqual(pending.read_bytes(), saved, "a refused code leaves the saved sign-in as it was")
+        done = self.install("--code", "ABCD-1234")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertTrue(status_lines(done.stdout)[0].startswith("THEODORE OK: Theodore is ready"), done.stdout)
+        self.assertEqual(len(self.api.activations), 1, "one code, one installation")
+        self.box.wait_jobs()
+
     def test_doctor_checks_the_registration_and_the_next_command_finishes_one_the_installer_left_undone(self):
         # ACCEPT-RC8 D1: the installer was stopped before it registered the plugin; doctor then said ready although
         # Claude Code had no Theodore plugin.
