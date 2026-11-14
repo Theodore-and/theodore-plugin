@@ -43,12 +43,23 @@ class Installer(unittest.TestCase):
         lines = self.calls.read_text().splitlines()
         return [line.replace('"', "") for line in lines] if IS_WINDOWS else lines
 
-    def wait_gone(self, path: Path, seconds: float = 150.0) -> None:
+    def wait_gone(self, path: Path, seconds: float = 30.0, output: str = "") -> float:
+        """Wait for the folder the uninstall's cleanup removes; on failure say what is left, what the cleanup wrote and
+        what the client logged about the processes it stopped. Returns the seconds it took."""
+        import re
         import time
-        deadline = time.monotonic() + seconds
-        while path.exists() and time.monotonic() < deadline:
-            time.sleep(1)
-        self.assertFalse(path.exists(), f"{path} is still there after {seconds:.0f} s: {sorted(p.name for p in path.iterdir())}")
+        began = time.monotonic()
+        while path.exists() and time.monotonic() - began < seconds:
+            time.sleep(0.5)
+        if path.exists():
+            try:
+                left = sorted(p.name for p in path.iterdir())
+            except OSError:
+                left = "(gone while listing)"
+            found = re.search(r"its result is written to (.+?result\.txt)", output)
+            result = Path(found.group(1)).read_text(errors="replace") if found and Path(found.group(1)).exists() else "(no result yet)"
+            self.fail(f"{path} is still there after {seconds:.0f} s: {left}; cleanup result: {result!r}; status: {output[:600]}")
+        return time.monotonic() - began
 
     @unittest.skipUnless(IS_WINDOWS, "a running Theodore process that holds a file in the folder: Windows cannot delete it")
     def test_uninstall_stops_theodores_own_background_process_and_removes_the_folder_in_one_run(self):
@@ -75,7 +86,7 @@ class Installer(unittest.TestCase):
         self.assertTrue(status_lines(removed.stdout)[0].startswith("THEODORE OK: Theodore was removed"), removed.stdout)
         self.assertNotIn("run the same command again", removed.stdout)
         holder.wait(timeout=30)                 # stopped by its job file's pid, with its child
-        self.wait_gone(home)
+        self.wait_gone(home, output=removed.stdout)
 
     def install(self, *args, env=None, installer=None):
         import subprocess
@@ -132,8 +143,8 @@ class Installer(unittest.TestCase):
         removed = self.install("--uninstall")
         self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
         self.assertNotIn("run the same command again", removed.stdout, "never a command that no longer exists")
-        if IS_WINDOWS:          # the folder goes after the client has exited, by a cleanup that waits for the last files
-            self.wait_gone(home)
+        if IS_WINDOWS:          # the folder goes a moment after the client has exited
+            self.wait_gone(home, output=removed.stdout)
         self.assertFalse(home.exists())
         calls = self.host_calls()
         for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",

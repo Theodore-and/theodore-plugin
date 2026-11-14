@@ -2094,10 +2094,31 @@ def _theodore_pids() -> list[int]:
     return sorted(p for p in pids if p > 0 and p != os.getpid() and core.pid_alive(p))
 
 
+def _processes_in_folder(root: Path) -> list[int]:
+    """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, LibreOffice, Git
+    Bash), whatever started them; never this process or its parents. Read with WMI. Empty elsewhere."""
+    if not core.IS_WINDOWS or not root.exists():
+        return []
+    ps = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    os.environ["THEODORE_ROOT_SCAN"] = str(root).rstrip("\\") + "\\"
+    code, out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
+                      "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
+                      "$_.ExecutablePath.StartsWith($env:THEODORE_ROOT_SCAN, [StringComparison]::OrdinalIgnoreCase) } | "
+                      "ForEach-Object { $_.ProcessId }"], timeout=60)
+    mine = {os.getpid(), os.getppid()}
+    return sorted({int(x) for x in out.split() if x.isdigit()} - mine) if code == 0 else []
+
+
 def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
     """Stop Theodore's own processes and the processes they started (on Windows the whole tree: a download or an
-    unpacker holds files in the folder, and Windows cannot delete a file in use), then wait until they are gone."""
+    unpacker holds files in the folder, and Windows cannot delete a file in use), then wait until they are gone. On
+    Windows also every process running a program from inside Theodore's folder (the launcher's bootstrap has no pid
+    record there), each logged."""
     pids = _theodore_pids()
+    for pid in _processes_in_folder(core.home().root):
+        if pid not in pids:
+            pids.append(pid)
+            core.log(f"uninstall: process {pid} runs a program from inside {core.home().root}: stopped")
     for pid in pids:
         if core.IS_WINDOWS:
             _run([os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "taskkill.exe"),
@@ -2133,7 +2154,7 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
     marker = root / UNINSTALL_MARKER
     core.write_atomic(marker, f"{os.getpid()}\n", 0o644)
     # A few seconds first: the launcher that called this client reads its own file to its end once the client exits.
-    lines = ["@echo off", "setlocal", "set N=0", "ping -n 5 127.0.0.1 >nul", ":again",
+    lines = ["@echo off", "setlocal", "set N=0", "ping -n 3 127.0.0.1 >nul", ":again",
              f'if exist "{marker}" goto pass', f'>"{result}" echo stopped: a new installation started in {root}', "goto end",
              ":pass"]
     for name in names:
@@ -2144,13 +2165,14 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
         else:
             lines.append(f'if exist "{target}" rmdir /s /q "{target}" >nul 2>&1')
     checks = [f'if exist "{root / n}" goto wait' for n in names if not (n == "state" and keep_specimen_record)]
-    lines += checks + ["goto done", ":wait", "set /a N+=1", "if %N% geq 60 goto done",
-                       "ping -n 3 127.0.0.1 >nul", "goto again", ":done", f'del /f /q "{marker}" >nul 2>&1',
-                       f'rmdir "{root}" >nul 2>&1']
+    # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
+    lines += checks + ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done",
+                       "ping -n 2 127.0.0.1 >nul", "goto again", ":done", f'del /f /q "{marker}" >nul 2>&1',
+                       f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
     lines += [f'if exist "{root / n}" (>>"{result}" echo left: {root / n})' for n in names
               if not (n == "state" and keep_specimen_record)]
     # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
-    lines += [f'if not exist "{result}" (>"{result}" echo removed: {root})', ":end", "ping -n 301 127.0.0.1 >nul",
+    lines += [f'if not exist "{root}" (>>"{result}" echo removed: {root})', ":end", "ping -n 301 127.0.0.1 >nul",
               f'(goto) 2>nul & rmdir /s /q "{work}"']
     script = work / "cleanup.cmd"
     script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
@@ -2205,10 +2227,16 @@ def uninstall(keep_hosts: bool) -> int:
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
     if core.IS_WINDOWS:  # the running interpreter lives inside the folder: a cleanup deletes it after this process ends
-        names = [n for n in core.OWNED if (root / n).exists()]
-        result = _windows_cleanup(root, names, bool(specimens_left)) if names else None
+        # Everything this process does not run from goes now; its own Python (runtime), its code (client) and the
+        # launcher that called it (bin) go a moment after it exits.
+        for name in core.OWNED:
+            if name in ("runtime", "client", "bin") or (name == "state" and specimens_left):
+                continue
+            core.remove_tree(root / name)
+        names = list(core.OWNED)        # each guarded by "if exist" in the script: a folder written meanwhile (a log) goes too
+        result = _windows_cleanup(root, names, bool(specimens_left)) if any((root / x).exists() for x in names) else None
         what = (f"its folder {root} is deleted by a cleanup that starts when this command ends (Theodore's own processes are "
-                f"stopped; it retries for up to two minutes while Windows releases the last files; its result is written to "
+                f"stopped; it retries every second for up to five minutes while Windows releases the last files; its result is written to "
                 f"{result} for five minutes)") if result else f"{root} was deleted"
         what += (f"; {'; '.join(edits)}" if edits else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "")
         if left:
