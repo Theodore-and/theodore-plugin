@@ -19,6 +19,8 @@
   next Theodore command finishes a registration an interrupted install left undone.
 - An engine install that finds another Theodore process holding the update lock answers `SETUP_IN_PROGRESS`, not
   `INTERNAL`.
+- The runtime build refuses a node_modules that lacks a package the lockfile lists for the platform (npm skips an
+  optional dependency it could not fetch without an error; a bundle without mathjax-full was made that way).
 
 ## 0.3.6
 
