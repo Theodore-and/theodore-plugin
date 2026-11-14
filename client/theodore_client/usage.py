@@ -70,6 +70,23 @@ def enabled() -> bool:
     return _state().get("enabled") is True
 
 
+ASK_RETRY_S = 3600
+
+
+def should_ask() -> bool:
+    """No licence refresh has told this computer yet whether usage is recorded (since its last log in), and no try
+    was made in the last hour."""
+    state = _state()
+    return "enabled" not in state and core.now() - float(state.get("asked_at") or 0) >= ASK_RETRY_S
+
+
+def note_asking() -> None:
+    with core.lock("usage", timeout=10):
+        state = _state()
+        state["asked_at"] = int(core.now())
+        _save(state)
+
+
 def remember(answer_enabled, asked_at: float) -> None:
     """What a licence refresh answered. Only a literal true turns the counts on (absent is an older server: off). Off
     deletes the ledger. An on from a refresh asked before a usage_off this computer learned meanwhile is ignored."""

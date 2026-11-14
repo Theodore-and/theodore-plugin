@@ -182,8 +182,10 @@ def import_pending_activation() -> None:
     core.remove_tree(pending)
 
 
-def refresh(timeout: float = 20.0) -> dict:
-    """POST /v1/licence/refresh. Saves the new token. Raises ApiError / NetworkError to the caller."""
+def refresh(timeout: float = 20.0, *, nudge_updates: bool = True) -> dict:
+    """POST /v1/licence/refresh. Saves the new token. Raises ApiError / NetworkError to the caller. `nudge_updates`:
+    when the channel moved, the next guide checks the manifest at once (off for the refresh made only to learn the
+    usage switch, which must not change when updates are looked for)."""
     cred = credentials.load()
     if not cred:
         raise api.sign_in_required()
@@ -211,7 +213,7 @@ def refresh(timeout: float = 20.0) -> dict:
         usage.remember(answer.get("usage_enabled"), asked_at)
     except Exception as exc:        # noqa: BLE001  never in the way of the licence
         core.log(f"usage: switch not recorded ({exc.__class__.__name__})")
-    if release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine):
+    if nudge_updates and (release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine)):
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
         from . import install          # imported here: install imports this module
         install.save_update_state(last_check=0, last_attempt=0)
@@ -247,6 +249,18 @@ def require(feature: str, *, allow_refresh: bool = True) -> dict:
                     raise Status("OFFLINE", f"{days} and the Theodore service could not be reached ({error.detail}).",
                                  "ask the user to connect to the internet, then run the same command again.",
                                  "Theodore has been offline for more than 7 days and needs a connection to confirm your licence.") from None
+        elif allow_refresh and token:
+            # Usage counts: their switch comes only with a licence refresh, and the token a new log in brings is not
+            # due one for 12 hours. The first command after a log in asks once; any failure leaves the licence as it is.
+            # At most one try an hour while it fails (offline), so a command is never held up twice.
+            try:
+                from . import usage
+                if usage.should_ask():
+                    usage.note_asking()
+                    refresh(timeout=8.0, nudge_updates=False)
+            except Exception as exc:        # noqa: BLE001  never in the way of the licence
+                core.log(f"usage: first refresh not made ({exc.__class__.__name__})")
+            token, claims = stored_token()  # a refresh that signed this device out removed the token: log in again
     if not token:
         raise login_start()
     if now >= float(claims.get("exp") or 0):

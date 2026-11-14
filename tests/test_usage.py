@@ -481,6 +481,22 @@ class Commands(ClientCase):
             self.assertNotIn(text, body)
         self.assertFalse(self.ledger().exists() and self.ledger().read_text().strip(), "the lines sent are gone")
 
+    def test_the_first_command_after_a_log_in_learns_the_switch(self):
+        """A log in brings a token that is not due a refresh for 12 hours, and only a refresh carries usage_enabled: the
+        first command asks once, so a new installation records usage from its first deck (staging check, rc.9)."""
+        self.api.usage_enabled = True
+        self.ready()
+        # The skill reads the served entry first (`guide pptx`, a licensed call that may refresh); the engine commands
+        # after it check the licence offline and do not refresh.
+        self.assertEqual(self.client("guide", "pptx").returncode, 0)
+        env = json.loads(self.client("pptx", "env").stdout.strip().splitlines()[-1])
+        self.assertEqual(env["usage_ledger"], str(self.ledger()))
+        refreshes = self.api.refreshes
+        self.assertEqual(self.client("guide", "pptx").returncode, 0)
+        env = json.loads(self.client("pptx", "env").stdout.strip().splitlines()[-1])
+        self.assertEqual(env["usage_ledger"], str(self.ledger()))
+        self.assertEqual(self.api.refreshes, refreshes, "asked once, not at every command")
+
     def _refresh(self):
         """A licence refresh, as the client makes one when the licence is due (in a process of its own)."""
         import subprocess

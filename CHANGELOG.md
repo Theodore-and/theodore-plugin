@@ -1,5 +1,11 @@
 # Changes
 
+## 0.3.8
+
+- Usage counts start with a new installation: the first licensed command after a log in (the served entry the skill
+  reads first) makes one licence refresh to learn whether the account records usage, instead of waiting up to 12
+  hours for the first scheduled one. At most one try an hour while it fails; the command's outcome never depends on it.
+
 ## 0.3.7
 
 - Usage counts (lane ANALYTICS): while the licence refresh says `usage_enabled: true`, the client gives the engine a

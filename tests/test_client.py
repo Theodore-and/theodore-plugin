@@ -550,13 +550,15 @@ class Entitlement(ClientCase):
     def test_refresh_happens_once_past_rfa(self):
         self.ready()
         self.assertEqual(self.client("guide", "pptx").returncode, 0)
-        self.assertEqual(self.api.refreshes, 0)                       # fresh token: no refresh
+        self.assertEqual(self.api.refreshes, 1)                       # fresh token: only the one that learns the usage switch
+        self.assertEqual(self.client("guide", "pptx").returncode, 0)
+        self.assertEqual(self.api.refreshes, 1)                       # the switch is known: no more
         env = {"THEODORE_TEST_CLOCK_OFFSET": str(13 * 3600)}
         self.api.clock_offset = 13 * 3600
         self.assertEqual(self.client("guide", "pptx", env=env).returncode, 0)
-        self.assertEqual(self.api.refreshes, 1)
+        self.assertEqual(self.api.refreshes, 2)
         self.assertEqual(self.client("guide", "pptx", env=env).returncode, 0)
-        self.assertEqual(self.api.refreshes, 1)                       # the new token is fresh again
+        self.assertEqual(self.api.refreshes, 2)                       # the new token is fresh again
 
     def test_offline_grace_then_offline_status_then_recovery(self):
         self.ready()
