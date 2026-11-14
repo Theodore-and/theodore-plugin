@@ -29,11 +29,21 @@ class Installer(unittest.TestCase):
         fake = self.box.tmp / "fakebin"
         fake.mkdir()
         self.calls = self.box.tmp / "host-calls.log"
-        for name in ("claude", "codex"):
+        # Stand-ins that remember a registration, as the assistants do: Claude Code lists it as JSON, Codex as text.
+        for name, add, remove in (("claude", "install", "uninstall"), ("codex", "add", "remove")):
+            flag = self.box.tmp / f"{name}-registered"
             if IS_WINDOWS:
-                (fake / f"{name}.cmd").write_text(f'@echo off\r\n>>"{self.calls}" echo {name} %*\r\nif "%*"=="plugin list --json" echo []\r\nexit /b 0\r\n')
+                listing = ('if "%*"=="plugin list --json" if exist "{f}" echo [{{"id": "theodore@theodore"}}]\r\n'
+                           'if "%*"=="plugin list --json" if not exist "{f}" echo []\r\n' if name == "claude" else
+                           'if "%*"=="plugin list" if exist "{f}" echo theodore@theodore  enabled\r\n').format(f=flag)
+                (fake / f"{name}.cmd").write_text(f'@echo off\r\n>>"{self.calls}" echo {name} %*\r\n{listing}'
+                                                  f'if "%1 %2"=="plugin {add}" type nul >"{flag}"\r\n'
+                                                  f'if "%1 %2"=="plugin {remove}" del /q "{flag}" 2>nul\r\nexit /b 0\r\n')
             else:
-                (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.calls}"\ncase "$*" in "plugin list --json") echo "[]";; esac\nexit 0\n')
+                listing = (f'"plugin list --json") if [ -f "{flag}" ]; then echo \'[{{"id": "theodore@theodore"}}]\'; else echo "[]"; fi;;'
+                           if name == "claude" else f'"plugin list") [ -f "{flag}" ] && echo "theodore@theodore  enabled";;')
+                (fake / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{self.calls}"\ncase "$*" in\n{listing}\n'
+                                         f'"plugin {add}"*) : > "{flag}";;\n"plugin {remove}"*) rm -f "{flag}";;\nesac\nexit 0\n')
                 (fake / name).chmod(0o755)
         self.box.env["PATH"] = f"{fake}{os.pathsep}{self.box.env['PATH']}"
         self.box.env["THEODORE_DL_BASE"] = f"{self.api.base}/dl"
@@ -153,6 +163,37 @@ class Installer(unittest.TestCase):
         self.assertFalse((self.box.user_home / ".claude" / "settings.json").exists(), "the settings file Theodore created is gone again")
         if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
             self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
+
+    def test_doctor_checks_the_registration_and_the_next_command_finishes_one_the_installer_left_undone(self):
+        # ACCEPT-RC8 D1: the installer was stopped before it registered the plugin; doctor then said ready although
+        # Claude Code had no Theodore plugin.
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.install("--code", "ABCD-1234").returncode, 0)
+        self.box.wait_jobs()
+        stable = self.box.home / "bin" / STABLE
+        (self.box.tmp / "claude-registered").unlink()       # Claude Code has no Theodore plugin
+        doctor = self.box.run_launcher("doctor", launcher=stable)
+        self.assertEqual(doctor.returncode, 75, doctor.stdout + doctor.stderr)
+        first, nxt, _tell = status_lines(doctor.stdout)
+        self.assertIn("not registered in Claude Code", first)
+        self.assertIn("hosts register", nxt)
+        self.assertRegex(doctor.stdout, r"WARN  assistant claude: .*not registered")
+        self.assertEqual(self.box.run_launcher("hosts", "register", launcher=stable).returncode, 0)
+        self.assertTrue(status_lines(self.box.run_launcher("doctor", launcher=stable).stdout)[0].startswith("THEODORE OK: Theodore is ready"))
+
+        # An install stopped before step 5 leaves the installer's marker: the next Theodore command registers by itself.
+        (self.box.tmp / "claude-registered").unlink()
+        (self.box.tmp / "codex-registered").unlink()
+        (self.box.home / "state" / "hosts.pending").write_text("")
+        before = len(self.host_calls())
+        guide = self.box.run_launcher("guide", "pptx", launcher=stable)
+        self.assertEqual(guide.returncode, 0, guide.stdout + guide.stderr)
+        self.assertTrue(guide.stdout.startswith("=== THEODORE pptx"), guide.stdout[:300])
+        calls = self.host_calls()[before:]
+        self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
+        self.assertIn("codex plugin add theodore@theodore", calls)
+        self.assertFalse((self.box.home / "state" / "hosts.pending").exists())
+        self.assertTrue(status_lines(self.box.run_launcher("doctor", launcher=stable).stdout)[0].startswith("THEODORE OK: Theodore is ready"))
 
     @unittest.skipUnless(IS_WINDOWS, "install.cmd: the confirmation run after a deferred removal")
     def test_uninstall_confirms_only_when_the_render_cache_is_gone_too(self):

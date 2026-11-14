@@ -384,11 +384,16 @@ def engine_artifact(manifest: dict) -> dict:
     return entry
 
 
-def stage_engine(entry: dict, job: Job | None = None) -> str:
+# A command the assistant waits for gives up on the engine lock after this long, with RETRY (a background download may
+# hold it for many minutes on a slow link); the background jobs wait for it as long as core.lock allows.
+ENGINE_LOCK_WAIT_S = 25.0
+
+
+def stage_engine(entry: dict, job: Job | None = None, lock_timeout: float = 600.0) -> str:
     """Download, verify, unpack and self-test the engine named by a manifest entry. Does not make it current."""
     version = str(entry["version"])
     home = core.home()
-    with core.lock("update"):
+    with core.lock("update", timeout=lock_timeout):
         target = engine_dir(version)
         if core.read_json(target / ".theodore-engine.json").get("sha256") == entry["sha256"]:
             return version
@@ -954,7 +959,9 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
             save_update_state(pending={"version": target, "sha256": engine.get("sha256"), "issued": issued})
         if act and held and held != target:
             save_update_state(held=None)
-    if act and not have_exact:      # the download runs without the lock; its activation takes it again and rechecks
+    # The setup job is fetching the first engine itself (it holds the engine lock while it downloads): a second download
+    # would only wait for that lock. The pending item stays; the next guide activates what setup leaves on disk.
+    if act and not have_exact and not Job("setup").alive():   # without the lock; its activation takes it again and rechecks
         job = Job("engine-update")
         if not job.alive():
             core.write_json(core.home().state / "engine-update.json", engine)
@@ -1048,10 +1055,13 @@ def _restore_engine(workspace: Path, record: dict) -> str:
     reason = "its pin does not name the build's checksum"
     if sha:
         try:
-            return stage_engine({"version": version, "sha256": sha, "kind": record.get("kind"), "runtime_id": record.get("runtime_id")})
+            return stage_engine({"version": version, "sha256": sha, "kind": record.get("kind"), "runtime_id": record.get("runtime_id")},
+                                lock_timeout=ENGINE_LOCK_WAIT_S)
         except EngineError as exc:
             reason = str(exc)
         except Status as status:
+            if core.lock_busy(status):
+                raise                       # another Theodore process is installing an engine: RETRY, nothing refused
             reason = status.summary
     other = selected_engine() or "the current version"
     raise Status("UPDATE_REQUIRED", f"this workspace was started with engine {version}, which is no longer on this computer and could not be "
