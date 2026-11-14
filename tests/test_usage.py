@@ -444,6 +444,18 @@ class Paths(unittest.TestCase):
                 core._HOME = saved
 
 
+class Disclosure(unittest.TestCase):
+    def test_security_names_the_ledger_its_place_every_field_and_the_off_switch(self):
+        text = (Path(__file__).resolve().parents[1] / "SECURITY.md").read_text(encoding="utf-8")
+        section = text[text.index("## Usage counts"):text.index("## Bug reports")]
+        for needle in ("~/.theodore/state/usage-ledger.jsonl", "%LOCALAPPDATA%\\Theodore\\state\\usage-ledger.jsonl",
+                       "theodore usage --show", "support@theodoreand.ai", "pptx finish", "15", "2,000", "1 MB", "30 days"):
+            self.assertIn(needle, section)
+        for field in [*usage._COMMAND_REQUIRED, *usage._COMMAND_OPTIONAL, *usage._STATUS_REQUIRED]:
+            self.assertIn(f"`{field}`", section, field)
+        self.assertNotIn("sign in", section.lower())
+
+
 class Commands(ClientCase):
     """Through the client's command line: the engine's environment, the end of pptx finish, a slow service."""
 
