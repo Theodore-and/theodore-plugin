@@ -57,7 +57,9 @@ def tools(index: dict | None = None) -> list[dict]:
     folder listing would show them."""
     sections = [s for s in (index or {}).get("sections") or []]
     sheets = [s for s in (index or {}).get("specimens") or []]
-    section = {"type": "string", **({"enum": sections} if sections else {})}
+    # The deck-design sections as a folder would list them; any other name is still accepted (a pptx section the
+    # service serves to this account, lane STUDIO), and an unknown one answers that there is no such section.
+    section = {"anyOf": [{"type": "string", "enum": sections}, {"type": "string"}]} if sections else {"type": "string"}
     sheet = {"type": "string", **({"enum": sheets} if sheets else {})}
     return [
         {"name": "list", "description": DESCRIPTIONS["list"],
@@ -277,7 +279,8 @@ def _fetch_whole(skill: str, section: str | None) -> str:
         raise api.sign_in_required()
     if status == 304 and held:
         return held[1]
-    _seen_version(headers.get(HEADER_GUIDE_VERSION))
+    if skill == "deck-design":         # the index names deck-design's version; a served pptx section has its own
+        _seen_version(headers.get(HEADER_GUIDE_VERSION))
     chunks = [raw]
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     for part in range(2, total + 1):
@@ -317,9 +320,7 @@ def tool_guide(args: dict) -> dict:
         raise core.usage(f"unknown skill {skill!r}. The skills are: {', '.join(SKILLS)}.")
     if section is not None and not isinstance(section, str):
         raise core.usage("section is a string.")
-    if skill == "pptx":
-        if section:
-            raise core.usage("guide pptx takes no section: the rest of the pptx manual is read from the engine folder named in its header.")
+    if skill == "pptx" and not section:
         return _text(_pptx_manual())
     return _text(_fetch_whole(skill, section or None))
 
@@ -488,6 +489,23 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None) -> int:
     raw_in = stdin or sys.stdin.buffer
     out = stdout or sys.stdout.buffer
     sys.stdout = sys.stderr                 # anything printed by accident goes to standard error
+    # Named by its process id while it runs, so `theodore uninstall` can stop it (Windows cannot delete the runtime a
+    # running server uses). Removed at exit; one left by a killed server names a dead process, which is ignored.
+    marker = None
+    if stdin is None:
+        with contextlib.suppress(OSError):
+            marker = core.home().state / "servers" / str(os.getpid())
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(os.getpid()), encoding="utf-8")
+    try:
+        return _serve_lines(raw_in, out)
+    finally:
+        if marker:
+            with contextlib.suppress(OSError):
+                marker.unlink()
+
+
+def _serve_lines(raw_in, out) -> int:
     for line in raw_in:
         line = line.strip()
         if not line:

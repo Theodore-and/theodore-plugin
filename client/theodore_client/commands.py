@@ -100,9 +100,11 @@ def guide(skill: str, section: str | None, part: int, license_text: bool) -> int
     if part < 1:
         raise core.usage("--part starts at 1.")
     if skill == "pptx":
-        if section or license_text:
-            raise core.usage("guide pptx takes no section: the rest of the pptx manual is read from the engine folder named in its header.")
-        return _guide_pptx(part)
+        if license_text:
+            raise core.usage("guide pptx has no --license: the pptx manual and its notices are in the engine folder named in its header.")
+        if not section:
+            return _guide_pptx(part)
+        # A section of pptx is one the service serves to this account (lane STUDIO); the rest of the manual is on disk.
     return _guide_remote(skill, "license" if license_text else section, part)
 
 
@@ -202,7 +204,12 @@ def _section_name(given: str) -> str:
 
 
 def _no_such_section(skill: str, given: str) -> Status:
-    """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored)."""
+    """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
+    only the answer: its manual is on disk, and a served section is named by the text that points to it."""
+    launcher = quoted_launcher()
+    shown = "".join(ch for ch in given if ch.isprintable())[:80]
+    if skill == "pptx":
+        return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx for the manual.")
     names: list[str] = []
     try:
         _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill)
@@ -212,8 +219,6 @@ def _no_such_section(skill: str, given: str) -> Status:
     except Status as status:
         if status.name != "USAGE":
             raise
-    launcher = quoted_launcher()
-    shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if names:
         return core.usage(f"guide {skill} has no section '{shown}'. Sections: {', '.join(names)}.",
                           f"run {launcher} guide {skill} <section> with one of those names.")
@@ -250,7 +255,7 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
     elif part > total:
         raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     name = section or "SKILL.md"
-    if section != "license":       # a reference is a section of this guide, not a file: its link becomes the command that prints it
+    if section != "license" and skill != "pptx":   # a reference is a section of this guide, not a file: its link becomes the command that prints it (pptx references are files on disk)
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
@@ -1997,6 +2002,48 @@ def _remove_old_engine_caches(left: list[str]) -> list[str]:
     return removed
 
 
+# What the engine keeps in the temporary folder (Python's tempfile.gettempdir(), the engine's own rule): LibreOffice's
+# profile and its warm copy, the profile's lock file, and the folder of empty lock files. ACCEPT-LOCAL2 D-B.
+_TEMP_PROFILE = ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed")
+_TEMP_PROFILE_LOCK = "pptx-soffice-profile.lock"
+_TEMP_LOCKS = "theodore-pptx-locks"
+
+
+def _remove_engine_temp(left: list[str]) -> list[str]:
+    """Remove those, only by the engine's names, only this user's, never through a link. Returns what was removed."""
+    import tempfile
+    base = Path(tempfile.gettempdir())
+    removed: list[str] = []
+
+    def mine(path: Path) -> bool:
+        try:
+            return not path.is_symlink() and (core.IS_WINDOWS or path.lstat().st_uid == os.getuid())
+        except OSError:
+            return False
+    for name in _TEMP_PROFILE:
+        folder = base / name
+        if folder.is_dir() and mine(folder):
+            core.remove_tree(folder)
+            (left.append(f"the LibreOffice profile Theodore's engine used in {folder}") if folder.exists() else removed.append(str(folder)))
+    lock = base / _TEMP_PROFILE_LOCK
+    if lock.is_file() and mine(lock):
+        with contextlib.suppress(OSError):
+            lock.unlink()
+            removed.append(str(lock))
+    locks = base / _TEMP_LOCKS
+    if locks.is_dir() and mine(locks):
+        for item in list(locks.iterdir()):
+            if item.suffix == ".lock" and item.is_file() and not item.is_symlink():
+                with contextlib.suppress(OSError):
+                    item.unlink()
+        try:
+            locks.rmdir()
+            removed.append(str(locks))
+        except OSError:
+            left.append(f"the folder {locks} (the engine's lock files were removed; what else it holds is not Theodore's and was left)")
+    return removed
+
+
 # An assistant that is on the computer but never had Theodore registered: nothing to remove, not a failure.
 _NOT_THERE = ("not found", "not installed", "not configured", "no such", "does not exist", "unknown plugin", "unknown marketplace",
               "not registered", "is not a known", "no plugin named", "no marketplace named")
@@ -2029,6 +2076,127 @@ def _codex_leftovers() -> None:
                 config.unlink()
 
 
+def _theodore_pids() -> list[int]:
+    """Theodore's own running processes, each found by a file Theodore wrote for it, never by name: every background
+    job (state/jobs/*.json), the launcher's bootstrap (state/bootstrap/pid) and every tool server
+    (state/servers/<pid>). This process is never among them."""
+    home = core.home()
+    pids: set[int] = set()
+    for path in (sorted(home.jobs.glob("*.json")) if home.jobs.is_dir() else []):
+        with contextlib.suppress(ValueError, TypeError):
+            pids.add(int(Job(path.stem).read().get("pid") or 0))
+    with contextlib.suppress(OSError, ValueError):
+        pids.add(int((home.state / "bootstrap" / "pid").read_text(encoding="utf-8").strip() or 0))
+    servers = home.state / "servers"
+    for path in (servers.iterdir() if servers.is_dir() else []):
+        with contextlib.suppress(ValueError):
+            pids.add(int(path.name))
+    return sorted(p for p in pids if p > 0 and p != os.getpid() and core.pid_alive(p))
+
+
+def _processes_in_folder(root: Path) -> list[int]:
+    """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, LibreOffice, Git
+    Bash), whatever started them; never this process or its parents. Read with WMI. Empty elsewhere."""
+    if not core.IS_WINDOWS or not root.exists():
+        return []
+    ps = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    os.environ["THEODORE_ROOT_SCAN"] = str(root).rstrip("\\") + "\\"
+    code, out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
+                      "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
+                      "$_.ExecutablePath.StartsWith($env:THEODORE_ROOT_SCAN, [StringComparison]::OrdinalIgnoreCase) } | "
+                      "ForEach-Object { $_.ProcessId }"], timeout=60)
+    mine = {os.getpid(), os.getppid()}
+    return sorted({int(x) for x in out.split() if x.isdigit()} - mine) if code == 0 else []
+
+
+def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
+    """Stop Theodore's own processes and the processes they started (on Windows the whole tree: a download or an
+    unpacker holds files in the folder, and Windows cannot delete a file in use), then wait until they are gone. On
+    Windows also every process running a program from inside Theodore's folder (the launcher's bootstrap has no pid
+    record there), each logged."""
+    pids = _theodore_pids()
+    for pid in _processes_in_folder(core.home().root):
+        if pid not in pids:
+            pids.append(pid)
+            core.log(f"uninstall: process {pid} runs a program from inside {core.home().root}: stopped")
+    for pid in pids:
+        if core.IS_WINDOWS:
+            _run([os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "taskkill.exe"),
+                  "/PID", str(pid), "/T", "/F"], timeout=30)
+        else:
+            with contextlib.suppress(OSError):
+                os.killpg(os.getpgid(pid), 15) if os.getpgid(pid) == pid else os.kill(pid, 15)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline and any(core.pid_alive(p) for p in pids):
+        time.sleep(0.25)
+    if not core.IS_WINDOWS:
+        for pid in pids:
+            if core.pid_alive(pid):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, 9)
+    return pids
+
+
+UNINSTALL_MARKER = ".theodore-uninstalling"
+
+
+def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -> Path:
+    """Delete Theodore's folders after this process ends (its Python runs from inside them): a script in a private
+    temporary folder, started outside this console's job (a closed console or SSH session does not stop it), retries
+    every two seconds for up to two minutes while Windows releases the last files, then writes its result beside it
+    and removes itself. Returns the result file."""
+    import tempfile
+    work = Path(tempfile.mkdtemp(prefix="theodore-uninstall-"))
+    result = work / "result.txt"
+    # The cleanup works only while this marker is there. An installer or launcher that starts in the folder meanwhile
+    # (an install right after the uninstall) removes it first, so the cleanup stops instead of deleting the new
+    # installation's files as they are written (its sign-in was lost: ACCEPT-LOCAL2, observation b).
+    marker = root / UNINSTALL_MARKER
+    core.write_atomic(marker, f"{os.getpid()}\n", 0o644)
+    # A few seconds first: the launcher that called this client reads its own file to its end once the client exits.
+    lines = ["@echo off", "setlocal", "set N=0", "ping -n 3 127.0.0.1 >nul", ":again",
+             f'if exist "{marker}" goto pass', f'>"{result}" echo stopped: a new installation started in {root}', "goto end",
+             ":pass"]
+    for name in names:
+        target = root / name
+        if name == "state" and keep_specimen_record:
+            lines.append(f'for /d %%D in ("{target}\\*") do rmdir /s /q "%%D" >nul 2>&1')
+            lines.append(f'for %%F in ("{target}\\*") do if /i not "%%~nxF"=="{specimens.registry().name}" del /f /q "%%F" >nul 2>&1')
+        else:
+            lines.append(f'if exist "{target}" rmdir /s /q "{target}" >nul 2>&1')
+    checks = [f'if exist "{root / n}" goto wait' for n in names if not (n == "state" and keep_specimen_record)]
+    # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
+    lines += checks + ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done",
+                       "ping -n 2 127.0.0.1 >nul", "goto again", ":done", f'del /f /q "{marker}" >nul 2>&1',
+                       f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
+    lines += [f'if exist "{root / n}" (>>"{result}" echo left: {root / n})' for n in names
+              if not (n == "state" and keep_specimen_record)]
+    # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
+    lines += [f'if not exist "{root}" (>>"{result}" echo removed: {root})', ":end", "ping -n 301 127.0.0.1 >nul",
+              f'(goto) 2>nul & rmdir /s /q "{work}"']
+    script = work / "cleanup.cmd"
+    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    system32 = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32")
+    command = f'"{os.path.join(system32, "cmd.exe")}" /d /c "{script}"'
+    detached, new_group, no_window, breakaway = 0x00000008, 0x00000200, 0x08000000, 0x01000000
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work)}
+    try:                                    # outside this console's job object, when the job allows it
+        subprocess.Popen(command, creationflags=detached | new_group | no_window | breakaway, **quiet)
+        return result
+    except OSError:
+        pass
+    # A job that forbids breaking away (some SSH servers, some terminals): WMI creates the process outside it.
+    ps = os.path.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe")
+    os.environ["THEODORE_CLEANUP"], os.environ["THEODORE_CLEANUP_DIR"] = command, str(work)
+    code, _out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
+                       "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:THEODORE_CLEANUP; "
+                       "CurrentDirectory=$env:THEODORE_CLEANUP_DIR}; exit $r.ReturnValue"], timeout=60) \
+        if os.path.exists(ps) else (1, "")
+    if code != 0:
+        subprocess.Popen(command, creationflags=detached | new_group | no_window, **quiet)
+    return result
+
+
 def uninstall(keep_hosts: bool) -> int:
     home = core.home()
     left: list[str] = []
@@ -2038,13 +2206,9 @@ def uninstall(keep_hosts: bool) -> int:
         notes = _unregister_hosts(core.host_executable("claude"), core.host_executable("codex"), left, edits)
     else:
         _take_back_instructions(left)           # its record goes with state/: the block cannot be left without it
-    for name in ("setup", "packs", "engine-update", "client-update", "libreoffice"):
-        pid = int(Job(name).read().get("pid") or 0)
-        if pid and pid != os.getpid() and Job(name).alive():
-            try:
-                os.kill(pid, 15)
-            except OSError:
-                pass
+    stopped = _stop_theodore_processes()
+    if stopped:
+        core.log(f"uninstall: stopped Theodore's own processes {stopped}")
     if not credentials.delete():
         left.append(f"the sign-in item in the login keychain (service {credentials.SERVICE})")
     for cache in _render_cache_dirs():
@@ -2054,35 +2218,40 @@ def uninstall(keep_hosts: bool) -> int:
     old_caches = _remove_old_engine_caches(left)
     if old_caches:
         edits.append(f"the engine's former caches were removed ({', '.join(old_caches)})")
+    temp = _remove_engine_temp(left)
+    if temp:
+        edits.append(f"the engine's LibreOffice profile and lock files were removed from the temporary folder ({', '.join(temp)})")
     specimens_left = specimens.sweep(everything=True)
     for folder in specimens_left:
         left.append(f"the specimen folder {folder} (its record is kept in {specimens.registry()}; running uninstall again retries it)")
     root = home.root
     # Only Theodore's own subfolders go. Anything else in the folder was not put there by Theodore and stays.
-    if core.IS_WINDOWS:  # the running interpreter lives inside the folder: delete it after this process ends
-        # One string, not a list: Python would escape the inner quotes as \" and cmd does not read that escape (a
-        # path with a space was never removed). /s makes cmd strip exactly the outer pair of quotes.
-        def removal(name: str) -> str:
-            if name == "state" and specimens_left:          # keep only the record of folders still to remove
-                state = root / name
-                return (f'(for /d %D in ("{state}\\*") do rmdir /s /q "%D") & '
-                        f'(for %F in ("{state}\\*") do if /i not "%~nxF"=="{specimens.registry().name}" del /f /q "%F")')
-            return f'rmdir /s /q "{root / name}"'
-        removals = " & ".join(removal(name) for name in core.OWNED)
-        line = f'ping -n 6 127.0.0.1 >nul & {removals} & rmdir "{root}"'
-        subprocess.Popen(f'cmd /d /s /c "{line}"', creationflags=0x00000008 | 0x08000000,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        kept = [p.name for p in root.iterdir() if p.name not in core.OWNED] if root.exists() else []
-        # The deletion runs after this process has ended, so it cannot be confirmed here: say so, and let a second
-        # run (by then without Theodore's Python: the launcher's or the installer's own uninstall) confirm it.
-        print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed; its folders in {root} are deleted a few "
-              f"seconds after this command ends, which is scheduled but not confirmed"
-              + (f"; {'; '.join(edits)}" if edits else "")
-              + (f"; also not removed: {'; '.join(left)}" if left else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "") + ".\n"
-              "NEXT: run the same command again in 15 seconds; it confirms the deletion (or removes what is left) and says so.\n"
-              "TELL THE USER: Theodore is being removed from this computer; I am checking that its files are gone. Your decks were not touched.",
+    if core.IS_WINDOWS:  # the running interpreter lives inside the folder: a cleanup deletes it after this process ends
+        # Everything this process does not run from goes now; its own Python (runtime), its code (client) and the
+        # launcher that called it (bin) go a moment after it exits.
+        for name in core.OWNED:
+            if name in ("runtime", "client", "bin") or (name == "state" and specimens_left):
+                continue
+            core.remove_tree(root / name)
+        names = list(core.OWNED)        # each guarded by "if exist" in the script: a folder written meanwhile (a log) goes too
+        result = _windows_cleanup(root, names, bool(specimens_left)) if any((root / x).exists() for x in names) else None
+        what = (f"its folder {root} is deleted by a cleanup that starts when this command ends (Theodore's own processes are "
+                f"stopped; it retries every second for up to five minutes while Windows releases the last files; its result is written to "
+                f"{result} for five minutes)") if result else f"{root} was deleted"
+        what += (f"; {'; '.join(edits)}" if edits else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "")
+        if left:
+            print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed and {what}, but these could not be: "
+                  f"{'; '.join(left)}.\n"
+                  "NEXT: tell the user what is left (each item above names the folder, the file or the command); it can be removed by hand.\n"
+                  "TELL THE USER: Theodore is removed, but a few pieces could not be: " + "; ".join(left) + ". Your decks were not touched.",
+                  flush=True)
+            return 75
+        print(f"THEODORE OK: Theodore was removed from this computer (registrations and sign-in removed; {what}).\n"
+              f"NEXT: nothing to do. If {root} is still there after two minutes, it can be deleted by hand: nothing of "
+              "Theodore runs any more. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
+              "TELL THE USER: Theodore is uninstalled; its folder disappears within a minute or two. Your decks and workspaces were not touched.",
               flush=True)
-        return 75
+        return 0
     else:
         for name in core.OWNED:
             if name == "state" and specimens_left:          # the record of folders still to remove survives (it is read again)

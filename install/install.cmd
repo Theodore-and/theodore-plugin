@@ -56,8 +56,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.3.5"
-set "PIN_CLIENT=client/client-0.3.5.tar 58a6c3aaafdfd8e7fecf24f59cc58a8a86ed5de9fb4dd358d70ddb911dc9e07a"
+set "PIN_CLIENT_VERSION=0.3.6"
+set "PIN_CLIENT=client/client-0.3.6.tar ba2757d4f85e63ee13cd5817de3c8e718dbcc562e4309ef428d7fdeb8e33c2bd"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -101,7 +101,9 @@ for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%SELF%
 if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with https://theodoreand.ai/install)
 
 if not defined UNINSTALL goto :env_check
-if exist "%HOME_DIR%\bin\theodore.cmd" "%HOME_DIR%\bin\theodore.cmd" uninstall
+rem The launcher's uninstall stops Theodore's processes and starts the cleanup that removes the folder once the last
+rem files are released; its status is the answer (checking the folder now would race that cleanup).
+if exist "%HOME_DIR%\bin\theodore.cmd" (call "%HOME_DIR%\bin\theodore.cmd" uninstall & exit /b)
 rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
 rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
 set "LEFTOVER="
@@ -136,6 +138,9 @@ echo TELL THE USER: Theodore was not installed on this computer.
 exit /b 0
 
 :env_check
+rem An uninstall's cleanup may still be running in this folder (an install right after an uninstall): its marker goes
+rem first, which stops it, then a pause lets a pass in progress end before anything is written.
+if exist "%HOME_DIR%\.theodore-uninstalling" (del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1 & ping -n 6 127.0.0.1 >nul)
 rem A Theodore folder belongs to one service, the one it was set up for (state\environment): this installer does not
 rem reuse a folder of another. Uninstalling is the way out, so it is allowed.
 set "MY_API=%API_BASE%"
@@ -223,10 +228,9 @@ if exist "%RT_DIR%\.parts\python" set /p HAVE=<"%RT_DIR%\.parts\python"
 if exist "%PY%" if /i "%HAVE%"=="%PY_SHA%" goto :client
 echo theodore-install: downloading Theodore's Python (checked against its pinned SHA-256)
 set "WHAT=Theodore's Python"
-call :fetch "%DL_BASE%/%PY_PATH%" "%WORK%\python.tar.gz"
+call :fetch_checked "%DL_BASE%/%PY_PATH%" "%WORK%\python.tar.gz" "%PY_SHA%"
+if errorlevel 2 goto :hash_failed
 if errorlevel 1 goto :download_failed
-call :check "%WORK%\python.tar.gz" "%PY_SHA%"
-if errorlevel 1 goto :hash_failed
 if exist "%RT_DIR%\python" rmdir /s /q "%RT_DIR%\python" >nul 2>&1
 mkdir "%WORK%\py" 2>nul
 if not exist "%RT_DIR%\.parts" mkdir "%RT_DIR%\.parts" 2>nul
@@ -239,10 +243,9 @@ del /q "%WORK%\python.tar.gz" >nul 2>&1
 :client
 if exist "%HOME_DIR%\client\%CV%\__main__.py" goto :pointers
 set "WHAT=the Theodore client"
-call :fetch "%DL_BASE%/%C_PATH%" "%WORK%\client.tar"
+call :fetch_checked "%DL_BASE%/%C_PATH%" "%WORK%\client.tar" "%C_SHA%"
+if errorlevel 2 goto :hash_failed
 if errorlevel 1 goto :download_failed
-call :check "%WORK%\client.tar" "%C_SHA%"
-if errorlevel 1 goto :hash_failed
 mkdir "%WORK%\client" 2>nul
 if not exist "%HOME_DIR%\client" mkdir "%HOME_DIR%\client" 2>nul
 "%TAR%" -xf "%WORK%\client.tar" -C "%WORK%\client"
@@ -441,6 +444,21 @@ set "DETAIL=curl exit %CRC%, HTTP %HTTP%"
 if "%HTTP:~0,1%"=="3" set "DETAIL=it answered with a redirect, which is not followed"
 del /q "%~2" >nul 2>&1
 exit /b 1
+
+:fetch_checked
+rem %1 url, %2 file, %3 expected sha256. A damaged download (a flaky network) is fetched afresh, three times at most.
+rem Errorlevel 0 when it matches, 1 when the download failed, 2 when it arrived damaged three times.
+set "FTRY=0"
+:fetch_checked_again
+set /a FTRY+=1
+call :fetch "%~1" "%~2"
+if errorlevel 1 exit /b 1
+call :check "%~2" "%~3"
+if not errorlevel 1 exit /b 0
+if %FTRY% geq 3 exit /b 2
+echo theodore-install: %WHAT% arrived damaged; downloading it again
+ping -n 3 127.0.0.1 >nul
+goto :fetch_checked_again
 
 :check
 rem %1 file, %2 expected sha256. Errorlevel 0 when they match; the file is deleted when they do not.

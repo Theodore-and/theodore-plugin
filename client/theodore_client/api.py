@@ -7,6 +7,7 @@ import json
 import re
 import os
 import socket
+import time
 import ssl
 import urllib.error
 import urllib.parse
@@ -268,8 +269,38 @@ def call_json(route: str, **kwargs):
         raise core.internal(f"the Theodore API answered {route} with something that is not JSON (HTTP {status}).") from None
 
 
+DOWNLOAD_ATTEMPTS = 3
+
+
 def download(url: str, dest: Path, *, sha256: str, bearer: str | None = None, size: int | None = None,
              progress=None, timeout: float = 60.0, redirects: bool = True) -> Path:
+    """Stream `url` to `dest` and check its sha256, fetching it afresh up to three times when the bytes that arrived do
+    not match (a flaky network cuts or damages a download: ACCEPT-LOCAL2) or the connection fails on the way; then the
+    last failure is raised. An answer of the service (HTTP 4xx), a file larger than published and a full disk are
+    raised at once."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return _download_once(url, dest, sha256=sha256, bearer=bearer, size=size, progress=progress,
+                                  timeout=timeout, redirects=redirects)
+        except Status as status:
+            if attempt >= DOWNLOAD_ATTEMPTS or "did not match its published checksum" not in status.summary:
+                raise
+            core.log(f"download {dest.name}: checksum mismatch, attempt {attempt} of {DOWNLOAD_ATTEMPTS}; fetching it again")
+        except NetworkError as error:
+            if attempt >= DOWNLOAD_ATTEMPTS or error.cause not in ("NETWORK",):
+                raise
+            core.log(f"download {dest.name}: {error.detail}, attempt {attempt} of {DOWNLOAD_ATTEMPTS}; fetching it again")
+        try:
+            quick = core.is_loopback_api()
+        except core.Status:                 # the installer's plugin step runs before any launcher.json exists
+            quick = False
+        time.sleep(0.1 if quick else 2.0 * attempt)
+
+
+def _download_once(url: str, dest: Path, *, sha256: str, bearer: str | None = None, size: int | None = None,
+                   progress=None, timeout: float = 60.0, redirects: bool = True) -> Path:
     """Stream `url` to `dest` and check its sha256. A mismatch deletes the file and raises SETUP_FAILED."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")

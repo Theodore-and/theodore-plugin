@@ -699,12 +699,19 @@ def _first_line(text) -> str | None:
 
 
 def announce(kind: str, version: str, note: str | None = None) -> None:
-    """Note an update to say once at the next skill load or guide."""
+    """Note an update to say once at the next skill load or guide: once per kind and version, however many processes
+    learn of it (two sessions starting together each ran the plugin job and the user was told twice: ACCEPT-LOCAL2 D-A).
+    Read and written under the update lock."""
     try:
-        state = update_state()
-        pending = dict(state.get("announce") or {})
-        pending[kind] = {"version": version, **({"note": note} if note else {})}
-        save_update_state(announce=pending)
+        with update_lock():
+            state = update_state()
+            said = dict(state.get("announced") or {})
+            if said.get(kind) == version:
+                return
+            said[kind] = version
+            pending = dict(state.get("announce") or {})
+            pending[kind] = {"version": version, **({"note": note} if note else {})}
+            save_update_state(announce=pending, announced=said)
     except Exception as exc:  # an announcement never fails an update
         core.log(f"announce: {exc.__class__.__name__}")
 
@@ -712,10 +719,11 @@ def announce(kind: str, version: str, note: str | None = None) -> None:
 def take_announcement() -> str | None:
     """The one line saying what updated itself since the last one, then forgotten."""
     try:
-        pending = update_state().get("announce") or {}
-        if not pending:
-            return None
-        save_update_state(announce={})
+        with update_lock():                 # taken and cleared in one step: two sessions never both print it
+            pending = update_state().get("announce") or {}
+            if not pending:
+                return None
+            save_update_state(announce={})
         names = {"client": "client", "engine": "engine", "packs": "asset pack", "plugin": "plugin files"}
         parts = []
         for kind in ("plugin", "client", "engine", "packs"):
@@ -762,11 +770,14 @@ def start_plugin_update() -> None:
         if core.cloud_sandbox():          # a cloud chat's plugin is the account's: only its owner can update it there
             return
         session = core.session_id() or "-"
-        if done.get("version") == latest and done.get("session") == session:
-            return
-        if Job("plugin-update").alive():
-            return
-        save_update_state(plugin_update={**done, "version": latest, "session": session, "ok": False, "started": int(core.now())})
+        if done.get("version") == latest and (done.get("ok") or done.get("session") == session):
+            return                          # done for this release (this session still runs the old files), or tried here
+        with update_lock():                 # one job per release, also when two sessions start together
+            done = update_state().get("plugin_update") or {}
+            if done.get("version") == latest and (done.get("ok") or done.get("session") == session or Job("plugin-update").alive()
+                                                  or core.now() - float(done.get("started") or 0) < 300):
+                return                      # another session just started it
+            save_update_state(plugin_update={**done, "version": latest, "session": session, "ok": False, "started": int(core.now())})
         Job("plugin-update").spawn(["update", "--plugin-job"])
     except Exception as exc:
         core.log(f"plugin update: not started ({exc.__class__.__name__}: {exc})")

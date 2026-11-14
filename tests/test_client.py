@@ -697,6 +697,21 @@ class Engine(ClientCase):
         self.assertIn(str(self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx"), out)
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
 
+    def test_the_served_pptx_entry_comes_first_after_the_bindings_in_both_forms(self):
+        """Lane STUDIO: the served pptx entry (the Studio pointer, then the directions) is the first thing after the
+        three binding lines, before the engine's SKILL.md, in `guide pptx` and in the skill body loaded at skill
+        start (the tool server prints `guide pptx`)."""
+        self.ready()
+        self.api.guides["pptx"][""] = "SERVED-POINTER: first instruction.\n\nDIRECTIONS.\n"
+        manual = f"Fake manual for engine {self.ENGINE_VERSION}."
+        for args in (("guide", "pptx"), ("skill", "pptx")):
+            out = self.client(*args).stdout
+            lines = out.splitlines()
+            bindings = next(i for i, line in enumerate(lines) if line.startswith("Bindings: pptx <verb>"))
+            self.assertTrue(lines[bindings + 2].lstrip().startswith("<pptx-skill-dir> = "), args)
+            self.assertEqual(lines[bindings + 3], "SERVED-POINTER: first instruction.", args)
+            self.assertLess(out.index("DIRECTIONS."), out.index(manual), args)
+
     def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
         """Lane STUDIO: the served pptx entry gets three attempts. One that answers in time on a later attempt is
         delivered as usual; when none does, the first line after the document header says Theodore's online part
@@ -1499,6 +1514,38 @@ class StatusDoctorUninstall(ClientCase):
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["loose-file.txt", "memory"])
         self.assertEqual(foreign.read_text(), "not Theodore's")
 
+    def test_a_damaged_download_is_fetched_again_and_a_damaged_one_three_times_fails(self):
+        # ACCEPT-LOCAL2: a runtime part arrived damaged once on a flaky network (HASH_MISMATCH) and the install failed.
+        self.sign_in()
+        key = next(k for k in self.api.files if k.startswith("runtime/") and "node_modules" in k)
+        self.api.dl_damaged[key] = 2
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        self.box.wait_jobs()
+        self.assertStatus(self.client("status"), "OK", 0)
+        tries = [r for r in self.api.requests if r["path"].endswith(key)]
+        self.assertEqual(len(tries), 3, "two damaged answers, then the good one")
+
+    def test_uninstall_stops_theodores_own_running_processes_first(self):
+        # ACCEPT-LOCAL2 D-C: a background job (and a tool server) still running from Theodore's folder. Each is found by
+        # the file Theodore wrote for it, never by name; this test's own processes of the same name are untouched.
+        self.ready()
+        sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
+        job = subprocess.Popen(sleeper, start_new_session=True)
+        server = subprocess.Popen(sleeper, start_new_session=True)
+        bystander = subprocess.Popen(sleeper, start_new_session=True)
+        for proc in (job, server, bystander):
+            self.addCleanup(lambda p=proc: p.poll() is None and p.kill())
+        jobs = self.box.home / "state" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "libreoffice.json").write_text(json.dumps({"pid": job.pid, "phase": "downloading", "started": int(time.time())}))
+        (self.box.home / "state" / "servers").mkdir(parents=True, exist_ok=True)
+        (self.box.home / "state" / "servers" / str(server.pid)).write_text(str(server.pid))
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIsNotNone(job.wait(timeout=20))
+        self.assertIsNotNone(server.wait(timeout=20))
+        self.assertIsNone(bystander.poll(), "a process Theodore did not record is never stopped")
+        self.assertFalse(self.box.home.exists())
+
     def test_uninstall_leaves_nothing_behind(self):
         self.ready()
         (self.box.home / "plugin.partial" / "plugins").mkdir(parents=True)          # an interrupted plugin unpack
@@ -1549,6 +1596,24 @@ class StatusDoctorUninstall(ClientCase):
             self.assertFalse(folder.exists(), folder)
         for folder in folders[:4]:
             self.assertIn(str(folder), first)
+
+    def test_uninstall_removes_the_engines_libreoffice_profile_and_lock_files_from_the_temporary_folder(self):
+        # ACCEPT-LOCAL2 D-B: pptx-soffice-profile/, its .warm-seed/, its .lock, theodore-pptx-locks/*.lock stayed.
+        self.ready()
+        temp = Path(self.box.env["TMPDIR"])
+        for name in ("pptx-soffice-profile/user/registrymodifications.xcu", "pptx-soffice-profile.warm-seed/user/x.xcu"):
+            (temp / name).parent.mkdir(parents=True, exist_ok=True)
+            (temp / name).write_text("<x/>")
+        (temp / "pptx-soffice-profile.lock").write_text("")
+        (temp / "theodore-pptx-locks").mkdir()
+        for n in range(3):
+            (temp / "theodore-pptx-locks" / f"{n}.lock").write_text("")
+        (temp / "someone-elses").mkdir()
+        first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertIn("LibreOffice profile and lock files were removed", first)
+        for name in ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed", "pptx-soffice-profile.lock", "theodore-pptx-locks"):
+            self.assertFalse((temp / name).exists(), name)
+        self.assertTrue((temp / "someone-elses").exists())
 
     def test_uninstall_leaves_and_names_what_is_not_the_engines_in_a_former_cache(self):
         self.ready()
@@ -2132,6 +2197,33 @@ class AutoUpdate(ClientCase):
         self.assertTrue(out[0].startswith("THEODORE NOTICE: Theodore updated itself: engine 2.0.0"), out[:2])
         self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design").stdout)
 
+    def test_two_sessions_starting_together_run_one_job_and_say_it_once(self):
+        # ACCEPT-LOCAL2 D-A: session 3 started while session 2's plugin job ran; it ran a second job and the line came twice.
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        a, b = {"CLAUDE_CODE_SESSION_ID": "s-a", "CLAUDECODE": "1"}, {"CLAUDE_CODE_SESSION_ID": "s-b", "CLAUDECODE": "1"}
+        said = [self.client("skill", "pptx", env=a).stdout,
+                self.client("skill", "pptx", env=b).stdout]      # starts while (or right after) a's job runs, on the old files
+        self.box.wait_jobs()
+        said.append(self.client("skill", "pptx", env={"CLAUDE_CODE_SESSION_ID": "s-c", "CLAUDECODE": "1"}).stdout)
+        self.box.wait_jobs()
+        self.assertEqual(log.read_text().splitlines().count("claude plugin update theodore@theodore"), 1, "one job per release")
+        said += [self.client("skill", "deck-design", env=env).stdout for env in (a, b, a)]
+        self.assertEqual(sum(out.count("Theodore updated itself") for out in said), 1, said)
+
+    def test_the_client_and_the_plugin_files_move_in_the_same_first_session(self):
+        # The first session's check starts both; the next session runs entirely on the new version and hears one line.
+        log = self.fake_claude()
+        self.ready()
+        self.publish_plugin("9.9.9")
+        self.api.publish_client("9.9.9", UpdateApplySays.client_tar(self, "9.9.9"))
+        env = {"CLAUDE_CODE_SESSION_ID": "s-1", "CLAUDECODE": "1"}
+        self.client("skill", "pptx", env=env)
+        self.box.wait_jobs()
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text(), "9.9.9")
+        self.assertIn("claude plugin update theodore@theodore", log.read_text().splitlines())
+
     def test_a_current_plugin_hears_nothing(self):
         self.ready()
         self.publish_plugin("0.0.1")
@@ -2314,6 +2406,23 @@ class HostTest(ClientCase):
         first, _n, _t = self.assertStatus(self.client("guide", "deck-design", "../../etc/passwd"), "USAGE", 64)
         self.assertIn("craft, forms, worked-notes", first)
         self.assertEqual([r["path"] for r in self.api.requests if "passwd" in r["path"] or ".." in r["path"]], [])
+
+    def test_guide_pptx_section_prints_a_served_section_and_refuses_an_unserved_one_cleanly(self):
+        """Lane STUDIO: `guide pptx <section>` reads a section the service serves; pptx links stay file paths (the
+        manual's references are on disk). A section not served (an older service, an account without it) is a
+        clean USAGE that fetches nothing else."""
+        self.sign_in()
+        self.api.guides["pptx"]["served-part"] = "SERVED-PPTX see [charts](references/pptxgenjs-charts.md)\n"
+        result = self.client("guide", "pptx", "served-part")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("SERVED-PPTX see [charts](references/pptxgenjs-charts.md)", result.stdout)
+        self.assertEqual(result.stdout.splitlines()[1], "--- served-part ---")
+        before = len(self.api.requests)
+        first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
+        self.assertIn("guide pptx has no section 'not-served'.", first)
+        self.assertIn("guide pptx for the manual", nxt)
+        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/pptx/not-served"])
+        self.assertStatus(self.client("guide", "pptx", "--license"), "USAGE", 64)
 
     # --- 5: uninstall with an assistant that never had Theodore ------------------------------------------------------------------
     def test_uninstall_with_codex_never_registered_is_a_clean_removal(self):

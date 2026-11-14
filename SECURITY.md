@@ -133,9 +133,11 @@ changed since the client last learned it, the service refuses the report, stores
 ## Removing everything
 
 `theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
-plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). On Windows the folders go a moment
-after the client has exited, so the first run says the removal is scheduled, not confirmed (`RETRY`); running the
-installer with `--uninstall` again confirms it, and answers `RETRY` while any of those folders or the render cache remains. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
+plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). It first stops Theodore's own running
+processes (background downloads, the tool server), each found by the file Theodore wrote for it. On Windows the folders
+go after the client has exited: a cleanup removes them, retrying for up to two minutes while Windows releases the last
+files, and writes its result to a file in the temporary folder that the status names; running the installer with
+`--uninstall` later confirms it, and answers `RETRY` while any of those folders or the render cache remains. It deletes only the subfolders Theodore created. To revoke a computer without access to it, use the
 Settings in the portal (Computers and assistants, Remove). The next command on that computer that reaches the Theodore service, whichever it is (loading
 the instructions, a licence refresh, an update check, a report, automatic or not, a preference, a specimen, the setup
 job, the hourly "in use" note), is refused: the client deletes the stored sign-in and the stored licence at once, and

@@ -43,6 +43,51 @@ class Installer(unittest.TestCase):
         lines = self.calls.read_text().splitlines()
         return [line.replace('"', "") for line in lines] if IS_WINDOWS else lines
 
+    def wait_gone(self, path: Path, seconds: float = 30.0, output: str = "") -> float:
+        """Wait for the folder the uninstall's cleanup removes; on failure say what is left, what the cleanup wrote and
+        what the client logged about the processes it stopped. Returns the seconds it took."""
+        import re
+        import time
+        began = time.monotonic()
+        while path.exists() and time.monotonic() - began < seconds:
+            time.sleep(0.5)
+        if path.exists():
+            try:
+                left = sorted(p.name for p in path.iterdir())
+            except OSError:
+                left = "(gone while listing)"
+            found = re.search(r"its result is written to (.+?result\.txt)", output)
+            result = Path(found.group(1)).read_text(errors="replace") if found and Path(found.group(1)).exists() else "(no result yet)"
+            self.fail(f"{path} is still there after {seconds:.0f} s: {left}; cleanup result: {result!r}; status: {output[:600]}")
+        return time.monotonic() - began
+
+    @unittest.skipUnless(IS_WINDOWS, "a running Theodore process that holds a file in the folder: Windows cannot delete it")
+    def test_uninstall_stops_theodores_own_background_process_and_removes_the_folder_in_one_run(self):
+        # ACCEPT-LOCAL2 D-C: the background LibreOffice download's python.exe held the runtime; the folder stayed, and the
+        # status asked to run the deleted launcher again.
+        import subprocess
+        import time
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.install("--code", "ABCD-1234").returncode, 0)
+        self.box.wait_jobs()
+        home = self.box.home
+        held = home / "runtime" / "held-by-a-job.bin"
+        holder = subprocess.Popen([sys.executable, "-c", "import sys, time; f = open(sys.argv[1], 'wb'); "
+                                   "child = __import__('subprocess').Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
+                                   "time.sleep(600)", str(held)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: holder.poll() is None and holder.kill())
+        (home / "state" / "jobs").mkdir(parents=True, exist_ok=True)
+        (home / "state" / "jobs" / "libreoffice.json").write_text(json.dumps({"pid": holder.pid, "phase": "downloading LibreOffice",
+                                                                                "percent": 30, "started": int(time.time())}))
+        time.sleep(2)
+        removed = self.install("--uninstall")
+        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertTrue(status_lines(removed.stdout)[0].startswith("THEODORE OK: Theodore was removed"), removed.stdout)
+        self.assertNotIn("run the same command again", removed.stdout)
+        holder.wait(timeout=30)                 # stopped by its job file's pid, with its child
+        self.wait_gone(home, output=removed.stdout)
+
     def install(self, *args, env=None, installer=None):
         import subprocess
         installer = installer or self.box.installer()
@@ -96,13 +141,10 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
 
         removed = self.install("--uninstall")
-        if IS_WINDOWS:          # the folders go after the client has exited: scheduled, not confirmed; a second run confirms
-            self.assertEqual(removed.returncode, 75, removed.stdout + removed.stderr)
-            self.assertIn("scheduled but not confirmed", status_lines(removed.stdout)[0])
-            import time
-            time.sleep(15)
-            removed = self.install("--uninstall")
         self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        self.assertNotIn("run the same command again", removed.stdout, "never a command that no longer exists")
+        if IS_WINDOWS:          # the folder goes a moment after the client has exited
+            self.wait_gone(home, output=removed.stdout)
         self.assertFalse(home.exists())
         calls = self.host_calls()
         for expected in ("claude plugin uninstall theodore@theodore", "claude plugin marketplace remove theodore",
@@ -130,6 +172,37 @@ class Installer(unittest.TestCase):
         done = self.install("--uninstall", env={"LOCALAPPDATA": str(local)})
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
+
+    def test_install_uninstall_install_again_at_once_stays_signed_in(self):
+        # ACCEPT-LOCAL2 observation (b): a second install on the same profile right after an uninstall said "signed in"
+        # and ended with SIGN_IN_REQUIRED. On Windows the first uninstall's cleanup was still running and removed the new
+        # installation's state (its sign-in) as it was written. Elsewhere the removal is done before uninstall returns.
+        import time
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertEqual(self.install("--code", "ABCD-1234").returncode, 0)
+        self.box.wait_jobs()
+        self.assertEqual(self.install("--uninstall").returncode, 0)
+        self.api.issue_activation_code("ABCD-2345")
+        again = self.install("--code", "ABCD-2345")
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertTrue(status_lines(again.stdout)[0].startswith("THEODORE OK: Theodore is ready"), again.stdout)
+        self.box.wait_jobs()
+        if IS_WINDOWS:
+            time.sleep(150)                     # longer than the first uninstall's cleanup may run
+        status = self.box.run_launcher("status", launcher=self.box.home / "bin" / STABLE)
+        self.assertTrue(status_lines(status.stdout)[0].startswith("THEODORE OK"), status.stdout + status.stderr)
+
+    def test_a_damaged_download_is_fetched_again(self):
+        # ACCEPT-LOCAL2: on a flaky network a download arrived damaged once and the install stopped.
+        config = json.loads((self.box.plugin / "skills" / "pptx" / "scripts" / "launcher.json").read_text())
+        client_key = config["stage1_client_url"].split("/dl/", 1)[1]
+        self.api.dl_damaged[client_key] = 2
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("arrived damaged; downloading it again", result.stdout)
+        self.assertEqual(len([r for r in self.api.requests if r["path"].endswith(client_key)]), 3)
+        self.box.wait_jobs()
 
     def test_the_installer_removes_its_own_download_folder_when_the_cleanup_was_dropped(self):
         # Codex ran the install line split in two and dropped "rm -rf $d" (lane PORTAL, 2026-11-12): the installer

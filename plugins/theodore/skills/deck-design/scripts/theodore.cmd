@@ -79,6 +79,8 @@ if defined READY goto :run_client
 
 rem --- not installed yet -------------------------------------------------------------------------------------------
 if /i "%~1"=="uninstall" goto :uninstall_bare
+rem An uninstall's cleanup may still be running in this folder: its marker goes first, which stops it (see install.cmd).
+if exist "%HOME_DIR%\.theodore-uninstalling" (del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1 & ping -n 6 127.0.0.1 >nul)
 if /i "%~1"=="mcp" goto :mcp_not_ready
 rem Expired specimen folders go before the bootstrap starts, so also when it fails (the client sweeps once it runs).
 call :sweep_specimens
@@ -727,6 +729,22 @@ set "OCMSG="
 if defined OCDONE set "OCMSG=; the engine's former caches were removed: %OCDONE:~2%"
 rem Only Theodore's own subfolders: the folder may hold things that are not Theodore's. One line, because this file
 rem may be inside one of them: delete, then report what is still there (if defined and call echo run late enough).
+rem Theodore's own programs still running from inside the folder (a background download, the tool server) are stopped
+rem first, found by where their program file is; then every folder but bin is removed, retried for ten seconds while
+rem Windows releases the last files (a scanner may hold a file it has just seen).
+set "HOME_SCAN=%HOME_DIR%\"
+if exist "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:HOME_SCAN, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" <nul >nul 2>&1
+set "BTRY=0"
+:bare_retry
+for %%D in (%OWNED_DIRS%) do if /i not "%%D"=="bin" if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1
+set "BLEFT="
+for %%D in (%OWNED_DIRS%) do if /i not "%%D"=="bin" if exist "%HOME_DIR%\%%D" set "BLEFT=1"
+if not defined BLEFT goto :bare_retry_done
+if %BTRY% geq 10 goto :bare_retry_done
+set /a BTRY+=1
+ping -n 2 127.0.0.1 >nul
+goto :bare_retry
+:bare_retry_done
 (for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (call echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed%%OCMSG%%.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
 
 :old_engine_caches
