@@ -3,14 +3,17 @@ the limits the hosts put on a plugin (no bin/, no lockfile at the plugin root, n
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -873,6 +876,51 @@ class StampFromParts(unittest.TestCase):
         out = self.stamp()
         self.assertIn("test failures at this commit (linux-arm64-shim)", out.stdout)
         self.assertFalse((self.logs / "green" / "plugin" / self.sha).exists())
+
+
+@unittest.skipIf(os.name == "nt", "the runner is a POSIX shell script run from the Mac")
+class SelectedStartsWindowsFirst(unittest.TestCase):
+    """ci/run.sh selected starts its Windows job before it waits for the shared lock: that job runs on its own machine,
+    and another runner holding the lock must not delay it."""
+
+    def test_the_windows_job_starts_while_the_lock_is_held_by_another_runner(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        repo, logs, marker = tmp / "repo", tmp / "logs", tmp / "azure-up"
+        (repo / "ci").mkdir(parents=True)
+        for name in ("run.sh", "lock.sh"):
+            shutil.copy2(ROOT / "ci" / name, repo / "ci" / name)
+        (repo / ".gitignore").write_text("ci/out/\n")
+        fake = repo / "ci" / "azure-windows.sh"
+        fake.write_text(f'#!/bin/bash\n[ "$1" = up ] && echo up >> "{marker}"\nexit 1\n')
+        git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "a"], check=True)
+        stamped = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        (logs / "green" / "plugin").mkdir(parents=True)
+        (logs / "green" / "plugin" / stamped).write_text("checks green\n")
+        fake.write_text(fake.read_text() + "# a Windows-only change\n")       # plan: windows (secrets, archives, windows-x64)
+        subprocess.run([*git, "commit", "-q", "-am", "b"], check=True)
+        holder = subprocess.Popen(["sleep", "120"])
+        self.addCleanup(holder.kill)
+        (logs / "locks" / "matrix").mkdir(parents=True)
+        (logs / "locks" / "matrix" / "pid").write_text(f"{holder.pid}\n")
+        runner = subprocess.Popen(["sh", str(repo / "ci" / "run.sh"), "selected", "--azure"], cwd=str(repo), start_new_session=True,
+                                  env={**os.environ, "THEODORE_CI_LOGS": str(logs), "CI_LOCK_POLL": "1"},
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def stop():
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(runner.pid, signal.SIGKILL)
+            runner.wait()
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.2)
+        self.assertTrue(marker.exists(), "the Windows job did not start while another runner held the lock")
+        self.assertEqual((logs / "locks" / "matrix" / "pid").read_text().strip(), str(holder.pid), "the lock is still the other runner's")
+        self.assertIsNone(runner.poll(), "the runner waits for the lock for its local jobs")
 
 
 @unittest.skipIf(os.name == "nt", "the Azure helper is a bash script run from the Mac")
