@@ -11,6 +11,14 @@
   true, and logging out. `theodore usage --show` prints the next batch exactly as it would be sent. SECURITY.md names
   the file, its fields and when it is sent.
 - `ci/run.sh selected` starts its Windows job before it waits for the shared lock.
+- Install on a slow connection: the long downloads run as a background job that outlives the installer's command; the
+  installer waits for it at most three minutes, registers the plugin meanwhile and ends with `SETUP_IN_PROGRESS` and
+  the doctor command to poll, so a host's time limit on a command no longer cuts the install.
+- Running the install line again with a code already used keeps the login the earlier run saved.
+- `doctor` checks that the plugin is registered with each assistant it finds and says what to run when it is not; the
+  next Theodore command finishes a registration an interrupted install left undone.
+- An engine install that finds another Theodore process holding the update lock answers `SETUP_IN_PROGRESS`, not
+  `INTERNAL`.
 
 ## 0.3.6
 
