@@ -68,6 +68,16 @@ def entry() -> dict:
     return {"command": launcher, "args": ["mcp", "--for", FOR]}
 
 
+def entry_present() -> bool:
+    """Theodore's entry is in one of the app's configuration files (the app then starts Theodore's server itself)."""
+    for folder in config_dirs():
+        settings = _load(folder / "claude_desktop_config.json")
+        servers = settings.get("mcpServers") if isinstance(settings, dict) else None
+        if isinstance(servers, dict) and isinstance(servers.get(ENTRY_NAME), dict):
+            return True
+    return False
+
+
 def _ours(value, written: dict | None) -> bool:
     """An entry Theodore wrote: the one recorded, or one that runs this installation's launcher with `mcp --for`."""
     if not isinstance(value, dict):

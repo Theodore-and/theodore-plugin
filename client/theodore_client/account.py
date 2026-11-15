@@ -132,6 +132,7 @@ def remember_automatic_reports_off() -> None:
 def delete_token() -> None:
     with core.lock("entitlement", timeout=30):      # never between a refresh's read and its write
         core.remove_tree(_token_path())
+        core.remove_tree(core.home().state / "chat" / "state" / "entitlement.json")   # a chat command's copy (chatbuild)
 
 
 def release_hint() -> dict:

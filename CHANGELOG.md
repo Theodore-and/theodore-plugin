@@ -2,6 +2,42 @@
 
 ## 0.4.0
 
+- Claude Desktop's chat builds the deck with Theodore's engine on this computer, set up by the same install, with no
+  connector. The local server's one tool (`theodore`, so "Always allow" is still clicked once) gains the actions:
+  - `manual`: the build instructions;
+  - `run`: one engine command, `pptx <verb> ...` as an argument list, with the design note on standard input, in
+    the deck's folder; slide renders come back as images;
+  - `read`, `write`, `edit`, `list`: the deck's working files;
+  - `reveal`: shows the file in Finder or Explorer, only when the user asks.
+
+  The deck goes to the folder the chat names (its path on this computer), or else `~/Documents/Theodore`. Every answer
+  names the next step, through to the line that gives the user the file's path. Starting the same deck twice in the
+  same folder continues the first, with no `-2` copy.
+- Confinement:
+  - Only the engine's own verbs run, with no shell and no other program.
+  - Every path must be inside the deck's folder; reads may also open Theodore's renders and its manual. Only text
+    files are written.
+  - The deck script runs under Node's permission model plus a guard loaded first. It can read only the engine, its
+    runtime and packs, the fonts, the deck's folder and the render cache. It can write only the folder and the
+    cache. It has no network, and no program but the engine's own Node scripts, which run under the same restriction.
+  - The engine reads a copy of the licence that exists only while one command runs and goes with the main licence.
+- The route is the plan feature `chat-build`. Without it, `run`, `write` and `edit` answer NO_ENTITLEMENT; a plan
+  given the feature is picked up within minutes.
+- A delivered deck is never replaced from a chat: every start from a chat is a deck of its own (the client passes
+  `--new`, so the engine never reopens an earlier deck), and a command that changes a deck (apply, finish, slide and
+  comment edits) runs only on a workspace this session started and that is not finished; a finished deck is changed by
+  starting a new deck from its file, which gets a name of its own. The engine itself never writes a `--from` source and
+  never replaces a file it did not deliver (an existing name gets `-2`; `--output` onto such a file is refused). A
+  retried start of the same unfinished deck continues it. Proven on the real engine (tests/e2e/chat_build_proof.py).
+- One Theodore in a chat: when a Claude account also has Theodore's plugin on, the plugin's own server, started by the
+  Claude app (any client named as the app; Claude Code and Codex are unchanged), serves no tool while Theodore's entry
+  is in the app's configuration, and otherwise the chat's one tool, so a person meets one tool and one approval. The
+  skills' fallback wording names "the Theodore tool", whichever server provides it.
+- Codex, with no folder named: the deck goes to the thread's folder (from `_meta.threadId` and the thread's session
+  file), else `~/Documents/Theodore`. Render images named by a path with a space or an accent (a Windows user folder)
+  come back to the chat. The chat route starts the background licence check as every engine command does.
+- Each chat action is logged by name, verb and exit code only. For testing which name a chat picks,
+  THEODORE_CHAT_TOOL_NAME and THEODORE_CHAT_TOOL_DESCRIPTION override the tool's name and description.
 - Windows, a user name with a letter outside the console's code page (C:\Users\Théo Tester) (lane WINFIX, W-3):
   uninstall left Theodore's folder behind and still said OK. The cleanup script that deletes the folder after the
   command ends had the paths written into it in UTF-8, and cmd.exe reads a batch file in the OEM code page, so it

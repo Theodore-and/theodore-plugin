@@ -292,7 +292,10 @@ class ClaudeDesktop(McpCase):
         self.sign_in()
         self.api.guides["deck-design"][""] = ENTRY
         server = self.server(args=("--for", "claude-desktop"))
-        self.assertTrue(server.call("theodore", action="begin")["content"][0]["text"].rstrip().endswith(mcp.DESKTOP_BINDINGS))
+        from theodore_client import chatbuild
+        begin = server.call("theodore", action="begin")["content"][0]["text"].rstrip()
+        self.assertIn(mcp.DESKTOP_BINDINGS, begin)
+        self.assertTrue(begin.endswith(chatbuild.BUILD_POINTER), "the build with the engine is the last thing begin says")
         server.close()
 
     def test_a_pointer_to_the_remote_connector_keeps_its_tool_names(self):

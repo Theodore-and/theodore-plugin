@@ -13,6 +13,10 @@ installer's are in `install/`.
   explicitly. It never contacts Theodore.
 - The client is the only part that contacts Theodore.
 
+- In Claude Desktop's chat, Theodore's tool lets the chat run only Theodore's own engine commands. It can read and
+  write only the deck's folder (text files) and read Theodore's renders. The deck script the chat writes runs without
+  network access, without any other program, and without access to any other file on the computer.
+
 ## When the client contacts Theodore
 
 | When | What for | How often |

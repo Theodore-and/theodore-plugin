@@ -60,10 +60,16 @@ if verb == "version":
 elif verb == "start":
     ws = Path(args[-1]); (ws / ".pptx-state").mkdir(parents=True, exist_ok=True)
     (ws / ".pptx-state" / "engine-used.txt").write_text(VERSION)
-    print(json.dumps({"ok": True, "engine": VERSION}))
+    print(f"WORKSPACE: {ws}")
+    print(json.dumps({"ok": True, "engine": VERSION, "args": args[1:]}))
 elif verb == "apply":
     ws = Path(args[-1]); (ws / ".pptx-state" / "engine-used.txt").write_text(VERSION)
     print(json.dumps({"ok": True, "engine": VERSION, "packs": sorted(p.name for p in (ROOT / "skills" / "pptx-asset-packs").iterdir() if p.is_dir())}))
+elif verb == "list":     # what a chat's run sees (mcp --for claude-desktop): folder, private home, Node's options, stdin
+    print(json.dumps({"cwd": os.getcwd(), "home": os.environ.get("THEODORE_HOME"), "node_options": os.environ.get("NODE_OPTIONS"),
+                      "tmp": os.environ.get("TMPDIR"), "stdin": sys.stdin.read() if not sys.stdin.isatty() else None,
+                      "script_root": os.environ.get("THEODORE_NODE_SCRIPT_ROOT"), "args": args[1:],
+                      "licence_copy": (Path(os.environ.get("THEODORE_HOME", "/nonexistent")) / "state" / "entitlement.json").is_file()}))
 elif verb == "exit":
     sys.exit(int(args[1]))
 elif verb == "env":
