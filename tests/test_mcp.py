@@ -304,6 +304,19 @@ class ClaudeDesktop(McpCase):
             mcp.FOR = None
         self.assertIn("connector's theodore_begin tool", text)
 
+    def test_codex_gets_the_same_one_tool(self):
+        """Lane CHATGPT: Codex's plugin server (mcp.json, `--for codex`) is the one tool, marked neither destructive nor
+        open-world, which Codex calls without asking."""
+        self.sign_in()
+        self.api.guides["deck-design"][""] = ENTRY
+        server = self.server(args=("--for", "codex"))
+        tools = server.send("tools/list")["result"]["tools"]
+        self.assertEqual([t["name"] for t in tools], ["theodore"])
+        self.assertIs(tools[0]["annotations"]["destructiveHint"], False)
+        self.assertIs(tools[0]["annotations"]["openWorldHint"], False)
+        self.assertTrue(server.call("theodore", action="begin")["content"][0]["text"].startswith(ENTRY))
+        server.close()
+
     def test_without_the_flag_the_plugin_server_is_unchanged(self):
         server = self.server(args=("--for", "something-else"))
         self.assertEqual(sorted(t["name"] for t in server.send("tools/list")["result"]["tools"]), ["guide", "list", "specimen"])

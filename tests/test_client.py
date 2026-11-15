@@ -1729,6 +1729,13 @@ class Hosts(ClientCase):
         self.assertTrue((skills / "theodore-deck-design" / "SKILL.md").is_file())
         self.assertStatus(self.client("hosts", "register"), "OK", 0)        # again: the same links, nothing else
         self.assertEqual(sorted(p.name for p in skills.iterdir()), ["mine", "theodore-deck-design", "theodore-pptx"])
+        # A plugin update replaces Theodore's plugin copy in place: the links name the path, so they follow it.
+        shutil.rmtree(plugin / "plugins")
+        (plugin / "plugins" / "theodore" / "skills" / "pptx").mkdir(parents=True)
+        (plugin / "plugins" / "theodore" / "skills" / "pptx" / "SKILL.md").write_text("---\nname: pptx\nversion: next\n---\n")
+        self.assertIn("version: next", (skills / "theodore-pptx" / "SKILL.md").read_text())
+        (plugin / "plugins" / "theodore" / "skills" / "deck-design").mkdir(parents=True)
+        (plugin / "plugins" / "theodore" / "skills" / "deck-design" / "SKILL.md").write_text("---\nname: deck-design\n---\n")
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(sorted(p.name for p in skills.iterdir()), ["mine"], "only Theodore's links go")
         self.assertTrue((plugin / "plugins" / "theodore" / "skills" / "pptx" / "SKILL.md").is_file(), "a link's target is never removed")

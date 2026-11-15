@@ -348,7 +348,10 @@ class HostLimits(unittest.TestCase):
         sh = (ROOT / "install" / "install.sh").read_text(encoding="utf-8")
         cmd = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
         self.assertNotIn("--wait 1800", sh + cmd)
-        self.assertIn('SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}', sh)
+        self.assertIn('SETUP_WAIT_DEFAULT=180\n[ -n "${CODEX_THREAD_ID:-}" ] && SETUP_WAIT_DEFAULT=540\nSETUP_WAIT=${THEODORE_INSTALL_WAIT:-$SETUP_WAIT_DEFAULT}', sh)
+        # Codex (lane CHATGPT): no 10-minute command limit, and every command of the install session asks first: it
+        # waits up to 9 minutes and, still downloading, ends with nothing to poll.
+        self.assertIn("run nothing more now, neither doctor nor this installer", sh)
         self.assertIn('set "SETUP_WAIT_DEFAULT=180"', cmd)
         for text, setup, marker, register, doctor in (
                 (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
@@ -463,7 +466,10 @@ class HostLimits(unittest.TestCase):
         if mode:                    # a git checkout: the launcher is committed executable, so every copy of it runs
             self.assertEqual(mode, "100755")
         self.assertEqual(json.loads((PLUGIN / "mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "sh", "args": ["./skills/pptx/scripts/theodore", "mcp"], "cwd": "."}}})
+                         {"$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                          "mcpServers": {"theodore": {"type": "stdio", "command": "sh", "args": ["./skills/pptx/scripts/theodore", "mcp", "--for", "codex"]}}},
+                         "Codex 0.160 reads an Agent Plugins mcp.json only with its $schema and a type (codex-rs codex-mcp/src/agent_plugin_config.rs); "
+                         "without them it logged 'missing field $schema' and never started the server (lane CHATGPT)")
         self.assertEqual(portable["mcpServers"], "./mcp.json")
 
     @unittest.skipUnless(shutil.which("claude"), "the claude CLI is not installed")

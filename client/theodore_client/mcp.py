@@ -61,6 +61,7 @@ DESCRIPTIONS = {
 # The service's texts name "the Theodore tool guide" and "specimen", the launcher, and the connector's tool names
 # (`theodore_report`, `theodore_preference_add`); every answer here is rewritten to name this one tool and its action.
 DESKTOP = "claude-desktop"
+CODEX = "codex"
 FOR: str | None = None              # set by serve(): None for the plugin's server (Claude Code, Codex, Cowork)
 DESKTOP_TOOL = "theodore"
 DESKTOP_ACTIONS = ("begin", "guide", "specimen", "report", "preference_list", "preference_add", "preference_remove", "check")
@@ -623,7 +624,10 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None, for_host: str 
     """Read messages until the input ends. Our standard output carries only protocol messages."""
     global BLOCKED, FOR
     BLOCKED = blocked
-    FOR = for_host if for_host == DESKTOP else None
+    # Codex (`mcp --for codex`, its plugin's mcp.json) gets the same one tool: Codex asks before no call of a tool marked
+    # neither destructive nor open-world, and runs it outside its sandbox, so Theodore's work needs no approval there
+    # (lane CHATGPT; codex-rs core/src/mcp_tool_call.rs, requires_mcp_tool_approval).
+    FOR = DESKTOP if for_host in (DESKTOP, CODEX) else None
     raw_in = stdin or sys.stdin.buffer
     out = stdout or sys.stdout.buffer
     sys.stdout = sys.stderr                 # anything printed by accident goes to standard error
