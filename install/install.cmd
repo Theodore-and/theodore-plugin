@@ -76,6 +76,7 @@ set "CODE="
 set "UNINSTALL="
 set "NO_SETTINGS="
 set "RATE_WAIT="
+set "LIMIT_REFUSED="
 set "WORK="
 set "RC=0"
 rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
@@ -230,10 +231,21 @@ rem touches the sign-in that run saved in state\activation.pending.
 rem W-16: HTTP 429 rate_limited is the service's limit on sign-ins per account (or network) in an hour: the code was not
 rem used and is not wrong. Its message is "Too many requests. Try again in N seconds." (the 7th word, N).
 if "%HTTP%"=="429" "%SYS32%\findstr.exe" /c:"rate_limited" "%SAFE%\activation.pending" >nul 2>&1 && call :rate_wait
+rem W-17: HTTP 409 computer_limit: the account already has its maximum number of computers logged in. The code was not
+rem used (it works until it expires) and a browser sign-in would be refused the same way: no link. The answer holds no
+rem secret; the client turns it into the last status (login --refused), with the service's own message. As install.sh.
+if "%HTTP%"=="409" "%SYS32%\findstr.exe" /c:"computer_limit" "%SAFE%\activation.pending" >nul 2>&1 && move /y "%SAFE%\activation.pending" "%WORK%\activation.refused" >nul 2>&1 && set "LIMIT_REFUSED=%WORK%\activation.refused"
 rmdir /s /q "%SAFE%" >nul 2>&1
 set "CODE="
 if defined RATE_WAIT echo theodore-install: too many log-ins on this Theodore account in the last hour, so this computer is not signed in yet; the one-time code was not used (try again in %RATE_WAIT% minutes)
 if defined RATE_WAIT goto :stage1
+if defined LIMIT_REFUSED echo theodore-install: the Theodore service did not log this computer in: this account already has its maximum number of computers logged in (the one-time code was not used); what to do follows at the end
+if defined LIMIT_REFUSED goto :stage1
+rem No answer (the network) or a failure of the service (5xx): the code was not used, and it is never called wrong.
+if "%HTTP%"=="000" echo theodore-install: the Theodore service could not be reached, so the one-time code was not used; if this computer is not logged in already, a login link follows at the end
+if "%HTTP%"=="000" goto :stage1
+if "%HTTP:~0,1%"=="5" echo theodore-install: the Theodore service answered HTTP %HTTP%, so the one-time code was not used; if this computer is not logged in already, a login link follows at the end
+if "%HTTP:~0,1%"=="5" goto :stage1
 if not exist "%HOME_DIR%\state\activation.pending" goto :code_refused_new
 echo theodore-install: the one-time code was not accepted (it was used already, by an earlier run of this installer); the login that run saved is kept
 goto :stage1
@@ -436,6 +448,7 @@ set "RC=75"
 goto :finish
 
 :sign_in_last
+if defined LIMIT_REFUSED goto :limit_last
 if not defined RATE_WAIT goto :sign_in_link
 echo THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins on this Theodore account in the last hour, and the one-time code was not used. Try again in %RATE_WAIT% minutes.
 echo NEXT: do not retry now. Tell the user, and run the same install line again in %RATE_WAIT% minutes (with a fresh sentence from the Theodore site if the code has expired by then).
@@ -444,6 +457,11 @@ set "RC=75"
 goto :finish
 :sign_in_link
 call "%%T%%" login --start
+set "RC=%ERRORLEVEL%"
+goto :finish
+:limit_last
+rem W-17: the computer limit, never a sign-in link (it would be refused the same way). As install.sh.
+call "%%T%%" login --refused "%%LIMIT_REFUSED%%"
 set "RC=%ERRORLEVEL%"
 goto :finish
 

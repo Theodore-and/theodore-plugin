@@ -48,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     lg.add_argument("--finish", action="store_true")
     lg.add_argument("--wait", type=float, default=0.0)
     lg.add_argument("--code")
+    lg.add_argument("--refused", help=argparse.SUPPRESS)      # the installers' saved refusal of their code (W-17)
     sub.add_parser("mcp", add_help=False)
     sk = sub.add_parser("skill", add_help=False)
     sk.add_argument("name")
@@ -135,6 +136,8 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "specimen":
         return commands.specimen(args.files)
     if cmd == "login":
+        if args.refused:
+            return core.emit(account.activation_refused(args.refused))
         if args.code:
             return core.emit(account.login_code(args.code))
         if args.finish:

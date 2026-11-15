@@ -272,6 +272,44 @@ class Installer(unittest.TestCase):
         self.assertEqual(len(self.api.activations), 1, "the same code works once the limit has passed")
         self.box.wait_jobs()
 
+    def test_a_code_refused_for_the_computer_limit_ends_with_the_limit_and_no_sign_in_link(self):
+        """W-17: the account already has its maximum number of computers logged in (409 conflict, computer_limit).
+        install.sh and install.cmd say so, install everything else, print no sign-in link (it would be refused the same
+        way) and end with the client's COMPUTER_LIMIT; the code was not used, so the same line works once a computer is
+        removed."""
+        self.api.issue_activation_code("ABCD-1234")
+        self.api.computer_limit = 10
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertTrue(first.startswith("THEODORE COMPUTER_LIMIT: Theodore is installed, but the Theodore service did not log this "
+                                         "computer in (computer_limit): This account already has 10 computers logged in, the most it can have."), first)
+        self.assertIn("The one-time code was not used", first)
+        self.assertIn("do not retry, do not offer a sign-in link", nxt)
+        self.assertIn("Your Theodore account already has its maximum number of computers logged in", tell)
+        self.assertIn("/app/settings#connected", tell)
+        self.assertIn("this account already has its maximum number of computers logged in (the one-time code was not used)", result.stdout)
+        self.assertNotIn("was not accepted", result.stdout, "the code is never reported as invalid")
+        self.assertNotIn("SIGN_IN_REQUIRED", result.stdout)
+        self.assertNotIn("/device?code=", result.stdout)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed")
+        self.api.computer_limit = None
+        done = self.install("--code", "ABCD-1234")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.api.activations), 1, "the same code works once a computer is removed")
+        self.box.wait_jobs()
+
+    def test_a_failure_of_the_service_is_not_called_a_bad_code(self):
+        """W-17: a 5xx answer (and no answer at all) leaves the code unused and is never "not accepted"."""
+        self.api.issue_activation_code("ABCD-1234")
+        self.api.activation_failure = (503, "service_disabled")
+        result = self.install("--code", "ABCD-1234")
+        self.assertIn("the Theodore service answered HTTP 503, so the one-time code was not used", result.stdout)
+        self.assertNotIn("was not accepted", result.stdout)
+        self.assertEqual(status_lines(result.stdout)[0].split(":")[0], "THEODORE SIGN_IN_REQUIRED", result.stdout)
+        self.api.activation_failure = None
+        self.box.wait_jobs()
+
     def test_running_the_line_again_with_its_spent_code_keeps_the_sign_in_the_first_run_saved(self):
         # ACCEPT-RC8 D1: the first run redeemed the code and was stopped; the agent ran the same line again, whose step 1
         # emptied state/activation.pending before the (refused) activation and then deleted it: the sign-in was lost.

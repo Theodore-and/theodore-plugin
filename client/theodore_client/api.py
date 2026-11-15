@@ -27,9 +27,10 @@ from .core import Status, quoted_launcher
 class ApiError(Exception):
     """The server answered with an error body: {"error": {"code", "message", ...}} or the RFC 6749 device form."""
 
-    def __init__(self, http_status: int, code: str, message: str = "", retry_after: str | None = None):
+    def __init__(self, http_status: int, code: str, message: str = "", retry_after: str | None = None, reason: str = ""):
         super().__init__(f"{http_status} {code}")
         self.http_status, self.code, self.message, self.retry_after = http_status, code, message, retry_after
+        self.reason = reason        # details.reason of the standard shape, e.g. conflict's computer_limit (W-17)
 
 
 class TooLarge(Exception):
@@ -463,19 +464,21 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
         if exc.code == 407:
             raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
         raw = _read_bounded(exc, ERROR_LIMIT)
-        code, message = f"http_{exc.code}", ""
+        code, message, reason = f"http_{exc.code}", "", ""
         try:
             parsed = json.loads(raw.decode("utf-8"))
             err = parsed.get("error")
             if isinstance(err, dict):
                 code, message = str(err.get("code") or code), str(err.get("message") or "")
+                details = err.get("details")
+                reason = str(details.get("reason") or "") if isinstance(details, dict) else ""
             elif isinstance(err, str):
                 code, message = err, str(parsed.get("error_description") or "")
         except (ValueError, AttributeError):
             pass
         if "Authorization" in hdrs and learn_refusals:
             _signed_out(exc.code, code)
-        raise ApiError(exc.code, code, message, exc.headers.get("Retry-After")) from None
+        raise ApiError(exc.code, code, message, exc.headers.get("Retry-After"), reason) from None
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as exc:
         raise _network_error(exc) from None
 
