@@ -906,6 +906,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
                      else "Slide previews need LibreOffice, which is not installed.")
     if "claude git bash" in warned:
         notes.append("Claude Code on this computer needs Git for Windows (git-scm.com) to load Theodore's skills; install it, then start a new session.")
+    if desktop.reopen_needed(_host_record()):
+        notes.append("To use Theodore in the Claude app's chats, quit the app and open it again once.")
     if "processor" in warned:
         notes.append("This computer runs Windows on ARM, so Theodore uses its x64 build through Windows' emulation, which is slower.")
     if "service" in warned:

@@ -1808,6 +1808,24 @@ class Hosts(ClientCase):
         self.assertStatus(self.client("uninstall"), "OK", 0)
         self.assertEqual(json.loads(path.read_text()), {"preferences": {}})
 
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_the_last_words_say_to_reopen_the_claude_app_only_when_it_started_before_the_entry(self):
+        # The app reads its configuration only when it starts, and nothing makes it read it again: the user is told,
+        # once, to quit and reopen it; Theodore never quits it (it may be the app running this install, its Code tab).
+        self.desktop_config({"preferences": {}})
+        self.ready()
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        reopen = "To use Theodore in the Claude app's chats, quit the app and open it again once."
+        self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() - 3600)
+        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertIn(reopen, tell)
+        self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() + 60)       # opened after the entry
+        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertNotIn(reopen, tell)
+        self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = ""                          # not running: it loads at its next start
+        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertNotIn(reopen, tell)
+
     def test_claude_desktop_not_on_this_computer_is_said_and_nothing_is_written(self):
         first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
         self.assertIn("claude-desktop: not found on this computer", first)

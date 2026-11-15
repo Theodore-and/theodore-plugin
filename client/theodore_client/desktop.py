@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import time
 from pathlib import Path
 
 from . import core
@@ -114,12 +116,49 @@ def register(record: dict) -> list[str]:
                 lines.append(f"claude-desktop: FAILED ({path} could not be written: {exc.__class__.__name__})")
                 continue
             lines.append("claude-desktop: registered (it loads when the Claude app is quit and opened again)")
-            mine = {"ours": True, "created_servers": bool(mine.get("created_servers")) or created_servers}
+            mine = {"ours": True, "created_servers": bool(mine.get("created_servers")) or created_servers, "written_at": time.time()}
         mine.update({"ours": True, "entry": wanted})
         files[str(path)] = mine
     if files:
         record[RECORD_KEY] = files
     return lines
+
+
+def app_started_at() -> float | None:
+    """When the Claude app that is running now started (epoch seconds), or None when it is not running or that cannot be
+    told. The app reads its configuration file only when it starts, and nothing makes it read it again (Model Context
+    Protocol docs, "Connect to local MCP servers": "The application needs to restart to load the new configuration")."""
+    override = os.environ.get("THEODORE_TEST_CLAUDE_APP_STARTED")
+    if override is not None:
+        return float(override) if override else None
+    try:
+        if core.IS_WINDOWS:
+            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                  "(Get-Process claude -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1)"
+                                  ".StartTime.ToUniversalTime().ToString('o')"],
+                                 capture_output=True, text=True, timeout=10).stdout.strip()
+            if not out:
+                return None
+            from datetime import datetime
+            return datetime.fromisoformat(out.replace("Z", "+00:00")).timestamp()
+        if os.uname().sysname != "Darwin":
+            return None
+        out = subprocess.run(["ps", "-axo", "lstart=,comm="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    started = [time.mktime(time.strptime(line[:24], "%a %b %d %H:%M:%S %Y"))
+               for line in out.splitlines() if line.rstrip().endswith("/Claude.app/Contents/MacOS/Claude")]
+    return min(started) if started else None
+
+
+def reopen_needed(record: dict) -> bool:
+    """The Claude app is running and started before Theodore's entry was written, so its chats do not have Theodore
+    until it is quit and opened again. Never quits it: the app may be the one running this install (its Code tab)."""
+    written = [mine.get("written_at") for mine in (record.get(RECORD_KEY) or {}).values() if mine.get("ours") and mine.get("written_at")]
+    if not written:
+        return False
+    started = app_started_at()
+    return started is not None and started < max(written)
 
 
 def unregister(record: dict, left: list[str], notes: list[str]) -> list[str]:
