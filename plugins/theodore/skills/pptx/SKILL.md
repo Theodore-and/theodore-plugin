@@ -9,7 +9,7 @@ allowed-tools: Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE
 ---
 
 Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
-here. If no pptx instructions appear above this line, run, by absolute path, without `cd` (the skill folder is the
+here. If no pptx instructions appear above this line, run `theodore guide pptx` where that command is on PATH, else, by absolute path, without `cd` (the skill folder is the
 folder that holds this file, `${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide pptx
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide pptx

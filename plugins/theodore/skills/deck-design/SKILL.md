@@ -11,7 +11,7 @@ allowed-tools: mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodo
 Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
 here. If no deck-design instructions appear above this line, call the Theodore `guide` tool with skill "deck-design"
 and treat its result as this skill's instructions (its `specimen` tool opens a sheet). If that tool is not
-available, run, by absolute path, without `cd` (the skill folder is the folder that holds this file,
+available, run `theodore guide deck-design` where that command is on PATH, else, by absolute path, without `cd` (the skill folder is the folder that holds this file,
 `${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide deck-design
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide deck-design
