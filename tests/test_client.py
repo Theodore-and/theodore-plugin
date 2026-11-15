@@ -30,6 +30,8 @@ class SignIn(ClientCase):
         cred = self.box.home / "state" / "credentials"
         self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.box.home / "state" / "entitlement.json").stat().st_mode), 0o600)
+        if os.name != "nt":         # the engine, its manual and the packs: this user's alone (lane EXPOSURE)
+            self.assertEqual(stat.S_IMODE(self.box.home.stat().st_mode) & 0o077, 0)
         token = self.state("state/entitlement.json")["entitlement_token"]
         self.assertEqual(token.count("."), 2)
         secret = json.loads(cred.read_text())["installation_secret"]
@@ -2478,6 +2480,42 @@ class HostTest(ClientCase):
         workspace = self.box.tmp / "ws"
         workspace.mkdir()
         self.assertStatus(self.client("pptx", "start", str(workspace)), "SIGN_IN_REQUIRED", 65)
+
+    def test_an_engine_command_learns_a_revoke_from_its_hourly_background_check(self):
+        """Lane EXPOSURE: a device revoked while it stays online and runs only engine commands (no guide call) stopped
+        only when its licence expired (up to 7 days). An engine command now starts one detached refresh once the
+        licence is an hour old; the command itself never waits for it."""
+        self.ready()
+        job = self.box.home / "state" / "jobs" / "licence-check.json"
+        self.assertEqual(self.client("pptx", "exit", "0").returncode, 0)
+        self.box.wait_jobs()
+        self.assertFalse(job.exists(), "a licence issued less than an hour ago is not checked")
+        self.revoke()
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(2 * 3600)}
+        self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)     # this command runs: nothing waits
+        self.box.wait_jobs()
+        self.assertEqual(json.loads(job.read_text())["failed"]["cause"], "REFUSED")
+        self.gone()
+        self.assertStatus(self.client("pptx", "exit", "0", env=later), "SIGN_IN_REQUIRED", 65)
+
+    def test_the_background_licence_check_changes_nothing_offline_and_runs_at_most_once_an_hour(self):
+        self.ready()
+        job = self.box.home / "state" / "jobs" / "licence-check.json"
+        refreshes = self.api.refreshes
+        self.api.down = True
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(2 * 3600)}
+        self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)
+        self.box.wait_jobs()
+        first = json.loads(job.read_text())
+        self.assertEqual(first["failed"]["cause"], "NOT_CHECKED")
+        self.assertTrue((self.box.home / "state" / "entitlement.json").exists(), "offline: the licence stays")
+        self.assertTrue((self.box.home / "state" / "credentials").exists())
+        self.api.down = False
+        for _ in range(2):
+            self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)
+            self.box.wait_jobs()
+        self.assertEqual(json.loads(job.read_text())["started"], first["started"], "at most one check an hour")
+        self.assertEqual(self.api.refreshes, refreshes)
 
     def test_every_command_that_learns_of_a_revoke_clears_the_sign_in(self):
         for command in (["update", "--check"], ["update", "--apply"], ["prefs", "list"], ["packs", "install", "--all"],

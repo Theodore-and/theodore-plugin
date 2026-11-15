@@ -465,6 +465,7 @@ def _heartbeat(engine_version: str) -> None:
 
 def run_pptx(args: list[str]) -> int:
     account.require("pptx", allow_refresh=False)
+    account.check_in_background()      # at most one detached licence refresh an hour; never waited for
     install.require_runtime()
     install.wait_for_packs(args)
     install.wait_for_renderer(args)
@@ -476,6 +477,7 @@ def run_pptx(args: list[str]) -> int:
 
 def run_python(args: list[str]) -> int:
     account.require("pptx", allow_refresh=False)
+    account.check_in_background()
     install.require_runtime()
     return install.run_engine(args, python_passthrough=True)
 

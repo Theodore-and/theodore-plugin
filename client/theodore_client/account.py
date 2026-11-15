@@ -240,6 +240,48 @@ def refresh(timeout: float = 20.0, *, nudge_updates: bool = True) -> dict:
     return answer
 
 
+# Engine commands never wait for the service: they run on the stored licence, offline too, until it expires. So that a
+# device revoked, or an account suspended, deleted or without a plan, is learned while the computer stays online and
+# only engine commands run (no guide call), an engine command whose licence was issued more than an hour ago starts
+# one detached licence refresh: at most one an hour, nothing printed and nothing waited for. A refusal there deletes
+# the stored licence as every refresh does, so the next engine command stops; a network failure changes nothing.
+BACKGROUND_CHECK_SECONDS = 3600
+BACKGROUND_CHECK_JOB = "licence-check"
+
+
+def check_in_background() -> None:
+    """Start the detached licence refresh when it is due (see above). Never raises, never prints."""
+    try:
+        if os.environ.get(ENTITLEMENT_ENV) or not credentials.load():
+            return
+        token, claims = stored_token()
+        if not token or core.now() - float(claims.get("iat") or 0) < BACKGROUND_CHECK_SECONDS:
+            return
+        job = core.Job(BACKGROUND_CHECK_JOB)
+        started = float(job.read().get("started") or 0)         # wall-clock seconds, as Job writes them
+        if job.alive() or 0 <= time.time() - started < BACKGROUND_CHECK_SECONDS:
+            return
+        job.spawn([BACKGROUND_CHECK_JOB])
+    except Exception as exc:        # noqa: BLE001  never in the way of the engine command
+        core.log(f"licence check: not started ({exc.__class__.__name__})")
+
+
+def licence_check_job() -> int:
+    """The detached refresh an engine command starts. Its outcome goes to the log only."""
+    job = core.Job(BACKGROUND_CHECK_JOB)
+    job.begin("licence check")
+    try:
+        refresh(timeout=20.0, nudge_updates=False)
+        job.finish()
+    except api.ApiError as error:
+        job.fail("REFUSED", f"HTTP {error.http_status} {error.code}")
+        core.log(f"licence check: refused ({error.code})")
+    except Exception as exc:        # noqa: BLE001  offline or anything else: the licence stays as it was
+        job.fail("NOT_CHECKED", exc.__class__.__name__)
+        core.log(f"licence check: not made ({exc.__class__.__name__})")
+    return 0
+
+
 def require(feature: str, *, allow_refresh: bool = True) -> dict:
     """The claims of a valid entitlement that covers `feature`, refreshing past `rfa` when the network allows.
 

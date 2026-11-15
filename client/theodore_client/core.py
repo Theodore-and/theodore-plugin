@@ -9,6 +9,7 @@ import os
 import re
 import platform as _platform
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -349,6 +350,13 @@ class Home:
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(self.root / "state", 0o700)
+        # The folder holds the licensed engine, its manual and the asset packs: this user's alone (lane EXPOSURE). Only
+        # the group's and others' permissions are taken away, and only on a folder this user owns; the owner's are kept.
+        if not IS_WINDOWS:
+            with contextlib.suppress(OSError):
+                info = os.stat(self.root)
+                if info.st_uid == os.getuid() and info.st_mode & 0o077:
+                    os.chmod(self.root, stat.S_IMODE(info.st_mode) & 0o700)
 
     def launcher(self) -> Path:
         env = os.environ.get("THEODORE_LAUNCHER")
