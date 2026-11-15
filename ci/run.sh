@@ -386,6 +386,8 @@ CHANGELOG.md|inherit
 THIRD-PARTY-NOTICES.md|inherit
 ci/run.sh|inherit
 ci/lock.sh|inherit
+.gitleaksignore|inherit
+.gitleaks.toml|inherit
 plugins/*/skills/*/SKILL.md|text
 plugins/*/README.md|text
 ci/windows-*.ps1|windows
