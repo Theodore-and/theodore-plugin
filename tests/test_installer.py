@@ -595,6 +595,9 @@ class InstallerEveryAddress(unittest.TestCase):
         begin = text.index("# --- every address of Theodore's hosts (begin) ---")
         end = text.index("# --- every address of Theodore's hosts (end) ---")
         (self.dir / "block.sh").write_text(text[begin:end])
+        import re
+        # the time install.sh gives each address to connect and finish the handshake (its curl --connect-timeout)
+        self.per_address = float(re.search(r"--connect-timeout (\d+) --resolve", text[begin:end]).group(1))
         fake = self.dir / "bin"
         fake.mkdir()
         (fake / "curl").write_text(f"""#!{sys.executable}
@@ -639,17 +642,29 @@ os.execv(os.environ["REAL_CURL"], [os.environ["REAL_CURL"], *first, "--cacert", 
                               text=True, timeout=120, cwd=str(self.dir))
         return done, time.monotonic() - began, (self.dir / "curl.log").read_text().split("\n")[:-1]
 
+    def within(self, script: str, waits: int, every_dead: bool = False) -> float:
+        """The longest a run of `script` may take when `waits` addresses each use up their own time: that time, plus
+        half of one more (an address tried twice, or a timeout doubled, is caught), plus twice what the same script
+        takes, with as many curl calls, when the dead address refuses at once (the shell, the stand-in curl and curl
+        itself: slow on a loaded machine), measured now, the shorter of two runs (a test's first run is slowed by cold
+        caches, which would hide a doubled wait). A fixed bound failed under load (9.9 s against 9.0 for one 4 s
+        address)."""
+        fast = {"FAKE_PORTS": f"{self.DEAD}={self.bench.refused} {self.LIVE}={self.bench.refused}"} if every_dead else None
+        baseline = min(self.run_block(script, self.bench.refused, fast)[1] for _ in range(2))
+        return waits * self.per_address + self.per_address / 2 + 2 * baseline
+
     def test_a_dead_first_address_falls_over_to_the_next_and_is_remembered(self):
         twice = ('curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"\n'
                  'curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"')
         for dead in ("silent", "no_accept", "refused"):         # the handshake that hangs: the case a user met
             with self.subTest(dead=dead):
+                bound = self.within(twice, 1)
                 done, took, calls = self.run_block(twice, getattr(self.bench, dead))
                 self.assertEqual(done.stdout.split(), ["200", "rc=0", "200", "rc=0"], done.stdout + done.stderr)
                 self.assertEqual((self.dir / "out").read_bytes(), b"ok")
                 # 4 s for the dead address at most, then the live one; the second request starts with the live one
                 self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4", f"{self.LIVE} 4"])
-                self.assertLess(took, 9.0, f"{dead}: {took:.1f} s")
+                self.assertLess(took, bound, f"{dead}: {took:.1f} s")
 
     def test_the_body_is_sent_again_to_the_next_address(self):
         script = 'CURL_DATA=\'{"code":"ABCD-1234"}\'\ncurl_host 1 "$URL" -q -sS --proto =https -m 60 -o "$OUT"; echo " rc=$?"'
@@ -660,12 +675,13 @@ os.execv(os.environ["REAL_CURL"], [os.environ["REAL_CURL"], *first, "--cacert", 
 
     def test_every_address_dead_fails_within_bounds(self):
         script = 'curl_host 1 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"'
+        bound = self.within(script, 1, every_dead=True)          # the silent address's own time, once; the refused one at once
         done, took, calls = self.run_block(script, self.bench.silent, {"FAKE_PORTS": f"{self.DEAD}={self.bench.silent} "
                                                                                      f"{self.LIVE}={self.bench.refused}"})
         self.assertEqual(done.stdout.split()[0], "000", done.stdout + done.stderr)
         self.assertNotEqual(done.stdout.split()[1], "rc=0")
         self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4"])
-        self.assertLess(took, 9.0)
+        self.assertLess(took, bound, f"{took:.1f} s")
 
     def test_a_slow_link_gets_the_callers_own_connect_time_once(self):
         # every address only ran out of its 4 s: the first is tried once more with the caller's own connect timeout

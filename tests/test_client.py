@@ -3365,7 +3365,27 @@ class EveryAddress(unittest.TestCase):
         status, _headers, body = self.api.request("GET", f"https://{host or self.HOST}:{self.bench.live}/x", timeout=timeout)
         return status, body, time.monotonic() - began
 
+    def within(self, promise: float, regression: float, baseline: float) -> float:
+        """The longest a request may take: what the client promises, plus half the way to what a regression would cost
+        (no race: the hanging address's whole CONNECT_EACH), plus twice `baseline`, a request straight to the live
+        address measured now (slow on a loaded machine). Fixed bounds of 0.75 to 2.5 s failed the same way as the
+        installer's under load."""
+        return promise + (regression - promise) / 2 + 2 * baseline
+
+    def baseline(self) -> float:
+        """A request to the only, live address, the shorter of two; nothing it remembers is left behind."""
+        good, kept, addresses = dict(self.api._GOOD_ADDRESS), self.kept.read_bytes() if self.kept.exists() else None, self.addresses
+        self.addresses = [self.bench.live]
+        took = min(self.get()[2] for _ in range(2))
+        self.api._GOOD_ADDRESS.clear()
+        self.api._GOOD_ADDRESS.update(good)
+        self.kept.write_bytes(kept) if kept is not None else self.kept.unlink(missing_ok=True)
+        self.addresses = addresses
+        self.connects.clear()
+        return took
+
     def test_a_dead_first_address_falls_over_to_the_next_and_is_remembered(self):
+        bound = self.within(self.api.STAGGER, self.api.CONNECT_EACH, self.baseline())
         for dead in ("silent", "no_accept", "refused"):     # the handshake that hangs: the case a user met
             with self.subTest(dead=dead):
                 self.api._GOOD_ADDRESS.clear()
@@ -3375,7 +3395,7 @@ class EveryAddress(unittest.TestCase):
                 self.addresses = [port, self.bench.live]
                 status, body, took = self.get()
                 self.assertEqual((status, body), (200, b"ok"))
-                self.assertLess(took, 1.5, f"{dead}: {took:.1f} s")        # the next address started 0.25 s later
+                self.assertLess(took, bound, f"{dead}: {took:.1f} s")      # the next address started 0.25 s later
                 self.assertEqual([a[1] for a in self.connects], [port, self.bench.live])
                 self.assertEqual(self.api._GOOD_ADDRESS[(self.HOST, self.bench.live)], ("127.0.0.1", self.bench.live))
                 # the next request starts with the address that worked
@@ -3384,7 +3404,7 @@ class EveryAddress(unittest.TestCase):
                 status, body, took = self.get()
                 self.assertEqual((status, body), (200, b"ok"))
                 self.assertEqual([a[1] for a in self.connects], [self.bench.live])
-                self.assertLess(took, 1.5)
+                self.assertLess(took, bound)
                 self.assertEqual(self.bench.accepted["silent"], silent_before)
 
     DRIVER = r"""
@@ -3428,22 +3448,34 @@ print(json.dumps(out))
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout.strip().splitlines()[-1])
 
+    def process_baseline(self, method: str = "get") -> float:
+        """`baseline` for other_process: the live address alone, from a Theodore folder of its own, the shorter of two."""
+        addresses, self.addresses = self.addresses, [self.bench.live]
+        took = []
+        for n in range(2):
+            home = self.folder / f"baseline-{method}-{n}"
+            (home / "state").mkdir(parents=True)
+            took.append(self.other_process(home, method)["took"])
+        self.addresses = addresses
+        return min(took)
+
     def test_a_hanging_first_address_costs_once_across_processes(self):
         # the owner's carrier: of the two addresses one takes the connection and never the handshake
         home = self.folder / "proc-home"
         (home / "state").mkdir(parents=True)
         self.addresses = [self.bench.silent, self.bench.live]
+        bound = self.within(self.api.STAGGER, self.api.CONNECT_EACH, self.process_baseline())
         first = self.other_process(home)
         self.assertEqual(first.get("status"), 200, first)
         self.assertEqual(first["connects"], [self.bench.silent, self.bench.live])
-        self.assertLess(first["took"], 1.5)
+        self.assertLess(first["took"], bound)
         silent_before = self.bench.accepted["silent"]
         for method in ("get", "usage"):     # every later process, the usage send among them, goes straight to the one that works
             with self.subTest(method=method):
                 later = self.other_process(home, method)
                 self.assertEqual(later.get("status"), 200, later)
-                self.assertEqual(later["connects"], [self.bench.live])
-                self.assertLess(later["took"], 0.75)
+                self.assertEqual(later["connects"], [self.bench.live])     # never the hanging one again
+                self.assertLess(later["took"], bound)
         self.assertEqual(self.bench.accepted["silent"], silent_before)
 
     def test_the_usage_send_gets_through_a_hanging_first_address_on_a_new_computer(self):
@@ -3451,9 +3483,10 @@ print(json.dumps(out))
         home = self.folder / "new-home"
         (home / "state").mkdir(parents=True)
         self.addresses = [self.bench.silent, self.bench.live]
+        bound = self.within(self.api.STAGGER, 2.0, self.process_baseline("usage"))      # past its 2 s the send has failed
         sent = self.other_process(home, "usage")
         self.assertEqual(sent.get("status"), 200, sent)
-        self.assertLess(sent["took"], 1.0)
+        self.assertLess(sent["took"], bound)
 
     def test_every_address_dead_says_so(self):
         self.addresses = [self.bench.refused, self.bench.silent]
@@ -3464,17 +3497,19 @@ print(json.dumps(out))
         self.assertIn(f"127.0.0.1: ", caught.exception.detail)
 
     def test_the_request_timeout_still_bounds_the_whole_connection(self):
+        baseline = self.baseline()
         self.addresses = [self.bench.silent, self.bench.no_accept]
         began = time.monotonic()
         with self.assertRaises(self.api.NetworkError) as caught:
             self.get(timeout=1.0)
-        self.assertLess(time.monotonic() - began, 2.5)
+        # the request's 1 s and the race's last 0.25 s wait; each address's own 3 s would be the regression
+        self.assertLess(time.monotonic() - began, self.within(1.0 + 0.25, self.api.CONNECT_EACH, baseline))
         self.assertIn("addresses of", caught.exception.detail)
         # a third address that works is reached within the same second: the dead ones do not use it up
         self.addresses = [self.bench.silent, self.bench.no_accept, self.bench.live]
         status, body, took = self.get(timeout=1.0)
         self.assertEqual((status, body), (200, b"ok"))
-        self.assertLess(took, 1.0)
+        self.assertLess(took, self.within(2 * self.api.STAGGER, 1.0 + 0.25, baseline))     # it started 0.5 s in
 
     def test_the_address_that_worked_is_kept_for_the_next_process(self):
         self.addresses = [self.bench.silent, self.bench.live]
@@ -3491,6 +3526,7 @@ print(json.dumps(out))
     def test_a_kept_address_that_stopped_working_is_replaced_and_an_old_one_is_not_used(self):
         key = f"{self.HOST}:{self.bench.live}"
         self.kept.parent.mkdir(parents=True, exist_ok=True)
+        bound = self.within(self.api.STAGGER, self.api.CONNECT_EACH, self.baseline())
         for at, expect_first in ((time.time() - 60, self.bench.silent), (time.time() - self.api.ADDRESS_TTL - 60, self.bench.live)):
             with self.subTest(age=time.time() - at):
                 self.kept.write_text(json.dumps({key: {"address": "127.0.0.1", "port": self.bench.silent, "at": int(at)}}))
@@ -3500,7 +3536,7 @@ print(json.dumps(out))
                 status, body, took = self.get()
                 self.assertEqual((status, body), (200, b"ok"))
                 self.assertEqual(self.connects[0][1], expect_first)
-                self.assertLess(took, 1.5)
+                self.assertLess(took, bound)
                 self.assertEqual(json.loads(self.kept.read_text())[key]["port"], self.bench.live)
 
     def test_nothing_is_kept_without_a_theodore_folder(self):

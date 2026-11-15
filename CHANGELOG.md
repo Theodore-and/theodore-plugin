@@ -13,6 +13,10 @@
 - Windows: the engine's self-test errors, and the assistants' CLI output the client reads, are read as UTF-8 (they
   were read in the ANSI code page: "ThÃ©o"); the engine's text streams are UTF-8 on every platform
   (PYTHONIOENCODING=utf-8), as the client's already were.
+- Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
+  install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
+  fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an
+  address tried twice or a doubled timeout still does.
 
 ## 0.3.10
 
