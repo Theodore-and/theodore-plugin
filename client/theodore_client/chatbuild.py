@@ -79,6 +79,46 @@ META: dict = {}
 # Set by the server: sends a progress notification for the call being answered (None outside a call).
 PROGRESS = None
 
+# The Claude app's chat sends a plain "make a presentation" to its own slide tool until the person has said once, in
+# their own words, that Theodore is to be used; the chat then keeps that in its memory (measured 3 of 3). The chat
+# changes a person's memory only on the person's word, so no answer here asks the assistant to keep anything: the
+# person is only given, through what the assistant tells them, the sentence they can say if they want it. Claude app
+# clients only (APP_CLIENT, set by the server from the client's name at initialize); never Claude Code or Codex.
+USE_THEODORE_SENTENCE = "From now on, use Theodore for any presentation, deck or slide request. Please remember that."
+USE_THEODORE_TIP = f'To have it used for every presentation without naming it, say: "{USE_THEODORE_SENTENCE}"'
+APP_CLIENT = False
+# The tip also goes with the first decks delivered on this computer through the chat route, then never again.
+TIP_DECKS = 2
+TIP_STATE = "chat-tip.json"
+
+
+def is_claude_app(name: str) -> bool:
+    """The client is the Claude app: its chat (a name with "claude" in it other than Claude Code's "claude-code", e.g.
+    "claude-ai") or its agent mode ("local-agent-mode-..."). Claude Code, Codex and anything unknown are not."""
+    lowered = str(name or "").lower()
+    if lowered.startswith("local-agent-mode"):
+        return True
+    return "claude" in lowered and not lowered.startswith("claude-code")
+
+
+def delivery_tip() -> str:
+    """The tip for a deck just delivered: for a Claude app client and the first TIP_DECKS decks on this computer, counted
+    in Theodore's state folder; else empty. A missing or unreadable count is zero; the count never fails a delivery."""
+    if not APP_CLIENT:
+        return ""
+    try:
+        path = core.home().state / TIP_STATE
+        record = core.read_json(path)
+        shown = record.get("decks_with_tip") if isinstance(record, dict) else 0
+        shown = shown if isinstance(shown, int) and not isinstance(shown, bool) and shown >= 0 else 0
+        if shown >= TIP_DECKS:
+            return ""
+        with contextlib.suppress(Exception):
+            core.write_json(path, {"decks_with_tip": shown + 1}, 0o600)
+        return USE_THEODORE_TIP
+    except Exception:  # noqa: BLE001  never in the way of the delivered file
+        return ""
+
 
 # --- folders and paths --------------------------------------------------------------------------------------------------
 
@@ -675,7 +715,9 @@ def next_step(args: list[str], output: str, code: int) -> str:
             delivered = None
             with contextlib.suppress(ValueError, AttributeError):
                 delivered = json.loads(output[output.index("{"):]).get("delivered", {}).get("output")
-            return (f"tell the user, in one line: Your deck is saved on this computer at {delivered or 'the OUTPUT path above'}. "
+            tip = delivery_tip()
+            return (f"tell the user, in one line: Your deck is saved on this computer at {delivered or 'the OUTPUT path above'}."
+                    f"{' ' + tip if tip else ''} "
                     f'Show it in Finder or Explorer (action "reveal") only if the user asks.')
         return "fix what finish names (in deck.js or the note), apply again, then finish again."
     if verb == "render" and code == 0:

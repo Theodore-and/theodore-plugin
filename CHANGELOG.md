@@ -46,6 +46,15 @@
   skill folder's launcher by absolute path only "if the shell answers that `theodore` is not found" (lane WINDOWS's
   recount: a model given "where that command is on PATH, else …" took the path).
 - `doctor` says whether `theodore` is on this shell's PATH, and plainly when it was written but is not found there.
+- The Claude app's chat (lane CHATASK): for a Claude app client only (its chat, `claude-ai`, or its agent mode,
+  `local-agent-mode-…`; never Claude Code, Codex or an unknown client), the `check` answer's TELL THE USER line adds
+  the sentence the person can say so the chat uses Theodore for every presentation without naming it ("From now on,
+  use Theodore for any presentation, deck or slide request. Please remember that."), and so does what the finish
+  answer tells the user, for the first two decks delivered on this computer (`~/.theodore/state/chat-tip.json`; a
+  missing or unreadable count is zero and never fails a delivery). No answer asks the assistant to save or remember
+  anything, or to ask the user (the chat changes its memory only on the person's own word); a test reads every string
+  of the local server's answer code for it. The "is the Claude app" rule now includes `local-agent-mode-…`, so the
+  plugin's own server stays silent there too beside Theodore's entry.
 - W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
   racing it over the same file and ending INTERNAL.
 

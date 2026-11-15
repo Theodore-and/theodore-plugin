@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -458,6 +459,133 @@ class PluginServerInTheApp(McpCase):
         self.assertEqual(names(without), ["theodore"], "no entry: the plugin's server is the chat's one tool")
         code = self.start("claude-code", True)
         self.assertEqual(sorted(names(code)), ["guide", "list", "specimen"], "Claude Code keeps the plugin's tools")
-        for server in (with_entry, without, code):
+        agent = self.start("local-agent-mode-theodore", True)
+        self.assertEqual(names(agent), [], "the app's agent mode is the app too: silent beside Theodore's entry")
+        agent_alone = self.start("local-agent-mode-theodore", False)
+        self.assertEqual(names(agent_alone), ["theodore"])
+        codex = self.start("codex-mcp-client", True)
+        self.assertEqual(sorted(names(codex)), ["guide", "list", "specimen"], "Codex keeps the plugin's tools")
+        for server in (with_entry, without, code, agent, agent_alone, codex):
             server.close()
+        log = (self.box.home / "logs" / "client.log").read_text(encoding="utf-8")
+        self.assertIn("mcp initialize: client local-agent-mode-theodore (for plugin)", log)
+
+
+APP_TELL = ("TELL THE USER: Theodore is set up and ready for your presentations here. To have it used for every presentation "
+            'without naming it, say: "From now on, use Theodore for any presentation, deck or slide request. Please remember that."')
+PLAIN_TELL = "TELL THE USER: Theodore is set up and ready for your presentations here."
+
+
+class UseTheodoreTip(unittest.TestCase):
+    """The sentence a person can say so that the Claude app's chat uses Theodore for every presentation: told to the
+    person by the Claude app's clients only, never asked of the assistant (chatbuild.USE_THEODORE_SENTENCE)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        saved = os.environ.get("THEODORE_HOME"), chatbuild.APP_CLIENT
+        os.environ["THEODORE_HOME"] = str(self.tmp / ".theodore")
+        core._HOME = None
+
+        def restore():
+            if saved[0] is None:
+                os.environ.pop("THEODORE_HOME", None)
+            else:
+                os.environ["THEODORE_HOME"] = saved[0]
+            chatbuild.APP_CLIENT = saved[1]
+            core._HOME = None
+        self.addCleanup(restore)
+        self.counter = self.tmp / ".theodore" / "state" / chatbuild.TIP_STATE
+
+    def finish(self) -> str:
+        return chatbuild.next_step(["finish", str(self.tmp)], '{"delivered": {"output": "/x/d.pptx"}}', 0)
+
+    def test_the_claude_app_by_its_client_name(self):
+        for name in ("claude-ai", "Claude Desktop", "local-agent-mode-theodore", "local-agent-mode"):
+            self.assertTrue(chatbuild.is_claude_app(name), name)
+        for name in ("claude-code", "Claude-Code", "codex-mcp-client", "codex", "test", "", None, "my-local-agent-mode"):
+            self.assertFalse(chatbuild.is_claude_app(name), name)
+
+    def test_the_first_two_decks_delivered_carry_the_tip_then_never_again(self):
+        chatbuild.APP_CLIENT = True
+        first, second, third = self.finish(), self.finish(), self.finish()
+        line = 'Your deck is saved on this computer at /x/d.pptx. ' + chatbuild.USE_THEODORE_TIP + ' Show it in Finder'
+        self.assertIn(line, first)
+        self.assertIn(line, second)
+        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, third)
+        self.assertIn("Your deck is saved on this computer at /x/d.pptx. Show it in Finder", third)
+        self.assertEqual(json.loads(self.counter.read_text())["decks_with_tip"], 2)
+        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, self.finish())
+
+    def test_an_unreadable_counter_counts_as_zero_and_a_broken_one_never_fails_the_delivery(self):
+        chatbuild.APP_CLIENT = True
+        self.counter.parent.mkdir(parents=True)
+        for bad in ("not json", '{"decks_with_tip": "two"}', '{"decks_with_tip": -3}', "[]"):
+            self.counter.write_text(bad)
+            self.assertIn(chatbuild.USE_THEODORE_TIP, self.finish(), bad)
+        self.counter.unlink()
+        self.counter.mkdir()                    # cannot be read or written: no tip is lost to it, no error either
+        done = self.finish()
+        self.assertIn("/x/d.pptx", done)
+
+    def test_other_clients_never_get_the_tip_or_count(self):
+        chatbuild.APP_CLIENT = False
+        for _ in range(3):
+            done = self.finish()
+            self.assertIn("/x/d.pptx", done)
+            self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, done)
+        self.assertFalse(self.counter.exists())
+
+    def test_no_answer_asks_the_assistant_to_keep_anything(self):
+        """Every string literal the local server's answer code holds (not its docstrings), and the answers that carry the
+        sentence: nothing tells the assistant to save, remember or store a preference, nothing puts a question to the
+        user about preferences, and the sentence appears only as what the user can say, in what is told to the user."""
+        import ast
+        from theodore_client import mcp
+        literals = []
+        for module in (mcp, chatbuild):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            docstrings = {id(node.body[0].value) for node in ast.walk(tree)
+                          if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                          and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)}
+            literals += [node.value for node in ast.walk(tree)
+                         if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings]
+        keep = re.compile(r"\b(save|remember|store|memori[sz]e)\b|\bmemory\b", re.I)
+        for text in literals:
+            if text == chatbuild.USE_THEODORE_SENTENCE:
+                continue
+            self.assertIsNone(keep.search(text), text)
+            if re.search(r"\bask (the user|them)\b", text, re.I):
+                self.assertIsNone(re.search(r"prefer|remember|memory|from now on", text, re.I), text)
+        self.assertEqual(sum(chatbuild.USE_THEODORE_SENTENCE in t for t in literals), 1, "one constant for the sentence")
+        chatbuild.APP_CLIENT = True
+        answers = [self.finish(), mcp._check_status().render()]
+        for answer in answers:
+            for line in answer.splitlines():
+                if chatbuild.USE_THEODORE_SENTENCE in line:
+                    told = re.match(r"(TELL THE USER: |.*\btell the user, in one line: )", line)
+                    self.assertIsNotNone(told, line)
+                    self.assertIn(f'say: "{chatbuild.USE_THEODORE_SENTENCE}"', line[told.end():])
+
+
+class UseTheodoreTipThroughTheServer(McpCase):
+    """The check answer of the chat's one tool, by the client that started the server."""
+
+    def check(self, client: str, for_host: str = "claude-desktop") -> str:
+        server = Server(self, args=("--for", for_host))
+        self.addCleanup(lambda: server.proc.poll() is None and server.proc.kill())
+        server.send("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": client, "version": "1"}})
+        text = server.call("theodore", action="check")["content"][0]["text"]
+        server.close()
+        return text
+
+    def test_the_check_tells_the_claude_app_user_the_sentence_and_no_one_else(self):
+        self.sign_in()
+        ok = ("THEODORE OK: Theodore is set up on this computer and signed in; its design guidance reaches this chat.\n"
+              'NEXT: to make or rework a presentation, call theodore with action "begin".\n')
+        for client in ("claude-ai", "local-agent-mode-theodore"):
+            self.assertEqual(self.check(client).strip(), ok + APP_TELL, client)
+        for client, host in (("claude-code", "claude-desktop"), ("codex-mcp-client", "codex"), ("test", "claude-desktop"),
+                             ("", "claude-desktop")):
+            self.assertEqual(self.check(client, host).strip(), ok + PLAIN_TELL, client)
 
