@@ -407,20 +407,12 @@ def _fetch_whole(skill: str, section: str | None) -> str:
 
 
 def _pptx_manual() -> str:
-    """The pptx manual as the launcher prints it, every part in order (it comes with the engine)."""
-    out = []
-    part, total = 1, 1
-    while part <= total:
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            commands._guide_pptx(part)
-        text = buffer.getvalue()
-        first = text.split("\n", 1)[0]
-        with contextlib.suppress(ValueError, IndexError):
-            total = int(first.rsplit("part ", 1)[1].split("/", 1)[1].split(" ", 1)[0])
-        out.append(text)
-        part += 1
-    return "".join(out)
+    """The pptx manual as the launcher prints it, whole, in one document (it comes with the engine); a tool result
+    needs none of the opening lines a long command output gets."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        commands._guide_pptx(1, whole=True, opening=False)
+    return buffer.getvalue()
 
 
 def tool_guide(args: dict) -> dict:

@@ -71,46 +71,97 @@ def split_parts(text: str, limit: int = GUIDE_PART_CHARS) -> list[str]:
     return parts
 
 
+# A text is read whole (WHOLETEXT, 2026-11-15): an agent that held one part of a text paged in three, and acted on it,
+# had half the route to the sheets. Where the host keeps a long output whole, the command prints the whole text as one
+# document: Claude Code (CLAUDECODE=1 in the commands it runs) shows it inline when it fits and otherwise saves the
+# whole output to a file of its own and shows the path with a short preview. Theodore itself writes no guidance text to
+# disk. Elsewhere, and whenever --part is given, the text comes in parts, and every part says at its start and at its
+# end which part of how many it is and that none of it may be acted on before all are read.
+GUIDE_TOOL = "mcp__plugin_theodore_theodore__guide"      # the plugin's guide tool, as Claude Code names it
+
+
+def whole_by_default() -> bool:
+    """The host keeps a long command output whole (Claude Code), so a guide without --part prints the whole text."""
+    return bool(os.environ.get("CLAUDECODE"))
+
+
+def _tool_arguments(skill: str, section: str | None) -> str:
+    return f'skill "{skill}"' + (f', section "{section}"' if section else "")
+
+
+def _opening(skill: str, name: str, body: str, part: int, total: int, command: str, section: str | None) -> list[str]:
+    """The first lines of the output, before any text: within the short preview a host shows of a long output."""
+    if total == 1:
+        first = (f"THIS IS THE WHOLE TEXT: {len(body)} characters, {body.count(chr(10))} lines, from here to the line "
+                 f'that starts "=== END theodore {skill} {name}".')
+    else:
+        first = (f"THIS IS PART {part} OF {total} OF ONE TEXT ({len(body)} characters). Nothing in it may be acted on "
+                 f"before all {total} parts are read.")
+    lines = [first,
+            "If the shell shows only a preview or the path of a saved output, read that file in full, from the first "
+            "line to the last, before designing anything: searching it is not reading it.",
+            f"Where the Theodore tool {GUIDE_TOOL} is available, it returns this text whole in one step and is the "
+            f"better way to read it ({_tool_arguments(skill, section)})."]
+    if total > 1:               # after the lines a preview must show: the command can be long
+        lines.append(f"The parts: {command} --part N, for N from 1 to {total}"
+                     + (f"; the next one is --part {part + 1}." if part < total else "."))
+    return lines
+
+
 def _end_line(skill: str, name: str, body: str, part: int, total: int, next_command: str) -> str:
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     label = f"{name} part {part}/{total}" if total > 1 else name
-    tail = f". NEXT PART: {next_command}" if part < total else ""
+    if total == 1:
+        tail = ". THE TEXT IS COMPLETE."
+    elif part < total:
+        tail = (f". NOT COMPLETE: this is part {part} of {total} of one text; nothing in it may be acted on before the "
+                f"remaining parts are read. NEXT PART: {next_command}")
+    else:
+        tail = f". This is the last part: the text is complete once parts 1 to {total - 1} are read as well."
     return f"=== END theodore {skill} {label} ({len(body)} chars, sha256 {digest}){tail} ==="
 
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
-                    header_lines: list[str], next_command: str) -> None:
+                    header_lines: list[str], command: str, section: str | None, opening: bool = True) -> None:
+    """One document: the whole text (total 1) or one part of it. `command` prints this text (without --part);
+    `section` is how the guide tool names it; `opening` is False when the text is a tool's result."""
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
+    if opening:
+        out += _opening(skill, name, body, part, total, command, section)
     if part == 1:
         out += [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
     out += header_lines
     out.append(f"--- {name} ---")
     sys.stdout.write("\n".join(out) + "\n")
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
-    sys.stdout.write(_end_line(skill, name, body, part, total, next_command) + "\n")
+    sys.stdout.write(_end_line(skill, name, body, part, total, f"{command} --part {part + 1}") + "\n")
     sys.stdout.flush()
 
 
-def guide(skill: str, section: str | None, part: int, license_text: bool) -> int:
+def guide(skill: str, section: str | None, part: int | None, license_text: bool) -> int:
+    """`part` None: the whole text where the host keeps a long output whole, else part 1 of the paged form."""
     ensure_hosts()
     ensure_instructions()
     resume_background()
     if skill not in SKILLS:
         raise core.usage(f"unknown skill '{skill}'. The skills are: {', '.join(SKILLS)}.")
-    if part < 1:
+    if part is not None and part < 1:
         raise core.usage("--part starts at 1.")
+    whole = part is None and whole_by_default()
+    part = part or 1
     if skill == "pptx":
         if license_text:
             raise core.usage("guide pptx has no --license: the pptx manual and its notices are in the engine folder named in its header.")
         if not section:
-            return _guide_pptx(part)
+            return _guide_pptx(part, whole=whole)
         # A section of pptx is one the service serves to this account (lane STUDIO); the rest of the manual is on disk.
-    return _guide_remote(skill, "license" if license_text else section, part)
+    return _guide_remote(skill, "license" if license_text else section, part, whole=whole)
 
 
-def _guide_pptx(part: int) -> int:
+def _guide_pptx(part: int, whole: bool = False, opening: bool = True) -> int:
+    """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
     claims = account.require("pptx")
     install.require_runtime()
     first = install.current_engine() is None
@@ -128,7 +179,7 @@ def _guide_pptx(part: int) -> int:
         raise core.internal(f"engine {version} has no skills/pptx/SKILL.md.") from None
     install.touch_used(version)
     _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
-    parts = split_parts(text)
+    parts = [text] if whole else split_parts(text)
     if part > len(parts):
         raise core.usage(f"guide pptx has {len(parts)} part(s); there is no part {part}.")
     launcher = quoted_launcher()
@@ -143,7 +194,7 @@ def _guide_pptx(part: int) -> int:
         elif directions:
             header += directions.rstrip("\n").split("\n")
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
-                    f"{launcher} guide pptx --part {part + 1}")
+                    f"{launcher} guide pptx", None, opening)
     return 0
 
 
@@ -240,9 +291,11 @@ def _no_such_section(skill: str, given: str) -> Status:
     return core.usage(f"guide {skill} has no section '{shown}'.", f"run {launcher} guide {skill}; its text names the sections it has.")
 
 
-def _guide_remote(skill: str, section: str | None, part: int) -> int:
+def _guide_remote(skill: str, section: str | None, part: int, whole: bool = False) -> int:
+    """A served text: part `part` of it, or with `whole` the whole text in one document (one answer with form=whole;
+    an older service that still pages is asked for every part, in order, and nothing is printed unless all came)."""
     claims = account.require(skill)
-    query = {"part": part} if part > 1 else None
+    query = {"form": "whole"} if whole else ({"part": part} if part > 1 else None)
     what = f"guide {skill}"
     if section and section != "license":
         given, section = section, _section_name(section)
@@ -258,10 +311,15 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
         _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query)
     else:
         _status, headers, raw = _api("guide", what, skill=skill, query=query)
-    body = raw.decode("utf-8", errors="replace")
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     label = headers.get(HEADER_GUIDE_VERSION) or "current"
-    if total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
+    if whole and total > 1:
+        raw = _remaining_parts(skill, section, what, raw, total)
+        total = 1
+    body = raw.decode("utf-8", errors="replace")
+    if whole:
+        pass                                          # the host keeps it whole: never cut here
+    elif total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
         parts = split_parts(body)
         total = len(parts)
         if part > total:
@@ -274,9 +332,30 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
-    next_command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''} --part {part + 1}"
-    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], next_command)
+    command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''}"
+    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], command, section)
     return 0
+
+
+def _remaining_parts(skill: str, section: str | None, what: str, first: bytes, total: int) -> bytes:
+    """Parts 2 to `total` after `first`, fetched one after the other and joined in order. A part that cannot be had
+    fails the whole command: nothing of the text is printed, and the status says which part is missing."""
+    chunks = [first]
+    for number in range(2, total + 1):
+        try:
+            if section:
+                _s, _h, more = _api("guide_section", what, skill=skill, section=section, query={"part": number})
+            else:
+                _s, _h, more = _api("guide", what, skill=skill, query={"part": number})
+        except Status as status:
+            missing = f"part {number} of {total}" + (f" (and the {total - number} after it)" if number < total else "")
+            failed = Status(status.name, f"{what}{' ' + section if section else ''}: {missing} could not be fetched "
+                         f"({status.summary}). Nothing of the text was printed: it is one text and was not read whole.",
+                         status.next_step, status.tell_user)
+            failed.cause = status.cause
+            raise failed from None
+        chunks.append(more)
+    return b"".join(chunks)
 
 
 # --- skill: the instructions as a skill file's body -------------------------------------------------------------------------
