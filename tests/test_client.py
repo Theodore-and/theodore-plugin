@@ -2171,15 +2171,42 @@ class Hosts(ClientCase):
         self.ready()
         self.assertStatus(self.client("hosts", "register"), "OK", 0)
         reopen = "To use Theodore in the Claude app's chats, quit the app and open it again once."
+        from theodore_client import chatbuild
         self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() - 3600)
         _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
-        self.assertIn(reopen, tell)
+        self.assertIn(reopen + " " + chatbuild.INSTALL_TIP, tell, "and the sentence to say once the app is reopened (lane CHATASK)")
         self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() + 60)       # opened after the entry
         _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
         self.assertNotIn(reopen, tell)
+        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, tell)
         self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = ""                          # not running: it loads at its next start
         _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
         self.assertNotIn(reopen, tell)
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_registering_the_claude_app_tells_the_person_the_sentence_to_say_once(self):
+        """Installed from the Code tab, a person never pastes the set-up sentence into a chat: `hosts register` tells
+        them, only when Theodore's entry in the Claude app was written or was already there (lane CHATASK)."""
+        from theodore_client import chatbuild
+        told = "TELL THE USER: Theodore is registered in the assistants found on this computer. " + chatbuild.INSTALL_TIP
+        self.assertEqual(chatbuild.INSTALL_TIP, "In the Claude app's chat, after reopening the app, say once: \"From now on, use "
+                         "Theodore for any presentation, deck or slide request. Please remember that.\" and it uses Theodore "
+                         "for every presentation.")
+        _first, _n, tell = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, tell, "no Claude app on this computer")
+        path = self.desktop_config({"preferences": {}})
+        result = self.client("hosts", "register")
+        self.assertIn("claude-desktop: registered", result.stdout)
+        self.assertIn(told, result.stdout)
+        again = self.client("hosts", "register")
+        self.assertIn("claude-desktop: already registered", again.stdout)
+        self.assertIn(told, again.stdout)
+        path.write_text(json.dumps({"mcpServers": {"theodore": {"command": "/opt/my/theodore", "args": []}}}))
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        path.write_text(json.dumps({"mcpServers": {"theodore": {"command": "/opt/my/theodore", "args": []}}}))
+        theirs = self.client("hosts", "register")
+        self.assertIn("did not write", theirs.stdout)
+        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, theirs.stdout, "an entry that is not Theodore's: nothing to say")
 
     def test_claude_desktop_not_on_this_computer_is_said_and_nothing_is_written(self):
         first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)

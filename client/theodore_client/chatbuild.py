@@ -86,6 +86,10 @@ PROGRESS = None
 # clients only (APP_CLIENT, set by the server from the client's name at initialize); never Claude Code or Codex.
 USE_THEODORE_SENTENCE = "From now on, use Theodore for any presentation, deck or slide request. Please remember that."
 USE_THEODORE_TIP = f'To have it used for every presentation without naming it, say: "{USE_THEODORE_SENTENCE}"'
+# Installed from Claude's Code tab, a person never pastes the set-up sentence into a chat: the set-up tells them, when
+# the Claude app's entry is there (commands.hosts register, and doctor while the app still has to be reopened).
+INSTALL_TIP = (f'In the Claude app\'s chat, after reopening the app, say once: "{USE_THEODORE_SENTENCE}" and it uses Theodore '
+               f'for every presentation.')
 APP_CLIENT = False
 # The tip also goes with the first decks delivered on this computer through the chat route, then never again.
 TIP_DECKS = 2
@@ -715,9 +719,11 @@ def next_step(args: list[str], output: str, code: int) -> str:
             delivered = None
             with contextlib.suppress(ValueError, AttributeError):
                 delivered = json.loads(output[output.index("{"):]).get("delivered", {}).get("output")
+            # Not for a person who already has the preference: the tool cannot know, the assistant does (it was named).
             tip = delivery_tip()
+            tip = f" If the user had to name Theodore in their request to get this deck, add: {tip}" if tip else ""
             return (f"tell the user, in one line: Your deck is saved on this computer at {delivered or 'the OUTPUT path above'}."
-                    f"{' ' + tip if tip else ''} "
+                    f"{tip} "
                     f'Show it in Finder or Explorer (action "reveal") only if the user asks.')
         return "fix what finish names (in deck.js or the note), apply again, then finish again."
     if verb == "render" and code == 0:

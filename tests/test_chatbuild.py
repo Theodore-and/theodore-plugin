@@ -509,7 +509,8 @@ class UseTheodoreTip(unittest.TestCase):
     def test_the_first_two_decks_delivered_carry_the_tip_then_never_again(self):
         chatbuild.APP_CLIENT = True
         first, second, third = self.finish(), self.finish(), self.finish()
-        line = 'Your deck is saved on this computer at /x/d.pptx. ' + chatbuild.USE_THEODORE_TIP + ' Show it in Finder'
+        line = ('Your deck is saved on this computer at /x/d.pptx. If the user had to name Theodore in their request to get '
+                'this deck, add: ' + chatbuild.USE_THEODORE_TIP + ' Show it in Finder')
         self.assertIn(line, first)
         self.assertIn(line, second)
         self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, third)
@@ -543,14 +544,15 @@ class UseTheodoreTip(unittest.TestCase):
         import ast
         from theodore_client import mcp
         literals = []
-        for module in (mcp, chatbuild):
+        from theodore_client import account, commands, desktop
+        for module in (mcp, chatbuild, commands, desktop, account, core):
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
             docstrings = {id(node.body[0].value) for node in ast.walk(tree)
                           if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
                           and node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)}
             literals += [node.value for node in ast.walk(tree)
                          if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings]
-        keep = re.compile(r"\b(save|remember|store|memori[sz]e)\b|\bmemory\b", re.I)
+        keep = re.compile(r"\b(remember|memori[sz]e|memory)\b|\b(save|store|keep)\b[^.]{0,40}\b(preference|sentence|setting)", re.I)
         for text in literals:
             if text == chatbuild.USE_THEODORE_SENTENCE:
                 continue
@@ -559,13 +561,13 @@ class UseTheodoreTip(unittest.TestCase):
                 self.assertIsNone(re.search(r"prefer|remember|memory|from now on", text, re.I), text)
         self.assertEqual(sum(chatbuild.USE_THEODORE_SENTENCE in t for t in literals), 1, "one constant for the sentence")
         chatbuild.APP_CLIENT = True
-        answers = [self.finish(), mcp._check_status().render()]
+        answers = [self.finish(), mcp._check_status().render(), "TELL THE USER: x. " + chatbuild.INSTALL_TIP]
         for answer in answers:
             for line in answer.splitlines():
                 if chatbuild.USE_THEODORE_SENTENCE in line:
                     told = re.match(r"(TELL THE USER: |.*\btell the user, in one line: )", line)
                     self.assertIsNotNone(told, line)
-                    self.assertIn(f'say: "{chatbuild.USE_THEODORE_SENTENCE}"', line[told.end():])
+                    self.assertRegex(line[told.end():], rf'say( once)?: "{re.escape(chatbuild.USE_THEODORE_SENTENCE)}"')
 
 
 class UseTheodoreTipThroughTheServer(McpCase):
