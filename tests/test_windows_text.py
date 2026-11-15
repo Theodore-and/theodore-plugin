@@ -245,8 +245,9 @@ class PowerShellInstallLine(unittest.TestCase):
         and in anything PowerShell does with it. The documented line sets UTF-8 first; where no console is attached the
         setting throws and is skipped."""
         page = (support.ROOT / "install" / "install.md").read_text(encoding="utf-8")
-        line = next(l for l in page.splitlines() if l.strip().startswith("Windows PowerShell: "))
-        self.assertTrue(line.strip().startswith("Windows PowerShell: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; "), line)
+        lines = page.splitlines()
+        run = lines[next(n for n, l in enumerate(lines) if l.strip().startswith("Windows PowerShell: ")) + 1]
+        self.assertTrue(run.strip().startswith("then: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "), run)
 
 
 class UninstallRecord(unittest.TestCase):

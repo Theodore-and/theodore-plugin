@@ -59,6 +59,10 @@
   the plugin's guide tool returns it whole). Elsewhere, or with `--part`, each part says at its start and its end
   that it is part N of M and that nothing in it may be acted on before all are read; the last part and a whole text
   end by saying the text is complete. The local server's pptx manual is one document.
+- Tests and `ci/run.sh` no longer inherit the launching host's identity (lane WHOLETEXT2): `CLAUDECODE`, `CLAUDE_PID`,
+  `THEODORE_HOST`, `CLAUDE_CODE_*`, `CLAUDE_PLUGIN_*` and `CODEX_*` are removed before any target or suite runs, so a
+  check started from a Claude Code or Codex session gives the same results; a test of a host sets the variable itself.
+  Three tests read the line after the guide's opening lines.
 - Claude Desktop's chat builds the deck with Theodore's engine on this computer, set up by the same install, with no
   connector. The local server's one tool (`theodore`, so "Always allow" is still clicked once) gains the actions:
   - `manual`: the build instructions;
@@ -144,6 +148,14 @@
 - Uninstall's record (WINDOWS W-8): the uninstall's last words name the record it keeps beside Theodore's folder
   (`~/.theodore-uninstall.log`, `%LOCALAPPDATA%\Theodore-uninstall.log`; it can be deleted), and on Windows a new log
   starts with a UTF-8 byte-order mark, so Notepad and PowerShell 5.1 read C:\Users\Théo as written.
+- Windows install lines (WINDOWS W-13): Microsoft Defender once flagged install.md's own Windows line as
+  Trojan:Win32/ClickFix.EEI!MTB (a one-line PowerShell download into %TEMP% followed by use of the file). It did not
+  reproduce in nine later runs, but the shape is what ClickFix rules key on. Every documented Windows line
+  (install.md's first line and step 1, the README) is now two separate commands into `%LOCALAPPDATA%\Theodore-install`:
+  the folder made first (`New-Item -Force` / `mkdir`: curl's `--create-dirs` fails for a profile named with é), then
+  `curl.exe ... --retry 2 --retry-delay 2 -o`; the run, or the read of install.md, is a second command. They were clean
+  with Defender on in each way tested (Codex's `powershell -Command`, Claude Code's tool, `-EncodedCommand`, `-File`,
+  cmd, Win+R). The installer removes the folder when it ends, as before; the pins and checks are unchanged.
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an

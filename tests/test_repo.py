@@ -630,10 +630,10 @@ class StampedSite(unittest.TestCase):
             self.assertEqual(hits, [], rel)
         page = tree["install/install.md"].decode("utf-8")
         self.assertEqual(page.count("https://staging.theodoreand.ai/install.sh"), 1)
-        self.assertEqual(page.count("https://staging.theodoreand.ai/install.cmd"), 4)     # PowerShell once, cmd's three attempts
+        self.assertEqual(page.count("https://staging.theodoreand.ai/install.cmd"), 2)     # the PowerShell and the cmd download
         self.assertIn("claude plugin install theodore --marketplace https://staging.theodoreand.ai/marketplace.json", page)
         self.assertIn("the same value is shown on https://staging.theodoreand.ai/install.", page)
-        self.assertEqual(page.count("{{ACTIVATION_CODE}}"), 6)
+        self.assertEqual(page.count("{{ACTIVATION_CODE}}"), 7)
         self.assertIn("(compare with https://staging.theodoreand.ai/install)", tree["install/install.sh"].decode("utf-8"))
         cmd = tree["install/install.cmd"]
         self.assertIn(b"(compare with https://staging.theodoreand.ai/install)", cmd)
@@ -700,12 +700,15 @@ class LauncherAddresses(unittest.TestCase):
 class InstallPage(unittest.TestCase):
     def test_install_md_has_the_two_commands_and_the_substitution_point(self):
         text = (ROOT / "install" / "install.md").read_text()
-        self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 6, "in the three commands, twice in the first line's address, once in the note for the Worker")
+        self.assertEqual(text.count("{{ACTIVATION_CODE}}"), 7, "in the three installer runs, three times in the first line's addresses, once in the note for the Worker")
         # The first line says how to read the page word for word, with the address quoted for a shell (zsh globs "?").
         first = text.splitlines()[0]
         self.assertIn("not through a tool that summarises web pages", first)
         self.assertIn("for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o \"$d/install.md\" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}' && break; sleep 2; done", first)
-        self.assertIn('foreach ($i in 1..3) { curl.exe -q --proto =https -fsS --connect-timeout 10 -o "$d\\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"; if ($LASTEXITCODE -eq 0) { break }', first)
+        # Windows (WINDOWS W-13, Defender's ClickFix rule): two separate commands into %LOCALAPPDATA%\Theodore-install, the
+        # folder made first (curl's --create-dirs fails for a profile named with é), never the temporary folder.
+        self.assertIn('PowerShell `$f = "$env:LOCALAPPDATA\\Theodore-install"; $null = New-Item -ItemType Directory -Force -Path $f; curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "$f\\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"` then `Get-Content -Encoding UTF8 "$env:LOCALAPPDATA\\Theodore-install\\install.md"`', first)
+        self.assertIn('cmd `(if not exist "%LOCALAPPDATA%\\Theodore-install" mkdir "%LOCALAPPDATA%\\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\\Theodore-install\\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"` then `type "%LOCALAPPDATA%\\Theodore-install\\install.md"`', first)
         # into a private folder of its own, not /tmp, and the installer removes it (its code is in the address)
         self.assertIn("d=$(mktemp -d)", first)
         self.assertIn("never straight into /tmp", first)
@@ -721,9 +724,18 @@ class InstallPage(unittest.TestCase):
             for line in path.read_text().splitlines():
                 for call in re.findall(r"curl(?:\.exe)? -q[^;|&)]*", line):
                     self.assertIn("--connect-timeout 10", call, f"{path.name}: {call}")
-            self.assertEqual(path.read_text().count("curl.exe -q --proto =https -fsS --connect-timeout 10 -o \"!D!\\install.cmd\""), 3, path.name)
-        self.assertIn('New-Item -ItemType Directory -Path $d -ErrorAction Stop', text)
-        self.assertIn('ping -n 3 127.0.0.1 >nul & curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\\install.cmd" https://theodoreand.ai/install.cmd)) && call "!D!\\install.cmd" --code {{ACTIVATION_CODE}}', text)
+            body = path.read_text()
+            for line in body.splitlines():          # never a download into the temporary folder
+                if "curl" in line:
+                    self.assertFalse(("$env:TEMP" in line) or ("%TEMP%" in line), f"{path.name}: {line[:120]}")
+            self.assertNotIn("--create-dirs", body, path.name)
+            for line in body.splitlines():          # no line both downloads and runs on Windows
+                if "curl.exe" in line and "Theodore-install" in line:
+                    self.assertNotIn("Theodore-install\\install.cmd\" --code", line.split("curl.exe", 1)[1].split("` then", 1)[0], path.name)
+            self.assertIn('$f = "$env:LOCALAPPDATA\\Theodore-install"; $null = New-Item -ItemType Directory -Force -Path $f; curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "$f\\install.cmd" https://theodoreand.ai/install.cmd', body, path.name)
+            self.assertIn('(if not exist "%LOCALAPPDATA%\\Theodore-install" mkdir "%LOCALAPPDATA%\\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\\Theodore-install\\install.cmd" https://theodoreand.ai/install.cmd', body, path.name)
+        self.assertIn('                  then: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "$env:LOCALAPPDATA\\Theodore-install\\install.cmd" --code {{ACTIVATION_CODE}}\n', text)
+        self.assertIn('                  then: "%LOCALAPPDATA%\\Theodore-install\\install.cmd" --code {{ACTIVATION_CODE}}\n', text)
         for path in (ROOT / "install" / "install.md", ROOT / "README.md"):
             page = path.read_text()
             self.assertNotIn("/tmp/theodore-install", page, path.name)
@@ -764,21 +776,20 @@ class InstallPage(unittest.TestCase):
             self.assertTrue(3.5 < took < 60, took)
             self.assertEqual(sorted(p.name for p in Path(folder).iterdir()), ["calls", "curl"], "the private folder is removed")
 
-    def test_the_windows_lines_try_three_times(self):
+    def test_the_windows_download_commands_fail_cleanly_and_run_nothing(self):
+        # Each Windows download is its own command (W-13); curl's --retry covers a timed-out address, not a refused
+        # one, so here (nothing listens) it fails at once and nothing is run.
         if os.name != "nt":
             self.skipTest("Windows only")
         for label, command in (("Windows cmd:", None), ("Windows PowerShell:", "powershell")):
             with self.subTest(label=label):
                 line = self._line(label)
-                began = time.monotonic()
                 if command:
                     done = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", line], capture_output=True, text=True, timeout=180)
                 else:
                     done = subprocess.run(line, shell=True, capture_output=True, text=True, timeout=180)
-                took = time.monotonic() - began
-                # the line's own exit is that of its cleanup step; what matters is three tries and no installer run
+                self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
                 self.assertNotIn("THEODORE", done.stdout, done.stdout + done.stderr)
-                self.assertTrue(3.5 < took < 150, f"{label} {took:.1f} s: two pauses between three attempts")
 
 if __name__ == "__main__":
     unittest.main()
