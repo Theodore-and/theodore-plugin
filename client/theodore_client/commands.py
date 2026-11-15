@@ -1937,7 +1937,13 @@ def _claude_settings_apply(only_new: bool = False) -> str:
             market = {"created": False, "set_auto_update": entry.get("autoUpdate") is not True,
                       "auto_update_prior": {"present": "autoUpdate" in entry, **({"value": entry["autoUpdate"]} if "autoUpdate" in entry else {})}}
         entry["autoUpdate"] = True
-    core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
+    text = json.dumps(settings, indent=2) + "\n"
+    try:
+        same = path.read_text(encoding="utf-8") == text
+    except OSError:
+        same = False
+    if not same:        # unchanged settings are not written again: each write makes a running Claude Code reload them
+        core.write_atomic(path, text, 0o644)
     record.update({"rules": sorted(set(record.get("rules") or []) | set(added)), "created_keys": sorted(created), "marketplace": market,
                    "file_created": file_created, "path": str(path), "settings": "on"})
     if file_created:
@@ -1999,7 +2005,8 @@ def _codex_rules_apply(only_new: bool = False) -> str:
         return f"codex: rules not changed ({path} exists and Theodore did not write it)"
     if path.exists() and core.sha256_file(path) != (record.get("codex_rules") or {}).get("sha256"):
         return f"codex: rules not changed ({path} was changed after Theodore wrote it)"
-    core.write_atomic(path, text, 0o644)
+    if not path.is_file() or path.read_bytes() != text.encode("utf-8"):
+        core.write_atomic(path, text, 0o644)
     record["codex_rules"] = {"path": str(path), "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
     record["settings"] = "on"
     _save_host_record(record)
@@ -2114,9 +2121,16 @@ def _short_rules() -> set[str]:
 
 
 def _shim_written() -> bool:
-    """The short command is this installation's and on PATH now (its rules are written only then)."""
-    core.shim_reset()
-    return bool(_host_record().get("shim")) and core.shim_active()
+    """The short command Theodore wrote is in place, as written now (its rules exist only then). Told from the files, not
+    from this process's PATH: a Theodore command started by a host with another PATH must not take its rules away."""
+    texts = core.shim_texts()
+    paths = _shim_paths(_host_record())
+    if not texts or not paths:
+        return False
+    try:
+        return all(p.name in texts and p.read_text(encoding="utf-8") == texts[p.name] for p in paths)
+    except OSError:
+        return False
 
 
 def _legacy_marketplace(record: dict) -> dict | None:
