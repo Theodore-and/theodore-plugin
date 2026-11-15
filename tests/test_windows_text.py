@@ -348,6 +348,8 @@ class WindowsShortCommand(unittest.TestCase):
         with mock.patch.object(commands, "_host_record", lambda: {"shim": {"files": [str(folder / n) for n in texts]}}):
             self.assertTrue(commands._shim_written(), "its rules are written")
         for found in ("theodore.cmd", "theodore.CMD"):       # PATHEXT's spelling, as Windows' which() gives it
+            if not (folder / found).exists():                # a case-sensitive disk (Linux): Windows opens either spelling
+                core.write_atomic(folder / found, texts[found.lower()], 0o755)
             with mock.patch.dict(os.environ, {"PATH": str(folder)}), mock.patch.object(core.shutil, "which", lambda n, f=found: str(folder / f)):
                 core.shim_reset()
                 self.assertEqual(core.quoted_launcher(), "theodore", f"and the texts name it ({found})")
