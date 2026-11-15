@@ -28,6 +28,11 @@
 - Codex on Windows starts Theodore's tool server: Codex reads one `mcp.json` on every system and the published one
   starts it with `sh`, which Windows lacks; on Windows Theodore's own copy of the plugin (Codex's marketplace) now
   starts `./skills/pptx/scripts/theodore.cmd`, rewritten at every unpack so plugin updates keep it.
+- install.md: when the host holds the installer back (an automatic safety check), the assistant changes nothing and
+  tries no other route; it tells the user their assistant held Theodore's installer for their approval, where to give
+  it (Claude Code: /permissions, Recently blocked; the app's notice) or to reply "Yes, download and run Theodore's
+  installer", then runs the same line again. Measured with the line held 6 times: 6 stopped with no workaround, and
+  the reply let the same line run 6 of 6. The line itself is unchanged.
 - W-9: `doctor` on Windows says Theodore's own PortableGit is downloading (and how far), with nothing to install,
   instead of telling the person to install Git for Windows meanwhile.
 - W-12: the Windows uninstall's cleanup leaves its own folder before removing it (after `(goto)`, on the same line,
