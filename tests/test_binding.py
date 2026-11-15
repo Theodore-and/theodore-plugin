@@ -105,7 +105,13 @@ class MachineValue(unittest.TestCase):
         device._MACHINE.clear()
         self.addCleanup(device._MACHINE.clear)
         value = device.machine_id()
-        if value is None and sys.platform.startswith("linux") and not any(os.path.exists(p) for p in ("/etc/machine-id", "/var/lib/dbus/machine-id")):
+        def has_id(path: str) -> bool:
+            try:
+                return bool(Path(path).read_text().strip())
+            except OSError:
+                return False
+        # a container without a machine id (Ubuntu's images ship /etc/machine-id empty): accepted without one
+        if value is None and sys.platform.startswith("linux") and not any(has_id(p) for p in ("/etc/machine-id", "/var/lib/dbus/machine-id")):
             self.skipTest("a container without a machine id: accepted without one")
         self.assertTrue(value)
 

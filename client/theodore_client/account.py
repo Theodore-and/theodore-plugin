@@ -345,13 +345,16 @@ def login_start(reason: str = "this computer is not signed in to Theodore.", ope
         # A cloud chat's workspace is a machine of its own (on claude.ai a new one for every chat), so each one is
         # approved once; the link carries the code, so approving is one click on a signed-in browser.
         tell = (f"Theodore needs your approval for this chat's workspace, which runs on its own machine. Open "
-                f"{pending['url']} and press Approve (one click when you are signed in to Theodore), then tell me when done.")
+                f"{pending['url']} in your usual browser and press Approve (one click when you are signed in to Theodore), then tell me when done.")
     else:
         tell = "Theodore needs a one-time sign-in. " + (
             "I opened a browser page; approve it and tell me when done." if opened
-            else f"Please open {pending['url']} in your browser, approve, and tell me when done.")
+            else f"Please open {pending['url']} in your usual browser, approve, and tell me when done.")
     return Status("SIGN_IN_REQUIRED", reason,
-                  f"ask the user to open {pending['url']} and approve, then run: {quoted_launcher()} login --finish --wait 90",
+                  f"give the user this link and ask them to open it in the browser where they use Theodore (their usual "
+                  f"browser), not in your own browser: {pending['url']} . If it opens somewhere they are not logged in, the "
+                  f"page shows the address to copy into their usual browser. Once they have approved, run: "
+                  f"{quoted_launcher()} login --finish --wait 90",
                   tell)
 
 

@@ -7,7 +7,7 @@ rem   install.cmd                         the same, ending with a sign-in link i
 rem   install.cmd --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
 rem   install.cmd --uninstall             remove Theodore from this computer
 rem
-rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
+rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
 rem Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 rem plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive
 rem it names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
@@ -60,7 +60,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.9"
-set "PIN_CLIENT=client/client-0.3.9.tar 43a86f8e4e2c7c4c1ca00da467e8934d977c3231bd0acee11575387e1b5c5de2"
+set "PIN_CLIENT=client/client-0.3.9.tar 261ecd9e69f906a6ef251b458e0abd88bdacf8177a50605bc6a491fba59a9324"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -192,7 +192,7 @@ rem removed at every exit.
 for /l %%N in (1,1,5) do if not defined WORK call :make_work
 if not defined WORK goto :not_writable
 
-rem --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer -----------------------
+rem --- 1. redeem the one-time code first: it lasts an hour, the downloads may take longer ---------------------------
 if not defined CODE goto :stage1
 rem The answer holds the installation secret. state\ may carry explicit grants of its own (THEODORE_HOME can point
 rem anywhere), so the answer is written into a new folder of this installer whose only entry is the current user,
@@ -210,10 +210,16 @@ set "CURL_ERR=nul"
 call :curl_host 1 "%API_BASE%/v1/device/activate"
 set "CURL_BODY="
 if not "%HTTP%"=="200" goto :code_refused
-move /y "%SAFE%\activation.pending" "%HOME_DIR%\state\activation.pending" >nul 2>&1
+move /y "%SAFE%\activation.pending" "%HOME_DIR%\state\activation.pending" >nul 2>&1 || goto :code_not_saved
 rmdir /s /q "%SAFE%" >nul 2>&1
 echo theodore-install: this computer is signed in (the one-time code was accepted)
 goto :stage1
+:code_not_saved
+rmdir /s /q "%SAFE%" >nul 2>&1
+echo THEODORE SETUP_FAILED: cause DISK: the one-time code was accepted but this computer could not save the login in %HOME_DIR%\state.
+echo NEXT: the one-time code was accepted but this computer could not save the login (cause DISK); fix the folder's permissions and run the same line again within 30 minutes: the same code works again on this computer until it has been used.
+echo TELL THE USER: Theodore could not save its login on this computer. Its folder may be protected; once that is fixed, the same install line works again for 30 minutes.
+exit /b 68
 :code_refused
 rem The answer was written into the private folder only: a refused code (spent by an earlier run of the same line) never
 rem touches the sign-in that run saved in state\activation.pending.

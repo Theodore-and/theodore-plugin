@@ -207,13 +207,16 @@ def host_name() -> str:
         return explicit
     if _claude_cloud():
         return "claude-web"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT") or os.environ.get("CLAUDE_PLUGIN_ROOT"):
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
         return "claude-code"
     if _chatgpt_cloud():
         return "chatgpt"
-    if any(os.environ.get(name) for name in ("CODEX_HOME", "CODEX_SANDBOX", "CODEX_MANAGED_BY_NPM", "CODEX_THREAD_ID",
-                                             "CODEX_SESSION_ID", "CODEX_VERSION")):
+    # Before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs (a Codex desktop install was shown as Claude Code).
+    if any(os.environ.get(name) for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_HOME",
+                                             "CODEX_MANAGED_BY_NPM", "CODEX_VERSION")):
         return "codex"
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return "claude-code"
     return "other"
 
 

@@ -131,7 +131,7 @@ changed since the client last learned it, the service refuses the report, stores
 - The licence is a signed token that the engine checks offline. It is refreshed when online and lasts 7 days
   from the last refresh: Theodore's engine works offline for up to 7 days. The deck-design guidance always
   needs a connection.
-- One-time activation codes are single-use and expire after 10 minutes. The installer redeems the code before
+- One-time activation codes expire after an hour and sign in one computer: the same code works again only for that computer and network, within 30 minutes of its first use (an install that failed half way). The installer redeems the code before
   it downloads anything large and never prints it. The code is given on the command line (`--code`), by design: it
   is in the sentence the user pastes, works once and expires within minutes. Nothing longer-lived ever is: the
   connector's grant, which can carry the installation secret, is read only from standard input or a file only its

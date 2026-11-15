@@ -24,6 +24,9 @@
   computer (`entitlement_wrong_machine`, engines from rc.10) asks for a log in on this one.
 - `uninstall` writes what it did beside Theodore's folder (`~/.theodore-uninstall.log`), not into the folder it removes.
 - `ci/run.sh all` starts the Windows job before it waits for the shared lock.
+- A cloud sandbox that cannot reach Theodore's sites answers `CONNECTOR_REQUIRED`: the assistant calls the Theodore
+  connector (`theodore_begin`) for the design, or says how to add it; an ordinary computer offline keeps its message.
+- The log-in link is to be opened in the user's own web browser, not a browser inside the assistant's app.
 
 ## 0.3.8
 

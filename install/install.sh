@@ -7,7 +7,7 @@
 #   sh install.sh --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
 #   sh install.sh --uninstall             remove Theodore from this computer
 #
-# What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
+# What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
 # Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 # plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive it
 # names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
@@ -30,7 +30,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.9"
-PIN_CLIENT="client/client-0.3.9.tar 43a86f8e4e2c7c4c1ca00da467e8934d977c3231bd0acee11575387e1b5c5de2"
+PIN_CLIENT="client/client-0.3.9.tar 261ecd9e69f906a6ef251b458e0abd88bdacf8177a50605bc6a491fba59a9324"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -384,9 +384,11 @@ host_of() {
   explicit=$(printf '%s' "${THEODORE_HOST:-}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-' | cut -c1-32 | sed 's/^-*//')
   if [ -n "$explicit" ]; then echo "$explicit"
   elif claude_cloud; then echo claude-web
-  elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}${CLAUDE_PLUGIN_ROOT:-}" ]; then echo claude-code
+  elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}" ]; then echo claude-code
   elif [ "$PLAT" = linux ] && truthy "${CODEX_NETWORK_PROXY_ACTIVE:-}" && { [ -n "${CODEX_PROXY_CERT:-}" ] || [ -d /opt/codex/runtimes ]; }; then echo chatgpt
-  elif [ -n "${CODEX_HOME:-}${CODEX_SANDBOX:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_VERSION:-}" ]; then echo codex
+  # before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs
+  elif [ -n "${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_SANDBOX:-}${CODEX_HOME:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_VERSION:-}" ]; then echo codex
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then echo claude-code
   else echo installer; fi
 }
 # fetch, then check against the pinned SHA-256; a damaged download (a flaky network) is fetched afresh, three times at most
@@ -406,7 +408,7 @@ checked() { # file sha what: delete and stop on a mismatch
     "run the installer again; if it fails twice, tell the user to write to support@theodoreand.ai." "A Theodore download arrived damaged. I am trying again."
 }
 
-# --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer --------------------------
+# --- 1. redeem the one-time code first: it lasts an hour, the downloads may take longer ------------------------------
 if [ -n "$CODE" ]; then
   name=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-60)
   body=$(printf '{"code":"%s","device_name":"%s","platform":"%s","arch":"%s","host":"%s","client_version":"%s"}' \
@@ -420,6 +422,11 @@ if [ -n "$CODE" ]; then
   CURL_DATA=
   if [ "$http" = 200 ] && [ -s "$answer" ] && mv -f "$answer" "$pending"; then
     say "this computer is signed in (the one-time code was accepted)"
+  elif [ "$http" = 200 ] && [ -s "$answer" ]; then
+    rm -f "$answer"
+    status SETUP_FAILED 68 "cause DISK: the one-time code was accepted but this computer could not save the login in $HOME_DIR/state." \
+      "the one-time code was accepted but this computer could not save the login (cause DISK); fix the folder's permissions and run the same line again within 30 minutes: the same code works again on this computer until it has been used." \
+      "Theodore could not save its login on this computer. Its folder may be protected; once that is fixed, the same install line works again for 30 minutes."
   else
     rm -f "$answer"
     if [ -s "$pending" ]; then

@@ -2902,6 +2902,9 @@ class HostAndCloud(unittest.TestCase):
         # Codex on this computer: npm and other installs (the variables Codex 0.160.1 sets for the commands it runs)
         self.assertEqual(self.host({"CODEX_MANAGED_BY_NPM": "1", "CODEX_THREAD_ID": "t"}), "codex")
         self.assertEqual(self.host({"CODEX_THREAD_ID": "t", "CODEX_VERSION": "0.160.1"}), "codex")
+        # Codex sets CLAUDE_PLUGIN_ROOT for the plugins it runs: a Codex desktop install is Codex (ORGWEB, H5)
+        self.assertEqual(self.host({"CLAUDE_PLUGIN_ROOT": "/x/.codex/plugins/theodore", "CODEX_THREAD_ID": "t"}), "codex")
+        self.assertEqual(self.host({"CLAUDE_PLUGIN_ROOT": "/p", "CODEX_HOME": "/h", "CLAUDECODE": "1"}), "claude-code")
         # ChatGPT Work / a Codex cloud task: a Codex runtime behind OpenAI's proxy on Linux
         work = {"CODEX_NETWORK_PROXY_ACTIVE": "1", "CODEX_PROXY_CERT": "/usr/local/share/ca-certificates/x.crt", "CODEX_THREAD_ID": "t"}
         self.assertEqual(self.host(work, linux=True), "chatgpt")
@@ -2979,7 +2982,10 @@ class ProxiesAndSandboxes(ClientCase):
         _first, nxt, tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
         self.assertIn("this chat's workspace", tell)
         self.assertIn("press Approve", tell)
-        url = re.search(r"open (\S+) and", nxt).group(1)
+        # HOSTS2 gap 6: Codex desktop opened the link in its own browser, where the user is not logged in
+        self.assertIn("in your usual browser", tell)
+        self.assertIn("ask them to open it in the browser where they use Theodore (their usual browser), not in your own browser:", nxt)
+        url = re.search(r"not in your own browser: (\S+) \.", nxt).group(1)
         self.assertIn(url, tell)
         plain = self.client("login", "--start")
         self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])

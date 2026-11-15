@@ -212,6 +212,24 @@ class Installer(unittest.TestCase):
         self.assertEqual(len(self.api.activations), 1, "one code, one installation")
         self.box.wait_jobs()
 
+    @unittest.skipIf(IS_WINDOWS, "install.sh; install.cmd takes the same branch when its move fails")
+    def test_an_accepted_code_whose_login_cannot_be_saved_says_so_and_when_to_run_again(self):
+        # ORGWEB: the code was accepted but state/ refused the answer; the backend lets the same code work again on this
+        # computer within 30 minutes, so the installer says to fix the folder and run the same line again.
+        import shutil
+        self.api.issue_activation_code("ABCD-1234")
+        shims = self.box.tmp / "shims"
+        shims.mkdir()
+        (shims / "mv").write_text('#!/bin/sh\nfor last; do :; done\ncase "$last" in */state/activation.pending) '
+                                  f'echo "mv: Permission denied" >&2; exit 1 ;; esac\nexec "{shutil.which("mv")}" "$@"\n')
+        (shims / "mv").chmod(0o755)
+        result = self.install("--code", "ABCD-1234", env={"PATH": f"{shims}{os.pathsep}{self.box.env.get('PATH', os.environ.get('PATH', ''))}"})
+        first, nxt, _tell = status_lines(result.stdout)
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        self.assertIn("cause DISK", first)
+        self.assertIn("the one-time code was accepted but this computer could not save the login (cause DISK); fix the "
+                      "folder's permissions and run the same line again within 30 minutes", nxt)
+
     def test_doctor_checks_the_registration_and_the_next_command_finishes_one_the_installer_left_undone(self):
         # ACCEPT-RC8 D1: the installer was stopped before it registered the plugin; doctor then said ready although
         # Claude Code had no Theodore plugin.
