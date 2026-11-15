@@ -193,7 +193,7 @@ class Installer(unittest.TestCase):
     @unittest.skipIf(IS_WINDOWS, "install.sh")
     def test_in_codex_a_ready_install_ends_by_sending_the_deck_to_a_new_session(self):
         """Lane CHATGPT: Codex loads the plugin, its tool and the rules only at a session's start; asked for a deck in the
-        install session, every Theodore command asked (19 approvals, measured). The last words send the deck to a new session."""
+        install session, every Theodore command asked (30 approvals, measured). The last words send the deck to a new session."""
         self.api.issue_activation_code("ABCD-1234")
         result = self.install("--code", "ABCD-1234", env={"CODEX_THREAD_ID": "01a1df00-test"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
