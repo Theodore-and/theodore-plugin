@@ -202,6 +202,16 @@ class LauncherPartialUninstall(unittest.TestCase):
         self.assertNotIn("%LEFT", line)
 
 
+class PowerShellInstallLine(unittest.TestCase):
+    def test_the_powershell_line_reads_the_installers_utf8(self):
+        """W-4: PowerShell 5.1 decodes a program's output in the console's code page (cp437: "Th├⌐o"), in a console
+        and in anything PowerShell does with it. The documented line sets UTF-8 first; where no console is attached the
+        setting throws and is skipped."""
+        page = (support.ROOT / "install" / "install.md").read_text(encoding="utf-8")
+        line = next(l for l in page.splitlines() if l.strip().startswith("Windows PowerShell: "))
+        self.assertTrue(line.strip().startswith("Windows PowerShell: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; "), line)
+
+
 class ChildText(unittest.TestCase):
     def test_utf8_from_a_child_is_read_as_utf8(self):
         path = "C:\\Users\\Théo Tester\\测试"

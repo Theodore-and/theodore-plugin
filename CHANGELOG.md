@@ -30,6 +30,19 @@
   `cmd /d /v:on /c !THEODORE_DESKTOP_LAUNCHER! mcp --for claude-desktop` (delayed expansion comes after cmd has parsed
   the line); other paths keep the entry as it was. The launcher's uninstall of a partial installation reports what is
   left with delayed expansion instead of CALL ECHO, so the message is no longer cut at the &.
+- Windows LibreOffice (WINDOWS W-6, a release blocker for every profile folder with a space): `msiexec /a` was run
+  from a list, so Python quoted the whole `"TARGETDIR=C:\Users\First Last\..."`; msiexec rejects that form, shows its
+  usage window where nobody sees it and waited for ever (31 minutes at "100% unpacking", every rendering call answering
+  SETUP_IN_PROGRESS). Theodore's own unpack (msi.dll's tables in process, expand.exe for the cabinet) now goes first:
+  no Windows Installer service (which refuses network and batch logons), nothing to quote, progress per file; msiexec
+  is the second way, as one command string with `TARGETDIR="..."`, as proven on the VM. Every program the client runs to
+  unpack or copy a tool has a hard time limit (expand, msiexec, hdiutil, cp, the engine's venv, junctions), ending in the
+  other way or a clear SETUP_FAILED; a rendering call names the phase ("unpacking LibreOffice, 40%"), and a LibreOffice
+  job whose record has not moved for 20 minutes is reported as stuck, not as still being installed.
+- Windows PowerShell (W-4): the install page's PowerShell line sets the console's output encoding to UTF-8 first, so
+  PowerShell 5.1 reads the installer's UTF-8 as UTF-8 (it read it in the console's code page: "Th├⌐o"). The client's
+  output stays UTF-8: an assistant reading PowerShell's own output (Codex), Claude Code's Bash and PowerShell tools
+  and cmd get it right as it is.
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an

@@ -696,7 +696,7 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
         cmd = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "cmd.exe")
         subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
                        env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": str(target)},
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
     else:
         os.symlink(relative or str(target), link, target_is_directory=True)
 
