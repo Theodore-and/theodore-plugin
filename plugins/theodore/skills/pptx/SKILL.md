@@ -9,12 +9,14 @@ allowed-tools: Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE
 ---
 
 Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
-here. If no pptx instructions appear above this line, run `theodore guide pptx` where that command is on PATH, else, by absolute path, without `cd` (the skill folder is the
-folder that holds this file, `${CLAUDE_SKILL_DIR}` where the host fills it in):
+here. Theodore's command is `theodore`: write every Theodore command as `theodore …` in every shell. If no pptx
+instructions appear above this line, run `theodore guide pptx` and read the output to the line that starts `=== END`;
+if the last line names a next part, run it. Only if the shell answers that `theodore` is not found, run the launcher in
+this skill's folder by absolute path instead, without `cd` (the skill folder is the folder that holds this file,
+`${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide pptx
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide pptx
-   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide pptx
-and read the output to the line that starts `=== END`; if the last line names a next part, run it. A first line
+   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide pptx A first line
 starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
 its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
 context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same

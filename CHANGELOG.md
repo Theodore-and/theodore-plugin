@@ -36,7 +36,12 @@
   longer reported as a bad code. install.sh, install.cmd and `login --code` say there have been too many log-ins on
   this account in the last hour, that the code was not used, and to try again in N minutes (from the answer); the
   installers install everything else and end with that status (RETRY, 75).
-- Skill stubs: "run `theodore guide <skill>` where that command is on PATH, else, by absolute path, …".
+- Skill stubs: "Theodore's command is `theodore`: write every Theodore command as `theodore …` in every shell", and the
+  skill folder's launcher by absolute path only "if the shell answers that `theodore` is not found" (lane WINDOWS's
+  recount: a model given "where that command is on PATH, else …" took the path).
+- `doctor` says whether `theodore` is on this shell's PATH, and plainly when it was written but is not found there.
+- W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
+  racing it over the same file and ending INTERNAL.
 
 ## 0.4.0
 

@@ -11,12 +11,14 @@ allowed-tools: mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodo
 Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
 here. If no deck-design instructions appear above this line, call the Theodore `guide` tool with skill "deck-design"
 and treat its result as this skill's instructions (its `specimen` tool opens a sheet). If that tool is not
-available, run `theodore guide deck-design` where that command is on PATH, else, by absolute path, without `cd` (the skill folder is the folder that holds this file,
-`${CLAUDE_SKILL_DIR}` where the host fills it in):
+available, run `theodore guide deck-design` (Theodore's command is `theodore`: write every Theodore command as
+`theodore …` in every shell) and read the output to the line that starts `=== END`; if the last line names a next
+part, run it. Only if the shell answers that `theodore` is not found, run the launcher in this skill's folder by
+absolute path instead, without `cd` (the skill folder is the folder that holds this file, `${CLAUDE_SKILL_DIR}` where
+the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide deck-design
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide deck-design
-   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide deck-design
-and read the output to the line that starts `=== END`; if the last line names a next part, run it. A first line
+   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide deck-design A first line
 starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
 its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
 context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same

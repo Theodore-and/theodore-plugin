@@ -1995,6 +1995,10 @@ class Hosts(ClientCase):
         self.assertNotIn("PowerShell(theodore *)", allow, "PowerShell rules only on Windows")
         for rule in allow:
             self.assertNotIn(rule, ("Bash(*)", "Bash", "Edit", "Edit(**)", "Bash(cd *)", "Bash(sh *)"), "nothing broader than Theodore's own")
+        doctor = self.client("doctor").stdout
+        self.assertIn(f"short command: theodore is on this shell's PATH ({shim})", doctor)
+        hidden = self.client("doctor", env={"PATH": self.box.env["PATH"].replace(f"{folder}{os.pathsep}", "")}).stdout
+        self.assertIn(f"WARN  short command: written to {folder}, but this shell's PATH does not find it", hidden)
         ran = subprocess.run([str(shim), "hosts", "settings"], env=self.box.env, capture_output=True, text=True, timeout=120)
         first, nxt, _t = status_lines(ran.stdout)
         self.assertTrue(first.startswith("THEODORE OK: settings on"), ran.stdout + ran.stderr)

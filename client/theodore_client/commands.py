@@ -906,6 +906,18 @@ def doctor(as_json: bool) -> int:
         note = claude_policy_note() if core.host_executable("claude") else None
         if note:
             add("ok", "claude policy", note)
+        if not off:
+            shim = _shim_paths(_host_record())
+            core.shim_reset()
+            if core.shim_active():
+                add("ok", "short command", f"theodore is on this shell's PATH ({shutil.which(core.SHIM_NAME)}); Theodore's texts name it")
+            elif shim and _shim_written():
+                add("warn", "short command", f"written to {shim[0].parent}, but this shell's PATH does not find it, so Theodore's "
+                    "texts name the launcher by its full path and each of its commands may ask first; add that folder to PATH "
+                    "and start a new session")
+            else:
+                add("ok", "short command", f"not installed (no per-user folder on PATH took it), so Theodore's texts name the "
+                    f"launcher by its full path; {quoted_launcher()} hosts settings --apply writes it once ~/.local/bin is on PATH")
     missing = _still_missing(snap)
     add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
     if resumed:
@@ -1307,11 +1319,24 @@ def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) ->
         return core.emit(Status("OK", f"LibreOffice {pin.get('version', '')} is downloading in the background (about {megabytes} MB, from The Document Foundation) into {core.home().tools}.",
                                 "continue; slide previews work once it has arrived.",
                                 f"Theodore is downloading LibreOffice (about {megabytes} MB) in the background so it can preview slides. Nothing is installed system-wide."))
+    running = Job("libreoffice")
+    if running.alive() and int(running.read().get("pid") or 0) != os.getpid():
+        # W-15: one install at a time. A second one (the installer's background job plus `tools install libreoffice`)
+        # raced the first over the same .part file and ended INTERNAL; it now reports the first one's progress.
+        if as_job:
+            return 0
+        state = running.read()
+        percent = state.get("percent")
+        how = f"{state.get('phase') or 'downloading'}" + (f", {int(percent)}%" if isinstance(percent, (int, float)) and percent > 0 else "")
+        return core.emit(Status("OK", f"LibreOffice is already being installed in the background ({how}) into {core.home().tools}.",
+                                "nothing to do; slide previews work once it has arrived. Do not start it again.",
+                                "Theodore is already downloading LibreOffice for its slide previews."))
     job = Job("libreoffice") if as_job else None
     if job:
         job.begin("libreoffice")
     try:
-        binary = install.install_libreoffice(job)
+        with core.lock("libreoffice", timeout=3600.0):      # and one at a time also when both start in the same instant
+            binary = install.install_libreoffice(job)
     except Status as status_:
         if job:
             job.fail(_failure_cause(status_), status_.summary)
