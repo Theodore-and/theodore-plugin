@@ -1,0 +1,170 @@
+"""Windows text: paths with letters outside the console code page (C:\\Users\\Théo Tester), and what the client
+generates for cmd.exe and PowerShell. Unit-level, on every platform: what is written, how it is invoked, and what cmd
+would read from it (a batch file is read in the OEM code page)."""
+
+from __future__ import annotations
+
+import base64
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import support  # noqa: E402,F401  (puts the client on sys.path)
+
+from theodore_client import commands, core, specimens  # noqa: E402
+
+# A home with é, a space, an ampersand, a CJK letter and every character cmd treats specially.
+STRANGE = "Théo Tester & 测试 (x) 50%off! ^a"
+
+
+def cmd_reads(text: bytes, env: dict) -> list[str]:
+    """The script as cmd.exe would see it after percent expansion: decoded in the OEM code page, each %NAME% replaced
+    once by its value (cmd never expands the result again)."""
+    lines = text.decode("cp437").split("\r\n")
+    return [re.sub(r"%(THEODORE_CLEANUP_[A-Z]+)%", lambda m: env[m.group(1)], line) for line in lines]
+
+
+class WindowsCleanup(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / STRANGE / "AppData" / "Local" / "Theodore"
+        (self.root / "bin").mkdir(parents=True)
+        env = {"THEODORE_HOME": str(self.root), "TMPDIR": str(self.tmp / STRANGE / "Temp"), "TEMP": str(self.tmp / STRANGE / "Temp")}
+        (self.tmp / STRANGE / "Temp").mkdir()
+        patches = [mock.patch.dict(os.environ, env), mock.patch.object(core, "_HOME", None),
+                   mock.patch.object(tempfile, "tempdir", None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_cleanup(self, probe_code: int = 0, popen_error: bool = False):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(("run", command, kwargs))
+            return subprocess.CompletedProcess(command, probe_code)
+
+        def popen(command, **kwargs):
+            calls.append(("popen", command, kwargs))
+            if popen_error and len([c for c in calls if c[0] == "popen"]) == 1:
+                raise OSError("job forbids breakaway")
+            return mock.Mock()
+
+        ran = []
+        with mock.patch.object(commands.subprocess, "run", run), mock.patch.object(commands.subprocess, "Popen", popen), \
+                mock.patch.object(commands, "_run", lambda command, timeout=0: ran.append(command) or (0, "")):
+            result = commands._windows_cleanup(self.root, list(core.OWNED), keep_specimen_record=True)
+        return result, calls, ran
+
+    def test_no_path_is_written_into_the_script_and_cmd_finds_every_path_through_variables(self):
+        result, calls, _ran = self.run_cleanup()
+        self.assertIsNotNone(result)
+        script = result.parent / "cleanup.cmd"
+        raw = script.read_bytes()
+        self.assertTrue(raw.isascii(), "the batch file holds only ASCII")
+        for piece in ("Théo", "测试", "&", "50%off", str(self.tmp)):
+            self.assertNotIn(piece.encode("utf-8"), raw.replace(b"& rmdir", b"").replace(b"2>&1", b""))
+        probe, started = calls[0], calls[1]
+        self.assertEqual(("run", "popen"), (probe[0], started[0]), "the probe runs first, synchronously, then the cleanup")
+        env = started[2]["env"]
+        self.assertEqual(str(self.root), env["THEODORE_CLEANUP_ROOT"])
+        self.assertEqual(str(script), env["THEODORE_CLEANUP_SCRIPT"])
+        self.assertEqual(specimens.registry().name, env["THEODORE_CLEANUP_KEEP"])
+        self.assertIs(probe[2]["env"], env)
+        seen = cmd_reads(raw, env)
+        self.assertIn(f'if exist "{self.root}\\{commands.UNINSTALL_MARKER}" goto pass', seen)
+        self.assertIn(f'if exist "{self.root}\\bin" rmdir /s /q "{self.root}\\bin" >nul 2>&1', seen)
+        self.assertIn(f'rmdir "{self.root}" >nul 2>&1', seen)
+        # Every expanded path sits inside double quotes, so &, ( ) and ^ in it are never cmd syntax.
+        for line in raw.decode("ascii").split("\r\n"):
+            for m in re.finditer(r"%THEODORE_CLEANUP_[A-Z]+%", line):
+                self.assertEqual(1, line[:m.start()].count('"') % 2, line)
+            self.assertNotIn("enabledelayedexpansion", line.replace("disabledelayedexpansion", ""))
+        # The command lines name no path but cmd.exe's; the script comes from a variable, in a pair cmd keeps.
+        for _kind, command, _kw in calls:
+            self.assertTrue(command.isascii())
+            self.assertIn('/d /v:off /c ""%THEODORE_CLEANUP_SCRIPT%"', command)
+        self.assertTrue(probe[1].endswith('" probe"'))
+        self.assertTrue((self.root / commands.UNINSTALL_MARKER).exists())
+
+    def test_a_probe_that_does_not_see_the_folder_starts_nothing_and_says_so(self):
+        result, calls, _ran = self.run_cleanup(probe_code=3)
+        self.assertIsNone(result)
+        self.assertEqual(["run"], [c[0] for c in calls], "no cleanup is started")
+        self.assertFalse((self.root / commands.UNINSTALL_MARKER).exists())
+        self.assertFalse(any(p.name.startswith("theodore-uninstall-") for p in (self.tmp / STRANGE / "Temp").iterdir()))
+
+    def test_the_wmi_way_carries_the_variables_in_an_encoded_command(self):
+        system32 = self.tmp / "Windows" / "System32"
+        ps = system32 / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        ps.parent.mkdir(parents=True)
+        ps.write_text("")
+        with mock.patch.dict(os.environ, {"SystemRoot": str(self.tmp / "Windows")}):
+            result, calls, ran = self.run_cleanup(popen_error=True)
+            launch = os.environ["THEODORE_CLEANUP"]
+        self.assertIsNotNone(result)
+        self.assertEqual(1, len(ran))
+        self.assertTrue(launch.isascii())
+        body = base64.b64decode(launch.split("-EncodedCommand ")[1]).decode("utf-16-le")
+        values = {k: base64.b64decode(v).decode("utf-8") for k, v in
+                  re.findall(r"\$env:(THEODORE_CLEANUP_[A-Z]+) = \[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)", body)}
+        self.assertEqual(str(self.root), values["THEODORE_CLEANUP_ROOT"])
+        self.assertEqual(str(result.parent / "cleanup.cmd"), values["THEODORE_CLEANUP_SCRIPT"])
+        self.assertTrue(body.isascii(), "no value is written as a literal")
+
+    def test_script_names_must_be_plain(self):
+        with self.assertRaises(ValueError):
+            commands._cleanup_script(["bin&x"], False)
+
+
+class Junction(unittest.TestCase):
+    def test_a_junction_takes_its_paths_through_variables(self):
+        tmp = Path(tempfile.mkdtemp()) / STRANGE
+        seen = []
+        with mock.patch.object(core, "IS_WINDOWS", True), \
+                mock.patch.object(core.subprocess, "run", lambda command, **kw: seen.append((command, kw["env"]))):
+            core.link_dir(tmp / "link", tmp / "target")
+        command, env = seen[0]
+        self.assertTrue(command.isascii(), command)
+        self.assertTrue(command.endswith('/d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""'))
+        self.assertEqual(str(tmp / "link"), env["THEODORE_LINK"])
+        self.assertEqual(str(tmp / "target"), env["THEODORE_LINK_TARGET"])
+
+
+class ChildText(unittest.TestCase):
+    def test_utf8_from_a_child_is_read_as_utf8(self):
+        path = "C:\\Users\\Théo Tester\\测试"
+        self.assertEqual(path, core.child_text(path.encode("utf-8")))
+        self.assertNotIn("Ã", core.child_text("Théo".encode("utf-8")))
+
+    def test_a_code_page_byte_is_still_text(self):
+        self.assertTrue(core.child_text("Théo".encode("cp1252")).startswith("Th"))
+        self.assertEqual("", core.child_text(None))
+
+    def test_the_engine_writes_utf8(self):
+        from theodore_client import install
+        with mock.patch.object(install, "system_libreoffice", lambda: True):
+            self.assertEqual("utf-8", install.engine_env(Path(tempfile.mkdtemp()))["PYTHONIOENCODING"])
+
+    def test_the_self_test_error_names_the_path_as_written(self):
+        from theodore_client import install
+        directory = Path(tempfile.mkdtemp())
+        (directory / "skills" / "pptx" / "scripts").mkdir(parents=True)
+        (directory / "skills" / "pptx" / "scripts" / "pptx.py").write_text("")
+        message = "[WinError 448] untrusted mount point: 'C:\\\\Users\\\\Théo Tester\\\\x'"
+        failed = subprocess.CompletedProcess([], 1, b"", message.encode("utf-8"))
+        with mock.patch.object(install.subprocess, "run", lambda *a, **k: failed), \
+                mock.patch.object(install, "engine_env", lambda d: {}), mock.patch.object(install, "engine_python", lambda d: "py"):
+            with self.assertRaises(install.EngineError) as raised:
+                install._self_test(directory, "rt")
+        self.assertIn("Théo Tester", str(raised.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

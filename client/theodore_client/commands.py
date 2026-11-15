@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
@@ -1294,8 +1295,8 @@ def _claude_git_bash_apply(bash: Path) -> str:
 
 def _run(command: list[str], timeout: float = 300.0) -> tuple[int, str]:
     try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        return done.returncode, (done.stdout + done.stderr).strip()
+        done = subprocess.run(command, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return done.returncode, (core.child_text(done.stdout) + core.child_text(done.stderr)).strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, str(exc)
 
@@ -2492,11 +2493,62 @@ def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
 UNINSTALL_MARKER = ".theodore-uninstalling"
 
 
-def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -> Path:
+# The cleanup script's paths reach it only through these variables, never written into it: cmd.exe reads a batch file
+# in the console's OEM code page, so a path with a letter outside it (C:\Users\Théo Tester) written into the file is
+# another path to cmd, and the cleanup stopped with the folder still there while the uninstall said OK (WINDOWS, W-3).
+# The script holds only ASCII; each variable is expanded inside double quotes with delayed expansion off, so a space,
+# &, %, !, ^ or a parenthesis in a name is part of the path.
+CLEANUP_VARS = ("THEODORE_CLEANUP_ROOT", "THEODORE_CLEANUP_RESULT", "THEODORE_CLEANUP_WORK", "THEODORE_CLEANUP_SCRIPT",
+                "THEODORE_CLEANUP_KEEP")
+
+
+def _cleanup_script(names: list[str], keep_specimen_record: bool) -> str:
+    """The cleanup batch file: ASCII only, every path read from CLEANUP_VARS. With the argument "probe" it only answers
+    whether it sees the marker in Theodore's folder (exit 0) or not (exit 3), and touches nothing."""
+    for name in names:
+        if not name.isascii() or not name.replace(".", "").replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"not a folder name the cleanup can hold: {name!r}")
+    root, result = "%THEODORE_CLEANUP_ROOT%", "%THEODORE_CLEANUP_RESULT%"
+    marker = f'"{root}\\{UNINSTALL_MARKER}"'
+    lines = ["@echo off", "setlocal enableextensions disabledelayedexpansion",
+             'if /i "%~1"=="probe" goto probe', "set N=0",
+             # A few seconds first: the launcher that called the client reads its own file to its end once it exits.
+             "ping -n 3 127.0.0.1 >nul", ":again",
+             f"if exist {marker} goto pass", f'>"{result}" echo stopped: a new installation started in the folder', "goto end",
+             ":pass"]
+    for name in names:
+        if name == "state" and keep_specimen_record:
+            lines.append(f'for /d %%D in ("{root}\\{name}\\*") do rmdir /s /q "%%D" >nul 2>&1')
+            lines.append(f'for %%F in ("{root}\\{name}\\*") do if /i not "%%~nxF"=="%THEODORE_CLEANUP_KEEP%" del /f /q "%%F" >nul 2>&1')
+        else:
+            lines.append(f'if exist "{root}\\{name}" rmdir /s /q "{root}\\{name}" >nul 2>&1')
+    gone = [n for n in names if not (n == "state" and keep_specimen_record)]
+    # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
+    lines += [f'if exist "{root}\\{n}" goto wait' for n in gone]
+    lines += ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done", "ping -n 2 127.0.0.1 >nul", "goto again",
+              ":done", f"del /f /q {marker} >nul 2>&1", f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
+    lines += [f'if exist "{root}\\{n}" (>>"{result}" echo left: {n})' for n in gone]
+    # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
+    lines += [f'if not exist "{root}" (>>"{result}" echo removed: the folder)', ":end", "ping -n 301 127.0.0.1 >nul",
+              '(goto) 2>nul & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
+              ":probe", f"if not exist {marker} exit /b 3", 'if not exist "%THEODORE_CLEANUP_SCRIPT%" exit /b 4', "exit /b 0"]
+    text = "\r\n".join(lines) + "\r\n"
+    assert text.isascii()
+    return text
+
+
+def _cmd_line(cmd: str, probe: bool = False) -> str:
+    """cmd.exe running the cleanup script named by THEODORE_CLEANUP_SCRIPT. /c with the whole rest in one more pair of
+    quotes: cmd drops the outer pair and keeps the inner one whatever the path holds; /v:off whatever the registry says."""
+    return f'"{cmd}" /d /v:off /c ""%THEODORE_CLEANUP_SCRIPT%"{" probe" if probe else ""}"'
+
+
+def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -> Path | None:
     """Delete Theodore's folders after this process ends (its Python runs from inside them): a script in a private
     temporary folder, started outside this console's job (a closed console or SSH session does not stop it), retries
-    every two seconds for up to two minutes while Windows releases the last files, then writes its result beside it
-    and removes itself. Returns the result file."""
+    every second for up to five minutes while Windows releases the last files, then writes its result beside it and
+    removes itself. Returns the result file, or None when cmd.exe could not see Theodore's folder through the script
+    (the folder then stays, and the uninstall must not say it is removed)."""
     import tempfile
     work = Path(tempfile.mkdtemp(prefix="theodore-uninstall-"))
     result = work / "result.txt"
@@ -2505,45 +2557,50 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
     # installation's files as they are written (its sign-in was lost: ACCEPT-LOCAL2, observation b).
     marker = root / UNINSTALL_MARKER
     core.write_atomic(marker, f"{os.getpid()}\n", 0o644)
-    # A few seconds first: the launcher that called this client reads its own file to its end once the client exits.
-    lines = ["@echo off", "setlocal", "set N=0", "ping -n 3 127.0.0.1 >nul", ":again",
-             f'if exist "{marker}" goto pass', f'>"{result}" echo stopped: a new installation started in {root}', "goto end",
-             ":pass"]
-    for name in names:
-        target = root / name
-        if name == "state" and keep_specimen_record:
-            lines.append(f'for /d %%D in ("{target}\\*") do rmdir /s /q "%%D" >nul 2>&1')
-            lines.append(f'for %%F in ("{target}\\*") do if /i not "%%~nxF"=="{specimens.registry().name}" del /f /q "%%F" >nul 2>&1')
-        else:
-            lines.append(f'if exist "{target}" rmdir /s /q "{target}" >nul 2>&1')
-    checks = [f'if exist "{root / n}" goto wait' for n in names if not (n == "state" and keep_specimen_record)]
-    # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
-    lines += checks + ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done",
-                       "ping -n 2 127.0.0.1 >nul", "goto again", ":done", f'del /f /q "{marker}" >nul 2>&1',
-                       f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
-    lines += [f'if exist "{root / n}" (>>"{result}" echo left: {root / n})' for n in names
-              if not (n == "state" and keep_specimen_record)]
-    # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
-    lines += [f'if not exist "{root}" (>>"{result}" echo removed: {root})', ":end", "ping -n 301 127.0.0.1 >nul",
-              f'(goto) 2>nul & rmdir /s /q "{work}"']
     script = work / "cleanup.cmd"
-    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    script.write_bytes(_cleanup_script(names, keep_specimen_record).encode("ascii"))
+    values = {"THEODORE_CLEANUP_ROOT": str(root).rstrip("\\/"), "THEODORE_CLEANUP_RESULT": str(result),
+              "THEODORE_CLEANUP_WORK": str(work), "THEODORE_CLEANUP_SCRIPT": str(script),
+              "THEODORE_CLEANUP_KEEP": specimens.registry().name}
+    env = {**os.environ, **values}
     system32 = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32")
-    command = f'"{os.path.join(system32, "cmd.exe")}" /d /c "{script}"'
+    cmd = os.path.join(system32, "cmd.exe")
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work), "env": env}
+    # First the same script, the same way, asked only whether it sees the folder: what it sees is what it deletes.
+    try:
+        seen = subprocess.run(_cmd_line(cmd, probe=True), creationflags=0x08000000, timeout=60, **quiet).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        seen = f"{exc.__class__.__name__}: {exc}"
+    if seen != 0:
+        core.log(f"uninstall: the cleanup script does not see {root} (probe answered {seen}); not started")
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        core.remove_tree(work)
+        return None
+    command = _cmd_line(cmd)
     detached, new_group, no_window, breakaway = 0x00000008, 0x00000200, 0x08000000, 0x01000000
-    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work)}
     try:                                    # outside this console's job object, when the job allows it
         subprocess.Popen(command, creationflags=detached | new_group | no_window | breakaway, **quiet)
         return result
     except OSError:
         pass
-    # A job that forbids breaking away (some SSH servers, some terminals): WMI creates the process outside it.
+    # A job that forbids breaking away (some SSH servers, some terminals): WMI creates the process outside it. A process
+    # WMI creates does not inherit this one's variables, so a PowerShell started by WMI sets them, from an encoded
+    # command (ASCII on its command line, each value base64 of its UTF-8), and starts the cleanup.
     ps = os.path.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe")
-    os.environ["THEODORE_CLEANUP"], os.environ["THEODORE_CLEANUP_DIR"] = command, str(work)
-    code, _out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
-                       "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:THEODORE_CLEANUP; "
-                       "CurrentDirectory=$env:THEODORE_CLEANUP_DIR}; exit $r.ReturnValue"], timeout=60) \
-        if os.path.exists(ps) else (1, "")
+    code = 1
+    if os.path.exists(ps):
+        def text(value: str) -> str:
+            return f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{base64.b64encode(value.encode('utf-8')).decode('ascii')}'))"
+        body = "".join(f"$env:{k} = {text(v)}; " for k, v in values.items())
+        body += (f"$i = New-Object Diagnostics.ProcessStartInfo; $i.FileName = {text(cmd)}; "
+                 f"$i.Arguments = {text(command[len(cmd) + 3:])}; $i.UseShellExecute = $false; $i.CreateNoWindow = $true; "
+                 f"$i.WorkingDirectory = $env:THEODORE_CLEANUP_WORK; [void][Diagnostics.Process]::Start($i)")
+        launch = f'"{ps}" -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {base64.b64encode(body.encode("utf-16-le")).decode("ascii")}'
+        os.environ["THEODORE_CLEANUP"], os.environ["THEODORE_CLEANUP_DIR"] = launch, str(work)
+        code, _out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
+                           "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:THEODORE_CLEANUP; "
+                           "CurrentDirectory=$env:THEODORE_CLEANUP_DIR}; exit $r.ReturnValue"], timeout=60)
     if code != 0:
         subprocess.Popen(command, creationflags=detached | new_group | no_window, **quiet)
     return result
@@ -2599,10 +2656,13 @@ def _uninstall(keep_hosts: bool) -> int:
                 continue
             core.remove_tree(root / name)
         names = list(core.OWNED)        # each guarded by "if exist" in the script: a folder written meanwhile (a log) goes too
-        result = _windows_cleanup(root, names, bool(specimens_left)) if any((root / x).exists() for x in names) else None
+        pending = any((root / x).exists() for x in names)
+        result = _windows_cleanup(root, names, bool(specimens_left)) if pending else None
+        if pending and result is None:      # the cleanup could not see the folder: it stays, and is named as left
+            left.append(f"Theodore's folder {root} (nothing of Theodore runs any more; it can be deleted by hand)")
         what = (f"its folder {root} is deleted by a cleanup that starts when this command ends (Theodore's own processes are "
                 f"stopped; it retries every second for up to five minutes while Windows releases the last files; its result is written to "
-                f"{result} for five minutes)") if result else f"{root} was deleted"
+                f"{result} for five minutes)") if result else (f"{root} was deleted" if not pending else "its other files were deleted")
         what += (f"; {'; '.join(edits)}" if edits else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "")
         if left:
             print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed and {what}, but these could not be: "

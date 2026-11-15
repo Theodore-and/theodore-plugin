@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import locale
 import os
 import re
 import platform as _platform
@@ -590,6 +591,23 @@ def now() -> float:
 
 # --- files ---------------------------------------------------------------------------------------------------------------
 
+def child_text(data: bytes | str | None) -> str:
+    """A child process's output as text. Theodore's children (its Python with PYTHONIOENCODING=utf-8, Node, the
+    assistants' CLIs) write UTF-8 on every platform; Windows' own tools write the console's code page. UTF-8 first,
+    else the system's code page, so C:\\Users\\Théo is never read as "ThÃ©o" (WINDOWS: a self-test error)."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        if IS_WINDOWS:
+            with contextlib.suppress(LookupError):
+                return data.decode("oem", errors="replace")
+        return data.decode(locale.getpreferredencoding(False) or "utf-8", errors="replace")
+
+
 def read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
@@ -673,8 +691,12 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
         remove_tree(link)
     link.parent.mkdir(parents=True, exist_ok=True)
     if IS_WINDOWS:
-        subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # The paths reach cmd only through variables, expanded inside quotes: on its command line a path with &, ^, % or
+        # a parenthesis (C:\\Users\\Tom & Jerry) would be cmd syntax, not a name.
+        cmd = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "cmd.exe")
+        subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
+                       env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": str(target)},
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         os.symlink(relative or str(target), link, target_is_directory=True)
 

@@ -1,5 +1,19 @@
 # Changes
 
+## 0.4.0
+
+- Windows, a user name with a letter outside the console's code page (C:\Users\Théo Tester) (lane WINFIX, W-3):
+  uninstall left Theodore's folder behind and still said OK. The cleanup script that deletes the folder after the
+  command ends had the paths written into it in UTF-8, and cmd.exe reads a batch file in the OEM code page, so it
+  looked for another folder and stopped. The script now holds only ASCII and gets every path through environment
+  variables, expanded inside quotes with delayed expansion off (a space, &, %, !, ^ or a parenthesis in a name is part
+  of the path; the WMI way for a job that forbids breaking away sets them from an encoded PowerShell command). The
+  same script is first asked, synchronously, whether it sees the folder; when it does not, nothing is started and the
+  uninstall answers RETRY naming the folder, never OK. Directory junctions take their paths the same way.
+- Windows: the engine's self-test errors, and the assistants' CLI output the client reads, are read as UTF-8 (they
+  were read in the ANSI code page: "ThÃ©o"); the engine's text streams are UTF-8 on every platform
+  (PYTHONIOENCODING=utf-8), as the client's already were.
+
 ## 0.3.10
 
 - Claude Desktop: when the app is on this computer, `hosts register` (the installer runs it) adds Theodore's local

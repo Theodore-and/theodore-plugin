@@ -300,6 +300,9 @@ def engine_env(directory: Path) -> dict:
     env["THEODORE_HOME"] = str(core.home().root)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
+    # The engine's text streams in UTF-8 on every platform, as on macOS: on Windows a pipe otherwise gets the ANSI code
+    # page, the engine's lines then differ in encoding from the client's around them, and a letter outside it fails.
+    env["PYTHONIOENCODING"] = "utf-8"
     usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
     if not system_libreoffice():
         local = libreoffice_binary()
@@ -325,9 +328,9 @@ def _prepare_engine(directory: Path, runtime_id: str) -> None:
     runtime = home.runtime / runtime_id
     python = home.runtime_python(runtime_id)
     done = subprocess.run([str(python), "-I", "-m", "venv", "--system-site-packages", "--without-pip", str(directory / ".venv")],
-                          capture_output=True, text=True)
+                          capture_output=True)
     if done.returncode != 0:
-        raise EngineError(f"could not create the engine's Python environment: {(done.stderr or done.stdout).strip()[:200]}")
+        raise EngineError(f"could not create the engine's Python environment: {core.child_text(done.stderr or done.stdout).strip()[:200]}")
     core.link_dir(directory / "node_modules", runtime / "node_modules")
     core.link_dir(directory / ".runtime" / "bin", runtime / "bin")
     home.packs.mkdir(parents=True, exist_ok=True)
@@ -344,11 +347,11 @@ def _self_test(directory: Path, runtime_id: str) -> None:
         raise EngineError("the engine archive has no skills/pptx/scripts/pptx.py")
     try:
         done = subprocess.run([str(engine_python(directory)), str(script), "--help"], env=engine_env(directory),
-                              capture_output=True, text=True, timeout=180, cwd=str(directory))
+                              capture_output=True, timeout=180, cwd=str(directory))
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise EngineError(f"the engine did not start: {exc}") from None
     if done.returncode != 0:
-        raise EngineError(f"the engine's self-test exited {done.returncode}: {(done.stderr or done.stdout).strip()[-200:]}")
+        raise EngineError(f"the engine's self-test exited {done.returncode}: {core.child_text(done.stderr or done.stdout).strip()[-200:]}")
     package = core.read_json(directory / "package.json")
     for name in (package.get("dependencies") or {}):
         if not (directory / "node_modules" / name / "package.json").is_file():
@@ -1180,8 +1183,9 @@ def _engine_refusal(directory: Path) -> Status | None:
     script = directory / "skills" / "pptx" / "scripts" / "pptx.py"
     try:
         probe = subprocess.run([str(engine_python(directory)), str(script), "--help"], env=engine_env(directory),
-                               capture_output=True, text=True, timeout=60)
-        answer = json.loads(probe.stdout.strip().splitlines()[-1]) if probe.returncode == 1 and probe.stdout.strip() else {}
+                               capture_output=True, timeout=60)
+        out = core.child_text(probe.stdout).strip()
+        answer = json.loads(out.splitlines()[-1]) if probe.returncode == 1 and out else {}
     except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):
         return None
     code = answer.get("code") if isinstance(answer, dict) else None
