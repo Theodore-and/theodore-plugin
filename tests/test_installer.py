@@ -185,6 +185,7 @@ class Installer(unittest.TestCase):
         self.assertTrue(first.startswith("THEODORE OK: Theodore is installed and signed in; the rest of its runtime"), first)
         self.assertIn("run nothing more now, neither doctor nor this installer", nxt)
         self.assertIn("start a new session and ask for a deck", nxt)
+        self.assertIn("here each Theodore command would ask for approval", nxt)
         self.assertNotIn("SETUP_IN_PROGRESS", first)
         self.box.wait_jobs(timeout=180)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")

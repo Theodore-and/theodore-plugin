@@ -24,7 +24,9 @@
   Their life is unchanged: removed after an hour by the next Theodore call, all of them at uninstall.
 - Windows Codex install (as install.sh, lane CHATGPT): under `CODEX_THREAD_ID` install.cmd waits up to 540 s for the
   download, with a line a minute while it waits, and, still downloading with every assistant registered, ends with
-  THEODORE OK and "run nothing more now, neither doctor nor this installer" instead of an in-progress status to poll.
+  THEODORE OK and "run nothing more now, neither doctor nor this installer" instead of an in-progress status to poll;
+  ready, it ends with "Theodore is ready (the check above)" and sends the deck to a new session (Codex loads Theodore's
+  tool and permissions only when a session starts), both as install.sh.
 - Windows, a user name with & or a parenthesis: Claude Desktop's entry, when the launcher path has a character cmd
   treats specially, carries it in the entry's `env` (`THEODORE_DESKTOP_LAUNCHER`, quoted) and runs
   `cmd /d /v:on /c !THEODORE_DESKTOP_LAUNCHER! mcp --for claude-desktop` (delayed expansion comes after cmd has parsed

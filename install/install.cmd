@@ -402,7 +402,7 @@ setlocal EnableDelayedExpansion
 set "WHERE=!WHERE:~1!"
 if "!WHERE:~-1!"=="." set "WHERE=!WHERE:~0,-1!"
 echo THEODORE OK: Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (!WHERE!).
-echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck.
+echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval.
 echo TELL THE USER: Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck.
 endlocal
 set "RC=0"
@@ -415,7 +415,14 @@ goto :finish
 :doctor_shown
 type "%WORK%\doctor.txt"
 if not "%RC%"=="0" goto :finish
-if "%HOSTS_RC%"=="0" goto :finish
+if not "%HOSTS_RC%"=="0" goto :hosts_left
+if not defined CODEX_THREAD_ID goto :finish
+rem Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session. As install.sh.
+echo THEODORE OK: Theodore is ready (the check above).
+echo NEXT: run nothing more now. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval.
+echo TELL THE USER: Theodore is ready. Start a new session and ask for your deck there.
+goto :finish
+:hosts_left
 echo THEODORE RETRY: Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above).
 echo NEXT: register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session.
 echo TELL THE USER: Theodore is installed, but I could not add it to one of your assistants automatically. I will add it by hand.

@@ -163,6 +163,14 @@ class BatchFiles(unittest.TestCase):
         self.assertIn("echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. "
                       "Tell the user to start a new session and ask for a deck.", cmd)
         self.assertLess(ok, cmd.index("echo THEODORE SETUP_IN_PROGRESS: Theodore is installed;"))
+        # Ready in Codex: the deck goes to a new session (Codex loads the tool and the rules when a session starts).
+        sentence = (" If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's "
+                    "tool and permissions only when a session starts, so here each Theodore command would ask for approval.")
+        self.assertEqual(2, cmd.count(sentence))
+        ready = cmd.index("echo THEODORE OK: Theodore is ready (the check above).")
+        self.assertLess(cmd.index(":doctor_shown"), ready)
+        self.assertLess(cmd.index('if not "%HOSTS_RC%"=="0" goto :hosts_left'), ready)
+        self.assertIn("echo TELL THE USER: Theodore is ready. Start a new session and ask for your deck there.", cmd)
 
     def test_the_batch_files_are_ascii(self):
         for path in self.FILES:
