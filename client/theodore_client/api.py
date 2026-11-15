@@ -464,7 +464,7 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
         if exc.code == 407:
             raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
         raw = _read_bounded(exc, ERROR_LIMIT)
-        code, message, reason = f"http_{exc.code}", "", ""
+        code, message, reason, err = f"http_{exc.code}", "", "", None
         try:
             parsed = json.loads(raw.decode("utf-8"))
             err = parsed.get("error")
@@ -477,17 +477,20 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
         except (ValueError, AttributeError):
             pass
         if "Authorization" in hdrs and learn_refusals:
-            _signed_out(exc.code, code)
+            _signed_out(exc.code, code, url, isinstance(err, dict))
         raise ApiError(exc.code, code, message, exc.headers.get("Retry-After"), reason) from None
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as exc:
         raise _network_error(exc) from None
 
 
-def _signed_out(http_status: int, code: str) -> None:
+def _signed_out(http_status: int, code: str, url: str = "", well_formed: bool = False) -> None:
     """The service refused this installation's own credential. Whatever route learned it: a revoked or unknown
     installation loses the credential and the stored licence now, so no later command works from what is on disk; an
-    account that is refused (403) loses the stored licence. Automatic reports being off is not a refusal of the account."""
-    from . import account, credentials, specimens
+    account that is refused (403) loses the stored licence. Automatic reports being off is not a refusal of the account.
+    A definitive refusal in the service's own error envelope also marks Theodore's engine, manual and packs for removal
+    (withdraw.py; made at the end of the command, never while the engine runs)."""
+    from . import account, credentials, specimens, withdraw
+    withdraw.note_refusal(http_status, code, url, well_formed)
     if code in DELETE_CREDENTIAL_ON or code in ("account_suspended", "entitlement_inactive"):
         specimens.sweep(everything=True)        # whatever command learned it: no specimen sheet is kept (never raises)
     if code in DELETE_CREDENTIAL_ON:
@@ -595,14 +598,14 @@ def _download_once(url: str, dest: Path, *, sha256: str, bearer: str | None = No
         if exc.code == 407:
             raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
         raw = _read_bounded(exc, ERROR_LIMIT)
-        code = f"http_{exc.code}"
+        code, err = f"http_{exc.code}", None
         try:
             err = json.loads(raw.decode("utf-8")).get("error")
             code = err.get("code", code) if isinstance(err, dict) else (err or code)
         except (ValueError, AttributeError):
             pass
         if "Authorization" in hdrs:
-            _signed_out(exc.code, str(code))
+            _signed_out(exc.code, str(code), url, isinstance(err, dict))
         raise ApiError(exc.code, str(code), "", exc.headers.get("Retry-After")) from None
     except OSError as exc:
         _unlink(part)

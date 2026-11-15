@@ -498,7 +498,7 @@ def _specimen_paths(files: list[str]) -> dict[str, Path]:
             asked = {"Accept": "image/jpeg, application/json;q=0.9"}
             if copy is not None:
                 try:
-                    asked["If-None-Match"] = '"' + hashlib.sha256(copy.read_bytes()).hexdigest() + '"'
+                    asked["If-None-Match"] = '"' + specimens.content_sha256(copy.read_bytes()) + '"'
                 except OSError:
                     copy = None
             try:
@@ -513,7 +513,8 @@ def _specimen_paths(files: list[str]) -> dict[str, Path]:
                 continue
             if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
                 raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
-            if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest():
+            if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest() \
+                    or not specimens.content_matches(raw, headers.get("ETag")):
                 raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
                              "run the same command again once. If it fails again, continue without the sheet.",
                              "A design specimen arrived damaged. I am trying once more.")
