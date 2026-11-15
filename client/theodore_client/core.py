@@ -475,7 +475,9 @@ def shim_active() -> bool:
         texts = shim_texts()
         if found and texts:
             path = Path(found)
-            active = path.name in texts and shim_matches(path, texts[path.name])
+            # Windows names it as PATHEXT spells the extension (theodore.CMD): the file name is matched without case.
+            name = next((n for n in texts if n.lower() == path.name.lower()), None) if IS_WINDOWS else path.name
+            active = name in texts and shim_matches(path, texts[name])
     _SHIM_ACTIVE[:] = [active]
     return active
 

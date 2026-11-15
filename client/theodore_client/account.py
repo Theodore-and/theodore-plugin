@@ -505,6 +505,21 @@ def login_finish(wait_seconds: float) -> Status:
         time.sleep(interval)
 
 
+def activation_rate_limited(retry_after: str | None) -> Status:
+    """The service's limit on sign-ins per account (and per network) in an hour (W-16): the code was not used and is
+    not wrong, so it is never reported as invalid."""
+    try:
+        minutes = max(1, -(-int(str(retry_after).strip()) // 60))
+    except (TypeError, ValueError):
+        minutes = 60
+    return Status("RETRY", f"too many sign-ins on this Theodore account (or from this network) in the last hour; the "
+                           f"activation code was not used. Try again in {minutes} minute{'s' if minutes != 1 else ''}.",
+                  f"do not retry now. Tell the user, and run the same command again in {minutes} minutes (with a fresh "
+                  f"sentence from {core.site_url('/app')} if this code has expired by then).",
+                  f"There have been too many Theodore log-ins on your account in the last hour. Please try again in about "
+                  f"{minutes} minute{'s' if minutes != 1 else ''}; your code was not used.")
+
+
 def login_code(code: str) -> Status:
     """Redeem a one-time activation code from the portal. The code is never printed or logged."""
     code = code.strip().upper()
@@ -517,6 +532,8 @@ def login_code(code: str) -> Status:
     except api.NetworkError as error:
         return api.offline(error, "the activation code could not be redeemed")
     except api.ApiError as error:
+        if error.code == "rate_limited":
+            return activation_rate_limited(error.retry_after)
         if error.code == "invalid_grant":
             return Status("SIGN_IN_REQUIRED", "the activation code is not valid any more (codes last 10 minutes and work once).",
                           f"run {quoted_launcher()} login --start and follow what it prints, or ask the user for a fresh sentence from {core.site_url('/app')}.",

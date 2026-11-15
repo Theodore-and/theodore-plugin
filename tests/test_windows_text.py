@@ -70,7 +70,7 @@ class WindowsCleanup(unittest.TestCase):
         raw = script.read_bytes()
         self.assertTrue(raw.isascii(), "the batch file holds only ASCII")
         for piece in ("Théo", "测试", "&", "50%off", str(self.tmp)):
-            self.assertNotIn(piece.encode("utf-8"), raw.replace(b"& rmdir", b"").replace(b"2>&1", b""))
+            self.assertNotIn(piece.encode("utf-8"), raw.replace(b"& rmdir", b"").replace(b"& cd /d", b"").replace(b"2>&1", b""))
         probe, started = calls[0], calls[1]
         self.assertEqual(("run", "popen"), (probe[0], started[0]), "the probe runs first, synchronously, then the cleanup")
         env = started[2]["env"]
@@ -306,8 +306,10 @@ class CleanupLeavesNoFolder(unittest.TestCase):
         """W-12: cmd cannot remove its own current folder, so every uninstall left an empty theodore-uninstall-<random>."""
         lines = commands._cleanup_script(list(core.OWNED), keep_specimen_record=True).split("\r\n")
         last = next(i for i, line in enumerate(lines) if 'rmdir /s /q "%THEODORE_CLEANUP_WORK%"' in line)
-        self.assertEqual(lines[last - 1], 'cd /d "%THEODORE_CLEANUP_WORK%\\.."', "out of the folder, to %TEMP%, just before")
-        self.assertLess(lines.index(":end"), last - 1, "on every way out, a stopped cleanup included")
+        self.assertEqual(lines[last], '(goto) 2>nul & cd /d "%THEODORE_CLEANUP_WORK%\\.." & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
+                         "after (goto), on the same line: the script's setlocal would otherwise put this folder back as current")
+        self.assertIn("setlocal", lines[1])
+        self.assertLess(lines.index(":end"), last, "on every way out, a stopped cleanup included")
 
 
 class WindowsShortCommand(unittest.TestCase):
@@ -344,10 +346,11 @@ class WindowsShortCommand(unittest.TestCase):
         self.assertTrue(all(core.shim_matches(folder / n, t) for n, t in texts.items()))
         with mock.patch.object(commands, "_host_record", lambda: {"shim": {"files": [str(folder / n) for n in texts]}}):
             self.assertTrue(commands._shim_written(), "its rules are written")
-        with mock.patch.dict(os.environ, {"PATH": str(folder)}), mock.patch.object(core.shutil, "which", lambda n: str(folder / "theodore.cmd")):
-            core.shim_reset()
-            self.assertEqual(core.quoted_launcher(), "theodore", "and the texts name it")
-            core.shim_reset()
+        for found in ("theodore.cmd", "theodore.CMD"):       # PATHEXT's spelling, as Windows' which() gives it
+            with mock.patch.dict(os.environ, {"PATH": str(folder)}), mock.patch.object(core.shutil, "which", lambda n, f=found: str(folder / f)):
+                core.shim_reset()
+                self.assertEqual(core.quoted_launcher(), "theodore", f"and the texts name it ({found})")
+                core.shim_reset()
 
     def test_a_home_elsewhere_gets_no_short_command_on_windows(self):
         with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "elsewhere")}), mock.patch.object(core, "_HOME", None):
@@ -417,3 +420,17 @@ class GitBashBeingFetched(unittest.TestCase):
             self.assertEqual(commands._git_fetching(), "downloading, 40%")
             job.finish()
             self.assertIsNone(commands._git_fetching())
+
+
+class InstallCmdRateLimit(unittest.TestCase):
+    """W-16 in install.cmd (its run is on Windows CI): the 429 rate_limited answer is told apart from a wrong code, and
+    the wait is the 7th space-separated word of the service's body, as for /f "tokens=7" reads it."""
+
+    def test_the_branch_and_the_word_it_reads(self):
+        text = (Path(support.ROOT) / "install" / "install.cmd").read_text(encoding="ascii")
+        self.assertIn('if "%HTTP%"=="429" "%SYS32%\\findstr.exe" /c:"rate_limited"', text)
+        self.assertIn('for /f "usebackq tokens=7 delims= " %%S in ("%SAFE%\\activation.pending")', text)
+        self.assertIn("echo THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins", text)
+        body = json.dumps({"error": {"code": "rate_limited", "message": "Too many requests. Try again in 1500 seconds.",
+                                     "request_id": "r"}}, separators=(",", ":"))
+        self.assertEqual(body.split(" ")[6], "1500", "the service's JSON body, as the batch file splits it")

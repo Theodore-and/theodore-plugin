@@ -29,8 +29,14 @@
   starts `./skills/pptx/scripts/theodore.cmd`, rewritten at every unpack so plugin updates keep it.
 - W-9: `doctor` on Windows says Theodore's own PortableGit is downloading (and how far), with nothing to install,
   instead of telling the person to install Git for Windows meanwhile.
-- W-12: the Windows uninstall's cleanup leaves its own folder before removing it, so no empty
+- W-12: the Windows uninstall's cleanup leaves its own folder before removing it (after `(goto)`, on the same line,
+  since the script's `setlocal` puts the saved folder back when the batch ends), so no empty
   `%TEMP%\theodore-uninstall-<random>` is left.
+- W-16: a sign-in the service refuses for its per-account (or per-network) hourly limit (HTTP 429 `rate_limited`) is no
+  longer reported as a bad code. install.sh, install.cmd and `login --code` say there have been too many log-ins on
+  this account in the last hour, that the code was not used, and to try again in N minutes (from the answer); the
+  installers install everything else and end with that status (RETRY, 75).
+- Skill stubs: "run `theodore guide <skill>` where that command is on PATH, else, by absolute path, …".
 
 ## 0.4.0
 

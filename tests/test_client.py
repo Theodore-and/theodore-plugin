@@ -49,6 +49,25 @@ class SignIn(ClientCase):
             _first, nxt, _tell = self.assertStatus(self.client("login", "--code", code), "SIGN_IN_REQUIRED", 65)
             self.assertIn("login --start", nxt)
 
+    def test_a_rate_limited_sign_in_is_not_called_a_bad_code(self):
+        """W-16: the service's per-account limit answers 429 rate_limited; the code was not used and is not wrong."""
+        self.api.issue_activation_code("AAAA-2222")
+        self.api.activation_rate_limited = 1500
+        first, nxt, tell = self.assertStatus(self.client("login", "--code", "AAAA-2222"), "RETRY", self._exit("RETRY"))
+        self.assertIn("too many sign-ins", first)
+        self.assertIn("25 minutes", first)
+        self.assertIn("do not retry now", nxt)
+        self.assertIn("too many Theodore log-ins on your account in the last hour", tell)
+        for text in (first, nxt, tell):
+            self.assertNotIn("not valid", text)
+            self.assertNotIn("expired", text.split("if this code has expired")[0])
+        self.api.activation_rate_limited = None
+        self.assertStatus(self.client("login", "--code", "AAAA-2222"), "OK", 0)
+
+    def _exit(self, name: str) -> int:
+        from theodore_client.contract import EXIT
+        return EXIT[name]
+
     def test_malformed_code_is_usage(self):
         self.assertStatus(self.client("login", "--code", "nope"), "USAGE", 64)
 

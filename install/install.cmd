@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.4.1"
-set "PIN_CLIENT=client/client-0.4.1.tar 1bdfca6a2b0010639fcce1ea68eb47ae806868d86741e50da43e10f5c45d348e"
+set "PIN_CLIENT=client/client-0.4.1.tar 1e5aa41467c0934b7398a8980c410b018f759265f934743e986cf803a42a8a98"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -75,6 +75,7 @@ if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
 set "NO_SETTINGS="
+set "RATE_WAIT="
 set "WORK="
 set "RC=0"
 rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
@@ -226,8 +227,13 @@ exit /b 68
 :code_refused
 rem The answer was written into the private folder only: a refused code (spent by an earlier run of the same line) never
 rem touches the sign-in that run saved in state\activation.pending.
+rem W-16: HTTP 429 rate_limited is the service's limit on sign-ins per account (or network) in an hour: the code was not
+rem used and is not wrong. Its message is "Too many requests. Try again in N seconds." (the 7th word, N).
+if "%HTTP%"=="429" "%SYS32%\findstr.exe" /c:"rate_limited" "%SAFE%\activation.pending" >nul 2>&1 && call :rate_wait
 rmdir /s /q "%SAFE%" >nul 2>&1
 set "CODE="
+if defined RATE_WAIT echo theodore-install: too many log-ins on this Theodore account in the last hour, so this computer is not signed in yet; the one-time code was not used (try again in %RATE_WAIT% minutes)
+if defined RATE_WAIT goto :stage1
 if not exist "%HOME_DIR%\state\activation.pending" goto :code_refused_new
 echo theodore-install: the one-time code was not accepted (it was used already, by an earlier run of this installer); the login that run saved is kept
 goto :stage1
@@ -430,12 +436,27 @@ set "RC=75"
 goto :finish
 
 :sign_in_last
+if not defined RATE_WAIT goto :sign_in_link
+echo THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins on this Theodore account in the last hour, and the one-time code was not used. Try again in %RATE_WAIT% minutes.
+echo NEXT: do not retry now. Tell the user, and run the same install line again in %RATE_WAIT% minutes (with a fresh sentence from the Theodore site if the code has expired by then).
+echo TELL THE USER: There have been too many Theodore log-ins on your account in the last hour. Please try again in about %RATE_WAIT% minutes; your code was not used.
+set "RC=75"
+goto :finish
+:sign_in_link
 call "%%T%%" login --start
 set "RC=%ERRORLEVEL%"
 goto :finish
 
 rem =====================================================================================================================
 rem Subroutines
+
+:rate_wait
+set "RW="
+for /f "usebackq tokens=7 delims= " %%S in ("%SAFE%\activation.pending") do if not defined RW set "RW=%%S"
+set /a RATE_WAIT=(RW+59)/60 >nul 2>&1
+if not defined RATE_WAIT set "RATE_WAIT=60"
+if %RATE_WAIT% LEQ 0 set "RATE_WAIT=60"
+exit /b 0
 rem =====================================================================================================================
 
 :remove_specimens

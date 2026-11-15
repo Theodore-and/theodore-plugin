@@ -2895,10 +2895,10 @@ def _cleanup_script(names: list[str], keep_specimen_record: bool) -> str:
     lines += [f'if exist "{root}\\{n}" (>>"{result}" echo left: {n})' for n in gone]
     # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
     # Out of its own folder first: a process's current folder cannot be removed, so the empty
-    # %TEMP%\theodore-uninstall-<random> stayed after every uninstall (WINDOWS, W-12).
+    # %TEMP%\theodore-uninstall-<random> stayed after every uninstall (WINDOWS, W-12). The `cd` comes after `(goto)` on the
+    # same line: ending the batch ends its setlocal, which puts the folder it saved (this one) back as the current one.
     lines += [f'if not exist "{root}" (>>"{result}" echo removed: the folder)', ":end", "ping -n 301 127.0.0.1 >nul",
-              'cd /d "%THEODORE_CLEANUP_WORK%\\.."',
-              '(goto) 2>nul & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
+              '(goto) 2>nul & cd /d "%THEODORE_CLEANUP_WORK%\\.." & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
               ":probe", f"if not exist {marker} exit /b 3", 'if not exist "%THEODORE_CLEANUP_SCRIPT%" exit /b 4', "exit /b 0"]
     text = "\r\n".join(lines) + "\r\n"
     assert text.isascii()
@@ -2933,7 +2933,7 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
     env = {**os.environ, **values}
     system32 = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32")
     cmd = os.path.join(system32, "cmd.exe")
-    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work), "env": env}
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work.parent), "env": env}
     # First the same script, the same way, asked only whether it sees the folder: what it sees is what it deletes.
     try:
         seen = subprocess.run(_cmd_line(cmd, probe=True), creationflags=0x08000000, timeout=60, **quiet).returncode

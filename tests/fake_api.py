@@ -186,6 +186,7 @@ class FakeApi:
         self.usage_bodies: list[bytes] = []   # every POST /v1/usage body exactly as it arrived
         self.usage_events: dict[str, dict] = {}   # event_id -> event, as the server keeps one per id
         self.activations: list[dict] = []             # /v1/device/activate bodies, without the code
+        self.activation_rate_limited: int | None = None   # seconds: /v1/device/activate answers 429 rate_limited (W-16)
         self.refreshes = 0
         api = self
 
@@ -464,6 +465,9 @@ class FakeApi:
             device["status"] = "consumed"
             return self._send(h, 200, self._bundle(device["meta"]))
         if route == ["device", "activate"] and method == "POST":
+            if self.activation_rate_limited is not None:      # the service's per-account limit: the code is not spent
+                wait = self.activation_rate_limited
+                return self._error(h, 429, "rate_limited", f"Too many requests. Try again in {wait} seconds.", headers={"Retry-After": str(wait)})
             entry = self.activation_codes.get(normalize_code(body.get("code")))
             if not entry or entry["used"]:
                 return self._device_error(h, "invalid_grant")

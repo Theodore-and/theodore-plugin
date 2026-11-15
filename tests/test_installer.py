@@ -251,6 +251,27 @@ class Installer(unittest.TestCase):
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
         self.assertTrue(status_lines(doctor.stdout)[0].startswith("THEODORE OK: Theodore is ready"), doctor.stdout)
 
+    def test_a_rate_limited_code_is_not_called_bad_and_the_last_status_says_when_to_run_again(self):
+        """W-16: the service's per-account sign-in limit (429 rate_limited) is not a wrong code: install.sh and
+        install.cmd say so, install everything else, and end with when to run the same line again."""
+        self.api.issue_activation_code("ABCD-1234")
+        self.api.activation_rate_limited = 1500
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertTrue(first.startswith("THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins"), first)
+        self.assertIn("25 minutes", first)
+        self.assertIn("run the same install line again in 25 minutes", nxt)
+        self.assertIn("your code was not used", tell)
+        self.assertNotIn("was not accepted", result.stdout, "the code is never reported as invalid")
+        self.assertIn("too many log-ins on this Theodore account in the last hour", result.stdout)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed")
+        self.api.activation_rate_limited = None
+        done = self.install("--code", "ABCD-1234")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.api.activations), 1, "the same code works once the limit has passed")
+        self.box.wait_jobs()
+
     def test_running_the_line_again_with_its_spent_code_keeps_the_sign_in_the_first_run_saved(self):
         # ACCEPT-RC8 D1: the first run redeemed the code and was stopped; the agent ran the same line again, whose step 1
         # emptied state/activation.pending before the (refused) activation and then deleted it: the sign-in was lost.
