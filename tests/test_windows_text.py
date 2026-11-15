@@ -137,6 +137,23 @@ class Junction(unittest.TestCase):
         self.assertEqual(str(tmp / "target"), env["THEODORE_LINK_TARGET"])
 
 
+class BatchFiles(unittest.TestCase):
+    """CALL doubles every caret, quoted or not, and expands % a second time: a path in a variable goes to CALL as
+    %%NAME%% (expanded once, after that), so C:\\Users\\a^b or 50%off stay themselves."""
+    FILES = [support.ROOT / "install" / "install.cmd", support.LAUNCHER_DIR / "theodore.cmd"]
+
+    def test_no_call_of_a_path_variable_expanded_before_call(self):
+        for path in self.FILES:
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().lower().startswith("rem "):
+                    continue
+                self.assertIsNone(re.search(r'\bcall "%[A-Za-z_]+%', line, re.I), f"{path.name}:{n}: {line}")
+
+    def test_the_batch_files_are_ascii(self):
+        for path in self.FILES:
+            self.assertTrue(path.read_bytes().isascii(), path)
+
+
 class ChildText(unittest.TestCase):
     def test_utf8_from_a_child_is_read_as_utf8(self):
         path = "C:\\Users\\Théo Tester\\测试"

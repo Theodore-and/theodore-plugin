@@ -13,6 +13,10 @@
 - Windows: the engine's self-test errors, and the assistants' CLI output the client reads, are read as UTF-8 (they
   were read in the ANSI code page: "ThÃ©o"); the engine's text streams are UTF-8 on every platform
   (PYTHONIOENCODING=utf-8), as the client's already were.
+- Windows batch files (lane WINFIX audit): the installer and the launcher call Theodore's launcher, the setup and
+  themselves as `call "%%NAME%%"`, so the path is expanded once, after CALL (CALL doubles every caret, quoted or not,
+  and expands % a second time: C:\Users\a^b or 50%off was another path); the lines that name Theodore's folder or
+  its stable launcher quote it, so a name with & or a parenthesis stays one path (install.sh quotes it the same way).
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an

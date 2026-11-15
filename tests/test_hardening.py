@@ -738,7 +738,7 @@ class WindowsRenderer(unittest.TestCase):
 
     def test_the_installer_asks_for_libreoffice_only_through_if_needed(self):
         text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
-        self.assertIn('call "%T%" tools install libreoffice --background --if-needed >nul 2>&1', text)
+        self.assertIn('call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1', text)
         self.assertNotIn("tools install libreoffice --background >nul", text)
 
 
@@ -844,5 +844,5 @@ class ClaudeGitBash(unittest.TestCase):
 
     def test_the_installer_asks_for_git_bash_only_through_if_needed(self):
         text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
-        self.assertIn('call "%T%" tools install git --if-needed', text)
+        self.assertIn('call "%%T%%" tools install git --if-needed', text)
         self.assertIn('/c:"\\"git_bash\\":"', text, "an uninstall without the runtime knows a setting is left to take back")

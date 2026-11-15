@@ -510,7 +510,7 @@ else
   say "Theodore's own commands run without asking each time; to turn that off: \"$T\" hosts settings --remove"
 fi
 if [ -n "$SETUP_FAILED_OUT" ]; then
-  say "the stable launcher is $T"
+  say "the stable launcher is \"$T\""
   printf '%s\n' "$SETUP_FAILED_OUT"
   exit 68
 fi
@@ -527,7 +527,7 @@ if [ "$(uname -s)" = Darwin ] && ! command -v soffice >/dev/null 2>&1 && [ ! -d 
 fi
 
 # --- 7. the check the assistant reports: the last line says what failed, if anything did ------------------------------
-say "the stable launcher is $T"
+say "the stable launcher is \"$T\""
 if ! theodore whoami >/dev/null 2>&1; then
   # Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to
   # relay. The installer never opens a browser; only `theodore login --open`, asked for by the user, does.

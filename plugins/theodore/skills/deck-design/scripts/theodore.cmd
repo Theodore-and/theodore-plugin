@@ -154,7 +154,7 @@ set /a WMI_WAIT+=1
 goto :wmic_wait
 :start_foreground
 echo theodore: no background job can be started on this computer (PowerShell and WMI are unavailable), so Theodore sets itself up in this call; it takes a few minutes and ends with a status.
-call "%LAUNCHER%" __bootstrap <nul >nul 2>&1
+call "%%LAUNCHER%%" __bootstrap <nul >nul 2>&1
 :started
 set /a WAITED=0
 set /a LIMIT=20
@@ -184,7 +184,7 @@ rem not the client's (its codes end at 130) but Windows refusing to start the in
 rem The MCP server's standard output carries only the protocol: setup reports to standard error, then the server starts
 rem once the client is there.
 :mcp_not_ready
-call "%SELF%" setup --wait 20 1>&2
+call "%%SELF%%" setup --wait 20 1>&2
 call :check_ready
 if defined READY goto :run_client
 exit /b 1
@@ -670,9 +670,9 @@ echo TELL THE USER: This copy of Theodore was built without its security keys an
 exit /b 78
 
 :foreign_home
-echo THEODORE USAGE: this Theodore folder (%HOME_DIR%) belongs to the Theodore service at %HOME_API%, but this launcher is stamped for %MY_API%; a folder is never shared between two services.
+echo THEODORE USAGE: this Theodore folder ("%HOME_DIR%") belongs to the Theodore service at %HOME_API%, but this launcher is stamped for %MY_API%; a folder is never shared between two services.
 echo NEXT: do not retry. Tell the user: to use this build, set THEODORE_HOME to a separate folder for it and run the same command again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
-echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
+echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in "%HOME_DIR%". To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
 exit /b 64
 
 :no_conf

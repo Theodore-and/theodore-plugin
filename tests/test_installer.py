@@ -119,7 +119,7 @@ class Installer(unittest.TestCase):
         self.assertTrue(first.startswith("THEODORE OK: Theodore is ready: engine 1.0.0-rc.3"), first)
         self.assertEqual(out.strip().splitlines()[-1], tell)
         home = self.box.home
-        self.assertIn(f"the stable launcher is {home / 'bin' / STABLE}", out)
+        self.assertIn(f'the stable launcher is "{home / "bin" / STABLE}"', out)    # quoted: a name with & or ( stays one path
         # the code is redeemed before any large download
         paths = [r["path"] for r in self.api.requests]
         self.assertLess(paths.index("/v1/device/activate"), min(i for i, p in enumerate(paths) if p.startswith("/dl/runtime/")))

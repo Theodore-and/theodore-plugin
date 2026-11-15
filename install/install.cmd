@@ -45,7 +45,7 @@ set "ICOUNT=0"
 for /f %%N in ('dir /b /a "%IDIR%" 2^>nul ^| "%SystemRoot%\System32\find.exe" /c /v ""') do set "ICOUNT=%%N"
 if not "%ICOUNT%"=="1" goto :installer_body
 set "THEODORE_INSTALL_INNER=1"
-call "%SELF%" %*
+call "%%SELF%%" %*
 set "IRC=%ERRORLEVEL%"
 set "THEODORE_INSTALL_INNER="
 (goto) 2>nul & del /f /q "%IDIR%\install.cmd" >nul 2>&1 & rmdir "%IDIR%" >nul 2>&1 & "%SystemRoot%\System32\cmd.exe" /d /c exit %IRC%
@@ -111,7 +111,7 @@ if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with 
 if not defined UNINSTALL goto :env_check
 rem The launcher's uninstall stops Theodore's processes and starts the cleanup that removes the folder once the last
 rem files are released; its status is the answer (checking the folder now would race that cleanup).
-if exist "%HOME_DIR%\bin\theodore.cmd" (call "%HOME_DIR%\bin\theodore.cmd" uninstall & exit /b)
+if exist "%HOME_DIR%\bin\theodore.cmd" (call "%%HOME_DIR%%\bin\theodore.cmd" uninstall & exit /b)
 rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
 rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
 set "LEFTOVER="
@@ -156,9 +156,9 @@ if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
 call :read_home_api
 if not defined FOREIGN goto :install
 :foreign_install
-echo THEODORE USAGE: the Theodore folder %HOME_DIR% belongs to the Theodore service at %HOME_API%, but this installer is for %MY_API%; a folder is never shared between two services.
+echo THEODORE USAGE: the Theodore folder "%HOME_DIR%" belongs to the Theodore service at %HOME_API%, but this installer is for %MY_API%; a folder is never shared between two services.
 echo NEXT: do not retry. Tell the user: to install this build, set THEODORE_HOME to a separate folder for it and run the installer again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
-echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
+echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in "%HOME_DIR%". To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
 exit /b 64
 
 :install
@@ -219,7 +219,7 @@ echo theodore-install: this computer is signed in (the one-time code was accepte
 goto :stage1
 :code_not_saved
 rmdir /s /q "%SAFE%" >nul 2>&1
-echo THEODORE SETUP_FAILED: cause DISK: the one-time code was accepted but this computer could not save the login in %HOME_DIR%\state.
+echo THEODORE SETUP_FAILED: cause DISK: the one-time code was accepted but this computer could not save the login in "%HOME_DIR%\state".
 echo NEXT: the one-time code was accepted but this computer could not save the login (cause DISK); fix the folder's permissions and run the same line again within 30 minutes: the same code works again on this computer until it has been used.
 echo TELL THE USER: Theodore could not save its login on this computer. Its folder may be protected; once that is fixed, the same install line works again for 30 minutes.
 exit /b 68
@@ -301,7 +301,7 @@ if defined THEODORE_INSTALL_WAIT set "SETUP_WAIT=%THEODORE_INSTALL_WAIT%"
 echo.%SETUP_WAIT%| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*" >nul || set "SETUP_WAIT=180"
 echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step
 set "THEODORE_BOOTSTRAP_WAIT=%SETUP_WAIT%"
-call "%LAUNCHER%" setup --wait %SETUP_WAIT% >"%WORK%\setup.txt"
+call "%%LAUNCHER%%" setup --wait %SETUP_WAIT% >"%WORK%\setup.txt"
 set "RC=%ERRORLEVEL%"
 set "THEODORE_BOOTSTRAP_WAIT="
 set "SETUP_FAILED="
@@ -324,39 +324,39 @@ if not exist "%T%" set "T=%LAUNCHER%"
 
 rem --- 5. the assistants on this computer ------------------------------------------------------------------------------
 echo theodore-install: registering Theodore in the assistants found on this computer
-call "%T%" hosts register
+call "%%T%%" hosts register
 set "HOSTS_RC=%ERRORLEVEL%"
 rem Claude Code on Windows with no Git Bash cannot load the skills: PortableGit into Theodore's folder, Claude Code pointed at it.
-call "%T%" tools install git --if-needed
+call "%%T%%" tools install git --if-needed
 rem The person asked their assistant to set Theodore up: its host settings come with it; --no-settings leaves them out.
-if defined NO_SETTINGS call "%T%" hosts settings --remove >nul 2>&1
+if defined NO_SETTINGS call "%%T%%" hosts settings --remove >nul 2>&1
 if defined NO_SETTINGS echo theodore-install: Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command
-if not defined NO_SETTINGS call "%T%" hosts settings --apply
+if not defined NO_SETTINGS call "%%T%%" hosts settings --apply
 if not defined NO_SETTINGS echo theodore-install: Theodore's own commands run without asking each time; to turn that off: "%T%" hosts settings --remove
 if not defined SETUP_FAILED goto :background
-echo theodore-install: the stable launcher is %T%
+echo theodore-install: the stable launcher is "%T%"
 type "%WORK%\setup.txt"
 set "RC=68"
 goto :finish
 :background
 
 rem --- 6. background downloads -------------------------------------------------------------------------------------------
-call "%T%" whoami >nul 2>&1
+call "%%T%%" whoami >nul 2>&1
 if errorlevel 1 goto :doctor
-call "%T%" guide pptx >nul 2>&1
+call "%%T%%" guide pptx >nul 2>&1
 echo theodore-install: asset packs (icons, flags, maps, backgrounds; about 95 MB), when published for this channel, download in the background
-call "%T%" packs install --all --background >nul 2>&1
+call "%%T%%" packs install --all --background >nul 2>&1
 rem Nothing to turn slides into images (no LibreOffice, no PowerPoint): fetch LibreOffice, as on macOS.
-call "%T%" tools install libreoffice --background --if-needed >nul 2>&1
+call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1
 
 :doctor
 rem --- 7. the check the assistant reports: the last line says what failed, if anything did -------------------------
-echo theodore-install: the stable launcher is %T%
+echo theodore-install: the stable launcher is "%T%"
 rem Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to
 rem relay. The installer never opens a browser; only "theodore login --open", asked for by the user, does.
-call "%T%" whoami >nul 2>&1
+call "%%T%%" whoami >nul 2>&1
 if errorlevel 1 goto :sign_in_last
-call "%T%" doctor >"%WORK%\doctor.txt"
+call "%%T%%" doctor >"%WORK%\doctor.txt"
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="67" goto :doctor_shown
 "%SYS32%\findstr.exe" /b /c:"NEXT: run the same command again" "%WORK%\doctor.txt" >nul || goto :doctor_shown
@@ -378,7 +378,7 @@ set "RC=75"
 goto :finish
 
 :sign_in_last
-call "%T%" login --start
+call "%%T%%" login --start
 set "RC=%ERRORLEVEL%"
 goto :finish
 
