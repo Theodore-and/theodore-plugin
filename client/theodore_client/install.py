@@ -731,7 +731,12 @@ def announce(kind: str, version: str, note: str | None = None) -> None:
 
 
 def take_announcement() -> str | None:
-    """The one line saying what updated itself since the last one, then forgotten."""
+    """The one line saying what updated itself since the last one, then forgotten. After access came back, first the
+    line saying why Theodore downloads its engine again (withdraw.py)."""
+    from . import withdraw
+    restored = withdraw.notice_line()
+    if restored:
+        return restored
     try:
         with update_lock():                 # taken and cleared in one step: two sessions never both print it
             pending = update_state().get("announce") or {}
@@ -1154,6 +1159,12 @@ def _pin_workspaces(args: list[str], version: str) -> None:
 
 
 def run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
+    from . import withdraw          # imported here: withdraw imports this module at run time
+    with withdraw.engine_run():     # nothing of the engine is removed while it runs (lane PROTECT2)
+        return _run_engine(args, python_passthrough=python_passthrough)
+
+
+def _run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
     enforce_restrictions()
     version = engine_for(args)
     enforce_restrictions(version)

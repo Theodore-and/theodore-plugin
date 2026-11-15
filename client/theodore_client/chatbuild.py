@@ -567,7 +567,14 @@ def _clip(text: str) -> str:
 
 
 def run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
-    """One engine command, confined. Returns {"content": [...]} with the output and its images."""
+    """One engine command, confined. Returns {"content": [...]} with the output and its images. Nothing of the engine
+    is removed while it runs (withdraw.py, lane PROTECT2)."""
+    from . import withdraw
+    with withdraw.engine_run():
+        return _run(args_in, stdin_text, folder_in, images_wanted)
+
+
+def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
     if folder_in in (None, ""):
         folder_in = _folder_of(args_in)
         if folder_in is None and isinstance(args_in, list) and args_in[:1] and args_in[0] in ("assets", "doctor", "cache") and FOLDERS:

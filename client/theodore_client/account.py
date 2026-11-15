@@ -96,6 +96,8 @@ def save_token(token: str, release: dict | None = None, auto_reports: bool | Non
         elif known:
             record["auto_reports"] = known
         core.write_json(_token_path(), record, 0o600)
+    from . import withdraw
+    withdraw.access_back()          # a licence again: what was removed when access ended downloads again
 
 
 AGENT_REPORTS_FEATURE = "agent-reports"
@@ -415,7 +417,8 @@ def refusal_status() -> Status:
         except BaseException:           # noqa: BLE001  the central handler never fails
             built = _static_sign_in(kind)
         built.refusal = True
-        _REFUSAL_STATUS = built
+        from . import withdraw
+        _REFUSAL_STATUS = withdraw.annotate(built)
     return _REFUSAL_STATUS
 
 

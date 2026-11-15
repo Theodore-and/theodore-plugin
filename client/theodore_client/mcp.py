@@ -32,7 +32,7 @@ import re
 import sys
 import time
 
-from . import __version__, account, api, chatbuild, commands, core, credentials, install, specimens
+from . import __version__, account, api, chatbuild, commands, core, credentials, install, specimens, withdraw
 from .contract import HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, SKILLS
 from .core import Status
 
@@ -453,12 +453,12 @@ def _sheet(name: str, current: str | None) -> bytes:
     SHEETS.pop(name, None)
     if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
         raise core.internal(f"{what}: the answer is not a JPEG image; it was refused.")
-    digest = hashlib.sha256(raw).hexdigest()
-    if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != digest:
+    if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest() \
+            or not specimens.content_matches(raw, headers.get("ETag")):
         raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing).",
                      "call the same tool again once. If it fails again, continue without the sheet.",
                      "A design specimen arrived damaged. I am trying once more.")
-    _hold_sheet(name, (digest, raw, current))
+    _hold_sheet(name, (specimens.content_sha256(raw), raw, current))     # the published sheet's hash: If-None-Match
     return raw
 
 
@@ -641,6 +641,7 @@ def call_tool(name: str, args) -> dict:
     except Status as status:
         if core.refused() or status.name not in KEEP_HELD_ON:
             forget(refused=core.refused() or status.name in REFUSALS)
+        withdraw.resume()           # the service ended this computer's access: Theodore's files go (withdraw.py)
         return _status(status)
     except api.TooLarge as exc:
         return _status(core.internal(f"an answer from the Theodore service was longer than {exc.limit} bytes; it was refused."))
@@ -649,6 +650,7 @@ def call_tool(name: str, args) -> dict:
         return _status(core.internal(f"{exc.__class__.__name__}: {exc}"))
     if core.refused():
         forget(refused=True)
+        withdraw.resume()
     return result
 
 
