@@ -102,7 +102,7 @@ class Stubs(unittest.TestCase):
             self.assertLess(len(body), 2500, "the stub stays small")
         self.assertIn("use the deck-design skill with the host's own slide tools", flat((PLUGIN / "skills" / "pptx" / "SKILL.md").read_text()))
         deck = (PLUGIN / "skills" / "deck-design" / "SKILL.md").read_text()
-        self.assertIn("Customize > Plugins > Theodore > Connectors", deck)
+        self.assertIn("claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore", deck)
         self.assertIn('call the Theodore `guide` tool with skill "deck-design"', flat(deck))
         allowed = frontmatter(deck)["allowed-tools"]
         for tool in ("mcp__plugin_theodore_theodore__guide", "mcp__plugin_theodore_theodore__specimen"):

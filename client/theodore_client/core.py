@@ -297,8 +297,10 @@ def cloud_sandbox() -> bool:
 # design the deck (CONNECTOR_REQUIRED; the launcher says the same).
 SANDBOX_NETWORK_NEXT = ("call the Theodore connector's theodore_begin tool now and follow what it returns: it gives the design "
                         "guidance and the specimen sheets, and you build the deck with your own tools. If no Theodore connector "
-                        "is available to you, say so and tell the user the one step to add it: Customize > Plugins > Theodore > "
-                        "Connectors, connect Theodore, then ask again.")
+                        "is available to you, say so and give the user this link, which adds the connector to their Claude account "
+                        "in one step (they confirm it, choose Connect and log in): "
+                        "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore&connectorUrl="
+                        "https%3A%2F%2Fmcp.theodoreand.ai%2Fmcp Then they ask again, naming Theodore.")
 
 
 def sandbox_network_tell() -> str:
