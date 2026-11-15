@@ -51,6 +51,14 @@
 - Uninstall's record (WINDOWS W-8): the uninstall's last words name the record it keeps beside Theodore's folder
   (`~/.theodore-uninstall.log`, `%LOCALAPPDATA%\Theodore-uninstall.log`; it can be deleted), and on Windows a new log
   starts with a UTF-8 byte-order mark, so Notepad and PowerShell 5.1 read C:\Users\Théo as written.
+- Windows install lines (WINDOWS W-13): Microsoft Defender once flagged install.md's own Windows line as
+  Trojan:Win32/ClickFix.EEI!MTB (a one-line PowerShell download into %TEMP% followed by use of the file). It did not
+  reproduce in nine later runs, but the shape is what ClickFix rules key on. Every documented Windows line
+  (install.md's first line and step 1, the README) is now two separate commands into `%LOCALAPPDATA%\Theodore-install`:
+  the folder made first (`New-Item -Force` / `mkdir`: curl's `--create-dirs` fails for a profile named with é), then
+  `curl.exe ... --retry 2 --retry-delay 2 -o`; the run, or the read of install.md, is a second command. They were clean
+  with Defender on in each way tested (Codex's `powershell -Command`, Claude Code's tool, `-EncodedCommand`, `-File`,
+  cmd, Win+R). The installer removes the folder when it ends, as before; the pins and checks are unchanged.
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an

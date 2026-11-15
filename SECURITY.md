@@ -22,7 +22,7 @@ installer's are in `install/`.
 | Update check | Asks which engine, client and asset-pack versions are current, and reads the signed `plugin/latest.json` (the current plugin version) | at the first Theodore command of each assistant session that loads the pptx instructions, then at most once per 6 hours |
 | Plugin update | When the published plugin is newer than an assistant's copy: Theodore's own copy of the plugin is downloaded (signed document, pinned sha256) and the assistant's own command updates its copy (`claude plugin marketplace update theodore` and `claude plugin update theodore@theodore`; `codex plugin add theodore@theodore`) | once per release and session, in the background |
 | Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
-| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private temporary folder, removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
+| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private folder in Theodore's own cache (the system's temporary folder only when the assistant works in a folder that contains the cache), removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
 | `theodore report` | A bug report or feedback, see below | when filed |
@@ -154,8 +154,10 @@ changed since the client last learned it, the service refuses the report, stores
 - The installer is the root of trust. The install commands fetch it over HTTPS from theodoreand.ai and run it:
   as with any bootstrap command, what protects that first step is TLS to our domain. The installer prints its own
   SHA-256 and the same value is published at https://theodoreand.ai/install, so anyone can compare before running it
-  (download the file, check, then run). The commands download it into a new private folder (never a fixed path in a
-  shared temporary folder) and delete that folder afterwards.
+  (download the file, check, then run). The commands download it into a private folder, never one in a shared
+  temporary folder: a new one from `mktemp -d` on macOS and Linux, `%LOCALAPPDATA%\Theodore-install` in the user's
+  own profile on Windows, where the download and the run are two separate commands. The folder goes when the
+  installer ends.
 - The installer carries, stamped in at release, the SHA-256 of Theodore's Python (an unmodified
   python-build-standalone archive) and of the client, and the Ed25519 public keys. It downloads Python and the
   client first and checks each against its SHA-256 with the system's own tool (`shasum`/`sha256sum`,
