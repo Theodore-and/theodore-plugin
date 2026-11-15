@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -134,6 +135,19 @@ def register(record: dict) -> list[str]:
     return lines
 
 
+def is_desktop_app(path: str) -> bool:
+    """A Windows program file of the Claude app: its per-user build (%LOCALAPPDATA%\\AnthropicClaude\\app-<version>\\)
+    or its package (WindowsApps\\Claude_<...>\\). Not Claude Code's claude.exe (~/.local/bin, npm) or anything else."""
+    parts = [p.lower() for p in re.split(r"[\\/]+", path) if p]
+    if not parts or parts[-1] != "claude.exe":
+        return False
+    folders = parts[:-1]
+    if "anthropicclaude" in folders:
+        rest = folders[folders.index("anthropicclaude") + 1:]
+        return bool(rest) and rest[0].startswith("app-")
+    return "windowsapps" in folders and any(f.startswith("claude_") for f in folders[folders.index("windowsapps") + 1:][:1])
+
+
 def app_started_at() -> float | None:
     """When the Claude app that is running now started (epoch seconds), or None when it is not running or that cannot be
     told. The app reads its configuration file only when it starts, and nothing makes it read it again (Model Context
@@ -143,14 +157,18 @@ def app_started_at() -> float | None:
         return float(override) if override else None
     try:
         if core.IS_WINDOWS:
-            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                                  "(Get-Process claude -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1)"
-                                  ".StartTime.ToUniversalTime().ToString('o')"],
-                                 capture_output=True, text=True, timeout=10).stdout.strip()
-            if not out:
-                return None
+            # Every claude.exe, with its program file: Claude Code's own CLI is claude.exe too (~/.local/bin), and only
+            # the app's count (WINDOWS W-7: the CLI alone made the install say to reopen a Claude app that was closed).
+            done = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                   "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; "
+                                   "Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.Path } | ForEach-Object "
+                                   "{ $_.StartTime.ToUniversalTime().ToString('o') + '|' + $_.Path }"],
+                                  capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
             from datetime import datetime
-            return datetime.fromisoformat(out.replace("Z", "+00:00")).timestamp()
+            times = [datetime.fromisoformat(when.replace("Z", "+00:00")).timestamp()
+                     for when, _bar, path in (line.strip().partition("|") for line in core.child_text(done.stdout).splitlines())
+                     if path and is_desktop_app(path)]
+            return min(times) if times else None
         if os.uname().sysname != "Darwin":
             return None
         out = subprocess.run(["ps", "-axo", "lstart=,comm="], capture_output=True, text=True, timeout=10).stdout

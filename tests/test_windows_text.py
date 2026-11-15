@@ -199,6 +199,34 @@ class DesktopEntry(unittest.TestCase):
         self.assertEqual(f'"{home}\\bin\\theodore.cmd"', json.loads(json.dumps(value, ensure_ascii=False))["env"]["THEODORE_DESKTOP_LAUNCHER"])
 
 
+class DesktopAppProcess(unittest.TestCase):
+    """W-7: Claude Code's CLI is claude.exe too; only the Claude app's own program files count as the app running."""
+
+    def test_only_the_apps_program_files_count(self):
+        from theodore_client import desktop
+        for path in (r"C:\Users\Théo Tester\AppData\Local\AnthropicClaude\app-3.6556.2\claude.exe",
+                     r"C:\Program Files\WindowsApps\Claude_5.11492.5.0_x64__pzs8sxrjxfjjc\app\claude.exe"):
+            self.assertTrue(desktop.is_desktop_app(path), path)
+        for path in (r"C:\Users\Théo Tester\.local\bin\claude.exe", r"C:\Users\T\AppData\Roaming\npm\claude.exe",
+                     r"C:\Users\T\AppData\Local\AnthropicClaude\Update.exe", r"C:\Users\T\AppData\Local\AnthropicClaude\claude.exe",
+                     r"C:\Program Files\WindowsApps\Other_1.0\claude.exe", ""):
+            self.assertFalse(desktop.is_desktop_app(path), path)
+
+    def test_the_cli_alone_is_not_the_app_running(self):
+        from theodore_client import desktop
+        out = ("2026-11-15T13:16:39.0000000Z|C:\\Users\\Théo Tester\\.local\\bin\\claude.exe\r\n"
+               "2026-11-15T13:20:00.0000000Z|C:\\Users\\Théo Tester\\AppData\\Local\\AnthropicClaude\\app-3.6556.2\\claude.exe\r\n").encode("utf-8")
+        with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(desktop.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, out, b"")):
+            os.environ.pop("THEODORE_TEST_CLAUDE_APP_STARTED", None)
+            from datetime import datetime
+            self.assertEqual(datetime.fromisoformat("2026-11-15T13:20:00+00:00").timestamp(), desktop.app_started_at())
+        cli_only = out.split(b"\r\n")[0]
+        with mock.patch.object(core, "IS_WINDOWS", True), \
+                mock.patch.object(desktop.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, cli_only, b"")):
+            self.assertIsNone(desktop.app_started_at())
+
+
 class LauncherPartialUninstall(unittest.TestCase):
     def test_its_last_line_reads_paths_after_parsing(self):
         text = (support.LAUNCHER_DIR / "theodore.cmd").read_text(encoding="utf-8")
