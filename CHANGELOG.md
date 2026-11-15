@@ -5,9 +5,11 @@
 - Claude Desktop: when the app is on this computer, `hosts register` (the installer runs it) adds Theodore's local
   server to the app's own `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude`, Windows
   `%APPDATA%\Claude` and the Microsoft Store build's folder): the entry `theodore` runs this installation's stable
-  launcher, `theodore mcp --for claude-desktop`. Desktop chat then has `theodore_begin`, `theodore_guide` and
-  `theodore_specimen` (deck-design guidance and specimen sheets through this computer's sign-in, held in memory
-  only), with no connector an organisation Owner must add: local servers are on for Team and Enterprise members
+  launcher, `theodore mcp --for claude-desktop`. Desktop chat then has one tool, `theodore` (the app asks for an
+  approval per tool of a local server, so "Always allow" is clicked once, ever): its `action` is `begin`, `guide`
+  (a section), `specimen` (sheets), `report`, `preference_list`, `preference_add`, `preference_remove` or `check`
+  (deck-design guidance and specimen sheets through this computer's sign-in, held in memory only; every answer and
+  next step names `theodore` and the action, never the remote connector's tool names, which are unchanged), with no connector an organisation Owner must add: local servers are on for Team and Enterprise members
   unless the organisation turns them off. The app loads it when it is quit and opened again. Only that entry is
   written; a second run changes nothing; an entry named `theodore` that Theodore did not write is kept; uninstall
   takes back exactly the entry (and the `mcpServers` object when Theodore created it and it is empty).

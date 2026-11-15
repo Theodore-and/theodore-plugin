@@ -232,30 +232,77 @@ class Guide(McpCase):
 class ClaudeDesktop(McpCase):
     """`mcp --for claude-desktop`: the entry Theodore writes in Claude Desktop's configuration (desktop.py)."""
 
-    def test_the_connector_names_deck_design_only_and_the_same_texts(self):
+    def test_one_tool_named_theodore_serves_every_action(self):
+        """The app asks for an approval per tool of a local server: exactly one tool, so "Always allow" is clicked once."""
+        from theodore_client import mcp
         self.sign_in()
         self.api.guide_index = INDEX
-        self.api.guides["deck-design"][""] = ENTRY
-        self.api.guides["deck-design"]["craft"] = "CRAFT TEXT\n"
+        self.api.guides["deck-design"][""] = ENTRY + mcp.SERVICE_TOOL_BINDINGS + "\n"
+        self.api.guides["deck-design"]["craft"] = ("CRAFT TEXT\n" + mcp.SERVICE_LAUNCHER_LINES[0] + " report --kind bug\n"
+                                                    "or call the `theodore_preference_add` tool.\n")
         self.api.specimens = {"cover-01.jpg": JPEG}
         server = self.server(args=("--for", "claude-desktop"))
-        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertEqual(sorted(tools), ["theodore_begin", "theodore_guide", "theodore_specimen"])
-        for tool in tools.values():
-            self.assertTrue(tool["annotations"]["readOnlyHint"])
-            self.assertTrue(tool["title"])
-            for phrase in ("call this first", "before any", "instead of", "built-in"):
-                self.assertNotIn(phrase, tool["description"].lower(), "directory review: no routing over other tools")
-        self.assertEqual(tools["theodore_guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
-        self.assertNotIn("skill", tools["theodore_guide"]["inputSchema"]["properties"])
-        begin = server.call("theodore_begin")
-        self.assertEqual(begin["content"][0]["text"], ENTRY)
-        self.assertEqual(server.call("theodore_guide", section="craft")["content"][0]["text"], "CRAFT TEXT\n")
-        image = server.call("theodore_specimen", file="cover-01.jpg")["content"][0]
+        tools = server.send("tools/list")["result"]["tools"]
+        self.assertEqual([t["name"] for t in tools], ["theodore"])
+        tool = tools[0]
+        self.assertTrue(tool["title"])
+        for phrase in ("call this first", "before any", "before built", "instead of", "built-in", "this computer", "its guidance on"):
+            self.assertNotIn(phrase, tool["description"].lower(), "no routing over other tools, nothing on how Theodore works")
+        for phrase in ("presentation", "deck", "slide", "set up or check"):
+            self.assertIn(phrase, tool["description"].lower())
+        props = tool["inputSchema"]["properties"]
+        self.assertEqual(tool["inputSchema"]["required"], ["action"])
+        self.assertEqual(props["action"]["enum"], list(mcp.DESKTOP_ACTIONS))
+        self.assertEqual(props["section"]["anyOf"][0]["enum"], ["craft", "forms"])
+        self.assertNotIn("skill", props)
+        begin = server.call("theodore", action="begin")["content"][0]["text"]
+        self.assertTrue(begin.startswith(ENTRY))
+        self.assertIn(mcp.DESKTOP_BINDINGS, begin)
+        self.assertNotIn(mcp.SERVICE_TOOL_BINDINGS, begin)
+        craft = server.call("theodore", action="guide", section="craft")["content"][0]["text"]
+        self.assertIn("CRAFT TEXT", craft)
+        self.assertIn(mcp.DESKTOP_LAUNCHER_LINE, craft)
+        self.assertIn('the `theodore` tool with action "preference_add"', craft)
+        image = server.call("theodore", action="specimen", file="cover-01.jpg")["content"][0]
         self.assertEqual(base64.b64decode(image["data"]), JPEG)
         self.assertIn("tool", {q.get("bindings") for q in self.api.guide_queries})
-        self.assertIn("unknown tool", server.call("guide", skill="deck-design")["content"][0]["text"], "the plugin's names are not served here")
+        added = server.call("theodore", action="preference_add", text="Navy headers")["content"][0]["text"]
+        self.assertIn("THEODORE OK: preference saved", added)
+        listed = server.call("theodore", action="preference_list")["content"][0]["text"]
+        self.assertIn("Navy headers", listed)
+        report = server.call("theodore", action="report", kind="feedback", title="Lovely deck", details="It was quick",
+                             origin="user_requested")["content"][0]["text"]
+        self.assertIn("THEODORE OK: report filed", report)
+        self.assertEqual(len(self.api.reports), 1)
+        check = server.call("theodore", action="check")["content"][0]["text"]
+        self.assertIn("THEODORE OK", check)
+        self.assertIn('action "begin"', check)
+        wrong = server.call("theodore", action="guide")
+        self.assertTrue(wrong.get("isError"))
+        for old in ("theodore_begin", "theodore_guide", "theodore_specimen", "guide"):
+            self.assertIn("unknown tool", server.call(old, skill="deck-design")["content"][0]["text"])
+        everything = begin + craft + added + listed + report + check + wrong["content"][0]["text"]
+        for old in ("theodore_begin", "theodore_guide", "theodore_specimen", "theodore_report", "theodore_preference",
+                    "Theodore tool guide", "Theodore tool specimen", "Theodore launcher"):
+            self.assertNotIn(old, everything)
         self.assertEqual(server.close(), b"")
+
+    def test_the_begin_answer_names_the_tool_also_when_the_service_sent_no_bindings(self):
+        from theodore_client import mcp
+        self.sign_in()
+        self.api.guides["deck-design"][""] = ENTRY
+        server = self.server(args=("--for", "claude-desktop"))
+        self.assertTrue(server.call("theodore", action="begin")["content"][0]["text"].rstrip().endswith(mcp.DESKTOP_BINDINGS))
+        server.close()
+
+    def test_a_pointer_to_the_remote_connector_keeps_its_tool_names(self):
+        from theodore_client import mcp, core
+        mcp.FOR = mcp.DESKTOP
+        try:
+            text = mcp.desktop_text(core.SANDBOX_NETWORK_NEXT)
+        finally:
+            mcp.FOR = None
+        self.assertIn("connector's theodore_begin tool", text)
 
     def test_without_the_flag_the_plugin_server_is_unchanged(self):
         server = self.server(args=("--for", "something-else"))

@@ -76,7 +76,7 @@ Outside that folder:
   that started the workspace, so an update never changes a deck halfway through.
 - **Claude Desktop**, when the app is on the computer: one entry, `theodore`, in its `claude_desktop_config.json`,
   which starts `~/.theodore/bin/theodore mcp --for claude-desktop` so the app's chat can read Theodore's design
-  guidance (it loads once the app is quit and opened again). Nothing else in that file changes.
+  guidance through one tool, `theodore` (it loads once the app is quit and opened again). Nothing else in that file changes.
 - **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
   (automatic plugin updates for the Theodore marketplace; permission to run `~/.theodore/bin/theodore`
   without a prompt), and in Codex the file `~/.codex/rules/theodore.rules`, which allows Theodore's launcher by its

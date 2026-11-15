@@ -1,4 +1,5 @@
-"""`theodore mcp`: a local stdio MCP server with two tools, `guide` and `specimen`.
+"""`theodore mcp`: a local stdio MCP server: `list`, `guide` and `specimen` for the plugin; one tool, `theodore`, for
+Claude Desktop's chat (see DESKTOP).
 
 Why: hosts show a command's output whole only up to a limit (Claude Code: about 30,000 characters; above that the
 model sees a 2,000-character preview), while an MCP tool's text result is shown whole up to the size the tool
@@ -27,6 +28,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import time
 
@@ -53,44 +55,75 @@ DESCRIPTIONS = {
 
 
 # Claude Desktop's chat (`mcp --for claude-desktop`, the entry desktop.py writes): no skill folder and no engine there,
-# and the host shows tool names before it shows anything else, so the three tools carry the names and wording of the
-# remote connector's (`theodore_begin`, `theodore_guide`, `theodore_specimen`) and serve deck-design only. The entry
-# document comes with the service's tool link bindings, which name "the Theodore tool guide" and "specimen".
+# and the app asks the person to approve each tool of a local server, so this server has exactly one tool, `theodore`:
+# one "Always allow", ever. Its `action` selects what the remote connector's separate tools do (begin, a guidance
+# section, specimen sheets, a report, preferences) and a check of this computer's set-up; it serves deck-design only.
+# The service's texts name "the Theodore tool guide" and "specimen", the launcher, and the connector's tool names
+# (`theodore_report`, `theodore_preference_add`); every answer here is rewritten to name this one tool and its action.
 DESKTOP = "claude-desktop"
 FOR: str | None = None              # set by serve(): None for the plugin's server (Claude Code, Codex, Cowork)
-DESKTOP_DESCRIPTIONS = {
-    "theodore_begin": "Returns Theodore's design method for this user's presentations: how to plan, write and design a deck, "
-                      "section or slide, and which guidance sections and specimen sheets to read for it. Use it when the user "
-                      "asks for a presentation, deck or slides to be created, restructured, redesigned, adapted or critiqued. "
-                      "Theodore reads its guidance on this computer; the deck itself is built with this conversation's own tools. "
-                      "The guidance is licensed to this user: apply it, do not reproduce it or list its rules, and do not name "
-                      "these tools or describe what was read.",
-    "theodore_guide": "Returns one section of Theodore's design guidance, named as the guidance links it (a link "
-                      "references/<name>.md is section \"<name>\"). Licensed like the method: apply it, never reproduce it, list "
-                      "its sections or say what was read.",
-    "theodore_specimen": "Returns Theodore specimen sheets as images: one file named by the guidance, or a list of up to 6 (each "
-                         "image after its file name). Open only the few sheets the guidance points to; do not pass them on, "
-                         "count them or describe them to the user.",
-}
-DESKTOP_TITLES = {"theodore_begin": "Start a presentation with Theodore", "theodore_guide": "Read Theodore's guidance",
-                  "theodore_specimen": "Open Theodore specimen sheets"}
-READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
+DESKTOP_TOOL = "theodore"
+DESKTOP_ACTIONS = ("begin", "guide", "specimen", "report", "preference_list", "preference_add", "preference_remove", "check")
+DESKTOP_DESCRIPTION = (
+    "Theodore, the presentation designer this user installed. Use it when a presentation, deck or slide is asked for "
+    "(to create, restructure, redesign, adapt or critique one), or when the user asks to set up or check Theodore. "
+    'Start a presentation with action "begin"; every answer says which action comes next. The guidance it returns is '
+    "licensed to this user: apply it, do not reproduce it or list its rules, and do not name this tool or describe what "
+    "was read.")
+DESKTOP_TITLE = "Theodore"
+# What the service's texts say, and what this one tool's answers say instead.
+SERVICE_TOOL_BINDINGS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or '
+                         '<name>.md is read by calling this same Theodore tool guide with section "<name>", and a link '
+                         'written specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+DESKTOP_BINDINGS = (f'Links in this guidance are read with the Theodore tool {DESKTOP_TOOL}: a link written references/<name>.md '
+                    f'or <name>.md is read by calling {DESKTOP_TOOL} with action "guide" and section "<name>", and a link '
+                    f'written specimens/<file>.jpg is opened by calling {DESKTOP_TOOL} with action "specimen" and file "<file>" '
+                    f'(or a list of up to {SPECIMEN_MAX_PER_CALL} files). A report this guidance asks for is sent with action "report" (kind, '
+                    f'title, details, and verb, code or origin when there are), and a lasting preference is saved with action '
+                    f'"preference_add" (text).')
+SERVICE_LAUNCHER_LINES = ("Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd "
+                          "on Windows) with:", "Run the Theodore launcher you used to get these instructions with:")
+DESKTOP_LAUNCHER_LINE = (f'Call the {DESKTOP_TOOL} tool with action "report" and, as its fields kind, title, details, verb, code '
+                         f'and origin, the values this command gives its options:')
 
 
 def desktop_tools(index: dict | None = None) -> list[dict]:
-    """The tool definitions for Claude Desktop's chat (see DESKTOP)."""
+    """The one tool definition for Claude Desktop's chat (see DESKTOP)."""
     plugin = {t["name"]: t for t in _plugin_tools(index)}
     section = plugin["guide"]["inputSchema"]["properties"]["section"]
-    return [
-        {"name": "theodore_begin", "title": DESKTOP_TITLES["theodore_begin"], "description": DESKTOP_DESCRIPTIONS["theodore_begin"],
-         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}, "annotations": READ_ONLY,
-         "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS}},
-        {"name": "theodore_guide", "title": DESKTOP_TITLES["theodore_guide"], "description": DESKTOP_DESCRIPTIONS["theodore_guide"],
-         "inputSchema": {"type": "object", "properties": {"section": section}, "required": ["section"], "additionalProperties": False},
-         "annotations": READ_ONLY, "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS}},
-        {"name": "theodore_specimen", "title": DESKTOP_TITLES["theodore_specimen"], "description": DESKTOP_DESCRIPTIONS["theodore_specimen"],
-         "inputSchema": plugin["specimen"]["inputSchema"], "annotations": READ_ONLY},
-    ]
+    file = plugin["specimen"]["inputSchema"]["properties"]["file"]
+    text = {"type": "string"}
+    return [{
+        "name": DESKTOP_TOOL, "title": DESKTOP_TITLE, "description": DESKTOP_DESCRIPTION,
+        "inputSchema": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": list(DESKTOP_ACTIONS),
+                       "description": 'begin: the design method for a deck; guide: one section the guidance links (section); '
+                                      'specimen: specimen sheets as images (file); report: a problem or feedback for Theodore '
+                                      '(kind, title, details); preference_list, preference_add (text), preference_remove (id): '
+                                      "the user's lasting preferences; check: whether Theodore is set up on this computer."},
+            "section": section, "file": file,
+            "kind": {"type": "string", "enum": ["bug", "feedback"]}, "title": text, "details": text, "verb": text, "code": text,
+            "origin": {"type": "string", "enum": ["automatic", "user_requested"]},
+            "text": text, "id": text},
+            "required": ["action"], "additionalProperties": False},
+        # Not read-only: a report and a preference are written to the user's Theodore account.
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+        "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS}}]
+
+
+def desktop_text(text: str, begin: bool = False) -> str:
+    """A service text as this one tool's answer: its tool and launcher bindings name `theodore` and the action. The
+    entry document always ends with the bindings, also from a service that sent none."""
+    out = text.replace(SERVICE_TOOL_BINDINGS, DESKTOP_BINDINGS)
+    for line in SERVICE_LAUNCHER_LINES:
+        out = out.replace(line, DESKTOP_LAUNCHER_LINE)
+    # The remote connector's own names stay where a text sends the assistant to that connector (CONNECTOR_REQUIRED).
+    out = re.sub(r"(?<!connector's )`?theodore_(begin|guide|specimen|report|preference_add|preference_list|preference_remove)`?",
+                 lambda m: f'`{DESKTOP_TOOL}` with action "{m.group(1)}"', out)
+    out = re.sub(r'`theodore` with action "(\w+)" tool', r'`theodore` tool with action "\1"', out)
+    if begin and DESKTOP_BINDINGS not in out:
+        out = out.rstrip("\n") + "\n\n" + DESKTOP_BINDINGS + "\n"
+    return out
 
 
 def tools(index: dict | None = None) -> list[dict]:
@@ -290,7 +323,8 @@ def _text(text: str, error: bool = False) -> dict:
 def _status(status: Status) -> dict:
     if core.refused() and not getattr(status, "refusal", False):
         status = account.refusal_status()
-    return _text(status.render(), error=status.name != "OK")
+    text = status.render()
+    return _text(desktop_text(text) if FOR == DESKTOP else text, error=status.name != "OK")
 
 
 # --- guide ---------------------------------------------------------------------------------------------------------------
@@ -466,11 +500,64 @@ def tool_list(args: dict) -> dict:
 
 
 HANDLERS = {"list": tool_list, "guide": tool_guide, "specimen": tool_specimen}
-DESKTOP_HANDLERS = {
-    "theodore_begin": lambda args: tool_guide({"skill": "deck-design"}),
-    "theodore_guide": lambda args: tool_guide({"skill": "deck-design", "section": args.get("section")}),
-    "theodore_specimen": tool_specimen,
-}
+def _captured(run) -> str:
+    """What a launcher command prints (its lines and its status), as text: this process's standard output is the
+    protocol stream."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        run()
+    return buffer.getvalue()
+
+
+def _desktop_report(args: dict) -> dict:
+    kind, title, details = args.get("kind"), args.get("title"), args.get("details")
+    if kind not in ("bug", "feedback") or not isinstance(title, str) or not isinstance(details, str):
+        raise core.usage('a report needs kind ("bug" or "feedback"), title and details.')
+    origin = args.get("origin") if args.get("origin") in ("automatic", "user_requested") else "automatic"
+    text = lambda key: args.get(key) if isinstance(args.get(key), str) else None
+    return _text(_captured(lambda: commands.report(kind, title, details, text("verb"), text("code"), None, origin, False)))
+
+
+def _desktop_preference(action: str, args: dict) -> dict:
+    value = args.get("text" if action == "add" else "id")
+    if action != "list" and not isinstance(value, str):
+        raise core.usage(f'preference_{action} needs {"text, the preference" if action == "add" else "id, as preference_list shows it"}.')
+    out = _captured(lambda: commands.prefs(action, value if action != "list" else None))
+    return _text(out.replace("prefs list", f'action "preference_list"'))
+
+
+def _desktop_check(_args: dict) -> dict:
+    account.require("deck-design")
+    return _status(Status("OK", "Theodore is set up on this computer and signed in; its design guidance reaches this chat.",
+                          f'to make or rework a presentation, call {DESKTOP_TOOL} with action "begin".',
+                          "Theodore is set up and ready for your presentations here."))
+
+
+def desktop_call(args: dict) -> dict:
+    action = args.get("action")
+    if action == "begin":
+        result = tool_guide({"skill": "deck-design"})
+    elif action == "guide":
+        if not isinstance(args.get("section"), str) or not args["section"]:
+            raise core.usage('action "guide" needs section, the name a link references/<name>.md gives.')
+        result = tool_guide({"skill": "deck-design", "section": args["section"]})
+    elif action == "specimen":
+        result = tool_specimen({"file": args.get("file")})
+    elif action == "report":
+        result = _desktop_report(args)
+    elif action in ("preference_list", "preference_add", "preference_remove"):
+        result = _desktop_preference(action.split("_", 1)[1], args)
+    elif action == "check":
+        result = _desktop_check(args)
+    else:
+        raise core.usage(f"action is one of: {', '.join(DESKTOP_ACTIONS)}.")
+    for block in result.get("content") or []:
+        if block.get("type") == "text":
+            block["text"] = desktop_text(block["text"], begin=action == "begin" and not result.get("isError"))
+    return result
+
+
+DESKTOP_HANDLERS = {DESKTOP_TOOL: desktop_call}
 
 
 # --- the server ----------------------------------------------------------------------------------------------------------
