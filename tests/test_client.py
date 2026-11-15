@@ -2863,6 +2863,45 @@ class Suspension(Revocation):
     command that learns it ends with NO_ENTITLEMENT 70, prints no instructions, and deletes the licence. The credential
     is kept on purpose (the contract's 403: the installation is still valid and a suspension can be lifted)."""
 
+    def test_a_suspended_account_is_told_so_with_no_sign_in_link(self):
+        """Lane EXPOSURE: a sign-in cannot help a suspended account, so none is offered; the way out is Theodore."""
+        self.fresh()
+        self.api.account_state = "suspended"
+        work = self.box.tmp / "work"
+        work.mkdir()
+        result = self.client("guide", "deck-design", cwd=work)
+        first, nxt, tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+        self.assertIn("account is suspended", first)
+        self.assertIn("support@theodoreand.ai", tell)
+        self.assertNotIn("/device", result.stdout)
+        self.assertNotIn("sign-in", tell)
+        self.assertIn("do not start a sign-in", nxt)
+        self.api.account_state = "active"
+
+    def test_whoami_after_a_plan_refusal_says_the_plan_is_not_active(self):
+        """Lane EXPOSURE: before, whoami said "signed in … plan unknown … works offline until 1970-01-01"."""
+        self.fresh()
+        self.api.account_state = "inactive"
+        work = self.box.tmp / "work"
+        work.mkdir()
+        self.assertStatus(self.client("guide", "deck-design", cwd=work), "NO_ENTITLEMENT", 70)
+        result = self.client("whoami")
+        first, _nxt, tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+        self.assertIn("plan is not active", first)
+        self.assertNotIn("1970", result.stdout)
+        self.api.account_state = "active"
+        first, _nxt, _tell = self.assertStatus(self.client("whoami"), "OK", 0)       # the plan is back: the licence comes back
+        self.assertIn("plan beta", first)
+
+    def test_whoami_offline_without_a_licence_says_so(self):
+        self.fresh()
+        (self.box.home / "state" / "entitlement.json").unlink()
+        self.api.down = True
+        first, _nxt, _tell = self.assertStatus(self.client("whoami"), "OK", 0)
+        self.assertIn("no licence is stored", first)
+        self.assertNotIn("1970", first)
+        self.api.down = False
+
     def test_every_command_that_contacts_the_service(self):
         report = ["report", "--kind", "bug", "--title", "A title", "--details", "Some details"]
         table = [(["update", "--check"], None), (["prefs", "list"], None), (report + ["--origin", "user_requested"], None),

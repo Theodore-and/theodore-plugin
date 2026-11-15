@@ -252,16 +252,16 @@ BACKGROUND_CHECK_JOB = "licence-check"
 def check_in_background() -> None:
     """Start the detached licence refresh when it is due (see above). Never raises, never prints."""
     try:
-        if os.environ.get(ENTITLEMENT_ENV) or not credentials.load():
+        if os.environ.get(ENTITLEMENT_ENV):
             return
-        token, claims = stored_token()
+        token, claims = stored_token()      # a file read: the cheap test first, so a fresh licence costs nothing more
         if not token or core.now() - float(claims.get("iat") or 0) < BACKGROUND_CHECK_SECONDS:
             return
         job = core.Job(BACKGROUND_CHECK_JOB)
         started = float(job.read().get("started") or 0)         # wall-clock seconds, as Job writes them
-        if job.alive() or 0 <= time.time() - started < BACKGROUND_CHECK_SECONDS:
+        if job.alive() or 0 <= time.time() - started < BACKGROUND_CHECK_SECONDS or not credentials.load():
             return
-        job.spawn([BACKGROUND_CHECK_JOB])
+        job.spawn([BACKGROUND_CHECK_JOB])     # detached; the refresh in it is bounded by its own 20 s timeout
     except Exception as exc:        # noqa: BLE001  never in the way of the engine command
         core.log(f"licence check: not started ({exc.__class__.__name__})")
 
@@ -418,14 +418,17 @@ def refusal_status() -> Status:
     return _REFUSAL_STATUS
 
 
-_REVOKED_REASON = ("this device was signed out of Theodore (from the portal, or its sign-in is no longer valid); "
-                   "its stored sign-in and licence were deleted.")
+_REVOKED_REASON = ("this device was signed out of Theodore (from the portal, by a suspension of the account that has since "
+                   "been lifted, or its sign-in is no longer valid); its stored sign-in and licence were deleted, and one new "
+                   "sign-in brings it back.")
+SUPPORT_EMAIL = "support@theodoreand.ai"
 
 
 def _static_sign_in(kind: str) -> Status:
     if kind != "revoked":
         return Status("NO_ENTITLEMENT", "the Theodore account is suspended or its plan is not active; the stored licence was deleted.",
-                      "do not retry. Tell the user to check their Theodore account.", "Your Theodore account is not active at the moment.")
+                      f"do not retry and do not start a sign-in. Tell the user to check their Theodore account or write to {SUPPORT_EMAIL}.",
+                      "Your Theodore account is not active at the moment.")
     return Status("SIGN_IN_REQUIRED", _REVOKED_REASON, f"run {quoted_launcher()} login --start and follow what it prints.",
                   "Theodore was signed out on this computer and needs a one-time sign-in again.")
 
@@ -448,10 +451,16 @@ def revoked_status() -> Status:
 def suspended_status(code: str) -> Status:
     """The account is suspended or its plan inactive (403): the licence is deleted, the credential kept (a suspension
     can be lifted; a deleted account's installations are revoked, which is the 401 route)."""
-    return Status("NO_ENTITLEMENT", f"the Theodore service refused this account ({code}): it is suspended or its plan is not active. "
-                                    "The stored licence was deleted; nothing runs until the account is active again.",
-                  f"do not retry. Tell the user; they can check their account at {core.site_url('/app/plan')}.",
-                  f"Your Theodore account is not active at the moment. You can check it at {core.site_name('/app/plan')}.")
+    if code == "account_suspended":     # a sign-in cannot help: no link, the way out is Theodore (lane EXPOSURE)
+        return Status("NO_ENTITLEMENT", "the Theodore service refused this account (account_suspended): the account is suspended. "
+                                        "The stored licence was deleted; nothing runs until Theodore lifts the suspension.",
+                      f"do not retry and do not start a sign-in. Tell the user that their Theodore account is suspended and that "
+                      f"they can write to {SUPPORT_EMAIL}.",
+                      f"Your Theodore account is suspended, so Theodore cannot run. Please contact Theodore at {SUPPORT_EMAIL}.")
+    return Status("NO_ENTITLEMENT", f"the Theodore service refused this account ({code}): its plan is not active. "
+                                    "The stored licence was deleted; nothing runs until the plan is active again.",
+                  f"do not retry. Tell the user; they can check their plan at {core.site_url('/app/plan')}.",
+                  f"Your Theodore plan is not active at the moment. You can check it at {core.site_name('/app/plan')}.")
 
 
 def signed_in_status(claims: dict) -> Status:
@@ -577,8 +586,25 @@ def whoami() -> Status:
     cred = credentials.load()
     if not cred and not token:
         return login_start()
-    exp = time.strftime("%Y-%m-%d", time.gmtime(float(claims.get("exp") or 0)))
     iid = (cred or {}).get("installation_id") or claims.get("iid") or "unknown"
+    if cred and not token and not os.environ.get(ENTITLEMENT_ENV):
+        # Signed in, no licence: the service refused the account (its plan ended, or it is suspended), or none was
+        # fetched yet. Ask once; a refusal answers with its own status (cli prints it), offline says so (lane EXPOSURE).
+        try:
+            refresh(timeout=8.0, nudge_updates=False)
+            token, claims = stored_token()
+        except api.ApiError as error:
+            if core.refused():
+                raise api.status_from(error, "licence check") from None
+            if error.code in DELETE_CREDENTIAL_ON:
+                return login_start("this device was signed out; it needs to sign in again.")
+            raise api.status_from(error, "licence check") from None
+        except api.NetworkError:
+            return Status("OK", f"signed in: installation {iid}, but no licence is stored and the Theodore service could not be "
+                                f"reached to fetch one; credential in {credentials.describe()}.",
+                          "nothing to do now; the next Theodore command fetches the licence when the computer is online.",
+                          "Theodore is signed in on this computer and will confirm the licence once it is online.")
+    exp = time.strftime("%Y-%m-%d", time.gmtime(float(claims.get("exp") or 0)))
     return Status("OK", f"signed in: installation {iid}, plan {claims.get('plan', 'unknown')}, channel {claims.get('chan', 'unknown')}, "
                         f"skills {', '.join(claims.get('feat') or []) or 'none'}, works offline until {exp}, credential in {credentials.describe()}.",
                   "nothing to do.", "Theodore is signed in on this computer.")
