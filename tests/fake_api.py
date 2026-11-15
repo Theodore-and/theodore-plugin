@@ -109,6 +109,30 @@ DEVICE_METADATA = {"device_name": _text(1, 80), "platform": lambda v: v in ("dar
                    "host": _slug, "client_version": _semver}
 
 
+def mark_like_the_service(data: bytes, token: bytes) -> bytes:
+    """The service's mark (apps/worker/src/services/specimen-mark.ts): a comment segment after the leading APPn
+    segments (in a file with none, after the first segment); a header it cannot walk is served unmarked."""
+    if data[:2] != b"\xff\xd8":
+        return data
+    offset, first = 2, True
+    while True:
+        if offset + 4 > len(data) or data[offset] != 0xFF:
+            return data
+        marker = data[offset + 1]
+        application = 0xE0 <= marker <= 0xEF
+        if not application and (not first or marker == 0xDA):
+            break
+        length = int.from_bytes(data[offset + 2:offset + 4], "big")
+        if length < 2 or offset + 2 + length > len(data):
+            return data
+        offset += 2 + length
+        if not application:
+            break
+        first = False
+    payload = b"theodore-mark/1 " + token
+    return data[:offset] + b"\xff\xfe" + (len(payload) + 2).to_bytes(2, "big") + payload + data[offset:]
+
+
 class FakeApi:
     MANIFEST_KID = "manifest-test-1"
     ENTITLEMENT_KID = "ent-test-1"
@@ -572,9 +596,8 @@ class FakeApi:
             if self.specimen_delay:
                 time.sleep(self.specimen_delay)
             extra = {"ETag": etag} if self.specimen_etag else {}
-            if self.specimen_mark is not None and data[:2] == b"\xff\xd8":
-                payload = b"theodore-mark/1 " + self.specimen_mark
-                data = data[:2] + b"\xff\xfe" + (len(payload) + 2).to_bytes(2, "big") + payload + data[2:]
+            if self.specimen_mark is not None:
+                data = mark_like_the_service(data, self.specimen_mark)
             return self._send(h, 200, data, {"X-Theodore-Sha256": self.specimen_sha or sha256_hex(data), **extra}, content_type=self.specimen_type)
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):
             skill, section = route[1], route[2] if len(route) == 3 else ""

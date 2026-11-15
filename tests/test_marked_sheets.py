@@ -15,13 +15,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when r
 from support import ClientCase, status_lines
 from test_mcp import McpCase
 
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + b"synthetic pixels " * 40 + b"\xff\xd9"
+# SOI, APP0 (JFIF), a start of scan, synthetic scan bytes, EOI: a header the service can walk.
+JPEG = (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xda\x00\x02"
+        + b"synthetic pixels " * 40 + b"\xff\xd9")
 TOKEN = b"A1b2C3d4-opaque_token"
 
 
 def marked(data: bytes, token: bytes = TOKEN) -> bytes:
+    """As the service marks it: after the APP0 segment (20 bytes from the start)."""
     payload = b"theodore-mark/1 " + token
-    return data[:2] + b"\xff\xfe" + (len(payload) + 2).to_bytes(2, "big") + payload + data[2:]
+    return data[:20] + b"\xff\xfe" + (len(payload) + 2).to_bytes(2, "big") + payload + data[20:]
 
 
 class LauncherSheets(ClientCase):
@@ -71,6 +74,25 @@ class LauncherSheets(ClientCase):
         self.assertEqual(first.read_bytes(), JPEG)
         self.client("specimen", "cover-01.jpg")
         self.assertEqual(self.api.served["specimen", "cover-01.jpg", 304], 1)
+
+
+class Unmarking(unittest.TestCase):
+    def test_the_mark_is_found_after_application_segments_and_nowhere_else(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "client"))
+        from theodore_client import specimens
+        from fake_api import mark_like_the_service
+        exif_icc = b"\xff\xd8\xff\xe1\x00\x08Exif\x00\x00\xff\xe2\x00\x05ICC" + JPEG[20:]
+        no_app = b"\xff\xd8\xff\xdb\x00\x04\x01\x02" + JPEG[20:]
+        for name, data in (("jfif", JPEG), ("exif+icc", exif_icc), ("no APPn", no_app)):
+            with self.subTest(name):
+                sent = mark_like_the_service(data, TOKEN)
+                self.assertNotEqual(sent, data)
+                self.assertEqual(specimens.unmarked(sent), data)
+                self.assertEqual(specimens.unmarked(data), data)
+        # A comment of someone else's, or a mark inside the image data, is left alone.
+        other = JPEG[:20] + b"\xff\xfe\x00\x07hello" + JPEG[20:]
+        self.assertEqual(specimens.unmarked(other), other)
+        self.assertEqual(specimens.unmarked(b"\xff\xd8\xff\xe0\x7f\xff"), b"\xff\xd8\xff\xe0\x7f\xff")
 
 
 class LocalServerSheets(McpCase):
