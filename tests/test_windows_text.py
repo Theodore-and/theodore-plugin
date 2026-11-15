@@ -375,7 +375,7 @@ class WindowsShortCommand(unittest.TestCase):
                 mock.patch.object(commands, "_shim_written", lambda: True):
             rules = commands._permission_rules()
         for rule in (f"PowerShell({launcher} *)", f'PowerShell(& "{launcher}" *)', f'PowerShell(& "{script}" *)',
-                     "PowerShell(theodore *)", "PowerShell(& theodore *)", "Bash(theodore *)", "Edit(**/.theodore/workspaces/**)"):
+                     "PowerShell(theodore *)", "PowerShell(& theodore *)", "Bash(theodore *)", "Edit(//**/.theodore/workspaces/**)"):
             self.assertIn(rule, rules)
         self.assertFalse([r for r in rules if r in ("PowerShell", "PowerShell(*)", "PowerShell(& *)", "Bash(*)")], "nothing broader")
         with mock.patch.object(commands, "_claude_skill_launchers", lambda: []), mock.patch.object(commands, "_render_cache_dirs", lambda: []), \

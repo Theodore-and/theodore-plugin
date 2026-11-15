@@ -21,9 +21,10 @@
   `PowerShell(& "<path>" *)` (the `&` form of a path matched no rule in the macOS probe; lane WINDOWS checks it on
   Windows). Codex: `prefix_rule(["theodore"])`. `Read(//<Claude Code's plugin cache>/theodore/**)`: Theodore's plugin
   files, so `ls <skill folder>/scripts` outside the working folder does not ask.
-- `Edit(**/.theodore/workspaces/**)`: the assistant writes and edits a deck's working files (`deck.js`, notes) in the
+- `Edit(//**/.theodore/workspaces/**)`: the assistant writes and edits a deck's working files (`deck.js`, notes) in the
   workspace folders Theodore's engine makes inside the user's folder without a file prompt. Nothing else; Theodore's
-  own folder has no `workspaces` subfolder. Said in the installer's last lines, install.md, README and SECURITY.md.
+  own folder has no `workspaces` subfolder. Anchored at the root (`//**`): a relative pattern is read against Claude
+  Code's current folder, which moves when the assistant `cd`s into the workspace (measured: the Edit then asked). Said in the installer's last lines, install.md, README and SECURITY.md.
 - Codex on Windows starts Theodore's tool server: Codex reads one `mcp.json` on every system and the published one
   starts it with `sh`, which Windows lacks; on Windows Theodore's own copy of the plugin (Codex's marketplace) now
   starts `./skills/pptx/scripts/theodore.cmd`, rewritten at every unpack so plugin updates keep it.

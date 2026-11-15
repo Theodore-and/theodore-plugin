@@ -1989,7 +1989,7 @@ class Hosts(ClientCase):
         self.assertIn("THEODORE_HOME=", text, "a home outside the default one goes with it")
         allow = json.loads(settings.read_text())["permissions"]["allow"]
         self.assertIn("Bash(theodore *)", allow)
-        self.assertIn("Edit(**/.theodore/workspaces/**)", allow)
+        self.assertIn("Edit(//**/.theodore/workspaces/**)", allow)
         self.assertIn(f"Read(/{self.box.user_home / '.claude' / 'plugins' / 'cache' / 'theodore'}/**)", allow,
                       "Claude Code's copy of Theodore's plugin, read-only")
         self.assertNotIn("PowerShell(theodore *)", allow, "PowerShell rules only on Windows")
@@ -2017,6 +2017,22 @@ class Hosts(ClientCase):
         self.assertTrue(shim.is_file())
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertFalse(shim.exists(), "the uninstall's take-back removes it")
+
+    def test_the_relative_workspace_rule_of_an_earlier_build_is_replaced(self):
+        _folder, settings = self._short_command_box()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        record_path = self.box.home / "state" / "host-settings.json"
+        record = json.loads(record_path.read_text())
+        applied = json.loads(settings.read_text())
+        applied["permissions"]["allow"] = ["Edit(**/.theodore/workspaces/**)" if r == "Edit(//**/.theodore/workspaces/**)" else r
+                                           for r in applied["permissions"]["allow"]]
+        settings.write_text(json.dumps(applied))
+        record["rules"] = ["Edit(**/.theodore/workspaces/**)" if r == "Edit(//**/.theodore/workspaces/**)" else r for r in record["rules"]]
+        record_path.write_text(json.dumps(record))
+        self.client("doctor")
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertNotIn("Edit(**/.theodore/workspaces/**)", allow)
+        self.assertIn("Edit(//**/.theodore/workspaces/**)", allow)
 
     @unittest.skipIf(IS_WINDOWS, "the POSIX short command")
     def test_a_short_command_the_person_deleted_stays_deleted_and_its_rule_goes(self):

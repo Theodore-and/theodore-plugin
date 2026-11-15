@@ -83,9 +83,9 @@ Outside that folder:
   in Claude Code's `settings.json` (shared by the CLI, the desktop app's Code tab and the VS Code extension),
   automatic plugin updates for the Theodore marketplace and permission rules for Theodore's own commands only, by
   their exact installed paths (on Windows for the PowerShell tool too), so they run without a prompt; the short
-  command `theodore` and its rule (below); and `Edit(**/.theodore/workspaces/**)`, which lets the assistant write and
+  command `theodore` and its rule (below); and `Edit(//**/.theodore/workspaces/**)`, which lets the assistant write and
   edit a deck's working files (`deck.js`, its notes) in the `.theodore/workspaces` folder Theodore's engine makes
-  inside the folder you work in, and nothing else; in Codex, the file `~/.codex/rules/theodore.rules`,
+  inside the folders you work in (wherever they are), and nothing else; in Codex, the file `~/.codex/rules/theodore.rules`,
   which allows Theodore's launcher by its exact paths (and `theodore`). With the Codex rules, Theodore's commands run outside Codex's
   sandbox without asking each time. Leave them out with the installer's `--no-settings`, take them back with
   `theodore hosts settings --remove`; an organisation's managed policy always wins. An installation that updates to

@@ -1440,7 +1440,11 @@ def _claude_settings_path() -> Path:
 
 
 CLAUDE_MCP_RULE = "mcp__plugin_theodore_theodore"      # every tool of the plugin's own server (guide, specimen, list)
-CLAUDE_WORKSPACE_EDIT_RULE = "Edit(**/.theodore/workspaces/**)"     # Edit rules also cover Write (permissions docs)
+# Edit rules also cover Write (permissions docs). Anchored at the filesystem root (`//**`), not relative: a relative
+# pattern is read against Claude Code's current folder, which moves when the assistant `cd`s into the workspace, and the
+# rule then stopped matching (lane PROMPTS, measured).
+CLAUDE_WORKSPACE_EDIT_RULE = "Edit(//**/.theodore/workspaces/**)"
+RETIRED_RULES = {"Edit(**/.theodore/workspaces/**)"}     # written by earlier 0.4.1 builds: taken out when found
 
 
 def _claude_skill_launchers() -> list[Path]:
@@ -1481,8 +1485,8 @@ def _permission_rules() -> list[str]:
         if core.IS_WINDOWS:
             rules += [f"PowerShell({core.SHIM_NAME} *)", f"PowerShell(& {core.SHIM_NAME} *)"]
     # The assistant's own edits of a deck's working files (deck.js, notes) in the deck workspaces Theodore's engine
-    # makes inside the user's folder: `<folder>/.theodore/workspaces/<deck>/`. Relative to the session's folder, at any
-    # depth under it; Theodore's own home (~/.theodore) has no `workspaces` folder, so its code is never covered.
+    # makes inside the user's folder: `<folder>/.theodore/workspaces/<deck>/`, wherever that folder is; Theodore's own
+    # home (~/.theodore) has no `workspaces` folder, so its code is never covered.
     rules.append(CLAUDE_WORKSPACE_EDIT_RULE)
     rules.append(CLAUDE_MCP_RULE)
     rules += [f"Skill({CLAUDE_PLUGIN}:{skill}{args})" for skill in ("pptx", "deck-design") for args in ("", " *")]
@@ -1935,7 +1939,7 @@ def _claude_settings_apply(only_new: bool = False) -> str:
     wanted = _permission_rules()
     # A rule for the short command lives only as long as the command: when it is gone (taken out, or PATH changed),
     # the rule Theodore wrote for it goes too, so it never allows another program of that name.
-    stale = [r for r in (record.get("rules") or []) if r in _short_rules() and r not in wanted]
+    stale = [r for r in (record.get("rules") or []) if (r in _short_rules() or r in RETIRED_RULES) and r not in wanted]
     allow[:] = [r for r in allow if r not in stale]
     record["rules"] = [r for r in (record.get("rules") or []) if r not in stale]
     added = [r for r in wanted if r not in allow and not (only_new and r in (record.get("rules") or []))] \
