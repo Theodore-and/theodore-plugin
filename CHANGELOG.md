@@ -17,6 +17,11 @@
   themselves as `call "%%NAME%%"`, so the path is expanded once, after CALL (CALL doubles every caret, quoted or not,
   and expands % a second time: C:\Users\a^b or 50%off was another path); the lines that name Theodore's folder or
   its stable launcher quote it, so a name with & or a parenthesis stays one path (install.sh quotes it the same way).
+- Specimen sheets go in a private folder under Theodore's own cache (macOS `~/Library/Caches/Theodore/specimens`,
+  Linux `$XDG_CACHE_HOME/theodore/specimens`, Windows `%LOCALAPPDATA%\Theodore\Cache\specimens`), owner-only and named
+  `theodore-specimens-<random>`, which the host settings' Read rule covers, instead of the system's temporary folder
+  (shared, swept and indexed by other tools); the temporary folder only when the working folder contains the cache.
+  Their life is unchanged: removed after an hour by the next Theodore call, all of them at uninstall.
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an

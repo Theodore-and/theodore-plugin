@@ -1,10 +1,10 @@
 r"""Deck-design specimen sheets. They are the publisher's images: fetched one at a time when the assistant asks,
-held in a private temporary folder of this run, removed by the first Theodore run after an hour (there is no background
+held in a private folder of this run in Theodore's cache, removed by the first Theodore run after an hour (there is no background
 process) and by the uninstall, and never put in Theodore's folder or in a deck's.
 
 `theodore specimen <file>...` fetches into a new folder <root>/theodore-specimens-XXXXXXXX (the current user's
-alone), where <root> is the system's temporary folder or, when that lies inside the working folder, the user's cache
-folder (~/Library/Caches/Theodore/specimens, $XDG_CACHE_HOME/theodore/specimens, %LOCALAPPDATA%\Theodore\Cache\specimens).
+alone), where <root> is the user's cache folder (~/Library/Caches/Theodore/specimens, $XDG_CACHE_HOME/theodore/specimens,
+%LOCALAPPDATA%\Theodore\Cache\specimens) or, only when that lies inside the working folder, the system's temporary folder.
 Every folder made is recorded in <home>/state/specimens.txt, one line "<created epoch> <path>", which the launchers and
 installers read too. Every client call first removes recorded folders, and folders in the current roots, older than an
 hour; `uninstall` removes them all. A changed TMPDIR therefore cannot strand a folder.
@@ -177,9 +177,11 @@ def make_folder() -> Path:
     """A new folder for this run's sheets, recorded before anything is put in it. No private folder outside the
     working folder, the deck and Theodore's folder: no sheet is fetched."""
     problem = None
-    for root in roots():
-        if not _usable(root):
-            continue
+    # Theodore's own cache first (the host settings' Read rule covers it; the system's temporary folder is shared,
+    # swept and indexed by other tools); the temporary folder only when the working folder contains the cache.
+    cache = cache_root().resolve()
+    usable = [root for root in roots() if _usable(root)]
+    for root in ([cache] if cache in usable else usable):
         if root == cache_root().resolve():
             with contextlib.suppress(OSError):
                 root.mkdir(parents=True, exist_ok=True)

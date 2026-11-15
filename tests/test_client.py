@@ -139,6 +139,11 @@ class Specimen(ClientCase):
         self.sign_in()
         self.api.specimens = {"cover-01.jpg": JPEG, "Grid_2.b.jpg": JPEG + b"2"}
         self.temp = Path(self.box.env["TMPDIR"])
+        # Where sheets go: Theodore's own cache (the temporary folder only when the working folder contains the cache).
+        home, env = self.box.user_home, self.box.env
+        self.cache = (home / "Library" / "Caches" / "Theodore" / "specimens" if sys.platform == "darwin" else
+                      Path(env["LOCALAPPDATA"]) / "Theodore" / "Cache" / "specimens" if IS_WINDOWS else
+                      Path(env.get("XDG_CACHE_HOME") or home / ".cache") / "theodore" / "specimens")
         self.deck = self.box.tmp / "deck"
         (self.deck / ".pptx-state").mkdir(parents=True)
         self.work = self.box.tmp / "work"           # a working folder that does not contain the temporary folder
@@ -149,7 +154,8 @@ class Specimen(ClientCase):
         return super().client(*args, **kwargs)
 
     def folders(self, root: Path | None = None) -> list[Path]:
-        return sorted(p for p in (root or self.temp).iterdir() if p.name.startswith("theodore-specimens-"))
+        root = root or self.cache
+        return sorted(p for p in root.iterdir() if p.name.startswith("theodore-specimens-")) if root.is_dir() else []
 
     def specimen_requests(self) -> list[dict]:
         return [r for r in self.api.requests if "/guide/specimens/" in r["path"]]
@@ -170,6 +176,7 @@ class Specimen(ClientCase):
         self.assertEqual((one.read_bytes(), two.read_bytes()), (JPEG, JPEG + b"2"))
         self.assertEqual(one.parent, two.parent, "one folder per run")
         self.assertEqual(self.folders(), [one.parent])
+        self.assertEqual(self.folders(self.temp), [], "never the shared temporary folder when Theodore's cache can be used")
         self.assertEqual(stat.S_IMODE(one.parent.stat().st_mode), 0o700)
         self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in (one, two)}, {0o600})
         for kept_out in (self.box.home, self.deck):
@@ -296,7 +303,9 @@ class Specimen(ClientCase):
         self.api.specimens["edge.jpg"] = b"\xff\xd8" + b"x" * ((1 << 20) - 2)
         self.assertEqual(self.client("specimen", "edge.jpg").returncode, 0)
         self.api.specimen_type = "text/html"
-        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.fresh_temp())}), "INTERNAL", 78)
+        for held in self.folders():         # the edge sheet's folder: what follows must add none
+            shutil.rmtree(held)
+        self.refused(self.client("specimen", "cover-01.jpg"), "INTERNAL", 78)
 
     def fresh_temp(self) -> Path:
         self.temp = self.box.tmp / "tmp2"
@@ -377,7 +386,9 @@ class Specimen(ClientCase):
     def test_a_folder_uninstall_could_not_remove_keeps_its_record(self):
         # The record of a folder that could not be removed survives the removal of state/, so a
         # later uninstall finds it although TMPDIR changed.
-        path = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        # From the user's home, which contains Theodore's cache: the sheet goes to the temporary folder.
+        path = Path(self.client("specimen", "cover-01.jpg", cwd=self.box.user_home).stdout.strip())
+        self.assertEqual(self.temp, path.parent.parent)
         self.temp.chmod(0o555)                     # the folder cannot be removed from its parent
         self.addCleanup(lambda: self.temp.chmod(0o755))
         other = self.box.tmp / "another-tmp"
