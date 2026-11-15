@@ -63,7 +63,9 @@ Windows x64 17.9 / 54.6 MB, Linux x64 21.2 / 58.5 MB, Linux arm64 18.5 / 48.9 MB
 Outside that folder:
 
 - **Your assistants' own plugin folders.** Claude Code and Codex keep their copy of the plugin (text files)
-  where they keep every plugin.
+  where they keep every plugin. Where Codex's settings folder is read-only (ChatGPT's Work mode), Codex cannot
+  take the plugin; the installer then links Theodore's two skills into `~/.agents/skills` (`theodore-deck-design`,
+  `theodore-pptx`), which Codex reads at the start of each session. Uninstalling removes those two links.
 - **The sign-in credential.** macOS: one item in your login keychain (service `ai.theodoreand.theodore`).
   Windows: a file in `state/` protected with DPAPI for your user. Linux: a file in `state/` readable only by
   you.

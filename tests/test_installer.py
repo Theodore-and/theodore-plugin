@@ -190,6 +190,25 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs(timeout=180)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
 
+    @unittest.skipIf(IS_WINDOWS, "install.sh")
+    def test_in_codex_a_slow_link_ends_with_nothing_to_poll(self):
+        """Lane CHATGPT: Codex asks before every command of the install session, so the installer's last words there are
+        OK with the download going on by itself, and tell the assistant to run nothing more (no doctor polls)."""
+        self.api.issue_activation_code("ABCD-1234")
+        for part in self.api.runtime["parts"]:
+            if part["part"] != "python":
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+        result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2", "CODEX_THREAD_ID": "01a1df00-test"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        self.assertTrue(first.startswith("THEODORE OK: Theodore is installed and signed in; the rest of its runtime"), first)
+        self.assertIn("run nothing more now, neither doctor nor this installer", nxt)
+        self.assertIn("start a new session and ask for a deck", nxt)
+        self.assertNotIn("SETUP_IN_PROGRESS", first)
+        self.box.wait_jobs(timeout=180)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
+
     def test_on_a_slow_link_the_installer_returns_and_the_download_goes_on_in_the_background(self):
         # ACCEPT-RC8 D1: Claude Code stopped the installer at its 10-minute limit while the runtime was still downloading,
         # before the plugin was registered. The long downloads are a background job the installer waits for only briefly.

@@ -1706,6 +1706,33 @@ class Hosts(ClientCase):
         self.assertIn(f"codex plugin marketplace add {plugin}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
 
+    @unittest.skipIf(IS_WINDOWS, "symbolic links: ChatGPT's Work mode is Linux")
+    def test_codex_with_read_only_settings_gets_the_skills_linked_and_uninstall_takes_them_back(self):
+        """Lane CHATGPT: in ChatGPT's Work mode ~/.codex is read-only, so `codex plugin add` fails; Theodore's two skills
+        are linked into ~/.agents/skills (read by Codex at each session start) instead, and only those links go back."""
+        log = self._fake_tools()
+        codex = self.box.tmp / "fakebin" / "codex"
+        codex.write_text(f'#!/bin/sh\necho "codex $*" >> "{log}"\ncase "$*" in "plugin add"*) echo "Error: config is read-only" >&2; exit 1;; esac\nexit 0\n')
+        plugin = self.box.home / "plugin"
+        (plugin / ".agents" / "plugins").mkdir(parents=True)
+        (plugin / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        for skill in ("deck-design", "pptx"):
+            (plugin / "plugins" / "theodore" / "skills" / skill).mkdir(parents=True)
+            (plugin / "plugins" / "theodore" / "skills" / skill / "SKILL.md").write_text(f"---\nname: {skill}\n---\n")
+        skills = Path(self.box.env["HOME"]) / ".agents" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "mine").mkdir()
+        result = self.client("hosts", "register")
+        self.assertStatus(result, "OK", 0)
+        self.assertNotIn("codex: FAILED", result.stdout)
+        self.assertEqual(os.readlink(skills / "theodore-pptx"), str(plugin / "plugins" / "theodore" / "skills" / "pptx"))
+        self.assertTrue((skills / "theodore-deck-design" / "SKILL.md").is_file())
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)        # again: the same links, nothing else
+        self.assertEqual(sorted(p.name for p in skills.iterdir()), ["mine", "theodore-deck-design", "theodore-pptx"])
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(sorted(p.name for p in skills.iterdir()), ["mine"], "only Theodore's links go")
+        self.assertTrue((plugin / "plugins" / "theodore" / "skills" / "pptx" / "SKILL.md").is_file(), "a link's target is never removed")
+
     def test_claude_falls_back_to_two_commands(self):
         log = self._fake_tools(claude_first_rc=1)
         self.client("hosts", "register")

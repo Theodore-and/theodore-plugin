@@ -1543,6 +1543,56 @@ def _host_registration(name: str, command: str) -> bool | None:
     return None if code != 0 else re.search(r"(?<![A-Za-z0-9_-])theodore@theodore(?![A-Za-z0-9_-])", out) is not None
 
 
+AGENTS_SKILL_LINKS = {"deck-design": "theodore-deck-design", "pptx": "theodore-pptx"}
+
+
+def _agents_skills_dir() -> Path:
+    return Path.home() / ".agents" / "skills"
+
+
+def _agents_skills_link(record: dict, plugin_dir: Path) -> str | None:
+    """Where Codex cannot take the plugin (its config folder is read-only, as in ChatGPT's Work mode), link Theodore's two
+    skills into ~/.agents/skills, the user skill folder Codex reads at the start of each session. Only links Theodore makes
+    (recorded, taken back at uninstall); an existing entry of that name is left alone. The line to report, or None."""
+    if core.IS_WINDOWS:
+        return None
+    target = _agents_skills_dir()
+    made: list[str] = list(record.get("agents_skills") or [])
+    for skill, name in AGENTS_SKILL_LINKS.items():
+        source = plugin_dir / "plugins" / "theodore" / "skills" / skill
+        link = target / name
+        if not (source / "SKILL.md").is_file():
+            return None
+        try:
+            if link.is_symlink() and os.readlink(link) == str(source):
+                pass
+            elif link.exists() or link.is_symlink():
+                return None
+            else:
+                target.mkdir(parents=True, exist_ok=True)
+                os.symlink(str(source), str(link))
+        except OSError:
+            return None
+        if str(link) not in made:
+            made.append(str(link))
+    record["agents_skills"] = made
+    return f"codex: its settings are read-only here, so Theodore's skills were linked into {target}"
+
+
+def _agents_skills_take_back(record: dict, left: list[str]) -> None:
+    kept: list[str] = []
+    for raw in record.pop("agents_skills", None) or []:
+        link = Path(raw)
+        try:
+            if link.is_symlink():
+                link.unlink()
+        except OSError as exc:
+            left.append(f"the skill link {link} ({exc.__class__.__name__})")
+            kept.append(raw)
+    if kept:
+        record["agents_skills"] = kept
+
+
 def _register_hosts() -> list[str]:
     """Register the plugin in Claude Code and Codex when they are on this computer, and write the lines naming Theodore
     in their instructions. One line per assistant ("... FAILED (...)" when it did not work); prints nothing. Done, the
@@ -1607,7 +1657,9 @@ def _register_hosts() -> list[str]:
                 record.setdefault("codex_added_marketplace", False)
             _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
             code, out = _run([codex, "plugin", "add", "theodore@theodore"])
-            lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+            linked = None if code == 0 else _agents_skills_link(record, plugin_dir)
+            lines.append("codex: registered" if code == 0 else linked if linked else
+                         f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
             if code == 0:
                 record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
                 record.setdefault("codex_added_marketplace", not market_before)
@@ -2222,6 +2274,12 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
                          f"from {', '.join(changed)} directly (nothing else in the file changed)")
     _codex_rules_take_back(left, notes)
     record = _host_record()
+    if "agents_skills" in record:
+        _agents_skills_take_back(record, left)
+        if record:
+            _save_host_record(record)
+        else:
+            core.remove_tree(_host_record_path())
     if desktop.RECORD_KEY in record:
         changed = desktop.unregister(record, left, notes)
         if changed:

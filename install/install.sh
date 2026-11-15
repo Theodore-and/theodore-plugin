@@ -480,8 +480,13 @@ LAUNCHER="$SCRIPTS/theodore"
 # --- 4. runtime and engine: a background job, so the first deck request does not wait -------------------------------
 # The job outlives this installer. It is waited for a few minutes at most: an assistant's command has a time limit
 # (Claude Code stops a command after 10 minutes), and the job must not be what that limit stops.
-SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}
-case "$SETUP_WAIT" in ''|*[!0-9]*) SETUP_WAIT=180 ;; esac
+# Codex (CODEX_THREAD_ID: its CLI, the ChatGPT app's Codex mode, ChatGPT's Work mode) lets a command run longer and asks
+# before each command of the session that runs this installer (its rules load at the next session): wait longer here,
+# so the assistant has nothing to poll.
+SETUP_WAIT_DEFAULT=180
+[ -n "${CODEX_THREAD_ID:-}" ] && SETUP_WAIT_DEFAULT=540
+SETUP_WAIT=${THEODORE_INSTALL_WAIT:-$SETUP_WAIT_DEFAULT}
+case "$SETUP_WAIT" in ''|*[!0-9]*) SETUP_WAIT=$SETUP_WAIT_DEFAULT ;; esac
 say "downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step"
 setup_out=$(THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=$SETUP_WAIT sh "$LAUNCHER" setup --wait "$SETUP_WAIT")
 rc=$?
@@ -541,6 +546,13 @@ if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the sam
   # "the same command", which here would be this installer).
   printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'
   where=$(printf '%s\n' "$doctor_out" | sed -n 's/^THEODORE SETUP_IN_PROGRESS: \(.*\)\.$/\1/p' | tail -n 1)
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$HOSTS_RC" -eq 0 ]; then
+    # In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the
+    # first deck request in a new session waits for it.
+    status OK 0 "Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (${where:-downloading})." \
+      "run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck." \
+      "Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck."
+  fi
   status SETUP_IN_PROGRESS 67 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
     "run \"$T\" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line." \
     "Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it."
