@@ -447,8 +447,9 @@ class Guide(ClientCase):
         launcher = f'"{self.box.home / "bin" / "theodore"}"'
         self.assertEqual(lines[1], f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>")
         self.assertEqual(lines[2], f"          python3 ...  ->  {launcher} python ...")
-        self.assertIn(f"<pptx-skill-dir> = {self.box.home / 'engines' / self.ENGINE_VERSION / 'skills' / 'pptx'}", lines[3])
-        self.assertEqual(lines[4], "--- SKILL.md ---")
+        self.assertEqual(lines[3], f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>")
+        self.assertIn(f"<pptx-skill-dir> = {self.box.home / 'engines' / self.ENGINE_VERSION / 'skills' / 'pptx'}", lines[4])
+        self.assertEqual(lines[5], "--- SKILL.md ---")
         manual = (self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md").read_text()
         body = result.stdout.split("--- SKILL.md ---\n", 1)[1].rsplit("=== END", 1)[0]
         self.assertEqual(body, manual)                                      # verbatim
@@ -820,8 +821,8 @@ class Engine(ClientCase):
             out = self.client(*args).stdout
             lines = out.splitlines()
             bindings = next(i for i, line in enumerate(lines) if line.startswith("Bindings: pptx <verb>"))
-            self.assertTrue(lines[bindings + 2].lstrip().startswith("<pptx-skill-dir> = "), args)
-            self.assertEqual(lines[bindings + 3], "SERVED-POINTER: first instruction.", args)
+            self.assertTrue(lines[bindings + 3].lstrip().startswith("<pptx-skill-dir> = "), args)
+            self.assertEqual(lines[bindings + 4], "SERVED-POINTER: first instruction.", args)
             self.assertLess(out.index("DIRECTIONS."), out.index(manual), args)
 
     def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
@@ -1955,15 +1956,23 @@ class Hosts(ClientCase):
     @unittest.skipIf(IS_WINDOWS, "the POSIX short command; Windows's is checked in test_windows_text")
     def test_the_short_command_is_written_named_allowed_and_taken_back(self):
         folder, settings = self._short_command_box()
+        (self.box.home / "plugin" / ".agents" / "plugins").mkdir(parents=True)
+        (self.box.home / "plugin" / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        claude_md = self.box.user_home / ".claude" / "CLAUDE.md"
+        self.assertIn(f'run "{self.box.home / "bin" / "theodore"}" uninstall.', claude_md.read_text())
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         shim = folder / "theodore"
         self.assertTrue(shim.is_file() and os.access(shim, os.X_OK), "written into the per-user folder on PATH, executable")
+        self.assertIn("run theodore uninstall.", claude_md.read_text(), "the routing line the model reads first names it too")
         text = shim.read_text()
         self.assertIn(str(self.box.home / "bin" / "theodore"), text, "it runs only the stable launcher, by its path")
         self.assertIn("THEODORE_HOME=", text, "a home outside the default one goes with it")
         allow = json.loads(settings.read_text())["permissions"]["allow"]
         self.assertIn("Bash(theodore *)", allow)
         self.assertIn("Edit(**/.theodore/workspaces/**)", allow)
+        self.assertIn(f"Read(/{self.box.user_home / '.claude' / 'plugins' / 'cache' / 'theodore'}/**)", allow,
+                      "Claude Code's copy of Theodore's plugin, read-only")
         self.assertNotIn("PowerShell(theodore *)", allow, "PowerShell rules only on Windows")
         for rule in allow:
             self.assertNotIn(rule, ("Bash(*)", "Bash", "Edit", "Edit(**)", "Bash(cd *)", "Bash(sh *)"), "nothing broader than Theodore's own")
@@ -1976,6 +1985,7 @@ class Hosts(ClientCase):
         self.assertIn('prefix_rule(pattern = ["theodore"], decision = "allow")', rules, "Codex allows the same one name")
         self.assertStatus(self.client("hosts", "settings", "--remove"), "OK", 0)
         self.assertFalse(shim.exists(), "taken back with the settings")
+        self.assertIn(f'run "{self.box.home / "bin" / "theodore"}" uninstall.', claude_md.read_text(), "and the routing line names the path again")
         allow = json.loads(settings.read_text())["permissions"]["allow"]
         self.assertEqual(allow, ["Bash(git status)"], "its rules and the workspace rule go too")
         _f, nxt, _t = self.assertStatus(self.client("hosts", "settings"), "OK", 0)

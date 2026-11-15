@@ -187,6 +187,7 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True) -> int:
     if part == 1:
         header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
                   f"          python3 ...  ->  {launcher} python ...",
+                  f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
                   f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"]
         directions = _directions("pptx")
         if directions.startswith("THEODORE OFFLINE: "):
@@ -432,6 +433,7 @@ def _pptx_body() -> str:
     launcher = quoted_launcher()
     header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
               f"          python3 ...  ->  {launcher} python ...",
+              f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
               f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"]
     directions = _directions("pptx")
     if directions.startswith("THEODORE OFFLINE: "):
@@ -1462,7 +1464,10 @@ def _permission_rules() -> list[str]:
     # Reading Theodore's own folders: its home (the engine's texts), the engine's render caches (rendered slides) and the
     # specimen cache. A folder inside another one listed is covered by that one's rule.
     folders: list[Path] = []
-    for folder in (core.home().root, *_render_cache_dirs(), specimens.cache_root().parent):
+    # Claude Code's copy of Theodore's plugin too: the assistant lists or reads its skill folder (`ls <skill>/scripts`), and
+    # a read-only command outside the working folder asks unless a Read rule covers it (lane PROMPTS, measured).
+    plugin_cache = _claude_settings_path().parent / "plugins" / "cache" / "theodore"
+    for folder in (core.home().root, *_render_cache_dirs(), specimens.cache_root().parent, plugin_cache):
         folder = Path(os.path.abspath(folder))
         if folder not in folders:
             folders.append(folder)
@@ -1631,6 +1636,7 @@ def settings_remove() -> list[str]:
     notes: list[str] = []
     if record.get("shim"):
         _shim_take_back(left, notes)
+        ensure_instructions()           # the routing line names the full path again
         lines.append("the short command theodore removed" if not left else f"not removed: {'; '.join(left)}")
         left = []
     if record.get("codex_rules"):
@@ -1775,6 +1781,8 @@ def _register_hosts() -> list[str]:
         if not (plugin_dir / ".agents" / "plugins" / "marketplace.json").exists():
             lines.append(f"codex: FAILED (no plugin copy in {plugin_dir}; run the installer again)")
         else:
+            if core.IS_WINDOWS:             # an installation unpacked before 0.4.1 starts the tool server on Windows too
+                _codex_mcp_for_windows(plugin_dir / "plugins" / "theodore" / "mcp.json")
             record["codex_path"] = codex
             config_before = _codex_config().exists()
             tables_before = _codex_tables()
@@ -2070,6 +2078,7 @@ def _shim_apply(only_new: bool = False) -> str:
     record["shim"] = {"files": [str(p) for p in targets]}
     _save_host_record(record)
     core.shim_reset()
+    ensure_instructions()               # the routing line names the short command from now on
     return f"short command: {core.SHIM_NAME} ({', '.join(str(p) for p in targets)})"
 
 

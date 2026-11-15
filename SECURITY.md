@@ -52,7 +52,8 @@ plugin's own tool server; on Windows also for Claude Code's PowerShell tool), so
 short command `theodore`, a two-line script that only runs the stable launcher, in a per-user folder already on the
 shell's PATH (`~/.local/bin` or `~/bin`; on Windows `%USERPROFILE%\.local\bin` or `%LOCALAPPDATA%\Microsoft\WindowsApps`),
 never over another file and never where another `theodore` comes first, with the rule `Bash(theodore *)` (on Windows
-also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) only while it is there; and one file rule,
+also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) only while it is there; reading Claude Code's own copy of
+Theodore's plugin (`~/.claude/plugins/cache/theodore`); and one file rule,
 `Edit(**/.theodore/workspaces/**)`: Claude Code's file tools may create and edit, without asking, files inside a
 `.theodore/workspaces` folder under the folder the session works in, which is where Theodore's engine keeps each deck's
 working files (`deck.js`, notes). That deck script is code: Theodore's engine runs it when the assistant applies the

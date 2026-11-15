@@ -30,10 +30,13 @@ TEXT = ("The user chose Theodore for every presentation, deck or set of slides, 
 # Version 2 (2026-11-14, lead-approved words, ACCEPT-LOCAL2 D-D): asked to uninstall Theodore, Claude Code on Windows
 # removed the plugin and the folder by hand and left the routing block and the computer's sign-in active. One clause
 # names Theodore's own command, with the launcher's absolute path quoted as every shell the assistants use reads it.
+# From 0.4.1 the short command `theodore` while it is on PATH (core.quoted_launcher): the model reads this line before
+# anything else and copied the long path from it into a variable that no permission rule matches (lane PROMPTS). The
+# block is brought up to date whenever the short command comes or goes (hosts settings, and every guide, skill, doctor).
 
 
 def sentence() -> str:
-    return TEXT[:-1] + f"; to uninstall Theodore, run {core.full_launcher()} uninstall."
+    return TEXT[:-1] + f"; to uninstall Theodore, run {core.quoted_launcher()} uninstall."
 RECORD_KEY = "instructions"
 
 

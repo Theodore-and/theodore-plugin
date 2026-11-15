@@ -11,13 +11,16 @@
 - While that command is on PATH, every text the client writes for the assistant (statuses, the Bindings lines, the
   guide's section links and specimen line, "the launcher you used") names `theodore …` instead of the quoted long path,
   which the model kept in a variable (`T="…"; "$T" …`, `$t=…; & $t …`) that no permission rule can match. The routing
-  line in CLAUDE.md and AGENTS.md keeps the full path for its uninstall command.
+  line in CLAUDE.md and AGENTS.md, which the model reads first, names it too (`run theodore uninstall`), and is brought
+  back to the full path when the short command goes. The Bindings block gains one line: Theodore's other commands
+  (guide, specimen, status, report, ...) -> `theodore <command>`.
 - Rules (Claude Code 2.1.292, measured headless in default mode): `Bash(theodore *)` matches `theodore …` alone, after
   `cd`, in pipes, `for` loops, here-documents and `T=theodore; "$T"`; written only while the short command is there and
   taken out when it goes. On Windows, for the PowerShell tool: `PowerShell(theodore *)` and `PowerShell(& theodore *)`
   (both measured), and for the launcher and each skill launcher by path `PowerShell(<path> *)` and
   `PowerShell(& "<path>" *)` (the `&` form of a path matched no rule in the macOS probe; lane WINDOWS checks it on
-  Windows). Codex: `prefix_rule(["theodore"])`.
+  Windows). Codex: `prefix_rule(["theodore"])`. `Read(//<Claude Code's plugin cache>/theodore/**)`: Theodore's plugin
+  files, so `ls <skill folder>/scripts` outside the working folder does not ask.
 - `Edit(**/.theodore/workspaces/**)`: the assistant writes and edits a deck's working files (`deck.js`, notes) in the
   workspace folders Theodore's engine makes inside the user's folder without a file prompt. Nothing else; Theodore's
   own folder has no `workspaces` subfolder. Said in the installer's last lines, install.md, README and SECURITY.md.
