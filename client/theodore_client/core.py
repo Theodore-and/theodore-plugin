@@ -446,8 +446,7 @@ def shim_texts() -> dict[str, str] | None:
     head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
     if IS_WINDOWS:
         local = os.environ.get("LOCALAPPDATA")
-        if os.environ.get("THEODORE_HOME") or not local or \
-                os.path.normcase(os.path.abspath(home().root)) != os.path.normcase(os.path.abspath(Path(local) / "Theodore")):
+        if not local or os.path.normcase(os.path.abspath(home().root)) != os.path.normcase(os.path.abspath(Path(local) / "Theodore")):
             return None
         return {
             "theodore.cmd": f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
@@ -458,7 +457,7 @@ def shim_texts() -> dict[str, str] | None:
                         + 'exec "$b/theodore.cmd" "$@"\n',
         }
     lines = "#!/bin/sh\n" + head
-    if os.environ.get("THEODORE_HOME"):
+    if os.path.abspath(home().root) != os.path.abspath(Path.home() / ".theodore"):     # the launchers set THEODORE_HOME always
         lines += f"THEODORE_HOME={_sh_quote(str(home().root))}\nexport THEODORE_HOME\n"
     return {"theodore": lines + f'exec {_sh_quote(str(home().launcher()))} "$@"\n'}
 

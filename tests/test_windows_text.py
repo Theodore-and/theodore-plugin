@@ -337,6 +337,8 @@ class WindowsShortCommand(unittest.TestCase):
     def test_a_home_elsewhere_gets_no_short_command_on_windows(self):
         with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "elsewhere")}), mock.patch.object(core, "_HOME", None):
             self.assertIsNone(core.shim_texts(), "no path is written into a batch file")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.local / "Theodore")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNotNone(core.shim_texts(), "the launchers always set THEODORE_HOME: the default folder named so still gets it")
 
     def test_the_folders_it_may_use_and_only_on_path(self):
         candidates = core.shim_dir_candidates()
