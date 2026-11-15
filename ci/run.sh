@@ -45,6 +45,11 @@ CACHE="$OUT/cache"
 # Verified downloads are kept by their pinned sha256 for every job (bootstrap_python.py, build_bundle.py): a rerun never
 # fetches them again. The containers see the same folder at /repo/ci/out/cache.
 export THEODORE_FETCH_STORE="$CACHE/by-sha256"
+# No result depends on where the check is launched: the host that runs it (Claude Code, Codex) exports variables the
+# client reads to name its host; none reaches a target (tests/support.py removes them too, for a suite run by hand).
+for _marker in $(env | grep -E '^(CLAUDECODE|CLAUDE_PID|THEODORE_HOST|CLAUDE_CODE_[A-Z0-9_]*|CLAUDE_PLUGIN_[A-Z0-9_]*|CODEX_[A-Z0-9_]*)=' | cut -d= -f1); do
+  unset "$_marker"
+done
 # ubuntu:22.04 (glibc 2.35; the runtime's floor is 2.28): the multi-arch index digest, pulled 2026-11-10.
 UBUNTU="ubuntu@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11"
 GITLEAKS_VERSION=8.30.1
@@ -510,10 +515,10 @@ cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; rel
 trap 'cleanup' EXIT
 trap 'exit 130' INT TERM HUP
 case "$TARGET" in
-  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
+  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
 esac
-# `selected` takes the lock itself, after its Windows job has started: that job runs on its own machine, and waiting in
-# the queue first only delayed the longest job of the run.
+# `selected` and `all` take the lock themselves, after their Windows job has started: that job runs on its own machine,
+# and waiting in the queue first only delayed the longest job of the run.
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
@@ -571,6 +576,7 @@ case "$TARGET" in
     else
       result windows-x64 shim not-run; result windows-x64 runtime not-run
     fi
+    acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)"
     limited 900 secrets run_secrets
     heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 ""
     heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64"

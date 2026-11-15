@@ -20,5 +20,5 @@ and read the output to the line that starts `=== END`; if the last line names a 
 starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
 its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
 context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same
-command. If you cannot run commands, call the Theodore connector's `guide` tool with skill `deck-design`; if there
-is no Theodore connector, tell the user to connect it at Customize > Plugins > Theodore > Connectors.
+command. If you cannot run commands, use the Theodore tool in this conversation (start with its begin action, or
+its guide with skill `deck-design`); if there is no Theodore tool, give the user this link to add it to their Claude account: https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore&connectorUrl=https%3A%2F%2Fmcp.theodoreand.ai%2Fmcp

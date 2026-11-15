@@ -16,9 +16,9 @@ By hand:
 
 | Assistant | Command |
 | --- | --- |
-| Any, macOS or Linux | `( d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
-| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue` |
-| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!" 2>nul"` |
+| Any, macOS or Linux | `( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
+| Any, Windows (PowerShell) | `$f = "$env:LOCALAPPDATA\Theodore-install"; $null = New-Item -ItemType Directory -Force -Path $f; curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "$f\install.cmd" https://theodoreand.ai/install.cmd` then, as a second command, `try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "$env:LOCALAPPDATA\Theodore-install\install.cmd"` |
+| Any, Windows (cmd) | `(if not exist "%LOCALAPPDATA%\Theodore-install" mkdir "%LOCALAPPDATA%\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\Theodore-install\install.cmd" https://theodoreand.ai/install.cmd` then, as a second command, `"%LOCALAPPDATA%\Theodore-install\install.cmd"` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
 | Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` (the installer above registers Codex from its own copy, the same as `codex plugin marketplace add ~/.theodore/plugin`) |
 
@@ -63,7 +63,9 @@ Windows x64 17.9 / 54.6 MB, Linux x64 21.2 / 58.5 MB, Linux arm64 18.5 / 48.9 MB
 Outside that folder:
 
 - **Your assistants' own plugin folders.** Claude Code and Codex keep their copy of the plugin (text files)
-  where they keep every plugin.
+  where they keep every plugin. Where Codex's settings folder is read-only (ChatGPT's Work mode), Codex cannot
+  take the plugin; the installer then links Theodore's two skills into `~/.agents/skills` (`theodore-deck-design`,
+  `theodore-pptx`), which Codex reads at the start of each session. Uninstalling removes those two links.
 - **The sign-in credential.** macOS: one item in your login keychain (service `ai.theodoreand.theodore`).
   Windows: a file in `state/` protected with DPAPI for your user. Linux: a file in `state/` readable only by
   you.
@@ -74,9 +76,17 @@ Outside that folder:
   `%USERPROFILE%\.cache` and `%TEMP%`); the uninstall removes all of them (only files of the names the engine writes).
 - **Your deck workspaces** get one small file, `.pptx-state/theodore-engine.json`, naming the engine version
   that started the workspace, so an update never changes a deck halfway through.
-- **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
-  (automatic plugin updates for the Theodore marketplace; permission to run `~/.theodore/bin/theodore`
-  without a prompt).
+- **Claude Desktop**, when the app is on the computer: one entry, `theodore`, in its `claude_desktop_config.json`,
+  which starts `~/.theodore/bin/theodore mcp --for claude-desktop` so the app's chat can read Theodore's design
+  guidance through one tool, `theodore` (it loads once the app is quit and opened again). Nothing else in that file changes.
+- **Theodore's host settings**, applied by the installer (the person asked their assistant to set Theodore up):
+  in Claude Code's `settings.json` (shared by the CLI, the desktop app's Code tab and the VS Code extension),
+  automatic plugin updates for the Theodore marketplace and permission rules for Theodore's own commands only, by
+  their exact installed paths, so they run without a prompt; in Codex, the file `~/.codex/rules/theodore.rules`,
+  which allows Theodore's launcher by its exact paths. With the Codex rules, Theodore's commands run outside Codex's
+  sandbox without asking each time. Leave them out with the installer's `--no-settings`, take them back with
+  `theodore hosts settings --remove`; an organisation's managed policy always wins. An installation that updates to
+  0.3.10 gets them once, at its first Theodore command after the update, unless they were turned off.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. There are no hooks.
@@ -115,8 +125,8 @@ when nothing else is in it). What is left afterwards:
 - `.pptx-state/theodore-engine.json` inside your deck workspaces (harmless; delete it if you like).
 - Claude Code's cached copy of the plugin under `~/.claude/plugins/cache/theodore/` (about 60 KB of text).
   Claude Code marks it as orphaned and deletes it itself after 14 days.
-- Nothing of the installer: the install commands above download it into a new private folder and delete that
-  folder when it ends.
+- Nothing of the installer: the install commands above download it into a new private folder (Windows:
+  `%LOCALAPPDATA%\Theodore-install`, never the temporary folder) that the installer deletes when it ends.
 - In the system's temporary folder (`$TMPDIR`, `%TEMP%`): the engine's LibreOffice profile (`pptx-soffice-profile/`,
   `pptx-soffice-profile.warm-seed/`, `pptx-soffice-profile.lock`) and its empty lock files
   (`theodore-pptx-locks/*.lock`). The system clears that folder itself; they can be deleted at any time. Specimen
@@ -129,7 +139,9 @@ when nothing else is in it). What is left afterwards:
   marketplace entry it created (left as it is, and said so, if you changed it since), restores an `autoUpdate` value
   it changed (an explicit `false` included), removes a marketplace only if Theodore's registration added it, and
   removes a key, an empty `config.toml` or a `settings.json` only if Theodore created it and it is empty again.
-  Anything you added, empty or not, stays. Codex's empty plugin cache folder for Theodore goes.
+  Anything you added, empty or not, stays. Codex's empty plugin cache folder for Theodore goes, and so does its
+  `theodore.rules` while it is still what Theodore wrote. In Claude Desktop's `claude_desktop_config.json`, only the
+  `theodore` entry Theodore wrote goes (and `mcpServers` if Theodore created it and it is empty again).
 - Your account at theodoreand.ai. Remove this device, or the account, in the portal.
 
 If the launcher is gone, deleting those subfolders and the keychain item by hand does the same.
@@ -143,7 +155,7 @@ If the launcher is gone, deleting those subfolders and the keychain item by hand
 3. The client downloads the rest of the runtime against a signed manifest, signs the computer in (activation
    code or browser approval), installs the engine and prints the instructions.
    The deck-design text is fetched at each use and never stored. Its specimen images are not shipped either:
-   `theodore specimen <file>` fetches one into a private temporary folder. Nothing runs in the background, so the
+   `theodore specimen <file>` fetches one into a private folder in Theodore's own cache. Nothing runs in the background, so the
    folder is removed by the first Theodore command run after it is an hour old, and at the latest by the uninstall.
 4. Every status is three lines the assistant can act on:
 

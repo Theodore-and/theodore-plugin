@@ -1,4 +1,4 @@
-Read this file as downloaded, not through a tool that summarises web pages, into a new private folder (never straight into /tmp): `d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.md" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}' && cat "$d/install.md"` (Windows PowerShell: `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d; curl.exe -q --proto =https -fsS -o "$d\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"; Get-Content "$d\install.md"`), then run the line for your shell in step 1 exactly as written. The installer deletes this file when it runs.
+Read this file as downloaded, not through a tool that summarises web pages, into a new private folder (never straight into /tmp): `d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.md" 'https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}' && break; sleep 2; done; cat "$d/install.md"` (Windows, as two separate commands, into Theodore's own download folder, never the temporary folder: PowerShell `$f = "$env:LOCALAPPDATA\Theodore-install"; $null = New-Item -ItemType Directory -Force -Path $f; curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "$f\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"` then `Get-Content -Encoding UTF8 "$env:LOCALAPPDATA\Theodore-install\install.md"`; cmd `(if not exist "%LOCALAPPDATA%\Theodore-install" mkdir "%LOCALAPPDATA%\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\Theodore-install\install.md" "https://theodoreand.ai/install.md?code={{ACTIVATION_CODE}}"` then `type "%LOCALAPPDATA%\Theodore-install\install.md"`), then run the commands for your shell in step 1 exactly as written. The installer deletes this file when it runs.
 
 # Set up Theodore (instructions for an AI agent)
 
@@ -15,12 +15,21 @@ decks there too, and that workspace is the computer this page means.
    background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
    no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and
    sets Claude Code's CLAUDE_CODE_GIT_BASH_PATH to it, so Theodore's skills can load; uninstalling takes both back.
+   It also lets Theodore's own commands run without asking each time (in Claude Code by their exact paths; in Codex
+   a rules file, so they run outside Codex's sandbox) and turns on the plugin's automatic updates; to leave that out,
+   add --no-settings, and `theodore hosts settings --remove` takes it back later.
    Theodore then keeps itself up to date: its client, engine and assets, and the plugin's files in Claude Code and
    Codex through their own plugin command (used from their next session); uninstalling stops it. Run the
    line for the shell you have, exactly as written:
-   macOS/Linux:        ( d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
-   Windows PowerShell: $d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" --code {{ACTIVATION_CODE}} }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
-   Windows cmd:        cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" --code {{ACTIVATION_CODE}} & rmdir /s /q "!D!" 2>nul"
+   macOS/Linux:        ( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
+   Windows: two separate commands, the download and then the installer (run the second only when the first
+   succeeded); the folder is %LOCALAPPDATA%\Theodore-install, which the installer removes when it ends.
+   Windows PowerShell: $f = "$env:LOCALAPPDATA\Theodore-install"; $null = New-Item -ItemType Directory -Force -Path $f; curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "$f\install.cmd" https://theodoreand.ai/install.cmd
+                  then: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "$env:LOCALAPPDATA\Theodore-install\install.cmd" --code {{ACTIVATION_CODE}}
+   Windows cmd:        (if not exist "%LOCALAPPDATA%\Theodore-install" mkdir "%LOCALAPPDATA%\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\Theodore-install\install.cmd" https://theodoreand.ai/install.cmd
+                  then: "%LOCALAPPDATA%\Theodore-install\install.cmd" --code {{ACTIVATION_CODE}}
+   Each download is tried up to three times (10 s each to connect): from some networks one of the service's
+   addresses does not answer, and a new attempt usually reaches another.
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    The download step can take several minutes: give the command a timeout of at least 15 minutes, or run it in
    the background and wait for it.
@@ -33,8 +42,8 @@ decks there too, and that workspace is the computer this page means.
      (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
      (or from GitHub: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
-3. Check: run `theodore doctor` by the path the installer printed ("the stable launcher is ..."). Report its
-   last line to the user.
+3. Check: the installer ends with Theodore's own check (doctor). Report its last line to the user; run another
+   command only when a NEXT line asks for it, by the path the installer printed ("the stable launcher is ...").
 4. Tell the user to start a new session and ask for a deck.
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or
 API key.

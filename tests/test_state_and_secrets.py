@@ -579,7 +579,8 @@ class SpecimenRegistry(unittest.TestCase):
                 made, path = line.split(" ", 1)
                 self.assertTrue(made.isdigit())
                 self.assertEqual(Path(path), folder)
-                self.assertEqual(folder.parent, dirs["tmp-a"])
+                # Sheets live in a private folder under Theodore's own cache, never in the shared temporary folder.
+                self.assertEqual(folder.parent, dirs["cache"] / "specimens")
 
     def test_a_changed_temporary_folder_cannot_strand_a_folder(self):
         import tempfile
@@ -612,16 +613,15 @@ class SpecimenRegistry(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Windows paths cannot hold a line feed")
     def test_a_path_with_a_line_feed_is_recorded_and_found_again(self):
-        import tempfile
         with self.world() as (specimens, home, dirs):
-            odd = dirs["tmp-a"].parent / "tmp\nwith a line feed %0A"
+            odd = dirs["tmp-a"].parent / "cache\nwith a line feed %0A"
             odd.mkdir()
-            with mock.patch.object(tempfile, "tempdir", str(odd)):
+            with mock.patch.object(specimens, "cache_root", return_value=odd):
                 folder = specimens.make_folder()
             self.assertEqual(folder.parent, odd)
             self.assertEqual([path for _made, path in specimens._read_registry()], [folder])
             self.age(specimens, folder, 3601)
-            self.assertEqual(specimens.sweep(), [])          # TMPDIR is back to tmp-a: only the record finds it
+            self.assertEqual(specimens.sweep(), [])          # the cache root is back to the usual one: only the record finds it
             self.assertFalse(folder.exists())
 
     def test_the_round_7_record_format_is_still_read(self):

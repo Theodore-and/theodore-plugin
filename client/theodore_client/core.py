@@ -5,10 +5,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import locale
 import os
 import re
 import platform as _platform
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -195,6 +197,11 @@ def _chatgpt_cloud() -> bool:
         and (bool(os.environ.get("CODEX_PROXY_CERT")) or Path("/opt/codex/runtimes").is_dir())
 
 
+def codex_sandboxed() -> bool:
+    """This command runs inside Codex's local sandbox (Codex sets CODEX_SANDBOX for the commands it sandboxes)."""
+    return bool(os.environ.get("CODEX_SANDBOX")) and not _chatgpt_cloud()
+
+
 def host_name() -> str:
     """The assistant that called us, as far as the environment says (sent as `host`).
 
@@ -207,13 +214,16 @@ def host_name() -> str:
         return explicit
     if _claude_cloud():
         return "claude-web"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT") or os.environ.get("CLAUDE_PLUGIN_ROOT"):
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
         return "claude-code"
     if _chatgpt_cloud():
         return "chatgpt"
-    if any(os.environ.get(name) for name in ("CODEX_HOME", "CODEX_SANDBOX", "CODEX_MANAGED_BY_NPM", "CODEX_THREAD_ID",
-                                             "CODEX_SESSION_ID", "CODEX_VERSION")):
+    # Before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs (a Codex desktop install was shown as Claude Code).
+    if any(os.environ.get(name) for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_HOME",
+                                             "CODEX_MANAGED_BY_NPM", "CODEX_VERSION")):
         return "codex"
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return "claude-code"
     return "other"
 
 
@@ -285,9 +295,14 @@ def cloud_sandbox() -> bool:
         or any(Path(p).is_dir() for p in ("/mnt/skills", "/mnt/user-data", "/home/oai"))
 
 
-# What the user changes when a cloud sandbox cannot reach Theodore's sites (installers and launcher say the same).
-SANDBOX_NETWORK_NEXT = ("this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once "
-                        "they have changed it, running the same command again is right (not before).")
+# A cloud sandbox that cannot reach Theodore's sites: the engine cannot run there, the Theodore connector can still
+# design the deck (CONNECTOR_REQUIRED; the launcher says the same).
+SANDBOX_NETWORK_NEXT = ("call the Theodore connector's theodore_begin tool now and follow what it returns: it gives the design "
+                        "guidance and the specimen sheets, and you build the deck with your own tools. If no Theodore connector "
+                        "is available to you, say so and give the user this link, which adds the connector to their Claude account "
+                        "in one step (they confirm it, choose Connect and log in): "
+                        "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore&connectorUrl="
+                        "https%3A%2F%2Fmcp.theodoreand.ai%2Fmcp Then they ask again, naming Theodore.")
 
 
 def sandbox_network_tell() -> str:
@@ -297,9 +312,9 @@ def sandbox_network_tell() -> str:
         host = ""
     root = ".".join(host.split(".")[-2:]) or host
     sites = f"{host} and *.{root}" if host else "Theodore's website and its subdomains"
-    return (f"This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and "
-            f"under \"Use the internet while making files\" > Allowed websites add {sites}, then try again. "
-            "ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does.")
+    return (f"Theodore's engine cannot reach its sites from this workspace, so I am using the Theodore connector for the design. "
+            f"For the full engine, add {sites} under Settings > Capabilities > Allowed websites (in ChatGPT, use Work mode), "
+            "or use Theodore in an assistant on your computer, such as Claude Code.")
 
 
 # --- data directory ------------------------------------------------------------------------------------------------------
@@ -336,6 +351,13 @@ class Home:
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(self.root / "state", 0o700)
+        # The folder holds the licensed engine, its manual and the asset packs: this user's alone (lane EXPOSURE). Only
+        # the group's and others' permissions are taken away, and only on a folder this user owns; the owner's are kept.
+        if not IS_WINDOWS:
+            with contextlib.suppress(OSError):
+                info = os.stat(self.root)
+                if info.st_uid == os.getuid() and info.st_mode & 0o077:
+                    os.chmod(self.root, stat.S_IMODE(info.st_mode) & 0o700)
 
     def launcher(self) -> Path:
         env = os.environ.get("THEODORE_LAUNCHER")
@@ -577,6 +599,23 @@ def now() -> float:
 
 # --- files ---------------------------------------------------------------------------------------------------------------
 
+def child_text(data: bytes | str | None) -> str:
+    """A child process's output as text. Theodore's children (its Python with PYTHONIOENCODING=utf-8, Node, the
+    assistants' CLIs) write UTF-8 on every platform; Windows' own tools write the console's code page. UTF-8 first,
+    else the system's code page, so C:\\Users\\Théo is never read as "ThÃ©o" (WINDOWS: a self-test error)."""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        if IS_WINDOWS:
+            with contextlib.suppress(LookupError):
+                return data.decode("oem", errors="replace")
+        return data.decode(locale.getpreferredencoding(False) or "utf-8", errors="replace")
+
+
 def read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
@@ -660,8 +699,12 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
         remove_tree(link)
     link.parent.mkdir(parents=True, exist_ok=True)
     if IS_WINDOWS:
-        subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # The paths reach cmd only through variables, expanded inside quotes: on its command line a path with &, ^, % or
+        # a parenthesis (C:\\Users\\Tom & Jerry) would be cmd syntax, not a name.
+        cmd = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "cmd.exe")
+        subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
+                       env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": str(target)},
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
     else:
         os.symlink(relative or str(target), link, target_is_directory=True)
 
@@ -849,11 +892,38 @@ class Job:
         return not self.alive()
 
 
+_LOG_FILE: Path | None = None       # set by uninstall: its record goes outside the folder it removes
+
+
+def uninstall_log() -> Path:
+    """Where an uninstall keeps its record: beside Theodore's folder, never inside it (~/.theodore-uninstall.log,
+    %LOCALAPPDATA%\\Theodore-uninstall.log), so what it did can still be read once the folder is gone."""
+    root = home().root
+    return root.parent / f"{root.name}-uninstall.log"
+
+
+def log_elsewhere(path: Path) -> None:
+    """From now on this process logs to `path` (kept under 256 KB: an older record is cut first), not to logs/."""
+    global _LOG_FILE
+    with contextlib.suppress(OSError):
+        if path.exists() and path.stat().st_size > 256 * 1024:
+            path.write_text(("\ufeff" if IS_WINDOWS else "") + path.read_text(encoding="utf-8-sig", errors="replace")[-64 * 1024:],
+                            encoding="utf-8")
+    _LOG_FILE = path
+
+
 def log(message: str) -> None:
     with contextlib.suppress(OSError):
-        home().logs.mkdir(parents=True, exist_ok=True)
-        with open(home().logs / "client.log", "a", encoding="utf-8") as handle:
-            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {scrub_secrets(message)}\n")
+        if _LOG_FILE is not None:
+            target = _LOG_FILE
+        else:
+            home().logs.mkdir(parents=True, exist_ok=True)
+            target = home().logs / "client.log"
+        # On Windows a new log starts with a UTF-8 byte-order mark: Notepad and PowerShell 5.1 then read it as UTF-8
+        # (without one they read the ANSI code page: C:\Users\Théo showed mangled, WINDOWS W-8).
+        bom = "\ufeff" if IS_WINDOWS and not os.path.exists(target) else ""
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(f"{bom}{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {scrub_secrets(message)}\n")
 
 
 def user_agent() -> str:

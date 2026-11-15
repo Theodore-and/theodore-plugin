@@ -1,5 +1,195 @@
 # Changes
 
+## 0.4.0
+
+- A text is read whole (lane WHOLETEXT): under Claude Code (CLAUDECODE=1), `theodore guide <skill> [section]`
+  without `--part` prints the whole text as one document (one `form=whole` request; an older paging service is asked
+  for every part in order, and a part that cannot be had prints nothing of the text and names the missing part), so
+  the host keeps it whole inline or in its own saved-output file; Theodore still writes no guidance text to disk.
+  Every output begins with short status lines (its length; read a saved output in full, searching is not reading;
+  the plugin's guide tool returns it whole). Elsewhere, or with `--part`, each part says at its start and its end
+  that it is part N of M and that nothing in it may be acted on before all are read; the last part and a whole text
+  end by saying the text is complete. The local server's pptx manual is one document.
+- Tests and `ci/run.sh` no longer inherit the launching host's identity (lane WHOLETEXT2): `CLAUDECODE`, `CLAUDE_PID`,
+  `THEODORE_HOST`, `CLAUDE_CODE_*`, `CLAUDE_PLUGIN_*` and `CODEX_*` are removed before any target or suite runs, so a
+  check started from a Claude Code or Codex session gives the same results; a test of a host sets the variable itself.
+  Three tests read the line after the guide's opening lines.
+- Claude Desktop's chat builds the deck with Theodore's engine on this computer, set up by the same install, with no
+  connector. The local server's one tool (`theodore`, so "Always allow" is still clicked once) gains the actions:
+  - `manual`: the build instructions;
+  - `run`: one engine command, `pptx <verb> ...` as an argument list, with the design note on standard input, in
+    the deck's folder; slide renders come back as images;
+  - `read`, `write`, `edit`, `list`: the deck's working files;
+  - `reveal`: shows the file in Finder or Explorer, only when the user asks.
+
+  The deck goes to the folder the chat names (its path on this computer), or else `~/Documents/Theodore`. Every answer
+  names the next step, through to the line that gives the user the file's path. Starting the same deck twice in the
+  same folder continues the first, with no `-2` copy.
+- Confinement:
+  - Only the engine's own verbs run, with no shell and no other program.
+  - Every path must be inside the deck's folder; reads may also open Theodore's renders and its manual. Only text
+    files are written.
+  - The deck script runs under Node's permission model plus a guard loaded first. It can read only the engine, its
+    runtime and packs, the fonts, the deck's folder and the render cache. It can write only the folder and the
+    cache. It has no network, and no program but the engine's own Node scripts, which run under the same restriction.
+  - The engine reads a copy of the licence that exists only while one command runs and goes with the main licence.
+- The route is the plan feature `chat-build`. Without it, `run`, `write` and `edit` answer NO_ENTITLEMENT; a plan
+  given the feature is picked up within minutes.
+- A delivered deck is never replaced from a chat: every start from a chat is a deck of its own (the client passes
+  `--new`, so the engine never reopens an earlier deck), and a command that changes a deck (apply, finish, slide and
+  comment edits) runs only on a workspace this session started and that is not finished; a finished deck is changed by
+  starting a new deck from its file, which gets a name of its own. The engine itself never writes a `--from` source and
+  never replaces a file it did not deliver (an existing name gets `-2`; `--output` onto such a file is refused). A
+  retried start of the same unfinished deck continues it. Proven on the real engine (tests/e2e/chat_build_proof.py).
+- One Theodore in a chat: when a Claude account also has Theodore's plugin on, the plugin's own server, started by the
+  Claude app (any client named as the app; Claude Code and Codex are unchanged), serves no tool while Theodore's entry
+  is in the app's configuration, and otherwise the chat's one tool, so a person meets one tool and one approval. The
+  skills' fallback wording names "the Theodore tool", whichever server provides it.
+- Codex, with no folder named: the deck goes to the thread's folder (from `_meta.threadId` and the thread's session
+  file), else `~/Documents/Theodore`. Render images named by a path with a space or an accent (a Windows user folder)
+  come back to the chat. The chat route starts the background licence check as every engine command does.
+- Each chat action is logged by name, verb and exit code only. For testing which name a chat picks,
+  THEODORE_CHAT_TOOL_NAME and THEODORE_CHAT_TOOL_DESCRIPTION override the tool's name and description.
+- Windows, a user name with a letter outside the console's code page (C:\Users\Théo Tester) (lane WINFIX, W-3):
+  uninstall left Theodore's folder behind and still said OK. The cleanup script that deletes the folder after the
+  command ends had the paths written into it in UTF-8, and cmd.exe reads a batch file in the OEM code page, so it
+  looked for another folder and stopped. The script now holds only ASCII and gets every path through environment
+  variables, expanded inside quotes with delayed expansion off (a space, &, %, !, ^ or a parenthesis in a name is part
+  of the path; the WMI way for a job that forbids breaking away sets them from an encoded PowerShell command). The
+  same script is first asked, synchronously, whether it sees the folder; when it does not, nothing is started and the
+  uninstall answers RETRY naming the folder, never OK. Directory junctions take their paths the same way.
+- Windows: the engine's self-test errors, and the assistants' CLI output the client reads, are read as UTF-8 (they
+  were read in the ANSI code page: "ThÃ©o"); the engine's text streams are UTF-8 on every platform
+  (PYTHONIOENCODING=utf-8), as the client's already were.
+- Windows batch files (lane WINFIX audit): the installer and the launcher call Theodore's launcher, the setup and
+  themselves as `call "%%NAME%%"`, so the path is expanded once, after CALL (CALL doubles every caret, quoted or not,
+  and expands % a second time: C:\Users\a^b or 50%off was another path); the lines that name Theodore's folder or
+  its stable launcher quote it, so a name with & or a parenthesis stays one path (install.sh quotes it the same way).
+- Specimen sheets go in a private folder under Theodore's own cache (macOS `~/Library/Caches/Theodore/specimens`,
+  Linux `$XDG_CACHE_HOME/theodore/specimens`, Windows `%LOCALAPPDATA%\Theodore\Cache\specimens`), owner-only and named
+  `theodore-specimens-<random>`, which the host settings' Read rule covers, instead of the system's temporary folder
+  (shared, swept and indexed by other tools); the temporary folder only when the working folder contains the cache.
+  Their life is unchanged: removed after an hour by the next Theodore call, all of them at uninstall.
+- Windows Codex install (as install.sh, lane CHATGPT): under `CODEX_THREAD_ID` install.cmd waits up to 540 s for the
+  download, with a line a minute while it waits, and, still downloading with every assistant registered, ends with
+  THEODORE OK and "run nothing more now, neither doctor nor this installer" instead of an in-progress status to poll;
+  ready, it ends with "Theodore is ready (the check above)" and sends the deck to a new session (Codex loads Theodore's
+  tool and permissions only when a session starts), both as install.sh.
+- Windows, a user name with & or a parenthesis: Claude Desktop's entry, when the launcher path has a character cmd
+  treats specially, carries it in the entry's `env` (`THEODORE_DESKTOP_LAUNCHER`, quoted) and runs
+  `cmd /d /v:on /c !THEODORE_DESKTOP_LAUNCHER! mcp --for claude-desktop` (delayed expansion comes after cmd has parsed
+  the line); other paths keep the entry as it was. The launcher's uninstall of a partial installation reports what is
+  left with delayed expansion instead of CALL ECHO, so the message is no longer cut at the &.
+- Windows LibreOffice (WINDOWS W-6, a release blocker for every profile folder with a space): `msiexec /a` was run
+  from a list, so Python quoted the whole `"TARGETDIR=C:\Users\First Last\..."`; msiexec rejects that form, shows its
+  usage window where nobody sees it and waited for ever (31 minutes at "100% unpacking", every rendering call answering
+  SETUP_IN_PROGRESS). Theodore's own unpack (msi.dll's tables in process, expand.exe for the cabinet) now goes first:
+  no Windows Installer service (which refuses network and batch logons), nothing to quote, progress per file; msiexec
+  is the second way, as one command string with `TARGETDIR="..."`, as proven on the VM. Every program the client runs to
+  unpack or copy a tool has a hard time limit (expand, msiexec, hdiutil, cp, the engine's venv, junctions), ending in the
+  other way or a clear SETUP_FAILED; a rendering call names the phase ("unpacking LibreOffice, 40%"), and a LibreOffice
+  job whose record has not moved for 20 minutes is reported as stuck, not as still being installed.
+- Windows PowerShell (W-4): the install page's PowerShell line sets the console's output encoding to UTF-8 first, so
+  PowerShell 5.1 reads the installer's UTF-8 as UTF-8 (it read it in the console's code page: "Th├⌐o"). The client's
+  output stays UTF-8: an assistant reading PowerShell's own output (Codex), Claude Code's Bash and PowerShell tools
+  and cmd get it right as it is.
+- Windows, Claude Desktop (WINDOWS W-7): "quit and reopen the Claude app" was said when only Claude Code's CLI was
+  running (it is claude.exe too). The app counts as running only for its own program files: the per-user build under
+  `%LOCALAPPDATA%\AnthropicClaude\app-<version>\` or its package under `WindowsApps\Claude_<...>\`.
+- Uninstall's record (WINDOWS W-8): the uninstall's last words name the record it keeps beside Theodore's folder
+  (`~/.theodore-uninstall.log`, `%LOCALAPPDATA%\Theodore-uninstall.log`; it can be deleted), and on Windows a new log
+  starts with a UTF-8 byte-order mark, so Notepad and PowerShell 5.1 read C:\Users\Théo as written.
+- Windows install lines (WINDOWS W-13): Microsoft Defender once flagged install.md's own Windows line as
+  Trojan:Win32/ClickFix.EEI!MTB (a one-line PowerShell download into %TEMP% followed by use of the file). It did not
+  reproduce in nine later runs, but the shape is what ClickFix rules key on. Every documented Windows line
+  (install.md's first line and step 1, the README) is now two separate commands into `%LOCALAPPDATA%\Theodore-install`:
+  the folder made first (`New-Item -Force` / `mkdir`: curl's `--create-dirs` fails for a profile named with é), then
+  `curl.exe ... --retry 2 --retry-delay 2 -o`; the run, or the read of install.md, is a second command. They were clean
+  with Defender on in each way tested (Codex's `powershell -Command`, Claude Code's tool, `-EncodedCommand`, `-File`,
+  cmd, Win+R). The installer removes the folder when it ends, as before; the pins and checks are unchanged.
+- Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
+  install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
+  fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an
+  address tried twice or a doubled timeout still does.
+- Host settings (lane WINFIX): Claude Code's rules now also allow Theodore's two skills by their plugin names,
+  `Skill(theodore:pptx)`, `Skill(theodore:deck-design)` and each with ` *` (any arguments), so loading them no longer
+  asks; and they allow reading the engine's render caches (rendered slides) by their own absolute paths, besides
+  Theodore's home and the specimen cache: macOS `~/Library/Caches/Theodore` (and the older engines'
+  `pptx-runtime`), Linux `~/.cache/theodore`, Windows `%LOCALAPPDATA%\Theodore` (its `Cache` holds the renders) and
+  `%LOCALAPPDATA%\pptx-runtime`. Windows gets Read rules for the first time, in the form Claude Code matches there
+  (`Read(//c/Users/.../Theodore/**)`); a folder on a network share gets none. All are recorded like the other rules:
+  an installation whose settings are on gets them at its next command, and `hosts settings --remove` and uninstall
+  take back exactly what was added.
+- While the download goes on after the installer has ended, its NEXT is `theodore status --wait 100`, which waits
+  for the runtime and the engine and returns as soon as they are there, instead of doctor every 20 seconds: one
+  waiting command in place of a sleep and repeated checks. `status --wait` now also waits for the engine while the
+  setup job is fetching it. The install page's check step reports the installer's last line (doctor's) instead of
+  running doctor again.
+
+## 0.3.10
+
+- Licence (lane EXPOSURE): an engine command (`pptx …`, `python …`) whose stored licence is more than an hour old
+  starts one detached licence refresh, at most one an hour, never waited for and silent. A device revoked, or an
+  account suspended, deleted or without a plan, while the computer stays online and runs only engine commands now
+  stops within about an hour instead of when its licence expires (up to 7 days). Offline nothing changes.
+- Theodore's folder (`~/.theodore`) is this user's alone on macOS and Linux: the group's and others' permissions are
+  removed (the owner's are kept), so other accounts on the computer cannot read the engine, its manual or the packs.
+- A suspended account (403 `account_suspended`, which the service now also answers for its revoked computers while the
+  suspension lasts) is told so with Theodore's address and no sign-in link: a sign-in cannot help it. A plan refusal
+  says the plan is not active. After a suspension is lifted, the computer is told it needs one new sign-in.
+- `whoami` with a sign-in but no stored licence asks the service once: a refused account gets the refusal's status
+  (never "plan unknown … 1970-01-01"); offline it says no licence is stored yet.
+- Claude Desktop: when the app is on this computer, `hosts register` (the installer runs it) adds Theodore's local
+  server to the app's own `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude`, Windows
+  `%APPDATA%\Claude` and the Microsoft Store build's folder): the entry `theodore` runs this installation's stable
+  launcher, `theodore mcp --for claude-desktop`. Desktop chat then has one tool, `theodore` (the app asks for an
+  approval per tool of a local server, so "Always allow" is clicked once, ever): its `action` is `begin`, `guide`
+  (a section), `specimen` (sheets), `report`, `preference_list`, `preference_add`, `preference_remove` or `check`
+  (deck-design guidance and specimen sheets through this computer's sign-in, held in memory only; every answer and
+  next step names `theodore` and the action, never the remote connector's tool names, which are unchanged), with no connector an organisation Owner must add: local servers are on for Team and Enterprise members
+  unless the organisation turns them off. The app loads it when it is quit and opened again. Only that entry is
+  written; a second run changes nothing; an entry named `theodore` that Theodore did not write is kept; uninstall
+  takes back exactly the entry (and the `mcpServers` object when Theodore created it and it is empty).
+- Host settings on by default (lane FRICTION): the installer applies `hosts settings --apply` itself, since the
+  person asked their assistant to set Theodore up. Claude Code (CLI, desktop Code tab, VS Code extension): plugin
+  auto-update and permission rules for Theodore's own commands only, by their exact installed paths: the stable
+  launcher bare and quoted, each skill launcher behind `sh` as the skills run it (Claude Code's plugin cache, one
+  folder per installed version, and Theodore's copy), and the plugin's tool server (`mcp__plugin_theodore_theodore`).
+  Codex: `~/.codex/rules/theodore.rules`, rules that allow Theodore's launcher by its exact installed paths; with it,
+  Theodore's commands run outside Codex's sandbox without asking each time. `--no-settings` leaves them out
+  (`--accept-settings` is still accepted and changes nothing); `theodore hosts settings --remove` takes back exactly
+  what they added and keeps them off; uninstall takes back exactly what was added. A managed Claude Code policy wins:
+  with `allowManagedPermissionRulesOnly`, or a marketplace policy that does not allow Theodore's, that setting is not
+  added and doctor says so in one line. An installation from before gets the settings once, at its first Theodore
+  command after updating to this version (unless turned off); later, rules are added only for launchers that are new
+  (a new plugin version's folder), never again one the user took out. The installer's last lines and doctor say in
+  one clause that Theodore's own commands run without asking, and how to turn that off.
+- A network where one of the service's addresses does not answer (it takes the connection and never the TLS
+  handshake) no longer slows or breaks any client call. The client races the addresses (the next one starts 0.25 s
+  after the one before, or at once when it failed; 3 s each to connect and finish the handshake) and keeps the one
+  that answered in `state/addresses.json` for 7 days, so the next commands, in other processes too, go straight to
+  it. A kept address that stops answering is replaced after the same 0.25 s; one the name no longer resolves to is
+  not used. The usage send at the end of a deck (2 s in all) gets through on such a network; a batch that gets no
+  answer is still kept and sent later under the same id (never lost, never counted twice).
+- The launchers' own downloads (the first runtime and client) try every address the way the installers do (the same
+  code, word for word).
+- install.md and the one line a summarising fetch gets: each download is tried up to three times, 10 s each to
+  connect, since a new attempt usually reaches another address.
+- The usage switch comes with the log-in answer (servers from 2026-11-15): a new installation needs no licence
+  refresh to learn it. Against an older server the first licensed command still asks once.
+- The client never switches below the version its launcher pins, unless the release manifest marks that client as a
+  rollback (`client.rollback: true`).
+- Device binding, client side (off until the service turns it on): each installation makes a P-256 key at sign-in
+  (an installation from before 0.3.9 at its next licence refresh), kept inside the credential; registers its public
+  half; and signs a single-use nonce at each licence refresh, with an HMAC of this computer's identifier. A service
+  that does not know these routes is left alone for a day. An engine that refuses a licence made for another
+  computer (`entitlement_wrong_machine`, engines from rc.10) asks for a log in on this one.
+- `uninstall` writes what it did beside Theodore's folder (`~/.theodore-uninstall.log`), not into the folder it removes.
+- `ci/run.sh all` starts the Windows job before it waits for the shared lock.
+- A cloud sandbox that cannot reach Theodore's sites answers `CONNECTOR_REQUIRED`: the assistant calls the Theodore
+  connector (`theodore_begin`) for the design, or says how to add it; an ordinary computer offline keeps its message.
+- The log-in link is to be opened in the user's own web browser, not a browser inside the assistant's app.
+
 ## 0.3.8
 
 - Theodore now tries every address of its service before reporting a connection failure, so a network that cannot

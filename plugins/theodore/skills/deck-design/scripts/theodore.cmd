@@ -154,7 +154,7 @@ set /a WMI_WAIT+=1
 goto :wmic_wait
 :start_foreground
 echo theodore: no background job can be started on this computer (PowerShell and WMI are unavailable), so Theodore sets itself up in this call; it takes a few minutes and ends with a status.
-call "%LAUNCHER%" __bootstrap <nul >nul 2>&1
+call "%%LAUNCHER%%" __bootstrap <nul >nul 2>&1
 :started
 set /a WAITED=0
 set /a LIMIT=20
@@ -184,7 +184,7 @@ rem not the client's (its codes end at 130) but Windows refusing to start the in
 rem The MCP server's standard output carries only the protocol: setup reports to standard error, then the server starts
 rem once the client is there.
 :mcp_not_ready
-call "%SELF%" setup --wait 20 1>&2
+call "%%SELF%%" setup --wait 20 1>&2
 call :check_ready
 if defined READY goto :run_client
 exit /b 1
@@ -342,6 +342,121 @@ for /f "skip=1 tokens=* delims=" %%H in ('%SYS32%\certutil.exe -hashfile "%~1" S
 if defined HASH set "HASH=%HASH: =%"
 exit /b 0
 
+:curl_host
+rem %1 tries, %2 url. CURL_ARGS: curl's options (the URL, -w and the address are added here); CURL_BODY: a body sent on
+rem stdin, if any; CURL_ERR: where curl's messages go. Sets HTTP (000 when nothing answered) and CRC (curl's exit status).
+rem Theodore's hosts resolve to several addresses, and from some networks one of them does not answer, or completes the
+rem TCP connection but never the TLS handshake (or resets it), while another works. curl moves to the next address only
+rem when the TCP connection fails: after a handshake that hangs or is reset it gives up (exit 28 or 35), and --retry
+rem starts again from the same first address. So, without a proxy, each address is tried in turn (curl --resolve: the
+rem name, its SNI and its certificate check stay the host's), 4 s each to connect and finish the handshake; the address
+rem that worked is tried first for the rest of this run; when every address only ran out of time (a slow link), the first
+rem is tried once more with the caller's own connect timeout. With a proxy (which chooses the address itself), for a loopback
+rem test server, or when nslookup lists no address for the name, curl runs as before.
+set "CH_TRIES=%~1"
+set "CH_URL=%~2"
+set "CH_HOST="
+set "CH_PORT="
+set "CH_ADDRS="
+set "CH_FIRST="
+if /i not "%CH_URL:~0,8%"=="https://" goto :curl_plain
+if defined HTTPS_PROXY goto :curl_plain
+if defined ALL_PROXY goto :curl_plain
+for /f "tokens=1 delims=/" %%H in ("%CH_URL:~8%") do set "CH_HP=%%H"
+for /f "tokens=1,2 delims=:" %%H in ("%CH_HP%") do set "CH_HOST=%%H" & set "CH_PORT=%%I"
+if not defined CH_PORT set "CH_PORT=443"
+if not defined CH_HOST goto :curl_plain
+echo %CH_HOST%| "%SYS32%\findstr.exe" /r /x /i "[a-z0-9.-]*" >nul || goto :curl_plain
+call :host_addresses "%CH_HOST%"
+if not defined CH_ADDRS goto :curl_plain
+set "CH_GOOD="
+for %%M in (%CH_MEMO%) do for /f "tokens=1,2 delims=#" %%P in ("%%M") do if /i "%%P"=="%CH_HOST%" set "CH_GOOD=%%Q"
+set "CH_LIST=%CH_GOOD%"
+for %%A in (%CH_ADDRS%) do if /i not "%%A"=="%CH_GOOD%" call set "CH_LIST=%%CH_LIST%% %%A"
+set "CH_ROUND=1"
+:curl_round
+set "CH_DONE="
+set "CH_SLOW=1"
+for %%A in (%CH_LIST%) do if not defined CH_DONE call :curl_address %%A
+if %CH_ROUND% geq %CH_TRIES% goto :curl_slow
+rem what --retry retries: 408, 429, 5xx, and no answer at all
+set "CH_AGAIN="
+if "%HTTP%"=="408" set "CH_AGAIN=1"
+if "%HTTP%"=="429" set "CH_AGAIN=1"
+if "%HTTP:~0,1%"=="5" set "CH_AGAIN=1"
+if "%HTTP%"=="000" for %%C in (7 18 28 35 52 55 56) do if "%CRC%"=="%%C" set "CH_AGAIN=1"
+if not defined CH_AGAIN goto :curl_slow
+set /a CH_WAIT=CH_ROUND+1
+ping -n %CH_WAIT% 127.0.0.1 >nul
+set /a CH_ROUND+=1
+goto :curl_round
+:curl_slow
+rem every address only ran out of its 4 s: a slow link (not a dead address), given the caller's own time once
+if not defined CH_SLOW exit /b 0
+for %%A in (%CH_LIST%) do if not defined CH_FIRST set "CH_FIRST=%%A"
+set "CH_R=%CH_FIRST%"
+if not "%CH_FIRST::=%"=="%CH_FIRST%" set "CH_R=[%CH_FIRST%]"
+call :curl_once --retry 0 --resolve "%CH_HOST%:%CH_PORT%:%CH_R%"
+if "%CRC%"=="0" set "CH_MEMO=%CH_MEMO% %CH_HOST%#%CH_FIRST%"
+set "CH_FIRST="
+exit /b 0
+:curl_plain
+set /a CH_RETRY=CH_TRIES-1
+call :curl_once --retry %CH_RETRY%
+exit /b 0
+
+:curl_address
+rem %1 one address. CH_DONE once it answered (and it is remembered); not when it did not connect or finish the handshake.
+set "CH_A=%~1"
+set "CH_R=%~1"
+if not "%CH_A::=%"=="%CH_A%" set "CH_R=[%~1]"
+call :curl_once --retry 0 --connect-timeout 4 --resolve "%CH_HOST%:%CH_PORT%:%CH_R%"
+if not "%CRC%"=="28" set "CH_SLOW="
+if not "%CRC%"=="0" if "%HTTP%"=="000" if "%CH_APPC%"=="0.000000" for %%C in (7 28 35 52 55 56) do if "%CRC%"=="%%C" exit /b 0
+set "CH_SLOW="
+set "CH_DONE=1"
+set "CH_MEMO=%CH_MEMO% %CH_HOST%#%CH_A%"
+exit /b 0
+
+:curl_once
+rem one curl: CURL_ARGS, then this call's own options, the status line and the URL
+set "HTTP=000"
+set "CH_APPC="
+if defined CURL_BODY goto :curl_once_body
+"%CURL%" %CURL_ARGS% %* -w "%%{http_code} %%{time_appconnect}" "%CH_URL%" >"%WORK%\http.txt" 2>>"%CURL_ERR%"
+set "CRC=%ERRORLEVEL%"
+goto :curl_once_read
+:curl_once_body
+echo %CURL_BODY%| "%CURL%" %CURL_ARGS% %* --data-binary @- -w "%%{http_code} %%{time_appconnect}" "%CH_URL%" >"%WORK%\http.txt" 2>>"%CURL_ERR%"
+set "CRC=%ERRORLEVEL%"
+:curl_once_read
+for /f "usebackq tokens=1,2" %%P in ("%WORK%\http.txt") do set "HTTP=%%P" & set "CH_APPC=%%Q"
+exit /b 0
+
+:host_addresses
+rem %1 host: CH_ADDRS = its addresses, IPv4 first, from the inbox nslookup; empty when it lists none. nslookup's labels
+rem are in the system's language, so the answer is found by the name itself: the addresses after the line that names it.
+set "CH_V4="
+set "CH_V6="
+set "CH_IN="
+for /f "tokens=1,2" %%P in ('%SYS32%\nslookup.exe %~1 2^>nul') do call :address_line "%~1" "%%P" "%%Q"
+set "CH_ADDRS=%CH_V4% %CH_V6%"
+if "%CH_ADDRS%"==" " set "CH_ADDRS="
+exit /b 0
+:address_line
+rem %1 host, %2 and %3 the line's first two words
+if /i "%~3"=="%~1" set "CH_IN=1" & exit /b 0
+if /i "%~3"=="%~1." set "CH_IN=1" & exit /b 0
+if not defined CH_IN exit /b 0
+call :address_word "%~2"
+call :address_word "%~3"
+exit /b 0
+:address_word
+if "%~1"=="" exit /b 0
+echo %~1| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul && set "CH_V4=%CH_V4% %~1" && exit /b 0
+echo %~1| "%SYS32%\findstr.exe" /r /x /i "[0-9a-f:]*:[0-9a-f:]*" >nul && set "CH_V6=%CH_V6% %~1"
+exit /b 0
+
 :fetch
 rem %1 url, %2 destination. Errorlevel 0 on success; otherwise CAUSE and DETAIL are set. Every route speaks HTTPS only
 rem (plain HTTP only to a loopback test server), follows no redirect and gives up on a stalled transfer.
@@ -352,9 +467,15 @@ set "PROTO==https"
 set "FURL=%~1"
 if /i "%FURL:~0,17%"=="http://127.0.0.1:" set "PROTO==https,http"
 if not exist "%SYS32%\curl.exe" goto :fetch_powershell
-"%SYS32%\curl.exe" -q -sS --fail --proto %PROTO% --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 -o "%~2" -w "%%{http_code}" "%~1" >"%B%\http.txt" 2>"%B%\fetch.err"
-set "RC=%ERRORLEVEL%"
-set /p HTTP=<"%B%\http.txt"
+rem Every address of Theodore's hosts is tried (:curl_host, the installer's own code: install\install.cmd).
+set "CURL=%SYS32%\curl.exe"
+set "WORK=%B%"
+set "CURL_BODY="
+set "CURL_ARGS=-q -sS --fail --proto %PROTO% --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 -o "%~2""
+set "CURL_ERR=%B%\fetch.err"
+type nul >"%B%\fetch.err"
+call :curl_host 3 "%~1"
+set "RC=%CRC%"
 if "%RC%"=="0" if "%HTTP%"=="200" exit /b 0
 set "DETAIL=curl exit %RC%, HTTP %HTTP%"
 if "%HTTP:~0,1%"=="3" goto :fetch_redirect
@@ -549,9 +670,9 @@ echo TELL THE USER: This copy of Theodore was built without its security keys an
 exit /b 78
 
 :foreign_home
-echo THEODORE USAGE: this Theodore folder (%HOME_DIR%) belongs to the Theodore service at %HOME_API%, but this launcher is stamped for %MY_API%; a folder is never shared between two services.
+echo THEODORE USAGE: this Theodore folder ("%HOME_DIR%") belongs to the Theodore service at %HOME_API%, but this launcher is stamped for %MY_API%; a folder is never shared between two services.
 echo NEXT: do not retry. Tell the user: to use this build, set THEODORE_HOME to a separate folder for it and run the same command again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
-echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
+echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in "%HOME_DIR%". To use this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
 exit /b 64
 
 :no_conf
@@ -745,7 +866,11 @@ set /a BTRY+=1
 ping -n 2 127.0.0.1 >nul
 goto :bare_retry
 :bare_retry_done
-(for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (call echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed%%OCMSG%%.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
+rem Delayed expansion for the last line: a value is read after cmd has parsed the line, so a path with & ( ) ^ or %
+rem stays text (CALL ECHO parsed it again: C:\Users\Tom & Jerry ended the message at the &).
+setlocal EnableDelayedExpansion
+set "BL="
+(for %%D in (%OWNED_DIRS%) do rmdir /s /q "!HOME_DIR!\%%D" >nul 2>&1) & rmdir "!HOME_DIR!" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "!HOME_DIR!\%%D" set "BL=1") & (if defined BL set "LEFT=!LEFT!; Theodore's folders in !HOME_DIR!") & if defined LEFT (echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: !LEFT:~2!.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: !LEFT:~2!. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed!OCMSG!.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
 
 :old_engine_caches
 rem The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): %USERPROFILE%\.cache\pptx-slide-raster

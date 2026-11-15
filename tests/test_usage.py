@@ -497,6 +497,21 @@ class Commands(ClientCase):
         self.assertEqual(env["usage_ledger"], str(self.ledger()))
         self.assertEqual(self.api.refreshes, refreshes, "asked once, not at every command")
 
+    def test_a_log_in_answer_that_says_the_switch_needs_no_refresh(self):
+        """P039: a server that says usage_enabled in the log-in answer saves the first command its refresh; against an
+        older server (no field) the first command still asks (the test above)."""
+        for answer in (True, False):
+            with self.subTest(answer=answer):
+                self.api.bundle_usage = answer
+                self.api.usage_enabled = not answer         # a refresh would say the opposite: none must be made
+                self.ready()
+                refreshes = self.api.refreshes
+                self.assertEqual(self.client("guide", "pptx").returncode, 0)
+                env = json.loads(self.client("pptx", "env").stdout.strip().splitlines()[-1])
+                self.assertEqual(env["usage_ledger"], str(self.ledger()) if answer else None)
+                self.assertEqual(self.api.refreshes, refreshes, "the log-in answer was enough")
+                self.client("logout")
+
     def _refresh(self):
         """A licence refresh, as the client makes one when the licence is due (in a process of its own)."""
         import subprocess

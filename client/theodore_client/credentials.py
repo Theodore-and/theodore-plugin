@@ -4,7 +4,9 @@ macOS: the login keychain through /usr/bin/security (no prompt when the Python p
 Windows: a file protected with DPAPI for the current user.
 Elsewhere, and when the keychain cannot be used (for example over SSH): a 0600 file under state/.
 
-The credential is {"installation_id", "installation_secret"}. It is never printed or logged.
+The credential is {"installation_id", "installation_secret"} and, from 0.3.9, "device_key": the installation's P-256
+private key (device.py), kept in the same store so it is protected and deleted with the credential. None of it is
+ever printed or logged.
 """
 
 from __future__ import annotations
@@ -205,10 +207,13 @@ def _migrate_legacy_item() -> str | None:
     return payload
 
 
-def store(installation_id: str, installation_secret: str) -> str:
-    """Save the credential. Returns the backend that holds it."""
-    payload = json.dumps({"installation_id": installation_id, "installation_secret": installation_secret,
-                          "api_base": _service_base()}, separators=(",", ":"))
+def store(installation_id: str, installation_secret: str, device_key: str | None = None) -> str:
+    """Save the credential (with the installation's device key when given). Returns the backend that holds it."""
+    value = {"installation_id": installation_id, "installation_secret": installation_secret, "api_base": _service_base()}
+    if device_key:
+        core.register_secret(device_key)
+        value["device_key"] = device_key
+    payload = json.dumps(value, separators=(",", ":"))
     kind = backend()
     if kind == "keychain":
         if _keychain_store(payload):
@@ -254,7 +259,11 @@ def load() -> dict | None:
         core.register_secret(value["installation_secret"])
         if value.get("api_base") and str(value["api_base"]).rstrip("/") != _service_base():
             return None             # another service's credential (a folder it left behind): never used here
-        return {"installation_id": value["installation_id"], "installation_secret": value["installation_secret"]}
+        loaded = {"installation_id": value["installation_id"], "installation_secret": value["installation_secret"]}
+        if isinstance(value.get("device_key"), str) and value["device_key"]:
+            core.register_secret(value["device_key"])
+            loaded["device_key"] = value["device_key"]
+        return loaded
     return None
 
 
@@ -263,6 +272,14 @@ def delete() -> bool:
     gone = _keychain_delete() if backend() == "keychain" else True
     core.remove_tree(_file())
     return gone and not _file().exists()
+
+
+def hardware() -> str:
+    """Where the credential (and so the device key) is kept, as the binding route names it: keychain, dpapi or file."""
+    kind = backend()
+    if kind == "keychain" and _file().exists():
+        return "file"
+    return kind if kind in ("keychain", "dpapi") else "file"
 
 
 def describe() -> str:

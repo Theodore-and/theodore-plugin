@@ -51,6 +51,8 @@ ROUTES = {
     "runtime_manifest": ("GET", "/v1/runtime/manifest", False),
     "keys": ("GET", "/v1/keys", False),
     "usage": ("POST", "/v1/usage", True),
+    "installation_bind": ("POST", "/v1/installation/bind", True),     # device binding (P039): the public key, once
+    "licence_nonce": ("POST", "/v1/licence/nonce", True),             # a single-use nonce for the refresh's proof
 }
 
 # Routes the backend is adding and its published contract (openapi.json, snapshotted in tests/fixtures) does not list
@@ -74,11 +76,16 @@ API_ERRORS = {
     "rate_limited": (429, "RETRY"),
     "internal_error": (500, "RETRY"),
     "service_disabled": (503, "RETRY"),
+    # Device binding (P039), only while the service enforces it: a bound installation's refresh without a proof (the
+    # nonce could not be fetched: try again), or with a proof this computer could not have made (a copied credential).
+    "device_proof_required": (401, "RETRY"),
+    "device_proof_invalid": (401, "SIGN_IN_REQUIRED"),
+    "device_key_exists": (409, "USAGE"),
 }
 # Codes after which the stored entitlement token is deleted (backend section 6: "a 401 or 403 deletes it").
 DELETE_TOKEN_ON = ("unauthenticated", "installation_revoked", "forbidden", "account_suspended", "entitlement_inactive")
 # Codes after which the stored installation credential is deleted as well (the device must sign in again).
-DELETE_CREDENTIAL_ON = ("unauthenticated", "installation_revoked")
+DELETE_CREDENTIAL_ON = ("unauthenticated", "installation_revoked", "device_proof_invalid")
 
 # Device endpoints answer in RFC 6749 form: {"error": ..., "error_description": ...}.
 DEVICE_ERRORS = ("authorization_pending", "slow_down", "access_denied", "expired_token", "invalid_grant", "invalid_request")
@@ -142,6 +149,8 @@ ENGINE_REFUSALS = {
     # State/ is missing, or state/engine-clock.json cannot be read or written (entitlement_state_unavailable): signing in again
     # recreates state/.
     "entitlement_state_unavailable": "NO_ENTITLEMENT",
+    # The token names another computer (its `mid` claim; engines from rc.10): this copy was set up elsewhere.
+    "entitlement_wrong_machine": "SIGN_IN_REQUIRED",
 }
 
 # --- usage events (lane ANALYTICS; the backend's packages/contracts/src/usage.ts) ---------------------------------------

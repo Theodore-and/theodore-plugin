@@ -4,10 +4,12 @@ rem into %LOCALAPPDATA%\Theodore (or THEODORE_HOME). Written to be run by an AI 
 rem
 rem   install.cmd --code ABCD-1234        sign this computer in with a one-time code and set everything up
 rem   install.cmd                         the same, ending with a sign-in link instead of a code (no browser opens)
-rem   install.cmd --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
+rem   install.cmd --no-settings ...       leave out Theodore's host settings (on by default: plugin auto-update, and
+rem                                       Theodore's own commands allowed in Claude Code and Codex); --accept-settings
+rem                                       is still accepted and changes nothing
 rem   install.cmd --uninstall             remove Theodore from this computer
 rem
-rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
+rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
 rem Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 rem plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive
 rem it names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
@@ -43,7 +45,7 @@ set "ICOUNT=0"
 for /f %%N in ('dir /b /a "%IDIR%" 2^>nul ^| "%SystemRoot%\System32\find.exe" /c /v ""') do set "ICOUNT=%%N"
 if not "%ICOUNT%"=="1" goto :installer_body
 set "THEODORE_INSTALL_INNER=1"
-call "%SELF%" %*
+call "%%SELF%%" %*
 set "IRC=%ERRORLEVEL%"
 set "THEODORE_INSTALL_INNER="
 (goto) 2>nul & del /f /q "%IDIR%\install.cmd" >nul 2>&1 & rmdir "%IDIR%" >nul 2>&1 & "%SystemRoot%\System32\cmd.exe" /d /c exit %IRC%
@@ -59,8 +61,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.3.8"
-set "PIN_CLIENT=client/client-0.3.8.tar 6126bd821ec0873906beea04b7c750d56c0eb77f6a00ef1bc97cd8e8cf6f417f"
+set "PIN_CLIENT_VERSION=0.4.0"
+set "PIN_CLIENT=client/client-0.4.0.tar 5cd94f6eb403db6c5190ac4657b1246d2230109f6be408dac37b87b9c893acd8"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -72,7 +74,7 @@ set "HOME_DIR=%LOCALAPPDATA%\Theodore"
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
-set "ACCEPT="
+set "NO_SETTINGS="
 set "WORK="
 set "RC=0"
 rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
@@ -88,8 +90,9 @@ if "%~1"=="" goto :parsed
 if /i "%~1"=="--code" goto :arg_code
 if /i "%~1"=="--uninstall" set "UNINSTALL=1"
 if /i "%~1"=="--uninstall" goto :next_arg
-if /i "%~1"=="--accept-settings" set "ACCEPT=1"
 if /i "%~1"=="--accept-settings" goto :next_arg
+if /i "%~1"=="--no-settings" set "NO_SETTINGS=1"
+if /i "%~1"=="--no-settings" goto :next_arg
 goto :bad_option
 :next_arg
 shift
@@ -108,7 +111,7 @@ if defined HASH echo theodore-install: installer sha256 %HASH: =% (compare with 
 if not defined UNINSTALL goto :env_check
 rem The launcher's uninstall stops Theodore's processes and starts the cleanup that removes the folder once the last
 rem files are released; its status is the answer (checking the folder now would race that cleanup).
-if exist "%HOME_DIR%\bin\theodore.cmd" (call "%HOME_DIR%\bin\theodore.cmd" uninstall & exit /b)
+if exist "%HOME_DIR%\bin\theodore.cmd" (call "%%HOME_DIR%%\bin\theodore.cmd" uninstall & exit /b)
 rem No launcher left (a removal already ran, or was interrupted): remove what is left of every path the uninstall is
 rem documented to remove (Theodore's own folders and the engine's render cache) and say whether anything remains.
 set "LEFTOVER="
@@ -153,9 +156,9 @@ if "%MY_API:~-1%"=="/" set "MY_API=%MY_API:~0,-1%"
 call :read_home_api
 if not defined FOREIGN goto :install
 :foreign_install
-echo THEODORE USAGE: the Theodore folder %HOME_DIR% belongs to the Theodore service at %HOME_API%, but this installer is for %MY_API%; a folder is never shared between two services.
+echo THEODORE USAGE: the Theodore folder "%HOME_DIR%" belongs to the Theodore service at %HOME_API%, but this installer is for %MY_API%; a folder is never shared between two services.
 echo NEXT: do not retry. Tell the user: to install this build, set THEODORE_HOME to a separate folder for it and run the installer again, or first remove the other installation with: "%HOME_DIR%\bin\theodore.cmd" uninstall
-echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in %HOME_DIR%. To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
+echo TELL THE USER: Theodore found an installation for another Theodore service (%HOME_API%) in "%HOME_DIR%". To install this one, give it its own folder (THEODORE_HOME) or uninstall the other first.
 exit /b 64
 
 :install
@@ -192,7 +195,7 @@ rem removed at every exit.
 for /l %%N in (1,1,5) do if not defined WORK call :make_work
 if not defined WORK goto :not_writable
 
-rem --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer -----------------------
+rem --- 1. redeem the one-time code first: it lasts an hour, the downloads may take longer ---------------------------
 if not defined CODE goto :stage1
 rem The answer holds the installation secret. state\ may carry explicit grants of its own (THEODORE_HOME can point
 rem anywhere), so the answer is written into a new folder of this installer whose only entry is the current user,
@@ -210,10 +213,16 @@ set "CURL_ERR=nul"
 call :curl_host 1 "%API_BASE%/v1/device/activate"
 set "CURL_BODY="
 if not "%HTTP%"=="200" goto :code_refused
-move /y "%SAFE%\activation.pending" "%HOME_DIR%\state\activation.pending" >nul 2>&1
+move /y "%SAFE%\activation.pending" "%HOME_DIR%\state\activation.pending" >nul 2>&1 || goto :code_not_saved
 rmdir /s /q "%SAFE%" >nul 2>&1
 echo theodore-install: this computer is signed in (the one-time code was accepted)
 goto :stage1
+:code_not_saved
+rmdir /s /q "%SAFE%" >nul 2>&1
+echo THEODORE SETUP_FAILED: cause DISK: the one-time code was accepted but this computer could not save the login in "%HOME_DIR%\state".
+echo NEXT: the one-time code was accepted but this computer could not save the login (cause DISK); fix the folder's permissions and run the same line again within 30 minutes: the same code works again on this computer until it has been used.
+echo TELL THE USER: Theodore could not save its login on this computer. Its folder may be protected; once that is fixed, the same install line works again for 30 minutes.
+exit /b 68
 :code_refused
 rem The answer was written into the private folder only: a refused code (spent by an earlier run of the same line) never
 rem touches the sign-in that run saved in state\activation.pending.
@@ -287,13 +296,42 @@ if not exist "%HOME_DIR%\state\hosts.pending" type nul >"%HOME_DIR%\state\hosts.
 rem --- 4. runtime and engine: a background job, so the first deck request does not wait ----------------------------
 rem The job outlives this installer. It is waited for a few minutes at most: an assistant's command has a time limit
 rem (Claude Code stops a command after 10 minutes), and the job must not be what that limit stops.
-set "SETUP_WAIT=180"
+rem Codex (CODEX_THREAD_ID: its CLI, the ChatGPT app's Codex mode, ChatGPT's Work mode) lets a command run longer and asks
+rem before each command of the session that runs this installer (its rules load at the next session): wait longer here,
+rem so the assistant has nothing to poll. As install.sh.
+set "SETUP_WAIT_DEFAULT=180"
+if defined CODEX_THREAD_ID set "SETUP_WAIT_DEFAULT=540"
+set "SETUP_WAIT=%SETUP_WAIT_DEFAULT%"
 if defined THEODORE_INSTALL_WAIT set "SETUP_WAIT=%THEODORE_INSTALL_WAIT%"
-echo.%SETUP_WAIT%| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*" >nul || set "SETUP_WAIT=180"
+echo.%SETUP_WAIT%| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*" >nul || set "SETUP_WAIT=%SETUP_WAIT_DEFAULT%"
 echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step
+if defined CODEX_THREAD_ID goto :setup_codex_start
 set "THEODORE_BOOTSTRAP_WAIT=%SETUP_WAIT%"
-call "%LAUNCHER%" setup --wait %SETUP_WAIT% >"%WORK%\setup.txt"
+call "%%LAUNCHER%%" setup --wait %SETUP_WAIT% >"%WORK%\setup.txt"
 set "RC=%ERRORLEVEL%"
+goto :setup_waited
+:setup_codex_start
+rem Codex shows a long command's output as it comes: a line a minute says the download is moving, so the assistant has
+rem no reason to inspect processes (each such command asks first in this session). The wait goes in steps of a minute.
+set /a SETUP_LEFT=SETUP_WAIT
+:setup_codex_step
+set /a SETUP_STEP=60
+if %SETUP_LEFT% LSS 60 set /a SETUP_STEP=SETUP_LEFT
+set "THEODORE_BOOTSTRAP_WAIT=%SETUP_STEP%"
+call "%%LAUNCHER%%" setup --wait %SETUP_STEP% >"%WORK%\setup.txt"
+set "RC=%ERRORLEVEL%"
+set /a SETUP_LEFT-=SETUP_STEP
+if not "%RC%"=="67" goto :setup_waited
+if %SETUP_LEFT% LEQ 0 goto :setup_waited
+set "SETUP_NOW= downloading."
+for /f "tokens=1,* delims=:" %%A in ('%SYS32%\findstr.exe /b /c:"THEODORE SETUP_IN_PROGRESS:" "%WORK%\setup.txt"') do set "SETUP_NOW=%%B"
+setlocal EnableDelayedExpansion
+set "SETUP_NOW=!SETUP_NOW:~1!"
+if "!SETUP_NOW:~-1!"=="." set "SETUP_NOW=!SETUP_NOW:~0,-1!"
+echo theodore-install: still downloading (!SETUP_NOW!); this installer waits at most !SETUP_LEFT! s more, then the download goes on by itself
+endlocal
+goto :setup_codex_step
+:setup_waited
 set "THEODORE_BOOTSTRAP_WAIT="
 set "SETUP_FAILED="
 if "%RC%"=="0" goto :setup_done
@@ -315,50 +353,76 @@ if not exist "%T%" set "T=%LAUNCHER%"
 
 rem --- 5. the assistants on this computer ------------------------------------------------------------------------------
 echo theodore-install: registering Theodore in the assistants found on this computer
-call "%T%" hosts register
+call "%%T%%" hosts register
 set "HOSTS_RC=%ERRORLEVEL%"
 rem Claude Code on Windows with no Git Bash cannot load the skills: PortableGit into Theodore's folder, Claude Code pointed at it.
-call "%T%" tools install git --if-needed
-if defined ACCEPT call "%T%" hosts settings --apply
-if not defined ACCEPT call "%T%" hosts settings
+call "%%T%%" tools install git --if-needed
+rem The person asked their assistant to set Theodore up: its host settings come with it; --no-settings leaves them out.
+if defined NO_SETTINGS call "%%T%%" hosts settings --remove >nul 2>&1
+if defined NO_SETTINGS echo theodore-install: Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command
+if not defined NO_SETTINGS call "%%T%%" hosts settings --apply
+if not defined NO_SETTINGS echo theodore-install: Theodore's own commands run without asking each time; to turn that off: "%T%" hosts settings --remove
 if not defined SETUP_FAILED goto :background
-echo theodore-install: the stable launcher is %T%
+echo theodore-install: the stable launcher is "%T%"
 type "%WORK%\setup.txt"
 set "RC=68"
 goto :finish
 :background
 
 rem --- 6. background downloads -------------------------------------------------------------------------------------------
-call "%T%" whoami >nul 2>&1
+call "%%T%%" whoami >nul 2>&1
 if errorlevel 1 goto :doctor
-call "%T%" guide pptx >nul 2>&1
+call "%%T%%" guide pptx >nul 2>&1
 echo theodore-install: asset packs (icons, flags, maps, backgrounds; about 95 MB), when published for this channel, download in the background
-call "%T%" packs install --all --background >nul 2>&1
+call "%%T%%" packs install --all --background >nul 2>&1
 rem Nothing to turn slides into images (no LibreOffice, no PowerPoint): fetch LibreOffice, as on macOS.
-call "%T%" tools install libreoffice --background --if-needed >nul 2>&1
+call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1
 
 :doctor
 rem --- 7. the check the assistant reports: the last line says what failed, if anything did -------------------------
-echo theodore-install: the stable launcher is %T%
+echo theodore-install: the stable launcher is "%T%"
 rem Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to
 rem relay. The installer never opens a browser; only "theodore login --open", asked for by the user, does.
-call "%T%" whoami >nul 2>&1
+call "%%T%%" whoami >nul 2>&1
 if errorlevel 1 goto :sign_in_last
-call "%T%" doctor >"%WORK%\doctor.txt"
+call "%%T%%" doctor >"%WORK%\doctor.txt"
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="67" goto :doctor_shown
 "%SYS32%\findstr.exe" /b /c:"NEXT: run the same command again" "%WORK%\doctor.txt" >nul || goto :doctor_shown
 rem Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
 rem "the same command", which here would be this installer).
 "%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
+rem In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the first
+rem deck request in a new session waits for it. As install.sh.
+if not defined CODEX_THREAD_ID goto :doctor_in_progress
+if not "%HOSTS_RC%"=="0" goto :doctor_in_progress
+set "WHERE= downloading."
+for /f "tokens=1,* delims=:" %%A in ('%SYS32%\findstr.exe /b /c:"THEODORE SETUP_IN_PROGRESS:" "%WORK%\doctor.txt"') do set "WHERE=%%B"
+setlocal EnableDelayedExpansion
+set "WHERE=!WHERE:~1!"
+if "!WHERE:~-1!"=="." set "WHERE=!WHERE:~0,-1!"
+echo THEODORE OK: Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (!WHERE!).
+echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval.
+echo TELL THE USER: Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck.
+endlocal
+set "RC=0"
+goto :finish
+:doctor_in_progress
 echo THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended.
-echo NEXT: run "%T%" doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer).
+echo NEXT: run "%T%" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line.
 echo TELL THE USER: Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it.
 goto :finish
 :doctor_shown
 type "%WORK%\doctor.txt"
 if not "%RC%"=="0" goto :finish
-if "%HOSTS_RC%"=="0" goto :finish
+if not "%HOSTS_RC%"=="0" goto :hosts_left
+if not defined CODEX_THREAD_ID goto :finish
+rem Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session. As install.sh.
+echo THEODORE OK: Theodore is ready (the check above).
+echo NEXT: run nothing more now. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval.
+echo TELL THE USER: Theodore is ready. Start a new session and ask for your deck there.
+goto :finish
+:hosts_left
 echo THEODORE RETRY: Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above).
 echo NEXT: register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session.
 echo TELL THE USER: Theodore is installed, but I could not add it to one of your assistants automatically. I will add it by hand.
@@ -366,7 +430,7 @@ set "RC=75"
 goto :finish
 
 :sign_in_last
-call "%T%" login --start
+call "%%T%%" login --start
 set "RC=%ERRORLEVEL%"
 goto :finish
 

@@ -1,12 +1,15 @@
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
     "theodore": {
+      "type": "stdio",
       "command": "sh",
       "args": [
         "./skills/pptx/scripts/theodore",
-        "mcp"
-      ],
-      "cwd": "."
+        "mcp",
+        "--for",
+        "codex"
+      ]
     }
   }
 }

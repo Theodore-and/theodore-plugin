@@ -640,27 +640,93 @@ class WindowsRenderer(unittest.TestCase):
                 mock.patch.object(install, "libreoffice_pin", return_value=pin):
             yield install
 
-    def test_the_admin_image_gets_its_x64_runtime_beside_the_program_and_drops_the_package_copy(self):
+    def download(self, install):
+        return mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"msi")))
+
+    def test_the_image_gets_its_x64_runtime_beside_the_program_and_drops_the_package_copy(self):
         from theodore_client import install
 
-        def admin_install(command, **_kwargs):          # what `msiexec /a` leaves: program, System64 (x64), System (x86)
-            target = Path(command[-1].split("=", 1)[1])
+        def unpack(archive, target, job=None):          # what an unpack leaves: program, System64 (x64), System (x86)
             for folder, name, data in (("program", "soffice.exe", b"exe"), ("System64", "msvcp140_1.dll", b"x64"),
                                        ("System64", "vcruntime140.dll", b"x64"), ("System", "msvcp140_1.dll", b"x86")):
                 (target / folder).mkdir(parents=True, exist_ok=True)
                 (target / folder / name).write_bytes(data)
-            (target / Path(command[2]).name).write_bytes(b"package copy")
-            return mock.Mock(returncode=0)
+            (target / Path(archive).name).write_bytes(b"package copy")
+            return 4
 
-        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), \
-                mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"msi"))), \
-                mock.patch.object(install.subprocess, "run", side_effect=admin_install):
+        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), self.download(install), \
+                mock.patch.object(install, "msi_unpack", side_effect=unpack), \
+                mock.patch.object(install.subprocess, "run", side_effect=AssertionError("msiexec is only the second way")):
             binary = install.install_libreoffice()
             program = home / "tools" / "libreoffice" / "program"
             self.assertEqual(binary, program / "soffice.exe")
             self.assertEqual((program / "msvcp140_1.dll").read_bytes(), b"x64", "the 64-bit copy, never System's 32-bit one")
             self.assertEqual((program / "vcruntime140.dll").read_bytes(), b"x64")
             self.assertFalse((home / "tools" / "libreoffice" / "LibreOffice_26.2.7_Win_x86-64.msi").exists())
+
+    def test_msiexec_is_the_second_way_with_the_property_quoted_as_it_reads_it_and_bounded(self):
+        # WINDOWS W-6: from a list Python quoted the whole "TARGETDIR=C:\\Users\\Théo Tester\\...", msiexec showed its
+        # usage window where nobody saw it and waited 31 minutes at "100% unpacking".
+        from theodore_client import install
+        seen = []
+
+        def msiexec(command, **kwargs):
+            seen.append((command, kwargs))
+            target = Path(command.split('TARGETDIR="', 1)[1].rstrip('"'))
+            (target / "program").mkdir(parents=True)
+            (target / "program" / "soffice.exe").write_bytes(b"exe")
+            return mock.Mock(returncode=0)
+
+        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), self.download(install), \
+                mock.patch.object(install, "msi_unpack", side_effect=OSError("msi.dll OpenDatabase failed (110)")), \
+                mock.patch.object(install.subprocess, "run", side_effect=msiexec):
+            self.assertEqual(install.install_libreoffice(), home / "tools" / "libreoffice" / "program" / "soffice.exe")
+        command, kwargs = seen[0]
+        self.assertIsInstance(command, str, "one command string: msiexec parses its own command line")
+        self.assertRegex(command, r'^"[^"]*msiexec\.exe" /a "[^"]+\.msi" /qn TARGETDIR="[^"]+"$')
+        self.assertTrue(kwargs.get("timeout"), "never an endless wait")
+
+    def test_a_profile_with_a_space_an_accent_and_an_ampersand_is_one_path_for_msiexec(self):
+        from theodore_client import install
+        seen = []
+        target = Path("C:/Users/Théo & Tester/AppData/Local/Theodore/tools/libreoffice.partial")
+        with mock.patch.object(install.subprocess, "run", side_effect=lambda c, **k: seen.append(c) or mock.Mock(returncode=0)):
+            install.msiexec_admin(Path("C:/Users/Théo & Tester/AppData/Local/Theodore/staging/LO.msi"), target)
+        self.assertTrue(seen[0].endswith(f' /qn TARGETDIR="{target}"'), seen[0])
+        self.assertIn(f'/a "{Path("C:/Users/Théo & Tester/AppData/Local/Theodore/staging/LO.msi")}"', seen[0])
+
+    def test_a_hung_msiexec_ends_in_a_clear_failure(self):
+        from theodore_client import install
+
+        def hangs(command, **kwargs):
+            raise install.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        with client_home(), self.windows(), mock.patch.object(install.sys, "platform", "win32"), self.download(install), \
+                mock.patch.object(install, "msi_unpack", side_effect=install.subprocess.TimeoutExpired("expand.exe", 600)), \
+                mock.patch.object(install.subprocess, "run", side_effect=hangs):
+            with self.assertRaises(core.Status) as raised:
+                install.install_libreoffice()
+        self.assertEqual("SETUP_FAILED", raised.exception.name)
+        self.assertIn("did not finish within 600 s", raised.exception.summary)
+
+    def test_a_libreoffice_job_that_does_not_move_is_reported_as_stuck(self):
+        from theodore_client import install
+        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True), \
+                mock.patch.dict(os.environ, {"THEODORE_TEST_RENDERER_WAIT": "0"}), mock.patch.object(core, "is_loopback_api", return_value=True), \
+                mock.patch.object(install.Job, "alive", return_value=True):
+            job = install.Job("libreoffice")
+            job.update(pid=os.getpid(), phase="unpacking LibreOffice", percent=100)
+            with self.assertRaises(core.Status) as raised:
+                win.wait_for_renderer(["apply", "C:/deck/ws"])
+            self.assertEqual("SETUP_IN_PROGRESS", raised.exception.name)
+            self.assertIn("(unpacking LibreOffice, 100%", raised.exception.summary)
+            state = job.read()
+            state["updated"] = int(core.now()) - install.STALL_SECONDS - 60
+            core.write_json(job.path, state)
+            with self.assertRaises(core.Status) as raised:
+                win.wait_for_renderer(["apply", "C:/deck/ws"])
+            self.assertEqual("SETUP_FAILED", raised.exception.name)
+            self.assertIn("stuck, not still being installed", raised.exception.summary)
 
     @staticmethod
     def pe(machine: int) -> bytes:
@@ -681,25 +747,6 @@ class WindowsRenderer(unittest.TestCase):
             self.assertIsNone(install.pe_machine(home / "bin" / "launcher.json"))
             install.libreoffice_app_local_runtime(image)
             self.assertEqual(sorted(p.name for p in (image / "program").iterdir()), ["vcruntime140.dll"])
-
-    def test_a_refused_windows_installer_falls_back_to_the_unpack_without_the_service(self):
-        from theodore_client import install
-        unpacked = []
-
-        def refused(command, **_kwargs):
-            raise install.subprocess.CalledProcessError(1601, command)
-
-        def unpack(archive, target):
-            (target / "program").mkdir(parents=True)
-            (target / "program" / "soffice.exe").write_bytes(b"exe")
-            unpacked.append(Path(archive).name)
-            return 1
-
-        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), \
-                mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"msi"))), \
-                mock.patch.object(install.subprocess, "run", side_effect=refused), mock.patch.object(install, "msi_unpack", side_effect=unpack):
-            self.assertEqual(install.install_libreoffice(), home / "tools" / "libreoffice" / "program" / "soffice.exe")
-            self.assertEqual(unpacked, ["LibreOffice_26.2.7_Win_x86-64.msi"])
 
     def test_a_rendering_call_with_no_converter_fetches_libreoffice_and_says_so(self):
         from theodore_client import install
@@ -738,7 +785,7 @@ class WindowsRenderer(unittest.TestCase):
 
     def test_the_installer_asks_for_libreoffice_only_through_if_needed(self):
         text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
-        self.assertIn('call "%T%" tools install libreoffice --background --if-needed >nul 2>&1', text)
+        self.assertIn('call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1', text)
         self.assertNotIn("tools install libreoffice --background >nul", text)
 
 
@@ -844,5 +891,5 @@ class ClaudeGitBash(unittest.TestCase):
 
     def test_the_installer_asks_for_git_bash_only_through_if_needed(self):
         text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
-        self.assertIn('call "%T%" tools install git --if-needed', text)
+        self.assertIn('call "%%T%%" tools install git --if-needed', text)
         self.assertIn('/c:"\\"git_bash\\":"', text, "an uninstall without the runtime knows a setting is left to take back")

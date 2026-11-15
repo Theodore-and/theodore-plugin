@@ -4,10 +4,12 @@
 #
 #   sh install.sh --code ABCD-1234        sign this computer in with a one-time code and set everything up
 #   sh install.sh                         the same, ending with a sign-in link instead of a code (no browser opens)
-#   sh install.sh --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
+#   sh install.sh --no-settings ...       leave out Theodore's host settings (on by default: plugin auto-update, and
+#                                         Theodore's own commands allowed in Claude Code and Codex); --accept-settings
+#                                         is still accepted and changes nothing
 #   sh install.sh --uninstall             remove Theodore from this computer
 #
-# What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts ten minutes); downloads
+# What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
 # Theodore's Python and client and checks each against the SHA-256 pinned below; with them, fetches the signed
 # plugin release document, checks its signature against the keys pinned below, then fetches the plugin archive it
 # names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
@@ -29,8 +31,8 @@ PIN_API_BASE="https://api.theodoreand.ai"
 PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
-PIN_CLIENT_VERSION="0.3.8"
-PIN_CLIENT="client/client-0.3.8.tar 6126bd821ec0873906beea04b7c750d56c0eb77f6a00ef1bc97cd8e8cf6f417f"
+PIN_CLIENT_VERSION="0.4.0"
+PIN_CLIENT="client/client-0.4.0.tar 5cd94f6eb403db6c5190ac4657b1246d2230109f6be408dac37b87b9c893acd8"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -43,7 +45,7 @@ HOME_DIR=${THEODORE_HOME:-${HOME:-}/.theodore}
 case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd -P)/$HOME_DIR" ;; esac
 CODE=
 UNINSTALL=
-ACCEPT=
+NO_SETTINGS=
 
 say() { printf 'theodore-install: %s\n' "$*"; }
 status() { printf 'THEODORE %s: %s\nNEXT: %s\nTELL THE USER: %s\n' "$1" "$3" "$4" "$5"; exit "$2"; }
@@ -58,7 +60,8 @@ while [ $# -gt 0 ]; do
     --code) CODE=${2:-}; shift ;;
     --code=*) CODE=${1#--code=} ;;
     --uninstall) UNINSTALL=1 ;;
-    --accept-settings) ACCEPT=1 ;;
+    --accept-settings) ;;                   # the settings are on by default now
+    --no-settings) NO_SETTINGS=1 ;;
     *) status USAGE 64 "unknown installer option $1." "run the installer with --code ABCD-1234, or with no option for a browser sign-in." \
          "I called the Theodore installer with a wrong option; I am correcting it." ;;
   esac
@@ -384,9 +387,11 @@ host_of() {
   explicit=$(printf '%s' "${THEODORE_HOST:-}" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-' | cut -c1-32 | sed 's/^-*//')
   if [ -n "$explicit" ]; then echo "$explicit"
   elif claude_cloud; then echo claude-web
-  elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}${CLAUDE_PLUGIN_ROOT:-}" ]; then echo claude-code
+  elif [ -n "${CLAUDECODE:-}${CLAUDE_CODE_ENTRYPOINT:-}" ]; then echo claude-code
   elif [ "$PLAT" = linux ] && truthy "${CODEX_NETWORK_PROXY_ACTIVE:-}" && { [ -n "${CODEX_PROXY_CERT:-}" ] || [ -d /opt/codex/runtimes ]; }; then echo chatgpt
-  elif [ -n "${CODEX_HOME:-}${CODEX_SANDBOX:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_VERSION:-}" ]; then echo codex
+  # before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs
+  elif [ -n "${CODEX_THREAD_ID:-}${CODEX_SESSION_ID:-}${CODEX_SANDBOX:-}${CODEX_HOME:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_VERSION:-}" ]; then echo codex
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then echo claude-code
   else echo installer; fi
 }
 # fetch, then check against the pinned SHA-256; a damaged download (a flaky network) is fetched afresh, three times at most
@@ -406,7 +411,7 @@ checked() { # file sha what: delete and stop on a mismatch
     "run the installer again; if it fails twice, tell the user to write to support@theodoreand.ai." "A Theodore download arrived damaged. I am trying again."
 }
 
-# --- 1. redeem the one-time code first: it lasts ten minutes, the downloads may take longer --------------------------
+# --- 1. redeem the one-time code first: it lasts an hour, the downloads may take longer ------------------------------
 if [ -n "$CODE" ]; then
   name=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-60)
   body=$(printf '{"code":"%s","device_name":"%s","platform":"%s","arch":"%s","host":"%s","client_version":"%s"}' \
@@ -420,6 +425,11 @@ if [ -n "$CODE" ]; then
   CURL_DATA=
   if [ "$http" = 200 ] && [ -s "$answer" ] && mv -f "$answer" "$pending"; then
     say "this computer is signed in (the one-time code was accepted)"
+  elif [ "$http" = 200 ] && [ -s "$answer" ]; then
+    rm -f "$answer"
+    status SETUP_FAILED 68 "cause DISK: the one-time code was accepted but this computer could not save the login in $HOME_DIR/state." \
+      "the one-time code was accepted but this computer could not save the login (cause DISK); fix the folder's permissions and run the same line again within 30 minutes: the same code works again on this computer until it has been used." \
+      "Theodore could not save its login on this computer. Its folder may be protected; once that is fixed, the same install line works again for 30 minutes."
   else
     rm -f "$answer"
     if [ -s "$pending" ]; then
@@ -470,11 +480,39 @@ LAUNCHER="$SCRIPTS/theodore"
 # --- 4. runtime and engine: a background job, so the first deck request does not wait -------------------------------
 # The job outlives this installer. It is waited for a few minutes at most: an assistant's command has a time limit
 # (Claude Code stops a command after 10 minutes), and the job must not be what that limit stops.
-SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}
-case "$SETUP_WAIT" in ''|*[!0-9]*) SETUP_WAIT=180 ;; esac
+# Codex (CODEX_THREAD_ID: its CLI, the ChatGPT app's Codex mode, ChatGPT's Work mode) lets a command run longer and asks
+# before each command of the session that runs this installer (its rules load at the next session): wait longer here,
+# so the assistant has nothing to poll.
+SETUP_WAIT_DEFAULT=180
+[ -n "${CODEX_THREAD_ID:-}" ] && SETUP_WAIT_DEFAULT=540
+SETUP_WAIT=${THEODORE_INSTALL_WAIT:-$SETUP_WAIT_DEFAULT}
+case "$SETUP_WAIT" in ''|*[!0-9]*) SETUP_WAIT=$SETUP_WAIT_DEFAULT ;; esac
 say "downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step"
-setup_out=$(THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=$SETUP_WAIT sh "$LAUNCHER" setup --wait "$SETUP_WAIT")
-rc=$?
+if [ -n "${CODEX_THREAD_ID:-}" ]; then
+  # Codex shows a long command's output as it comes: a line a minute says the download is moving, so the assistant has
+  # no reason to inspect processes (each such command asks first in this session).
+  setup_dir=$(mktemp -d "${TMPDIR:-/tmp}/theodore-setup.XXXXXX") || exit 70
+  ( THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=$SETUP_WAIT sh "$LAUNCHER" setup --wait "$SETUP_WAIT" >"$setup_dir/out"
+    echo $? >"$setup_dir/rc" ) &
+  setup_pid=$!
+  waited=0
+  while kill -0 "$setup_pid" 2>/dev/null; do
+    sleep 5; waited=$((waited + 5))
+    if [ $((waited % 60)) -eq 0 ] && kill -0 "$setup_pid" 2>/dev/null; then
+      job=$(cat "$HOME_DIR/state/jobs/setup.json" 2>/dev/null)
+      phase=$(printf '%s' "$job" | sed -n 's/.*"phase": *"\([^"]*\)".*/\1/p')
+      pct=$(printf '%s' "$job" | sed -n 's/.*"percent": *\([0-9]*\).*/\1/p')
+      say "still downloading (${phase:-starting}, ${pct:-0}%); this installer waits at most $((SETUP_WAIT - waited > 0 ? SETUP_WAIT - waited : 0)) s more, then the download goes on by itself"
+    fi
+  done
+  wait "$setup_pid" 2>/dev/null
+  setup_out=$(cat "$setup_dir/out" 2>/dev/null)
+  rc=$(cat "$setup_dir/rc" 2>/dev/null); rc=${rc:-70}
+  rm -rf "$setup_dir"
+else
+  setup_out=$(THEODORE_HOME=$HOME_DIR THEODORE_BOOTSTRAP_WAIT=$SETUP_WAIT sh "$LAUNCHER" setup --wait "$SETUP_WAIT")
+  rc=$?
+fi
 SETUP_FAILED_OUT=
 case "$rc" in
   0) ;;
@@ -490,10 +528,17 @@ theodore() { THEODORE_HOME=$HOME_DIR sh "$T" "$@"; }
 say "registering Theodore in the assistants found on this computer"
 theodore hosts register
 HOSTS_RC=$?
-[ -n "$ACCEPT" ] && theodore hosts settings --apply
-[ -z "$ACCEPT" ] && theodore hosts settings
+# The person asked their assistant to set Theodore up: its host settings come with it (Theodore's own commands run
+# without a prompt, the plugin updates itself); --no-settings leaves them out, and an organisation policy always wins.
+if [ -n "$NO_SETTINGS" ]; then
+  theodore hosts settings --remove >/dev/null 2>&1
+  say "Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command"
+else
+  theodore hosts settings --apply
+  say "Theodore's own commands run without asking each time; to turn that off: \"$T\" hosts settings --remove"
+fi
 if [ -n "$SETUP_FAILED_OUT" ]; then
-  say "the stable launcher is $T"
+  say "the stable launcher is \"$T\""
   printf '%s\n' "$SETUP_FAILED_OUT"
   exit 68
 fi
@@ -510,7 +555,7 @@ if [ "$(uname -s)" = Darwin ] && ! command -v soffice >/dev/null 2>&1 && [ ! -d 
 fi
 
 # --- 7. the check the assistant reports: the last line says what failed, if anything did ------------------------------
-say "the stable launcher is $T"
+say "the stable launcher is \"$T\""
 if ! theodore whoami >/dev/null 2>&1; then
   # Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to
   # relay. The installer never opens a browser; only `theodore login --open`, asked for by the user, does.
@@ -524,12 +569,25 @@ if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the sam
   # "the same command", which here would be this installer).
   printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'
   where=$(printf '%s\n' "$doctor_out" | sed -n 's/^THEODORE SETUP_IN_PROGRESS: \(.*\)\.$/\1/p' | tail -n 1)
+  if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$HOSTS_RC" -eq 0 ]; then
+    # In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the
+    # first deck request in a new session waits for it.
+    status OK 0 "Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (${where:-downloading})." \
+      "run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval." \
+      "Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck."
+  fi
   status SETUP_IN_PROGRESS 67 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
-    "run \"$T\" doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer)." \
+    "run \"$T\" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line." \
     "Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it."
 fi
 printf '%s\n' "$doctor_out"
 [ "$rc" -eq 0 ] || exit "$rc"
+if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$HOSTS_RC" -eq 0 ]; then
+  # Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session.
+  status OK 0 "Theodore is ready (the check above)." \
+    "run nothing more now. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval." \
+    "Theodore is ready. Start a new session and ask for your deck there."
+fi
 if [ "$HOSTS_RC" -ne 0 ]; then
   status RETRY 75 "Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above)." \
     "register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session." \

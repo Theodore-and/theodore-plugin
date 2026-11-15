@@ -18,5 +18,6 @@ and read the output to the line that starts `=== END`; if the last line names a 
 starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
 its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
 context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same
-command. If you cannot run commands here, the engine is not available in this environment: say so, and use the
-deck-design skill with the host's own slide tools.
+command. If you cannot run commands here, use the Theodore tool in this conversation: it runs the engine on the
+user's computer (its "manual" action gives these instructions for it). Only when there is no Theodore tool either is
+the engine not available: say so, and use the deck-design skill with the host's own slide tools.

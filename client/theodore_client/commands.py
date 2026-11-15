@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
@@ -15,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install, routing, specimens, usage
+from . import __version__, account, api, core, credentials, desktop, install, routing, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -70,46 +71,97 @@ def split_parts(text: str, limit: int = GUIDE_PART_CHARS) -> list[str]:
     return parts
 
 
+# A text is read whole (WHOLETEXT, 2026-11-15): an agent that held one part of a text paged in three, and acted on it,
+# had half the route to the sheets. Where the host keeps a long output whole, the command prints the whole text as one
+# document: Claude Code (CLAUDECODE=1 in the commands it runs) shows it inline when it fits and otherwise saves the
+# whole output to a file of its own and shows the path with a short preview. Theodore itself writes no guidance text to
+# disk. Elsewhere, and whenever --part is given, the text comes in parts, and every part says at its start and at its
+# end which part of how many it is and that none of it may be acted on before all are read.
+GUIDE_TOOL = "mcp__plugin_theodore_theodore__guide"      # the plugin's guide tool, as Claude Code names it
+
+
+def whole_by_default() -> bool:
+    """The host keeps a long command output whole (Claude Code), so a guide without --part prints the whole text."""
+    return bool(os.environ.get("CLAUDECODE"))
+
+
+def _tool_arguments(skill: str, section: str | None) -> str:
+    return f'skill "{skill}"' + (f', section "{section}"' if section else "")
+
+
+def _opening(skill: str, name: str, body: str, part: int, total: int, command: str, section: str | None) -> list[str]:
+    """The first lines of the output, before any text: within the short preview a host shows of a long output."""
+    if total == 1:
+        first = (f"THIS IS THE WHOLE TEXT: {len(body)} characters, {body.count(chr(10))} lines, from here to the line "
+                 f'that starts "=== END theodore {skill} {name}".')
+    else:
+        first = (f"THIS IS PART {part} OF {total} OF ONE TEXT ({len(body)} characters). Nothing in it may be acted on "
+                 f"before all {total} parts are read.")
+    lines = [first,
+            "If the shell shows only a preview or the path of a saved output, read that file in full, from the first "
+            "line to the last, before designing anything: searching it is not reading it.",
+            f"Where the Theodore tool {GUIDE_TOOL} is available, it returns this text whole in one step and is the "
+            f"better way to read it ({_tool_arguments(skill, section)})."]
+    if total > 1:               # after the lines a preview must show: the command can be long
+        lines.append(f"The parts: {command} --part N, for N from 1 to {total}"
+                     + (f"; the next one is --part {part + 1}." if part < total else "."))
+    return lines
+
+
 def _end_line(skill: str, name: str, body: str, part: int, total: int, next_command: str) -> str:
     digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
     label = f"{name} part {part}/{total}" if total > 1 else name
-    tail = f". NEXT PART: {next_command}" if part < total else ""
+    if total == 1:
+        tail = ". THE TEXT IS COMPLETE."
+    elif part < total:
+        tail = (f". NOT COMPLETE: this is part {part} of {total} of one text; nothing in it may be acted on before the "
+                f"remaining parts are read. NEXT PART: {next_command}")
+    else:
+        tail = f". This is the last part: the text is complete once parts 1 to {total - 1} are read as well."
     return f"=== END theodore {skill} {label} ({len(body)} chars, sha256 {digest}){tail} ==="
 
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
-                    header_lines: list[str], next_command: str) -> None:
+                    header_lines: list[str], command: str, section: str | None, opening: bool = True) -> None:
+    """One document: the whole text (total 1) or one part of it. `command` prints this text (without --part);
+    `section` is how the guide tool names it; `opening` is False when the text is a tool's result."""
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
+    if opening:
+        out += _opening(skill, name, body, part, total, command, section)
     if part == 1:
         out += [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
     out += header_lines
     out.append(f"--- {name} ---")
     sys.stdout.write("\n".join(out) + "\n")
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
-    sys.stdout.write(_end_line(skill, name, body, part, total, next_command) + "\n")
+    sys.stdout.write(_end_line(skill, name, body, part, total, f"{command} --part {part + 1}") + "\n")
     sys.stdout.flush()
 
 
-def guide(skill: str, section: str | None, part: int, license_text: bool) -> int:
+def guide(skill: str, section: str | None, part: int | None, license_text: bool) -> int:
+    """`part` None: the whole text where the host keeps a long output whole, else part 1 of the paged form."""
     ensure_hosts()
     ensure_instructions()
     resume_background()
     if skill not in SKILLS:
         raise core.usage(f"unknown skill '{skill}'. The skills are: {', '.join(SKILLS)}.")
-    if part < 1:
+    if part is not None and part < 1:
         raise core.usage("--part starts at 1.")
+    whole = part is None and whole_by_default()
+    part = part or 1
     if skill == "pptx":
         if license_text:
             raise core.usage("guide pptx has no --license: the pptx manual and its notices are in the engine folder named in its header.")
         if not section:
-            return _guide_pptx(part)
+            return _guide_pptx(part, whole=whole)
         # A section of pptx is one the service serves to this account (lane STUDIO); the rest of the manual is on disk.
-    return _guide_remote(skill, "license" if license_text else section, part)
+    return _guide_remote(skill, "license" if license_text else section, part, whole=whole)
 
 
-def _guide_pptx(part: int) -> int:
+def _guide_pptx(part: int, whole: bool = False, opening: bool = True) -> int:
+    """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
     claims = account.require("pptx")
     install.require_runtime()
     first = install.current_engine() is None
@@ -127,7 +179,7 @@ def _guide_pptx(part: int) -> int:
         raise core.internal(f"engine {version} has no skills/pptx/SKILL.md.") from None
     install.touch_used(version)
     _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
-    parts = split_parts(text)
+    parts = [text] if whole else split_parts(text)
     if part > len(parts):
         raise core.usage(f"guide pptx has {len(parts)} part(s); there is no part {part}.")
     launcher = quoted_launcher()
@@ -142,7 +194,7 @@ def _guide_pptx(part: int) -> int:
         elif directions:
             header += directions.rstrip("\n").split("\n")
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
-                    f"{launcher} guide pptx --part {part + 1}")
+                    f"{launcher} guide pptx", None, opening)
     return 0
 
 
@@ -239,9 +291,11 @@ def _no_such_section(skill: str, given: str) -> Status:
     return core.usage(f"guide {skill} has no section '{shown}'.", f"run {launcher} guide {skill}; its text names the sections it has.")
 
 
-def _guide_remote(skill: str, section: str | None, part: int) -> int:
+def _guide_remote(skill: str, section: str | None, part: int, whole: bool = False) -> int:
+    """A served text: part `part` of it, or with `whole` the whole text in one document (one answer with form=whole;
+    an older service that still pages is asked for every part, in order, and nothing is printed unless all came)."""
     claims = account.require(skill)
-    query = {"part": part} if part > 1 else None
+    query = {"form": "whole"} if whole else ({"part": part} if part > 1 else None)
     what = f"guide {skill}"
     if section and section != "license":
         given, section = section, _section_name(section)
@@ -257,10 +311,15 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
         _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query)
     else:
         _status, headers, raw = _api("guide", what, skill=skill, query=query)
-    body = raw.decode("utf-8", errors="replace")
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     label = headers.get(HEADER_GUIDE_VERSION) or "current"
-    if total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
+    if whole and total > 1:
+        raw = _remaining_parts(skill, section, what, raw, total)
+        total = 1
+    body = raw.decode("utf-8", errors="replace")
+    if whole:
+        pass                                          # the host keeps it whole: never cut here
+    elif total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
         parts = split_parts(body)
         total = len(parts)
         if part > total:
@@ -273,9 +332,30 @@ def _guide_remote(skill: str, section: str | None, part: int) -> int:
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
-    next_command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''} --part {part + 1}"
-    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], next_command)
+    command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''}"
+    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], command, section)
     return 0
+
+
+def _remaining_parts(skill: str, section: str | None, what: str, first: bytes, total: int) -> bytes:
+    """Parts 2 to `total` after `first`, fetched one after the other and joined in order. A part that cannot be had
+    fails the whole command: nothing of the text is printed, and the status says which part is missing."""
+    chunks = [first]
+    for number in range(2, total + 1):
+        try:
+            if section:
+                _s, _h, more = _api("guide_section", what, skill=skill, section=section, query={"part": number})
+            else:
+                _s, _h, more = _api("guide", what, skill=skill, query={"part": number})
+        except Status as status:
+            missing = f"part {number} of {total}" + (f" (and the {total - number} after it)" if number < total else "")
+            failed = Status(status.name, f"{what}{' ' + section if section else ''}: {missing} could not be fetched "
+                         f"({status.summary}). Nothing of the text was printed: it is one text and was not read whole.",
+                         status.next_step, status.tell_user)
+            failed.cause = status.cause
+            raise failed from None
+        chunks.append(more)
+    return b"".join(chunks)
 
 
 # --- skill: the instructions as a skill file's body -------------------------------------------------------------------------
@@ -465,6 +545,7 @@ def _heartbeat(engine_version: str) -> None:
 
 def run_pptx(args: list[str]) -> int:
     account.require("pptx", allow_refresh=False)
+    account.check_in_background()      # at most one detached licence refresh an hour; never waited for
     install.require_runtime()
     install.wait_for_packs(args)
     install.wait_for_renderer(args)
@@ -476,6 +557,7 @@ def run_pptx(args: list[str]) -> int:
 
 def run_python(args: list[str]) -> int:
     account.require("pptx", allow_refresh=False)
+    account.check_in_background()
     install.require_runtime()
     return install.run_engine(args, python_passthrough=True)
 
@@ -694,8 +776,10 @@ def status(as_json: bool, wait: float) -> int:
     account.import_pending_activation()
     deadline = time.monotonic() + max(0.0, wait)
     snap = _snapshot()
-    while not snap["runtime_ready"] and time.monotonic() < deadline:
-        if not Job("setup").alive():
+    # --wait also waits for the engine while the setup job is still fetching it (the installer's NEXT uses it, so the
+    # assistant waits in one call instead of sleeping between checks).
+    while (not snap["runtime_ready"] or (not snap["engine"] and Job("setup").alive())) and time.monotonic() < deadline:
+        if not snap["runtime_ready"] and not Job("setup").alive():
             install.setup_status()
         time.sleep(1.0)
         snap = _snapshot()
@@ -805,6 +889,13 @@ def doctor(as_json: bool) -> int:
     if engine_failed.get("version") and engine_failed.get("version") != snap.get("engine"):
         add("warn", "engine update", f"engine {engine_failed['version']} is pending: it failed its check ({engine_failed.get('reason', 'unknown')}); "
             f"engine {snap.get('engine')} keeps working and the update is tried again after six hours")
+    if core.host_executable("claude") or core.host_executable("codex"):
+        off = _host_record().get("settings") == "off"
+        add("ok", "host settings", f"off: Claude Code and Codex ask before each Theodore command (on: {quoted_launcher()} hosts settings --apply)"
+            if off else f"on: Theodore's own commands run without asking each time (to turn that off: {quoted_launcher()} hosts settings --remove)")
+        note = claude_policy_note() if core.host_executable("claude") else None
+        if note:
+            add("ok", "claude policy", note)
     missing = _still_missing(snap)
     add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
     if resumed:
@@ -906,6 +997,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
                      else "Slide previews need LibreOffice, which is not installed.")
     if "claude git bash" in warned:
         notes.append("Claude Code on this computer needs Git for Windows (git-scm.com) to load Theodore's skills; install it, then start a new session.")
+    if desktop.reopen_needed(_host_record()):
+        notes.append("To use Theodore in the Claude app's chats, quit the app and open it again once.")
     if "processor" in warned:
         notes.append("This computer runs Windows on ARM, so Theodore uses its x64 build through Windows' emulation, which is slower.")
     if "service" in warned:
@@ -1285,8 +1378,8 @@ def _claude_git_bash_apply(bash: Path) -> str:
 
 def _run(command: list[str], timeout: float = 300.0) -> tuple[int, str]:
     try:
-        done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        return done.returncode, (done.stdout + done.stderr).strip()
+        done = subprocess.run(command, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return done.returncode, (core.child_text(done.stdout) + core.child_text(done.stderr)).strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, str(exc)
 
@@ -1296,9 +1389,99 @@ def _claude_settings_path() -> Path:
     return (Path(base) if base else Path.home() / ".claude") / "settings.json"
 
 
+CLAUDE_MCP_RULE = "mcp__plugin_theodore_theodore"      # every tool of the plugin's own server (guide, specimen, list)
+
+
+def _claude_skill_launchers() -> list[Path]:
+    """The plugin's skill launchers as Claude Code runs them (`sh "<skill folder>/scripts/theodore" ...`): in Claude
+    Code's plugin cache, one folder per installed version, and in Theodore's own copy of the plugin."""
+    base = _claude_settings_path().parent / "plugins" / "cache" / "theodore" / "theodore"
+    roots = [core.home().plugin / "plugins" / "theodore"]
+    if base.is_dir():
+        roots += sorted(p for p in base.iterdir() if p.is_dir())
+    found = []
+    for root in roots:
+        for skill in ("pptx", "deck-design"):
+            script = root / "skills" / skill / "scripts" / ("theodore.cmd" if core.IS_WINDOWS else "theodore")
+            if script.is_file():
+                found.append(script)
+    return found
+
+
 def _permission_rules() -> list[str]:
+    """Theodore's own commands, by their exact installed paths, in the forms the product's texts write them: the stable
+    launcher bare and quoted (the Bindings block's form), each skill launcher behind `sh` (the skills' own form; on
+    Windows the .cmd quoted), and the plugin's own tool server. Claude Code checks each part of a compound command on
+    its own, so these also cover a pipe into or out of a read-only command and a `cd` inside the working folder."""
     launcher = str(core.home().launcher())
-    return [f"Bash({launcher} *)", f'Bash("{launcher}" *)']
+    rules = [f"Bash({launcher} *)", f'Bash("{launcher}" *)']
+    for script in _claude_skill_launchers():
+        rules += [f'Bash("{script}" *)'] if core.IS_WINDOWS else [f'Bash(sh "{script}" *)', f"Bash(sh {script} *)"]
+    rules.append(CLAUDE_MCP_RULE)
+    rules += [f"Skill({CLAUDE_PLUGIN}:{skill}{args})" for skill in ("pptx", "deck-design") for args in ("", " *")]
+    # Reading Theodore's own folders: its home (the engine's texts), the engine's render caches (rendered slides) and the
+    # specimen cache. A folder inside another one listed is covered by that one's rule.
+    folders: list[Path] = []
+    for folder in (core.home().root, *_render_cache_dirs(), specimens.cache_root().parent):
+        folder = Path(os.path.abspath(folder))
+        if folder not in folders:
+            folders.append(folder)
+    for folder in folders:
+        if not any(other != folder and other in folder.parents for other in folders):
+            rule = _claude_read_rule(folder)
+            if rule:
+                rules.append(rule)
+    return rules
+
+
+CLAUDE_PLUGIN = "theodore"      # a plugin's skills are named <plugin>:<skill> in Claude Code (`Skill(theodore:pptx)`)
+
+
+def _claude_read_rule(folder: Path) -> str | None:
+    """A Claude Code Read allow rule for everything under an absolute folder. `//` starts an absolute path in a Read
+    rule; on Windows Claude Code matches paths in POSIX form, `C:\\Users\\a` as `/c/Users/a` (its permissions page).
+    None for a Windows path without a drive letter (a network share), which keeps its own prompt."""
+    text = str(folder)
+    if core.IS_WINDOWS:
+        if len(text) < 3 or text[1] != ":" or not text[0].isalpha():
+            return None
+        return f"Read(//{text[0].lower()}{text[2:].replace(chr(92), '/').rstrip('/')}/**)"
+    return f"Read(/{text.rstrip('/')}/**)"
+
+
+def _claude_managed_settings() -> dict:
+    """The organisation's managed settings for Claude Code (the file its documentation names per system; {} when there
+    is none). Test seam: THEODORE_TEST_CLAUDE_MANAGED, honoured only when the API base is loopback."""
+    raw = os.environ.get("THEODORE_TEST_CLAUDE_MANAGED")
+    if raw and core.is_loopback_api():
+        path = Path(raw)
+    elif core.IS_WINDOWS:
+        path = Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "ClaudeCode" / "managed-settings.json"
+    elif sys.platform == "darwin":
+        path = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    else:
+        path = Path("/etc/claude-code/managed-settings.json")
+    value = _load_settings(path) if path.exists() else {}
+    return value if isinstance(value, dict) else {}
+
+
+def claude_policy_note() -> str | None:
+    """One line for doctor when an organisation policy keeps Theodore's Claude Code settings from applying."""
+    managed = _claude_managed_settings()
+    if managed.get("allowManagedPermissionRulesOnly") is True:
+        return ("your organisation's Claude Code policy allows only its own permission rules, so Claude Code asks before "
+                "Theodore's commands; Theodore did not add its rule")
+    if not _claude_market_allowed(managed):
+        return ("your organisation's Claude Code policy decides which marketplaces may update, so Theodore did not turn on "
+                "its plugin's automatic updates")
+    return None
+
+
+def _claude_market_allowed(managed: dict) -> bool:
+    url = str(core.config().get("marketplace_url") or "")
+    blocked, strict = managed.get("blockedMarketplaces"), managed.get("strictKnownMarketplaces")
+    return not (isinstance(blocked, list) and any(url and url in json.dumps(b) for b in blocked)) and \
+        not (isinstance(strict, list) and not any(url and url in json.dumps(k) for k in strict))
 
 
 # What Theodore added or changed in each assistant's settings is recorded in state/host-settings.json when it does it
@@ -1347,8 +1530,76 @@ def _hosts_pending_path() -> Path:
 HOSTS_RETRY_S = 3600
 
 
+def ensure_settings() -> None:
+    """Theodore's host settings are on by default (`hosts settings --apply`, which the installer runs). An installation
+    from before they were (no "settings" in the record) gets them once, at its first command after the update; one
+    whose settings are on gets rules for launchers that are new since (a new plugin version's folder), never again a
+    rule the user took out; `hosts settings --remove` or the installer's --no-settings ("off") stops both. Never fails
+    or prints."""
+    try:
+        if not core.home().launcher().exists():
+            return
+        record = _host_record()
+        state = record.get("settings")
+        if state == "off":
+            return
+        claude, codex = core.host_executable("claude"), core.host_executable("codex")
+        for host, apply in ((claude, _claude_settings_apply), (codex, _codex_rules_apply)):
+            if host:
+                core.log(f"settings: {apply(only_new=state == 'on')}")
+    except Exception as exc:  # a convenience: never the reason a guide or doctor fails
+        core.log(f"settings: not applied ({exc.__class__.__name__}: {exc})")
+
+
+def settings_remove() -> list[str]:
+    """`hosts settings --remove`: take back the Claude Code rules and marketplace change and the Codex rules file that
+    the settings added (the registration and everything else stay), and keep them off."""
+    record = _host_record()
+    lines: list[str] = []
+    path = Path(record.get("path") or _claude_settings_path())
+    settings = _load_settings(path) if path.exists() else None
+    if isinstance(settings, dict) and (record.get("rules") or record.get("marketplace")):
+        permissions = settings.get("permissions")
+        allow = permissions.get("allow") if isinstance(permissions, dict) else None
+        if isinstance(allow, list):
+            permissions["allow"] = [r for r in allow if r not in (record.get("rules") or [])]
+        markets = settings.get("extraKnownMarketplaces")
+        entry = markets.get("theodore") if isinstance(markets, dict) else None
+        market = record.get("marketplace") or {}
+        if isinstance(entry, dict) and market.get("created") is False and market.get("set_auto_update") and entry.get("autoUpdate") is True:
+            prior = market.get("auto_update_prior") or {}
+            if prior.get("present"):
+                entry["autoUpdate"] = prior.get("value")
+            else:
+                entry.pop("autoUpdate", None)
+        elif isinstance(entry, dict) and market.get("created") and entry == market.get("entry"):
+            markets.pop("theodore")         # the settings created it: taken out whole
+        for key in sorted(record.get("created_keys") or [], key=lambda k: -k.count(".")):        # emptied keys it created
+            parent, _, leaf = key.rpartition(".")
+            holder = settings.get(parent) if parent else settings
+            if isinstance(holder, dict) and holder.get(leaf, None) in ([], {}):
+                del holder[leaf]
+        core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
+        record["rules"] = []
+        record.pop("marketplace", None)
+        lines.append(f"claude-code: Theodore's permission rules and automatic updates taken out of {path}")
+    record["settings"] = "off"
+    _save_host_record(record)
+    left: list[str] = []
+    notes: list[str] = []
+    if record.get("codex_rules"):
+        _codex_rules_take_back(left, notes)
+        lines.append("codex: Theodore's rules file removed" if not left else f"codex: not removed: {'; '.join(left)}")
+    record = _host_record()
+    record["settings"] = "off"
+    _save_host_record(record)
+    return lines + notes or ["nothing to take back"]
+
+
 def ensure_hosts() -> None:
-    """Finish the registration an installer left undone (see above). Never fails or prints in the command it runs in."""
+    """Finish the registration an installer left undone (see above), then the settings (ensure_settings). Never fails
+    or prints in the command it runs in."""
+    ensure_settings()
     marker = _hosts_pending_path()
     try:
         if not marker.exists():
@@ -1371,6 +1622,56 @@ def _host_registration(name: str, command: str) -> bool | None:
         return None if code != 0 else '"theodore@theodore"' in out
     code, out = _run([command, "plugin", "list"], timeout=60)
     return None if code != 0 else re.search(r"(?<![A-Za-z0-9_-])theodore@theodore(?![A-Za-z0-9_-])", out) is not None
+
+
+AGENTS_SKILL_LINKS = {"deck-design": "theodore-deck-design", "pptx": "theodore-pptx"}
+
+
+def _agents_skills_dir() -> Path:
+    return Path.home() / ".agents" / "skills"
+
+
+def _agents_skills_link(record: dict, plugin_dir: Path) -> str | None:
+    """Where Codex cannot take the plugin (its config folder is read-only, as in ChatGPT's Work mode), link Theodore's two
+    skills into ~/.agents/skills, the user skill folder Codex reads at the start of each session. Only links Theodore makes
+    (recorded, taken back at uninstall); an existing entry of that name is left alone. The line to report, or None."""
+    if core.IS_WINDOWS:
+        return None
+    target = _agents_skills_dir()
+    made: list[str] = list(record.get("agents_skills") or [])
+    for skill, name in AGENTS_SKILL_LINKS.items():
+        source = plugin_dir / "plugins" / "theodore" / "skills" / skill
+        link = target / name
+        if not (source / "SKILL.md").is_file():
+            return None
+        try:
+            if link.is_symlink() and os.readlink(link) == str(source):
+                pass
+            elif link.exists() or link.is_symlink():
+                return None
+            else:
+                target.mkdir(parents=True, exist_ok=True)
+                os.symlink(str(source), str(link))
+        except OSError:
+            return None
+        if str(link) not in made:
+            made.append(str(link))
+    record["agents_skills"] = made
+    return f"codex: its settings are read-only here, so Theodore's skills were linked into {target}"
+
+
+def _agents_skills_take_back(record: dict, left: list[str]) -> None:
+    kept: list[str] = []
+    for raw in record.pop("agents_skills", None) or []:
+        link = Path(raw)
+        try:
+            if link.is_symlink():
+                link.unlink()
+        except OSError as exc:
+            left.append(f"the skill link {link} ({exc.__class__.__name__})")
+            kept.append(raw)
+    if kept:
+        record["agents_skills"] = kept
 
 
 def _register_hosts() -> list[str]:
@@ -1437,7 +1738,9 @@ def _register_hosts() -> list[str]:
                 record.setdefault("codex_added_marketplace", False)
             _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
             code, out = _run([codex, "plugin", "add", "theodore@theodore"])
-            lines.append("codex: registered" if code == 0 else f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+            linked = None if code == 0 else _agents_skills_link(record, plugin_dir)
+            lines.append("codex: registered" if code == 0 else linked if linked else
+                         f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
             if code == 0:
                 record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
                 record.setdefault("codex_added_marketplace", not market_before)
@@ -1455,6 +1758,7 @@ def _register_hosts() -> list[str]:
                      "installers put it)")
     else:
         lines.append("codex: not found on this computer")
+    lines += desktop.register(record)                              # Claude Desktop's chat: the local server
     record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
     lines += routed
     if record:
@@ -1467,8 +1771,7 @@ def _register_hosts() -> list[str]:
     return lines
 
 
-def hosts(action: str, apply: bool) -> int:
-    home = core.home()
+def hosts(action: str, apply: bool, remove: bool = False) -> int:
     lines: list[str] = []
     claude, codex = core.host_executable("claude"), core.host_executable("codex")
     if action == "register":
@@ -1480,16 +1783,32 @@ def hosts(action: str, apply: bool) -> int:
         lines += [f"{name}: removed" for name, tool in (("claude-code", claude), ("codex", codex)) if tool]
         lines += edits + [f"not removed: {item}" for item in left] + notes
     elif action == "settings":
-        if not claude:
+        if remove:
+            lines += settings_remove()
+        elif not claude and not codex:
             lines.append("claude-code: not found; nothing to set")
+            lines.append("codex: not found; nothing to set")
         elif apply:
-            lines.append(_claude_settings_apply())
+            if claude:
+                lines.append(_claude_settings_apply())
+            if codex:
+                lines.append(_codex_rules_apply())
+            note = claude_policy_note() if claude else None
+            if note:
+                lines.append(f"claude-code: {note}")
         else:
-            return core.emit(Status("OK", f"optional, not applied: Claude Code can update the Theodore plugin by itself and run {home.launcher()} "
-                                          f"without a permission prompt (two entries in {_claude_settings_path()}).",
-                                    f"ask the user whether they want that; only if they agree run: {quoted_launcher()} hosts settings --apply",
-                                    "Would you like Theodore's plugin to update itself and to run without asking permission each time? "
-                                    "That changes two entries in your Claude Code settings; uninstalling Theodore takes them back."))
+            record = _host_record()
+            what = []
+            if claude:
+                what.append(f"Claude Code updates the Theodore plugin by itself and runs Theodore's own commands without a permission "
+                            f"prompt (entries in {_claude_settings_path()})")
+            if codex:
+                what.append(f"Codex runs Theodore's commands without asking each time ({_codex_rules_path()}, Theodore's launcher by "
+                            f"its exact paths; they run outside Codex's sandbox)")
+            state = "off (hosts settings --remove or --no-settings)" if record.get("settings") == "off" else "on"
+            return core.emit(Status("OK", f"settings {state}: {'; '.join(what) or 'no assistant found'}.",
+                                    f"to turn them off: {quoted_launcher()} hosts settings --remove; on again: "
+                                    f"{quoted_launcher()} hosts settings --apply", None))
     else:
         raise core.usage(f"unknown hosts action '{action}'.")
     for line in lines:
@@ -1503,7 +1822,7 @@ def hosts(action: str, apply: bool) -> int:
                             "Theodore is registered in the assistants found on this computer." if action == "register" else "Done."))
 
 
-def _claude_settings_apply() -> str:
+def _claude_settings_apply(only_new: bool = False) -> str:
     """Add exactly two things in Claude Code's user settings (marketplace auto-update and the launcher rule) and
     record what was added or changed: the rules, the keys and the file created, the marketplace entry created or the
     autoUpdate value it had before."""
@@ -1516,6 +1835,9 @@ def _claude_settings_apply() -> str:
             or not isinstance(markets.get("theodore", {}), dict):
         return f"claude-code: settings not changed ({path} has these keys in another shape than expected)"
     record = _host_record()
+    managed = _claude_managed_settings()
+    rules_allowed = managed.get("allowManagedPermissionRulesOnly") is not True      # never set what the policy forbids
+    market_allowed = _claude_market_allowed(managed)
     if record.get("file_created") and path.exists() and record.get("file_identity") != _identity(path):
         record["file_created"] = False      # replaced since Theodore made it: the user's file now, never Theodore's to delete
         record.pop("file_identity", None)
@@ -1527,13 +1849,22 @@ def _claude_settings_apply() -> str:
     if "allow" not in permissions:
         created.add("permissions.allow")
     allow = permissions.setdefault("allow", [])
-    added = [r for r in _permission_rules() if r not in allow]
+    added = [r for r in _permission_rules() if r not in allow and not (only_new and r in (record.get("rules") or []))] \
+        if rules_allowed else []
     allow.extend(added)
-    if "extraKnownMarketplaces" not in settings:
+    if not allow and "permissions.allow" in created:
+        permissions.pop("allow")
+        created.discard("permissions.allow")
+    if not permissions and "permissions" in created:
+        settings.pop("permissions")
+        created.discard("permissions")
+    if market_allowed and "extraKnownMarketplaces" not in settings:
         created.add("extraKnownMarketplaces")
-    markets = settings.setdefault("extraKnownMarketplaces", {})
     market = record.get("marketplace")
-    if "theodore" not in markets:
+    markets = settings.setdefault("extraKnownMarketplaces", {}) if market_allowed else {}
+    if not market_allowed:
+        pass
+    elif "theodore" not in markets:
         markets["theodore"] = {"source": {"source": "url", "url": str(core.config().get("marketplace_url") or "")}, "autoUpdate": True}
         market = {"created": True, "entry": json.loads(json.dumps(markets["theodore"]))}
     else:
@@ -1544,11 +1875,90 @@ def _claude_settings_apply() -> str:
         entry["autoUpdate"] = True
     core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
     record.update({"rules": sorted(set(record.get("rules") or []) | set(added)), "created_keys": sorted(created), "marketplace": market,
-                   "file_created": file_created, "path": str(path)})
+                   "file_created": file_created, "path": str(path), "settings": "on"})
     if file_created:
         record["file_identity"] = _identity(path)
     _save_host_record(record)
-    return f"claude-code: automatic updates on and launcher allowed in {path}"
+    done = (["automatic updates on"] if market_allowed else []) + (["Theodore's commands allowed"] if rules_allowed else [])
+    return f"claude-code: {' and '.join(done) or 'nothing set (your organisation policy decides these)'} in {path}"
+
+
+# --- Codex: a rules file for Theodore's launcher (lane ORGDIRECT, TR-KN8R69) ---------------------------------------
+# Codex's sandbox lets a command write only the workspace and, by default, reach no network, so every Theodore command
+# asks for an approval. A Codex rule with decision "allow" runs a matching command outside the sandbox without asking
+# (learn.chatgpt.com/docs/agent-configuration/rules). Written by `hosts settings --apply`, which the installer runs
+# (the person asked their assistant to set Theodore up; --no-settings or `hosts settings --remove` turns it off), into a file of Theodore's own, matching the launcher by its exact installed paths; uninstall deletes the file while
+# it is still what Theodore wrote.
+CODEX_RULES_TELL = ("With this setting, Theodore's commands run outside Codex's sandbox without asking each time, "
+                    "including the slide scripts it runs for your decks.")
+
+
+def _codex_rules_path() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "rules" / "theodore.rules"
+
+
+def _codex_rule_patterns() -> list[list[str]]:
+    """The stable launcher, and the plugin's two skill launchers where they are on disk now (Theodore's plugin copy and
+    Codex's cache of it), each as the skills run it."""
+    home = core.home()
+    patterns = [[str(home.launcher())]] + ([] if core.IS_WINDOWS else [["sh", str(home.launcher())]])
+    base = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "plugins" / "cache" / "theodore"
+    roots = [home.plugin / "plugins" / "theodore"]
+    if base.is_dir():
+        roots += sorted(p.parent for p in base.rglob("skills") if p.is_dir())
+    for root in roots:
+        for skill in ("pptx", "deck-design"):
+            script = root / "skills" / skill / "scripts" / ("theodore.cmd" if core.IS_WINDOWS else "theodore")
+            if script.is_file():
+                pattern = [str(script)] if core.IS_WINDOWS else ["sh", str(script)]
+                if pattern not in patterns:
+                    patterns.append(pattern)
+    return patterns
+
+
+def _codex_rules_text() -> str:
+    lines = ["# Written by Theodore's set-up (hosts settings --apply); `theodore hosts settings --remove` and its uninstall remove this file.",
+             "# Theodore's launcher, by its exact paths: with these rules its commands run outside Codex's sandbox without asking."]
+    lines += [f"prefix_rule(pattern = {json.dumps(p)}, decision = \"allow\")" for p in _codex_rule_patterns()]
+    return "\n".join(lines) + "\n"
+
+
+def _codex_rules_apply(only_new: bool = False) -> str:
+    path = _codex_rules_path()
+    text = _codex_rules_text()
+    record = _host_record()
+    if only_new and (not path.exists() or not record.get("codex_rules")):
+        return "codex: rules left as they are"
+    if path.exists() and not record.get("codex_rules"):
+        return f"codex: rules not changed ({path} exists and Theodore did not write it)"
+    if path.exists() and core.sha256_file(path) != (record.get("codex_rules") or {}).get("sha256"):
+        return f"codex: rules not changed ({path} was changed after Theodore wrote it)"
+    core.write_atomic(path, text, 0o644)
+    record["codex_rules"] = {"path": str(path), "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+    record["settings"] = "on"
+    _save_host_record(record)
+    return f"codex: Theodore's commands allowed to run without asking ({path})"
+
+
+def _codex_rules_take_back(left: list[str], notes: list[str]) -> None:
+    record = _host_record()
+    rules = record.pop("codex_rules", None)
+    if not rules:
+        return
+    path = Path(rules.get("path") or _codex_rules_path())
+    if path.is_file():
+        if core.sha256_file(path) != rules.get("sha256"):
+            notes.append(f"codex: {path} was changed after Theodore wrote it, so it was left as it is")
+        else:
+            try:
+                path.unlink()
+            except OSError as exc:
+                left.append(f"the Codex rules file {path} ({exc.__class__.__name__})")
+                record["codex_rules"] = rules
+    if record:
+        _save_host_record(record)
+    else:
+        core.remove_tree(_host_record_path())
 
 
 def _legacy_marketplace(record: dict) -> dict | None:
@@ -1943,6 +2353,22 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
         if changed:
             edits.append(f"codex: its codex command was not found, so Theodore took back its registration by removing its two tables "
                          f"from {', '.join(changed)} directly (nothing else in the file changed)")
+    _codex_rules_take_back(left, notes)
+    record = _host_record()
+    if "agents_skills" in record:
+        _agents_skills_take_back(record, left)
+        if record:
+            _save_host_record(record)
+        else:
+            core.remove_tree(_host_record_path())
+    if desktop.RECORD_KEY in record:
+        changed = desktop.unregister(record, left, notes)
+        if changed:
+            edits.append(f"claude-desktop: its theodore entry was removed from {', '.join(changed)} (nothing else in the file changed)")
+        if record:
+            _save_host_record(record)
+        else:
+            core.remove_tree(_host_record_path())
     _take_back_instructions(left)
     _codex_leftovers()                      # reads the record: before it goes
     if len(left) == problems_before:
@@ -2233,11 +2659,62 @@ def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
 UNINSTALL_MARKER = ".theodore-uninstalling"
 
 
-def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -> Path:
+# The cleanup script's paths reach it only through these variables, never written into it: cmd.exe reads a batch file
+# in the console's OEM code page, so a path with a letter outside it (C:\Users\Théo Tester) written into the file is
+# another path to cmd, and the cleanup stopped with the folder still there while the uninstall said OK (WINDOWS, W-3).
+# The script holds only ASCII; each variable is expanded inside double quotes with delayed expansion off, so a space,
+# &, %, !, ^ or a parenthesis in a name is part of the path.
+CLEANUP_VARS = ("THEODORE_CLEANUP_ROOT", "THEODORE_CLEANUP_RESULT", "THEODORE_CLEANUP_WORK", "THEODORE_CLEANUP_SCRIPT",
+                "THEODORE_CLEANUP_KEEP")
+
+
+def _cleanup_script(names: list[str], keep_specimen_record: bool) -> str:
+    """The cleanup batch file: ASCII only, every path read from CLEANUP_VARS. With the argument "probe" it only answers
+    whether it sees the marker in Theodore's folder (exit 0) or not (exit 3), and touches nothing."""
+    for name in names:
+        if not name.isascii() or not name.replace(".", "").replace("_", "").replace("-", "").isalnum():
+            raise ValueError(f"not a folder name the cleanup can hold: {name!r}")
+    root, result = "%THEODORE_CLEANUP_ROOT%", "%THEODORE_CLEANUP_RESULT%"
+    marker = f'"{root}\\{UNINSTALL_MARKER}"'
+    lines = ["@echo off", "setlocal enableextensions disabledelayedexpansion",
+             'if /i "%~1"=="probe" goto probe', "set N=0",
+             # A few seconds first: the launcher that called the client reads its own file to its end once it exits.
+             "ping -n 3 127.0.0.1 >nul", ":again",
+             f"if exist {marker} goto pass", f'>"{result}" echo stopped: a new installation started in the folder', "goto end",
+             ":pass"]
+    for name in names:
+        if name == "state" and keep_specimen_record:
+            lines.append(f'for /d %%D in ("{root}\\{name}\\*") do rmdir /s /q "%%D" >nul 2>&1')
+            lines.append(f'for %%F in ("{root}\\{name}\\*") do if /i not "%%~nxF"=="%THEODORE_CLEANUP_KEEP%" del /f /q "%%F" >nul 2>&1')
+        else:
+            lines.append(f'if exist "{root}\\{name}" rmdir /s /q "{root}\\{name}" >nul 2>&1')
+    gone = [n for n in names if not (n == "state" and keep_specimen_record)]
+    # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
+    lines += [f'if exist "{root}\\{n}" goto wait' for n in gone]
+    lines += ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done", "ping -n 2 127.0.0.1 >nul", "goto again",
+              ":done", f"del /f /q {marker} >nul 2>&1", f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
+    lines += [f'if exist "{root}\\{n}" (>>"{result}" echo left: {n})' for n in gone]
+    # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
+    lines += [f'if not exist "{root}" (>>"{result}" echo removed: the folder)', ":end", "ping -n 301 127.0.0.1 >nul",
+              '(goto) 2>nul & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
+              ":probe", f"if not exist {marker} exit /b 3", 'if not exist "%THEODORE_CLEANUP_SCRIPT%" exit /b 4', "exit /b 0"]
+    text = "\r\n".join(lines) + "\r\n"
+    assert text.isascii()
+    return text
+
+
+def _cmd_line(cmd: str, probe: bool = False) -> str:
+    """cmd.exe running the cleanup script named by THEODORE_CLEANUP_SCRIPT. /c with the whole rest in one more pair of
+    quotes: cmd drops the outer pair and keeps the inner one whatever the path holds; /v:off whatever the registry says."""
+    return f'"{cmd}" /d /v:off /c ""%THEODORE_CLEANUP_SCRIPT%"{" probe" if probe else ""}"'
+
+
+def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -> Path | None:
     """Delete Theodore's folders after this process ends (its Python runs from inside them): a script in a private
     temporary folder, started outside this console's job (a closed console or SSH session does not stop it), retries
-    every two seconds for up to two minutes while Windows releases the last files, then writes its result beside it
-    and removes itself. Returns the result file."""
+    every second for up to five minutes while Windows releases the last files, then writes its result beside it and
+    removes itself. Returns the result file, or None when cmd.exe could not see Theodore's folder through the script
+    (the folder then stays, and the uninstall must not say it is removed)."""
     import tempfile
     work = Path(tempfile.mkdtemp(prefix="theodore-uninstall-"))
     result = work / "result.txt"
@@ -2246,51 +2723,69 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
     # installation's files as they are written (its sign-in was lost: ACCEPT-LOCAL2, observation b).
     marker = root / UNINSTALL_MARKER
     core.write_atomic(marker, f"{os.getpid()}\n", 0o644)
-    # A few seconds first: the launcher that called this client reads its own file to its end once the client exits.
-    lines = ["@echo off", "setlocal", "set N=0", "ping -n 3 127.0.0.1 >nul", ":again",
-             f'if exist "{marker}" goto pass', f'>"{result}" echo stopped: a new installation started in {root}', "goto end",
-             ":pass"]
-    for name in names:
-        target = root / name
-        if name == "state" and keep_specimen_record:
-            lines.append(f'for /d %%D in ("{target}\\*") do rmdir /s /q "%%D" >nul 2>&1')
-            lines.append(f'for %%F in ("{target}\\*") do if /i not "%%~nxF"=="{specimens.registry().name}" del /f /q "%%F" >nul 2>&1')
-        else:
-            lines.append(f'if exist "{target}" rmdir /s /q "{target}" >nul 2>&1')
-    checks = [f'if exist "{root / n}" goto wait' for n in names if not (n == "state" and keep_specimen_record)]
-    # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
-    lines += checks + ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done",
-                       "ping -n 2 127.0.0.1 >nul", "goto again", ":done", f'del /f /q "{marker}" >nul 2>&1',
-                       f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
-    lines += [f'if exist "{root / n}" (>>"{result}" echo left: {root / n})' for n in names
-              if not (n == "state" and keep_specimen_record)]
-    # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
-    lines += [f'if not exist "{root}" (>>"{result}" echo removed: {root})', ":end", "ping -n 301 127.0.0.1 >nul",
-              f'(goto) 2>nul & rmdir /s /q "{work}"']
     script = work / "cleanup.cmd"
-    script.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8")
+    script.write_bytes(_cleanup_script(names, keep_specimen_record).encode("ascii"))
+    values = {"THEODORE_CLEANUP_ROOT": str(root).rstrip("\\/"), "THEODORE_CLEANUP_RESULT": str(result),
+              "THEODORE_CLEANUP_WORK": str(work), "THEODORE_CLEANUP_SCRIPT": str(script),
+              "THEODORE_CLEANUP_KEEP": specimens.registry().name}
+    env = {**os.environ, **values}
     system32 = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32")
-    command = f'"{os.path.join(system32, "cmd.exe")}" /d /c "{script}"'
+    cmd = os.path.join(system32, "cmd.exe")
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work), "env": env}
+    # First the same script, the same way, asked only whether it sees the folder: what it sees is what it deletes.
+    try:
+        seen = subprocess.run(_cmd_line(cmd, probe=True), creationflags=0x08000000, timeout=60, **quiet).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        seen = f"{exc.__class__.__name__}: {exc}"
+    if seen != 0:
+        core.log(f"uninstall: the cleanup script does not see {root} (probe answered {seen}); not started")
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        core.remove_tree(work)
+        return None
+    command = _cmd_line(cmd)
     detached, new_group, no_window, breakaway = 0x00000008, 0x00000200, 0x08000000, 0x01000000
-    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "cwd": str(work)}
     try:                                    # outside this console's job object, when the job allows it
         subprocess.Popen(command, creationflags=detached | new_group | no_window | breakaway, **quiet)
         return result
     except OSError:
         pass
-    # A job that forbids breaking away (some SSH servers, some terminals): WMI creates the process outside it.
+    # A job that forbids breaking away (some SSH servers, some terminals): WMI creates the process outside it. A process
+    # WMI creates does not inherit this one's variables, so a PowerShell started by WMI sets them, from an encoded
+    # command (ASCII on its command line, each value base64 of its UTF-8), and starts the cleanup.
     ps = os.path.join(system32, "WindowsPowerShell", "v1.0", "powershell.exe")
-    os.environ["THEODORE_CLEANUP"], os.environ["THEODORE_CLEANUP_DIR"] = command, str(work)
-    code, _out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
-                       "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:THEODORE_CLEANUP; "
-                       "CurrentDirectory=$env:THEODORE_CLEANUP_DIR}; exit $r.ReturnValue"], timeout=60) \
-        if os.path.exists(ps) else (1, "")
+    code = 1
+    if os.path.exists(ps):
+        def text(value: str) -> str:
+            return f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{base64.b64encode(value.encode('utf-8')).decode('ascii')}'))"
+        body = "".join(f"$env:{k} = {text(v)}; " for k, v in values.items())
+        body += (f"$i = New-Object Diagnostics.ProcessStartInfo; $i.FileName = {text(cmd)}; "
+                 f"$i.Arguments = {text(command[len(cmd) + 3:])}; $i.UseShellExecute = $false; $i.CreateNoWindow = $true; "
+                 f"$i.WorkingDirectory = $env:THEODORE_CLEANUP_WORK; [void][Diagnostics.Process]::Start($i)")
+        launch = f'"{ps}" -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {base64.b64encode(body.encode("utf-16-le")).decode("ascii")}'
+        os.environ["THEODORE_CLEANUP"], os.environ["THEODORE_CLEANUP_DIR"] = launch, str(work)
+        code, _out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
+                           "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine=$env:THEODORE_CLEANUP; "
+                           "CurrentDirectory=$env:THEODORE_CLEANUP_DIR}; exit $r.ReturnValue"], timeout=60)
     if code != 0:
         subprocess.Popen(command, creationflags=detached | new_group | no_window, **quiet)
     return result
 
 
 def uninstall(keep_hosts: bool) -> int:
+    """Its record goes beside Theodore's folder (core.uninstall_log), never into the logs/ folder it removes."""
+    core.log_elsewhere(core.uninstall_log())
+    core.log(f"uninstall: {core.home().root} (registrations {'kept' if keep_hosts else 'removed'})")
+    try:
+        code = _uninstall(keep_hosts)
+    except BaseException as exc:
+        core.log(f"uninstall: stopped ({exc.__class__.__name__}: {exc})")
+        raise
+    core.log(f"uninstall: ended with exit code {code}")
+    return code
+
+
+def _uninstall(keep_hosts: bool) -> int:
     home = core.home()
     left: list[str] = []
     notes: list[str] = []
@@ -2327,10 +2822,13 @@ def uninstall(keep_hosts: bool) -> int:
                 continue
             core.remove_tree(root / name)
         names = list(core.OWNED)        # each guarded by "if exist" in the script: a folder written meanwhile (a log) goes too
-        result = _windows_cleanup(root, names, bool(specimens_left)) if any((root / x).exists() for x in names) else None
+        pending = any((root / x).exists() for x in names)
+        result = _windows_cleanup(root, names, bool(specimens_left)) if pending else None
+        if pending and result is None:      # the cleanup could not see the folder: it stays, and is named as left
+            left.append(f"Theodore's folder {root} (nothing of Theodore runs any more; it can be deleted by hand)")
         what = (f"its folder {root} is deleted by a cleanup that starts when this command ends (Theodore's own processes are "
                 f"stopped; it retries every second for up to five minutes while Windows releases the last files; its result is written to "
-                f"{result} for five minutes)") if result else f"{root} was deleted"
+                f"{result} for five minutes)") if result else (f"{root} was deleted" if not pending else "its other files were deleted")
         what += (f"; {'; '.join(edits)}" if edits else "") + (f"; left as they are: {'; '.join(notes)}" if notes else "")
         if left:
             print(f"THEODORE RETRY: Theodore's registrations and sign-in were removed and {what}, but these could not be: "
@@ -2341,7 +2839,8 @@ def uninstall(keep_hosts: bool) -> int:
             return 75
         print(f"THEODORE OK: Theodore was removed from this computer (registrations and sign-in removed; {what}).\n"
               f"NEXT: nothing to do. If {root} is still there after two minutes, it can be deleted by hand: nothing of "
-              "Theodore runs any more. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
+              "Theodore runs any more. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless. "
+              f"A record of this uninstall stays in {core.uninstall_log()}; it can be deleted.\n"
               "TELL THE USER: Theodore is uninstalled; its folder disappears within a minute or two. Your decks and workspaces were not touched.",
               flush=True)
         return 0
@@ -2373,6 +2872,7 @@ def uninstall(keep_hosts: bool) -> int:
               "TELL THE USER: Theodore's files are removed, but a few pieces could not be: " + "; ".join(left) + ". Your decks were not touched.", flush=True)
         return 75
     print(f"THEODORE OK: Theodore was removed from this computer ({what}; sign-in removed).\n"
-          "NEXT: nothing to do. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
+          "NEXT: nothing to do. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless. "
+          f"A record of this uninstall stays in {core.uninstall_log()}; it can be deleted.\n"
           "TELL THE USER: Theodore is uninstalled. Your decks and workspaces were not touched.", flush=True)
     return 0

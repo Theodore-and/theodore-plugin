@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
-from theodore_client import ed25519  # noqa: E402
+from theodore_client import device as _device, ed25519  # noqa: E402
 
 
 # --- Ed25519 signing (the client only verifies; tests need to sign) ------------------------------------------------
@@ -167,11 +167,20 @@ class FakeApi:
         self.guide_queries: list[dict] = []
         self.guide_index: dict | None = None           # GET /v1/guide/deck-design?form=index; None: an older server (answers the text)
         self.guide_whole = True                        # False: an older server that ignores form=whole and pages
+        self.guide_fail_parts: set[int] = set()         # parts answered 503 (a part that cannot be had mid-way)
         self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
         self.heartbeats: list[dict] = []
         self.usage_enabled = None         # what the licence refresh answers as usage_enabled; None: absent (an older server)
+        self.bundle_usage = None          # what a log-in answer says as usage_enabled; None: absent (a server before 2026-11-15)
+        # Device binding (P039): None is a server before it (bind and nonce answer 404); else its licence.binding mode.
+        self.binding: str | None = None
+        self.device_keys: dict[str, dict] = {}      # installation id -> the registered public JWK
+        self.binds: list[dict] = []                 # every bind body received
+        self.nonces: dict[str, dict] = {}           # nonce -> {iid, exp, used}
+        self.proofs: list[str] = []                 # per refresh of a bound installation: ok, missing or invalid
+        self.mids: list[str | None] = []
         self.usage_answer = None          # (HTTP status, error code) for POST /v1/usage; None: 200 {accepted, duplicates}
         self.usage_delay = 0.0            # seconds each usage answer waits
         self.usage_bodies: list[bytes] = []   # every POST /v1/usage body exactly as it arrived
@@ -258,10 +267,13 @@ class FakeApi:
         self.runtime = {"runtime_id": runtime_id, "parts": listed}
         self.runtimes[runtime_id] = self.runtime
 
-    def publish_client(self, version: str, data: bytes) -> None:
-        """A client build: served under /dl/client/ and named by the channel manifest and by every runtime manifest."""
+    def publish_client(self, version: str, data: bytes, rollback: bool = False) -> None:
+        """A client build: served under /dl/client/ and named by the channel manifest and by every runtime manifest.
+        `rollback`: the manifest marks it as a deliberate step down (allowed below a launcher's pin)."""
         self.files[f"client/client-{version}.tar"] = data
         self.client = {"version": version, "sha256": sha256_hex(data), "size": len(data)}
+        if rollback:
+            self.client["rollback"] = True
 
     def mint_entitlement(self, installation_id: str, **overrides) -> str:
         now = int(self.now())
@@ -304,7 +316,35 @@ class FakeApi:
         installation_id = str(uuid.uuid4())
         secret = "sec-" + uuid.uuid4().hex + uuid.uuid4().hex
         self.installations[installation_id] = {"secret": secret, "revoked": False, "gen": 1, "meta": meta}
-        return {"installation_id": installation_id, "installation_secret": secret, "entitlement_token": self.mint_entitlement(installation_id)}
+        bundle = {"installation_id": installation_id, "installation_secret": secret, "entitlement_token": self.mint_entitlement(installation_id)}
+        if self.bundle_usage is not None:
+            bundle["usage_enabled"] = self.bundle_usage
+        return bundle
+
+    def _proof(self, h, installation_id: str) -> str:
+        """The Theodore-Proof header of a refresh, checked as the service checks it: ok, missing or invalid."""
+        text = h.headers.get("Theodore-Proof") or ""
+        if not text:
+            return "missing"
+        try:
+            head, payload, signature = text.split(".")
+            header = json.loads(_device.b64u_decode(head))
+            claims = json.loads(_device.b64u_decode(payload))
+            key = self.device_keys[installation_id]
+            point = (int.from_bytes(_device.b64u_decode(key["x"]), "big"), int.from_bytes(_device.b64u_decode(key["y"]), "big"))
+            secret = (h.headers.get("Authorization") or "")[7:]
+            nonce = self.nonces.get(claims.get("nonce") or "")
+            good = (header == {"alg": "ES256", "typ": "theodore-proof+jwt"}
+                    and _device.verify(point, f"{head}.{payload}".encode("ascii"), _device.b64u_decode(signature))
+                    and claims.get("htm") == "POST" and claims.get("htu") == f"{self.base}/v1/licence/refresh"
+                    and abs(self.now() - float(claims.get("iat") or 0)) <= 300
+                    and nonce is not None and nonce["iid"] == installation_id and not nonce["used"] and nonce["exp"] > self.now()
+                    and claims.get("ath") == _device.b64u(hashlib.sha256(secret.encode("utf-8")).digest()))
+            if nonce is not None:
+                nonce["used"] = True
+            return "ok" if good else "invalid"
+        except (ValueError, KeyError, TypeError):
+            return "invalid"
 
     def _installation(self, h) -> str | None:
         auth = h.headers.get("Authorization") or ""
@@ -329,7 +369,7 @@ class FakeApi:
 
     def _channel_manifest(self, platform: str, arch: str) -> dict:
         return {"schema": "theodore-channel-manifest@1", "channel": self.channel_name, "platform": platform, "arch": arch,
-                "engine": self.engine, "client": {k: self.client[k] for k in ("version", "sha256")}, "shim_min": self.shim_min,
+                "engine": self.engine, "client": {k: self.client[k] for k in ("version", "sha256", "rollback") if k in self.client}, "shim_min": self.shim_min,
                 "guides": {"deck-design": self.guide_version}, "packs": [{k: p[k] for k in ("id", "version", "sha256")} | {"size": p["size_bytes"]} for p in self.packs],
                 "kill": self.kill, "kill_message": self.kill_message or None, "min_version": self.min_version,
                 "server_time": iso(self.now())}
@@ -434,17 +474,54 @@ class FakeApi:
         installation_id = self._installation(h)
         if installation_id is None:
             return None
+        if route == ["installation", "bind"] and method == "POST":
+            if self.binding is None:
+                return self._error(h, 404, "not_found", "no such route")
+            key = (body.get("device_key") or {}).get("jwk") or {}
+            if set(key) != {"kty", "crv", "x", "y"} or key.get("kty") != "EC" or key.get("crv") != "P-256" or \
+                    (body.get("device_key") or {}).get("hw") not in ("tpm", "dpapi", "keychain", "file") or \
+                    ("mid" in body and not _device.MID_PATTERN.match(str(body["mid"]))):
+                return self._error(h, 422, "validation_failed", "device_key")
+            point = (int.from_bytes(_device.b64u_decode(key["x"]), "big"), int.from_bytes(_device.b64u_decode(key["y"]), "big"))
+            if not _device.on_curve(*point):
+                return self._error(h, 422, "validation_failed", "device_key")
+            have = self.device_keys.get(installation_id)
+            if have and _device.thumbprint(have) != _device.thumbprint(key):
+                return self._error(h, 409, "device_key_exists")
+            self.binds.append(body)
+            self.device_keys[installation_id] = key
+            return self._send(h, 200, {"bound": True, "jkt": _device.thumbprint(key)})
+        if route == ["licence", "nonce"] and method == "POST":
+            if self.binding is None:
+                return self._error(h, 404, "not_found", "no such route")
+            nonce = _device.b64u(os.urandom(32))
+            self.nonces[nonce] = {"iid": installation_id, "exp": self.now() + 300, "used": False}
+            return self._send(h, 200, {"nonce": nonce, "expires_at": iso(self.now() + 300)})
         if route == ["licence", "refresh"] and method == "POST":
-            problem = _check(body, {}, {"engine_version": _semver, "client_version": _semver, "plugin_version": _semver, "host": _slug})
+            optional = {"engine_version": _semver, "client_version": _semver, "plugin_version": _semver, "host": _slug}
+            if self.binding is not None:
+                optional["mid"] = lambda v: isinstance(v, str) and bool(_device.MID_PATTERN.match(v))
+            problem = _check(body, {}, optional)
             if problem:
                 return self._error(h, 422, "validation_failed", problem)
+            claims = {}
+            if self.binding in ("observe", "enforce") and installation_id in self.device_keys:
+                outcome = self._proof(h, installation_id)
+                self.proofs.append(outcome)
+                self.mids.append(body.get("mid"))
+                if outcome != "ok" and self.binding == "enforce":
+                    return self._error(h, 401, "device_proof_required" if outcome == "missing" else "device_proof_invalid")
+                if outcome == "ok":
+                    claims["cnf"] = {"jkt": _device.thumbprint(self.device_keys[installation_id])}
+                    if body.get("mid"):
+                        claims["mid"] = body["mid"]
             self.refreshes += 1
             latest = (self.engine or {}).get("version")
             withdrawn = body.get("engine_version") in ((self.engine or {}).get("revoked") or [])
             extra = {"auto_report_enabled": self.auto_reports} if self.refresh_carries_report_switch else {}
             if self.usage_enabled is not None:
                 extra["usage_enabled"] = self.usage_enabled
-            return self._send(h, 200, {**extra, "entitlement_token": self.mint_entitlement(installation_id), "server_time": iso(self.now()),
+            return self._send(h, 200, {**extra, "entitlement_token": self.mint_entitlement(installation_id, **claims), "server_time": iso(self.now()),
                                        "release": {"channel": self.channel_name, "latest_version": latest, "min_version": self.min_version,
                                                    "update_required": withdrawn, "kill": self.kill, "kill_message": self.kill_message or None}})
         if route[:1] == ["guide"] and method == "GET" and self.guide_kill:
@@ -496,6 +573,8 @@ class FakeApi:
             else:
                 parts = [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
             index = int(query.get("part", "1"))
+            if index in self.guide_fail_parts:
+                return self._error(h, 503, "unavailable", "part unavailable")
             if index < 1 or index > len(parts):
                 return self._error(h, 404, "not_found", "no such part")
             etag = '"' + sha256_hex((self.guide_version + parts[index - 1] + str(index) + str(query.get("form"))).encode("utf-8"))[:16] + '"'

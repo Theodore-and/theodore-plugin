@@ -102,8 +102,11 @@ class Installer(unittest.TestCase):
         import subprocess
         installer = installer or self.box.installer()
         command = cmd_command(str(installer), *args) if IS_WINDOWS else ["/bin/sh", str(installer), *args]
-        return subprocess.run(command, env={**self.box.env, **(env or {})}, capture_output=True, text=True,
-                              timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+        # The installer gives the rest of the setup 180 s and then returns 67 (it goes on in the background). On a
+        # loaded test machine the local fake's downloads can take longer (windows-x64, 2026-11-15): tests that expect a
+        # finished install give it time; the slow-link test sets its own two seconds.
+        return subprocess.run(command, env={**self.box.env, "THEODORE_INSTALL_WAIT": "900", **(env or {})}, capture_output=True,
+                              text=True, timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
 
     def test_install_with_a_code_then_again_then_uninstall(self):
         self.api.issue_activation_code("ABCD-1234")
@@ -116,7 +119,7 @@ class Installer(unittest.TestCase):
         self.assertTrue(first.startswith("THEODORE OK: Theodore is ready: engine 1.0.0-rc.3"), first)
         self.assertEqual(out.strip().splitlines()[-1], tell)
         home = self.box.home
-        self.assertIn(f"the stable launcher is {home / 'bin' / STABLE}", out)
+        self.assertIn(f'the stable launcher is "{home / "bin" / STABLE}"', out)    # quoted: a name with & or ( stays one path
         # the code is redeemed before any large download
         paths = [r["path"] for r in self.api.requests]
         self.assertLess(paths.index("/v1/device/activate"), min(i for i, p in enumerate(paths) if p.startswith("/dl/runtime/")))
@@ -131,8 +134,11 @@ class Installer(unittest.TestCase):
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
         self.assertIn(f"codex plugin marketplace add {home / 'plugin'}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
-        self.assertIn("hosts settings --apply", out, "the settings change is offered, not made")
-        self.assertFalse((self.box.user_home / ".claude" / "settings.json").exists())
+        self.assertIn("Theodore's own commands run without asking each time; to turn that off:", out)
+        self.assertIn("hosts settings --remove", out)
+        applied = json.loads((self.box.user_home / ".claude" / "settings.json").read_text())
+        self.assertTrue(applied["extraKnownMarketplaces"]["theodore"]["autoUpdate"], "the settings come with the set-up")
+        self.assertIn(f"Bash({home / 'bin' / ('theodore.cmd' if IS_WINDOWS else 'theodore')} *)", applied["permissions"]["allow"])
         self.box.wait_jobs()
         self.assertEqual({v["status"] for v in json.loads((home / "packs" / "state.json").read_text()).values()}, {"ready"})
         self.assertEqual([p.name for p in (home / "staging").iterdir() if p.name.startswith("install")], [], "the installer removed its own files")
@@ -164,6 +170,59 @@ class Installer(unittest.TestCase):
         if not IS_WINDOWS:          # on Windows the folder goes a moment after the client has exited
             self.assertEqual(status_lines(self.install("--uninstall").stdout)[0].split(":")[0], "THEODORE OK")
 
+    @unittest.skipUnless(IS_WINDOWS, "install.cmd (install.sh: lane CHATGPT's test of the same name)")
+    def test_in_codex_on_windows_a_slow_link_ends_with_nothing_to_poll(self):
+        """install.cmd as install.sh in Codex (lane WINFIX, mirroring lane CHATGPT): OK with the download going on by
+        itself, and the assistant told to run nothing more (no doctor polls)."""
+        self.api.issue_activation_code("ABCD-1234")
+        for part in self.api.runtime["parts"]:
+            if part["part"] != "python":
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+        result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2", "CODEX_THREAD_ID": "01a1df00-test"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        self.assertTrue(first.startswith("THEODORE OK: Theodore is installed and signed in; the rest of its runtime"), first)
+        self.assertIn("run nothing more now, neither doctor nor this installer", nxt)
+        self.assertIn("start a new session and ask for a deck", nxt)
+        self.assertIn("here each Theodore command would ask for approval", nxt)
+        self.assertNotIn("SETUP_IN_PROGRESS", first)
+        self.box.wait_jobs(timeout=180)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
+
+    @unittest.skipIf(IS_WINDOWS, "install.sh")
+    def test_in_codex_a_ready_install_ends_by_sending_the_deck_to_a_new_session(self):
+        """Lane CHATGPT: Codex loads the plugin, its tool and the rules only at a session's start; asked for a deck in the
+        install session, every Theodore command asked (30 approvals, measured). The last words send the deck to a new session."""
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234", env={"CODEX_THREAD_ID": "01a1df00-test"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("THEODORE OK: Theodore is ready: engine", result.stdout, "doctor's check is still printed")
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(first, "THEODORE OK: Theodore is ready (the check above).")
+        self.assertIn("If they ask for a deck in this session anyway, ask them to start a new session first", nxt)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+
+    @unittest.skipIf(IS_WINDOWS, "install.sh")
+    def test_in_codex_a_slow_link_ends_with_nothing_to_poll(self):
+        """Lane CHATGPT: Codex asks before every command of the install session, so the installer's last words there are
+        OK with the download going on by itself, and tell the assistant to run nothing more (no doctor polls)."""
+        self.api.issue_activation_code("ABCD-1234")
+        for part in self.api.runtime["parts"]:
+            if part["part"] != "python":
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+        result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2", "CODEX_THREAD_ID": "01a1df00-test"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        self.assertTrue(first.startswith("THEODORE OK: Theodore is installed and signed in; the rest of its runtime"), first)
+        self.assertIn("run nothing more now, neither doctor nor this installer", nxt)
+        self.assertIn("start a new session and ask for a deck", nxt)
+        self.assertIn("If they ask for a deck in this session anyway, ask them to start a new session first", nxt)
+        self.assertNotIn("SETUP_IN_PROGRESS", first)
+        self.box.wait_jobs(timeout=180)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
+
     def test_on_a_slow_link_the_installer_returns_and_the_download_goes_on_in_the_background(self):
         # ACCEPT-RC8 D1: Claude Code stopped the installer at its 10-minute limit while the runtime was still downloading,
         # before the plugin was registered. The long downloads are a background job the installer waits for only briefly.
@@ -180,7 +239,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
         self.assertTrue(first.startswith("THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime"), first)
         stable = self.box.home / "bin" / STABLE
-        self.assertIn(f'run "{stable}" doctor in 20 seconds', nxt)
+        self.assertIn(f'run "{stable}" status --wait 100', nxt)
         self.assertIn("not this installer", nxt)
         self.assertLess(took, 45, "the installer does not wait for the whole download")
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.host_calls(),
@@ -211,6 +270,24 @@ class Installer(unittest.TestCase):
         self.assertTrue(status_lines(done.stdout)[0].startswith("THEODORE OK: Theodore is ready"), done.stdout)
         self.assertEqual(len(self.api.activations), 1, "one code, one installation")
         self.box.wait_jobs()
+
+    @unittest.skipIf(IS_WINDOWS, "install.sh; install.cmd takes the same branch when its move fails")
+    def test_an_accepted_code_whose_login_cannot_be_saved_says_so_and_when_to_run_again(self):
+        # ORGWEB: the code was accepted but state/ refused the answer; the backend lets the same code work again on this
+        # computer within 30 minutes, so the installer says to fix the folder and run the same line again.
+        import shutil
+        self.api.issue_activation_code("ABCD-1234")
+        shims = self.box.tmp / "shims"
+        shims.mkdir()
+        (shims / "mv").write_text('#!/bin/sh\nfor last; do :; done\ncase "$last" in */state/activation.pending) '
+                                  f'echo "mv: Permission denied" >&2; exit 1 ;; esac\nexec "{shutil.which("mv")}" "$@"\n')
+        (shims / "mv").chmod(0o755)
+        result = self.install("--code", "ABCD-1234", env={"PATH": f"{shims}{os.pathsep}{self.box.env.get('PATH', os.environ.get('PATH', ''))}"})
+        first, nxt, _tell = status_lines(result.stdout)
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        self.assertIn("cause DISK", first)
+        self.assertIn("the one-time code was accepted but this computer could not save the login (cause DISK); fix the "
+                      "folder's permissions and run the same line again within 30 minutes", nxt)
 
     def test_doctor_checks_the_registration_and_the_next_command_finishes_one_the_installer_left_undone(self):
         # ACCEPT-RC8 D1: the installer was stopped before it registered the plugin; doctor then said ready although
@@ -571,6 +648,9 @@ class InstallerEveryAddress(unittest.TestCase):
         begin = text.index("# --- every address of Theodore's hosts (begin) ---")
         end = text.index("# --- every address of Theodore's hosts (end) ---")
         (self.dir / "block.sh").write_text(text[begin:end])
+        import re
+        # the time install.sh gives each address to connect and finish the handshake (its curl --connect-timeout)
+        self.per_address = float(re.search(r"--connect-timeout (\d+) --resolve", text[begin:end]).group(1))
         fake = self.dir / "bin"
         fake.mkdir()
         (fake / "curl").write_text(f"""#!{sys.executable}
@@ -615,17 +695,29 @@ os.execv(os.environ["REAL_CURL"], [os.environ["REAL_CURL"], *first, "--cacert", 
                               text=True, timeout=120, cwd=str(self.dir))
         return done, time.monotonic() - began, (self.dir / "curl.log").read_text().split("\n")[:-1]
 
+    def within(self, script: str, waits: int, every_dead: bool = False) -> float:
+        """The longest a run of `script` may take when `waits` addresses each use up their own time: that time, plus
+        half of one more (an address tried twice, or a timeout doubled, is caught), plus twice what the same script
+        takes, with as many curl calls, when the dead address refuses at once (the shell, the stand-in curl and curl
+        itself: slow on a loaded machine), measured now, the shorter of two runs (a test's first run is slowed by cold
+        caches, which would hide a doubled wait). A fixed bound failed under load (9.9 s against 9.0 for one 4 s
+        address)."""
+        fast = {"FAKE_PORTS": f"{self.DEAD}={self.bench.refused} {self.LIVE}={self.bench.refused}"} if every_dead else None
+        baseline = min(self.run_block(script, self.bench.refused, fast)[1] for _ in range(2))
+        return waits * self.per_address + self.per_address / 2 + 2 * baseline
+
     def test_a_dead_first_address_falls_over_to_the_next_and_is_remembered(self):
         twice = ('curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"\n'
                  'curl_host 3 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"')
         for dead in ("silent", "no_accept", "refused"):         # the handshake that hangs: the case a user met
             with self.subTest(dead=dead):
+                bound = self.within(twice, 1)
                 done, took, calls = self.run_block(twice, getattr(self.bench, dead))
                 self.assertEqual(done.stdout.split(), ["200", "rc=0", "200", "rc=0"], done.stdout + done.stderr)
                 self.assertEqual((self.dir / "out").read_bytes(), b"ok")
                 # 4 s for the dead address at most, then the live one; the second request starts with the live one
                 self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4", f"{self.LIVE} 4"])
-                self.assertLess(took, 9.0, f"{dead}: {took:.1f} s")
+                self.assertLess(took, bound, f"{dead}: {took:.1f} s")
 
     def test_the_body_is_sent_again_to_the_next_address(self):
         script = 'CURL_DATA=\'{"code":"ABCD-1234"}\'\ncurl_host 1 "$URL" -q -sS --proto =https -m 60 -o "$OUT"; echo " rc=$?"'
@@ -636,12 +728,13 @@ os.execv(os.environ["REAL_CURL"], [os.environ["REAL_CURL"], *first, "--cacert", 
 
     def test_every_address_dead_fails_within_bounds(self):
         script = 'curl_host 1 "$URL" -q -fsS --proto =https --connect-timeout 20 -m 60 -o "$OUT"; echo " rc=$?"'
+        bound = self.within(script, 1, every_dead=True)          # the silent address's own time, once; the refused one at once
         done, took, calls = self.run_block(script, self.bench.silent, {"FAKE_PORTS": f"{self.DEAD}={self.bench.silent} "
                                                                                      f"{self.LIVE}={self.bench.refused}"})
         self.assertEqual(done.stdout.split()[0], "000", done.stdout + done.stderr)
         self.assertNotEqual(done.stdout.split()[1], "rc=0")
         self.assertEqual(calls, [f"{self.DEAD} 4", f"{self.LIVE} 4"])
-        self.assertLess(took, 9.0)
+        self.assertLess(took, bound, f"{took:.1f} s")
 
     def test_a_slow_link_gets_the_callers_own_connect_time_once(self):
         # every address only ran out of its 4 s: the first is tried once more with the caller's own connect timeout

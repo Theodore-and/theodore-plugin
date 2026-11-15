@@ -32,6 +32,9 @@
     "account_suspended": 403,
     "auto_reports_disabled": 403,
     "conflict": 409,
+    "device_key_exists": 409,
+    "device_proof_invalid": 401,
+    "device_proof_required": 401,
     "entitlement_inactive": 403,
     "forbidden": 403,
     "installation_revoked": 401,
@@ -133,7 +136,7 @@
     "channel": "theodore-channel-manifest@1",
     "runtime": "theodore-runtime-manifest@1"
   },
-  "openapi_sha256": "fc5dd0e9bc8e920f3c36f394cfd483105c27bc9357467b6d9982932e420610e7",
+  "openapi_sha256": "1762d1c5f680397dfae4549171c44457b2b65840044e4987066842672f05c2b9",
   "origins": {
     "production": {
       "api": "https://api.theodoreand.ai",
@@ -252,6 +255,21 @@
         "503"
       ]
     },
+    "v1.installation.bind": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/installation/bind",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "409",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
     "v1.installation.rotate": {
       "auth": "installation",
       "method": "POST",
@@ -287,6 +305,20 @@
         "401",
         "403",
         "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.licence.nonce": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/licence/nonce",
+      "responses": [
+        "200",
+        "401",
+        "403",
         "422",
         "429",
         "500",

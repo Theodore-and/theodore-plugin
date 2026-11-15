@@ -13,16 +13,20 @@ installer's are in `install/`.
   explicitly. It never contacts Theodore.
 - The client is the only part that contacts Theodore.
 
+- In Claude Desktop's chat, Theodore's tool lets the chat run only Theodore's own engine commands. It can read and
+  write only the deck's folder (text files) and read Theodore's renders. The deck script the chat writes runs without
+  network access, without any other program, and without access to any other file on the computer.
+
 ## When the client contacts Theodore
 
 | When | What for | How often |
 | --- | --- | --- |
 | Sign-in | An activation code or a browser approval, once per computer | once |
-| Licence refresh | Renews the signed licence | at most once per 12 hours, when you use Theodore |
+| Licence refresh | Renews the signed licence; where the service binds licences to computers, first asks for a single-use nonce and signs it with this installation's key (below) | at most once per 12 hours, when you use Theodore |
 | Update check | Asks which engine, client and asset-pack versions are current, and reads the signed `plugin/latest.json` (the current plugin version) | at the first Theodore command of each assistant session that loads the pptx instructions, then at most once per 6 hours |
 | Plugin update | When the published plugin is newer than an assistant's copy: Theodore's own copy of the plugin is downloaded (signed document, pinned sha256) and the assistant's own command updates its copy (`claude plugin marketplace update theodore` and `claude plugin update theodore@theodore`; `codex plugin add theodore@theodore`) | once per release and session, in the background |
 | Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
-| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private temporary folder, removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
+| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private folder in Theodore's own cache (the system's temporary folder only when the assistant works in a folder that contains the cache), removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
 | `theodore report` | A bug report or feedback, see below | when filed |
@@ -30,13 +34,28 @@ installer's are in `install/`.
 | `theodore prefs` | Saving, listing or removing a preference you asked to keep | when used |
 
 Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand.ai` (installer and sign-in
-pages). LibreOffice, when Theodore fetches it, comes unmodified from The Document Foundation
+pages). Each of these names resolves to several addresses; the client races them (the next one starts a quarter of a
+second after the one before) and keeps the one that answered in `state/addresses.json` (the address and when, nothing
+else) for up to 7 days, so that a network where one address does not answer costs that delay once, not at every
+command. LibreOffice, when Theodore fetches it, comes unmodified from The Document Foundation
 (`download.documentfoundation.org`) and is checked against a pinned SHA-256.
 
 What the client changes on this computer by itself: its own folder (client, runtime, engines, packs, its copy of
 the plugin), and, through the assistants' own plugin commands, the Theodore plugin in Claude Code and Codex when a
-newer one is published (it takes effect at their next session). It changes nothing else in their settings without
-your yes (`hosts settings --apply`). A claude.ai account's plugin is never changed from a computer: the skill says
+newer one is published (it takes effect at their next session), and, when Claude Desktop is on this computer, one
+entry named `theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the
+uninstall removes it). Setting Theodore up also applies its host settings, without a separate question (the person
+asked their assistant to set Theodore up): in Claude Code (CLI, the desktop app's Code tab and the VS Code extension
+share `~/.claude/settings.json`), plugin auto-update for the Theodore marketplace and permission rules that allow only
+Theodore's own commands, by their exact installed paths (the stable launcher, the plugin's skill launchers and the
+plugin's own tool server), so they run without a prompt; in Codex, `~/.codex/rules/theodore.rules`, which allows
+Theodore's launcher by its exact paths. With the Codex rules, Theodore's commands, including the slide scripts it runs
+for your decks, run outside Codex's sandbox without asking each time. To leave them out, install with
+`--no-settings`; to take them back later, run `theodore hosts settings --remove` (the uninstall also removes exactly
+what was added). An organisation's managed Claude Code policy always wins: when it allows only its own permission
+rules, or does not allow Theodore's marketplace, Theodore does not add that setting, and `theodore doctor` says so in
+one line. An installation from before these settings were on by default gets them once, at its first Theodore
+command after it updates to 0.3.10, unless they were turned off. A claude.ai account's plugin is never changed from a computer: the skill says
 once per release how to update it there.
 
 ## What is sent
@@ -118,10 +137,17 @@ changed since the client last learned it, the service refuses the report, stores
   Settings in the portal (Computers and assistants). It is kept in the macOS keychain (through `/usr/bin/security`), in a
   DPAPI-protected file on Windows, and in a file readable only by you on Linux (also on a Mac when the
   keychain is not available, for example over SSH). It is never printed or logged.
+- From 0.3.9 each installation also has its own key (ECDSA P-256), made on this computer at sign-in and kept inside the
+  installation credential, in the same store, so it is protected and removed with it. Only its public half is sent,
+  once, to register it with the installation (`state/binding.json` records that it was). Where the service binds
+  licences to computers, a licence refresh carries a signature made with this key and a value derived from this
+  computer's identifier and the installation id (an HMAC: the identifier itself never leaves the computer, and two
+  installations on one computer give different values), so a copied credential cannot refresh elsewhere and a
+  copied licence can be refused on another computer. A service that does not bind licences ignores both.
 - The licence is a signed token that the engine checks offline. It is refreshed when online and lasts 7 days
   from the last refresh: Theodore's engine works offline for up to 7 days. The deck-design guidance always
   needs a connection.
-- One-time activation codes are single-use and expire after 10 minutes. The installer redeems the code before
+- One-time activation codes expire after an hour and sign in one computer: the same code works again only for that computer and network, within 30 minutes of its first use (an install that failed half way). The installer redeems the code before
   it downloads anything large and never prints it. The code is given on the command line (`--code`), by design: it
   is in the sentence the user pastes, works once and expires within minutes. Nothing longer-lived ever is: the
   connector's grant, which can carry the installation secret, is read only from standard input or a file only its
@@ -132,8 +158,10 @@ changed since the client last learned it, the service refuses the report, stores
 - The installer is the root of trust. The install commands fetch it over HTTPS from theodoreand.ai and run it:
   as with any bootstrap command, what protects that first step is TLS to our domain. The installer prints its own
   SHA-256 and the same value is published at https://theodoreand.ai/install, so anyone can compare before running it
-  (download the file, check, then run). The commands download it into a new private folder (never a fixed path in a
-  shared temporary folder) and delete that folder afterwards.
+  (download the file, check, then run). The commands download it into a private folder, never one in a shared
+  temporary folder: a new one from `mktemp -d` on macOS and Linux, `%LOCALAPPDATA%\Theodore-install` in the user's
+  own profile on Windows, where the download and the run are two separate commands. The folder goes when the
+  installer ends.
 - The installer carries, stamped in at release, the SHA-256 of Theodore's Python (an unmodified
   python-build-standalone archive) and of the client, and the Ed25519 public keys. It downloads Python and the
   client first and checks each against its SHA-256 with the system's own tool (`shasum`/`sha256sum`,
@@ -175,7 +203,10 @@ changed since the client last learned it, the service refuses the report, stores
 ## Removing everything
 
 `theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
-plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). It first stops Theodore's own running
+plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). What it did is
+written beside Theodore's folder, never inside it (`~/.theodore-uninstall.log`; Windows:
+`%LOCALAPPDATA%\Theodore-uninstall.log`), so it can still be read once the folder is gone; it holds paths and
+outcomes, no credential, and can be deleted at any time. It first stops Theodore's own running
 processes (background downloads, the tool server), each found by the file Theodore wrote for it. On Windows the folders
 go after the client has exited: a cleanup removes them, retrying for up to two minutes while Windows releases the last
 files, and writes its result to a file in the temporary folder that the status names; running the installer with

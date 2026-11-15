@@ -32,6 +32,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(CLIENT_DIR))
 
 from fake_api import FakeApi, sha256_hex  # noqa: E402
+
+# The tests never inherit the identity of the host that launched them (WHOLETEXT2, 2026-11-15): run from a Claude Code
+# or Codex session, CLAUDECODE and the like would change what the client prints. Every variable the client reads to
+# name its host goes, here, for the in-process tests and every command they start; a test of a host sets it itself.
+HOST_MARKERS = ("CLAUDECODE", "CLAUDE_PID", "THEODORE_HOST")
+HOST_MARKER_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_")
+for _name in [n for n in os.environ if n in HOST_MARKERS or n.startswith(HOST_MARKER_PREFIXES)]:
+    del os.environ[_name]
 import build_client  # noqa: E402
 
 FAKE_PPTX = r'''"""A stand-in engine entry for the client's tests. It only echoes what it was asked."""
@@ -60,10 +68,16 @@ if verb == "version":
 elif verb == "start":
     ws = Path(args[-1]); (ws / ".pptx-state").mkdir(parents=True, exist_ok=True)
     (ws / ".pptx-state" / "engine-used.txt").write_text(VERSION)
-    print(json.dumps({"ok": True, "engine": VERSION}))
+    print(f"WORKSPACE: {ws}")
+    print(json.dumps({"ok": True, "engine": VERSION, "args": args[1:]}))
 elif verb == "apply":
     ws = Path(args[-1]); (ws / ".pptx-state" / "engine-used.txt").write_text(VERSION)
     print(json.dumps({"ok": True, "engine": VERSION, "packs": sorted(p.name for p in (ROOT / "skills" / "pptx-asset-packs").iterdir() if p.is_dir())}))
+elif verb == "list":     # what a chat's run sees (mcp --for claude-desktop): folder, private home, Node's options, stdin
+    print(json.dumps({"cwd": os.getcwd(), "home": os.environ.get("THEODORE_HOME"), "node_options": os.environ.get("NODE_OPTIONS"),
+                      "tmp": os.environ.get("TMPDIR"), "stdin": sys.stdin.read() if not sys.stdin.isatty() else None,
+                      "script_root": os.environ.get("THEODORE_NODE_SCRIPT_ROOT"), "args": args[1:],
+                      "licence_copy": (Path(os.environ.get("THEODORE_HOME", "/nonexistent")) / "state" / "entitlement.json").is_file()}))
 elif verb == "exit":
     sys.exit(int(args[1]))
 elif verb == "env":
@@ -316,6 +330,7 @@ class Sandbox:
                         "COMPUTERNAME", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "NUMBER_OF_PROCESSORS"):
                 if key in os.environ:
                     self.env[key] = os.environ[key]
+            self.env["APPDATA"] = str(self.user_home / "AppData" / "Roaming")     # Claude Desktop's folder: never the real one
         (self.tmp / "tmp").mkdir()
         if api:
             self.write_launcher_json()

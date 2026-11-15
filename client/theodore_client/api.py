@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import json
 import re
 import os
+import queue
 import socket
 import sys
+import threading
 import time
 import ssl
 import urllib.error
@@ -120,11 +123,21 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 # Theodore's hosts resolve to several addresses. From some networks one of them is unreachable, or completes the TCP
 # connection but never the TLS handshake (or resets it), while another works; http.client tries only the connection,
 # and a handshake that hangs or is reset on the first address failed every request. So, for Theodore's own hosts and
-# without a proxy (which chooses the address itself), each address is tried in turn with CONNECT_EACH seconds to connect
-# and finish the handshake, within the request's own timeout; the address that worked is tried first for the rest of
-# this process. The certificate is verified for the host name (SNI and verification on the name, never the address).
+# without a proxy (which chooses the address itself), the addresses are raced: the first is tried at once, the next
+# STAGGER seconds later (at once when the one before failed), each with CONNECT_EACH seconds to connect and finish the
+# handshake, within the request's own timeout; the first handshake that completes wins and the others are closed.
+# The address that worked is tried first, in this process and in the next ones: it is kept in state/addresses.json
+# for ADDRESS_TTL seconds and only while the name still resolves to it; when it stops working the race moves on after
+# STAGGER and the new winner replaces it. A request on a network where one address hangs costs STAGGER the first time
+# and nothing after. The certificate is verified for the host name (SNI and verification on the name, never the
+# address).
 CONNECT_EACH = 3.0
+STAGGER = 0.25
+ADDRESS_FILE = "addresses.json"
+ADDRESS_TTL = 7 * 86400
+ADDRESS_REFRESH = 86400          # a remembered address that keeps working is written again once a day (its expiry moves)
 _GOOD_ADDRESS: dict[tuple[str, int], tuple] = {}
+_ADDRESS_LOCK = threading.Lock()
 OWN_BASES: list[str] = []      # bases known before launcher.json exists (the installer's --dl-base)
 
 
@@ -154,19 +167,90 @@ def _own_host(host: str) -> bool:
     return False
 
 
+def _address_file() -> Path | None:
+    """state/addresses.json in Theodore's folder; None while there is no folder yet (an install's first steps) or it
+    is being removed (uninstall), so nothing is created there."""
+    try:
+        root = core.home().root
+        if not root.is_dir() or (root / ".theodore-uninstalling").exists():
+            return None
+        return root / "state" / ADDRESS_FILE
+    except Exception:       # noqa: BLE001
+        return None
+
+
+def _read_addresses() -> dict:
+    path = _address_file()
+    if path is None:
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _remembered(host: str, port: int) -> tuple | None:
+    """The address that worked last for host:port: this process's, else the one kept on disk while it is fresh."""
+    good = _GOOD_ADDRESS.get((host, port))
+    if good:
+        return good
+    entry = _read_addresses().get(f"{host}:{port}")
+    try:
+        if isinstance(entry, dict) and 0 <= time.time() - float(entry.get("at") or 0) < ADDRESS_TTL:
+            address, at_port = entry.get("address"), entry.get("port", port)
+            if isinstance(address, str) and address and isinstance(at_port, int):
+                return (address, at_port)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _keep_address(host: str, port: int, address: tuple, *, drop: bool = False) -> None:
+    """Remember (or, with drop, forget) the address on disk for the next processes. Written only when it changed or
+    once a day; one attempt, never an error, never a wait (a reader on Windows may hold the file a moment)."""
+    path = _address_file()
+    if path is None:
+        return
+    with _ADDRESS_LOCK, contextlib.suppress(Exception):
+        table = _read_addresses()
+        key = f"{host}:{port}"
+        entry = table.get(key) if isinstance(table.get(key), dict) else {}
+        same = entry.get("address") == address[0] and entry.get("port", port) == address[1]
+        if drop:
+            if not same:
+                return
+            table.pop(key, None)
+        else:
+            if same and 0 <= time.time() - float(entry.get("at") or 0) < ADDRESS_REFRESH:
+                return
+            table[key] = {"address": address[0], "port": address[1], "at": int(time.time())}
+        table = {k: v for k, v in table.items()
+                 if isinstance(v, dict) and 0 <= time.time() - float(v.get("at") or 0) < ADDRESS_TTL}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        try:
+            os.replace(tmp, path)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+
 def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSLContext):
-    """A TLS socket to `host`, from the first of its addresses that connects and completes the handshake. When every
-    address only timed out (a slow link rather than a dead address), they are tried once more with what is left of the
-    request's own time, as one connection was before."""
+    """A TLS socket to `host`, from the first of its addresses that connects and completes the handshake, the
+    addresses raced as described above. When every address only timed out (a slow link rather than a dead address),
+    they are tried once more, one after another, with what is left of the request's own time, as one connection was
+    before."""
     budget = timeout if isinstance(timeout, (int, float)) else None
     found, order = set(), []
     for family, kind, proto, _canon, address in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         if (family, address[:2]) not in found:
             found.add((family, address[:2]))
             order.append((family, kind, proto, address))
-    good = _GOOD_ADDRESS.get((host, port))
-    order.sort(key=lambda entry: entry[3][:2] != good)          # the address that worked last time first (stable)
-    began, failures, slow = time.monotonic(), [], []
+    remembered = _remembered(host, port)
+    order.sort(key=lambda entry: entry[3][:2] != remembered)    # the address that worked last time first (stable)
+    began = time.monotonic()
 
     def left():
         return None if budget is None else budget - (time.monotonic() - began)
@@ -185,41 +269,91 @@ def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSL
             except OSError:
                 pass
             sock.settimeout(max(deadline - time.monotonic(), 0.05))
-            tls = context.wrap_socket(sock, server_hostname=host)
+            return context.wrap_socket(sock, server_hostname=host)
         except BaseException:
             sock.close()
             raise
+
+    def won(entry, tls):
         tls.settimeout(timeout if budget is not None else socket.getdefaulttimeout())
-        _GOOD_ADDRESS[(host, port)] = address[:2]
+        address = entry[3][:2]
+        _GOOD_ADDRESS[(host, port)] = address
+        _keep_address(host, port, address)
         return tls
 
-    tried = 0
-    for entry in order:
-        remaining = left()
-        if tried and remaining is not None and remaining <= 0:
-            break
-        tried += 1
+    results: queue.Queue = queue.Queue()
+    decided = threading.Event()
+
+    def racer(entry, each):
         try:
-            return attempt(entry, CONNECT_EACH if remaining is None else max(min(CONNECT_EACH, remaining), 0.05))
-        except ssl.SSLCertVerificationError:
-            raise                                               # the same on every address: a TLS-inspecting network
-        except OSError as exc:
-            failures.append(f"{entry[3][0]}: {str(exc) or exc.__class__.__name__}")
-            if isinstance(exc, TimeoutError) or "timed out" in str(exc):
-                slow.append(entry)
-    if slow and len(slow) == tried:
+            tls = attempt(entry, each)
+        except BaseException as exc:            # noqa: BLE001  reported to the waiting thread
+            results.put((entry, None, exc))
+            return
+        if decided.is_set():                    # another address won meanwhile: this one is not used
+            with contextlib.suppress(Exception):
+                tls.close()
+            return
+        results.put((entry, tls, None))
+
+    failures, slow = [], []
+    started = running = 0
+    while True:
+        remaining = left()
+        if started < len(order) and (started == 0 or remaining is None or remaining > 0):
+            each = CONNECT_EACH if remaining is None else max(min(CONNECT_EACH, remaining), 0.05)
+            threading.Thread(target=racer, args=(order[started], each), name="theodore-connect", daemon=True).start()
+            started += 1
+            running += 1
+        if running == 0:
+            break
+        more = started < len(order) and (remaining is None or remaining > 0)
+        wait = STAGGER if more else (None if remaining is None else max(remaining, 0) + 0.25)
+        try:
+            entry, tls, exc = results.get(timeout=wait)
+        except queue.Empty:
+            if more:
+                continue                        # the next address starts beside the ones still trying
+            break                               # the request's own time is spent
+        running -= 1
+        if tls is not None:
+            decided.set()
+            while True:                         # another handshake that finished before this point is not used
+                try:
+                    _entry, other, _exc = results.get_nowait()
+                except queue.Empty:
+                    break
+                if other is not None:
+                    with contextlib.suppress(Exception):
+                        other.close()
+            if remembered and entry[3][:2] != remembered and remembered in [e[3][:2] for e in order]:
+                core.log(f"network: {host} answered on another address than the one remembered")
+            return won(entry, tls)
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            decided.set()
+            raise exc                           # the same on every address: a TLS-inspecting network
+        failures.append(f"{entry[3][0]}: {str(exc) or exc.__class__.__name__}")
+        if isinstance(exc, TimeoutError) or "timed out" in str(exc):
+            slow.append(entry)
+    decided.set()
+    tried = len(failures)
+    if slow and len(slow) == tried == started:
         for entry in slow:
             remaining = left()
             if remaining is not None and remaining <= CONNECT_EACH / 10:
                 break
             try:
-                return attempt(entry, remaining if remaining is not None else 3 * CONNECT_EACH)
+                return won(entry, attempt(entry, remaining if remaining is not None else 3 * CONNECT_EACH))
             except ssl.SSLCertVerificationError:
                 raise
             except OSError:
                 continue
-    untried = len(order) - tried
-    raise ConnectionError(f"all {len(order)} addresses of {host} failed ({'; '.join(failures)}"
+    if remembered and tried == started == len(order):
+        _keep_address(host, port, remembered, drop=True)    # nothing answered: the next process starts afresh
+    untried = len(order) - started
+    pending = started - tried
+    raise ConnectionError(f"all {len(order)} addresses of {host} failed ({'; '.join(failures) or 'no answer'}"
+                          + (f"; {pending} still trying when the request's {budget:g} s were spent" if pending else "")
                           + (f"; {untried} not tried: the request's {budget:g} s were spent" if untried else "") + ")")
 
 
@@ -504,6 +638,13 @@ def setup_failed(cause: str, detail: str) -> Status:
         "DISK": f"free disk space or make {core.home().root} writable, then run the same command again.",
         "HASH_MISMATCH": "run the same command again. If it fails twice, stop and tell the user to write to support@theodoreand.ai.",
     }
+    if cause == "DISK" and core.codex_sandboxed():
+        # Codex's sandbox lets a command write only the workspace: the one approval Theodore needs is for this command
+        # to run outside it, once (lane ORGDIRECT, TR-KN8R69).
+        nexts["DISK"] = (f"this runs inside Codex's sandbox, which does not let Theodore write {core.home().root}. Run the same command "
+                         f"again with permission to run outside the sandbox (one approval). That same command also writes Theodore's "
+                         f"Codex rules, so its later commands are not asked about again (the user turns that off with "
+                         f"{quoted_launcher()} hosts settings --remove).")
     tells = {
         "NETWORK": "Theodore could not download its files. Please check the internet connection.",
         "TLS_INTERCEPT": "This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate.",
@@ -512,7 +653,8 @@ def setup_failed(cause: str, detail: str) -> Status:
         "HASH_MISMATCH": "A Theodore download arrived damaged. I am trying again.",
     }
     if cause == "NETWORK" and sandbox_blocked(detail):
-        status = Status("SETUP_FAILED", f"cause {cause}: {detail}", core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
+        status = Status("CONNECTOR_REQUIRED", f"cause {cause}: {detail}; this cloud workspace cannot reach Theodore's sites, so "
+                        "Theodore's engine cannot run here.", core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
     else:
         status = Status("SETUP_FAILED", f"cause {cause}: {detail}", nexts[cause], tells[cause])
     status.cause = cause
@@ -530,8 +672,8 @@ def _offline(error: NetworkError, what: str) -> Status:
         failed = setup_failed(error.cause, f"{what}: {error.detail}")
         return Status("OFFLINE", failed.summary, failed.next_step, failed.tell_user)
     if sandbox_blocked(error.detail):
-        return Status("OFFLINE", f"{what}: the Theodore service could not be reached ({error.detail}).",
-                      core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
+        return Status("CONNECTOR_REQUIRED", f"{what}: the Theodore service could not be reached from this cloud workspace "
+                      f"({error.detail}), so Theodore's engine cannot run here.", core.SANDBOX_NETWORK_NEXT, core.sandbox_network_tell())
     return Status("OFFLINE", f"{what}: the Theodore service could not be reached ({error.detail}).",
                   "check the internet connection, then run the same command again.",
                   "Theodore could not reach its service. Please check the internet connection.")
@@ -552,7 +694,8 @@ def _status_from(error: ApiError, what: str) -> Status:
     detail = f"{what}: {error.message or error.code}"
     if name == "SIGN_IN_REQUIRED":
         reason = "this device was signed out from the Theodore portal." if error.code == "installation_revoked" \
-            else "this computer's sign-in is no longer valid."
+            else "this copy of Theodore was set up on another computer; this computer needs its own log in." \
+            if error.code == "device_proof_invalid" else "this computer's sign-in is no longer valid."
         return sign_in_required(reason)
     if name == "NO_ENTITLEMENT":
         return Status(name, detail, f"do not retry. Tell the user; they can check their plan at {core.site_url('/app/plan')}.",

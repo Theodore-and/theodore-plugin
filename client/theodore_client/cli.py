@@ -22,7 +22,7 @@ HELP = """Theodore client commands (run through the launcher):
   report --kind bug|feedback --title T --details D [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
   prefs add "<text>" | list | remove <id>
   packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
-  hosts register | unregister | settings [--apply]          activate --grant - | --grant-file F          uninstall
+  hosts register | unregister | settings [--apply | --remove]          activate --grant - | --grant-file F          uninstall
   usage [--show]                 where the usage counts stand; --show prints the next batch exactly as it would be sent
 """
 
@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     g = sub.add_parser("guide", add_help=False)
     g.add_argument("skill")
     g.add_argument("section", nargs="?")
-    g.add_argument("--part", type=int, default=1)
+    g.add_argument("--part", type=int, default=None)
     g.add_argument("--license", action="store_true")
     sp = sub.add_parser("specimen", add_help=False)
     sp.add_argument("files", nargs="*")
@@ -102,6 +102,7 @@ def _parser() -> argparse.ArgumentParser:
     hs = sub.add_parser("hosts", add_help=False)
     hs.add_argument("action", choices=("register", "unregister", "settings"))
     hs.add_argument("--apply", action="store_true")
+    hs.add_argument("--remove", action="store_true")
     ac = sub.add_parser("activate", add_help=False)
     grant = ac.add_mutually_exclusive_group(required=True)
     grant.add_argument("--grant", help="'-': read the grant from standard input")
@@ -111,6 +112,7 @@ def _parser() -> argparse.ArgumentParser:
     ip.add_argument("--keys", required=True)
     un = sub.add_parser("uninstall", add_help=False)
     un.add_argument("--keep-hosts", action="store_true")
+    sub.add_parser("licence-check", add_help=False)        # the detached refresh an engine command starts: not for assistants
     us = sub.add_parser("usage", add_help=False)
     us.add_argument("--show", action="store_true")
     return parser
@@ -170,7 +172,7 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "setup":
         return commands.setup_job() if args.job else commands.setup(args.wait)
     if cmd == "hosts":
-        return commands.hosts(args.action, args.apply)
+        return commands.hosts(args.action, args.apply, args.remove)
     if cmd == "activate":
         return core.emit(account.activate_grant(account.read_grant(args.grant, args.grant_file)))
     if cmd == "uninstall":
@@ -179,6 +181,8 @@ def _dispatch(argv: list[str]) -> int:
         return commands.install_plugin(args.dl_base, args.keys)
     if cmd == "usage":
         return usage.show(args.show)
+    if cmd == "licence-check":
+        return account.licence_check_job()
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 
@@ -205,7 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.suppress(Exception):
             account.register_disk_secrets()
         specimens.sweep()
-        return mcp.serve(blocked=blocked)
+        rest = argv[1:]
+        for_host = rest[rest.index("--for") + 1] if "--for" in rest[:-1] else None
+        return mcp.serve(blocked=blocked, for_host=for_host)
     if argv[:1] == ["skill"]:       # injected into a skill by the host: whatever happens, exit 0 with something to act on
         code = _main(argv)
         return 0 if code != 130 else code
@@ -233,7 +239,7 @@ def _main(argv: list[str]) -> int:
 
 # Commands that never send the usage counts at their start: the one that shows them, and those that end the sign-in or
 # the installation (logout and uninstall remove the ledger).
-_NO_USAGE_FLUSH = ("usage", "logout", "uninstall", "install-plugin", "help", "-h", "--help")
+_NO_USAGE_FLUSH = ("usage", "logout", "uninstall", "install-plugin", "licence-check", "help", "-h", "--help")
 
 
 def _run(argv: list[str]) -> int:

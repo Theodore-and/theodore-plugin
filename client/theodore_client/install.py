@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -300,6 +301,9 @@ def engine_env(directory: Path) -> dict:
     env["THEODORE_HOME"] = str(core.home().root)
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
+    # The engine's text streams in UTF-8 on every platform, as on macOS: on Windows a pipe otherwise gets the ANSI code
+    # page, the engine's lines then differ in encoding from the client's around them, and a letter outside it fails.
+    env["PYTHONIOENCODING"] = "utf-8"
     usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
     if not system_libreoffice():
         local = libreoffice_binary()
@@ -324,10 +328,13 @@ def _prepare_engine(directory: Path, runtime_id: str) -> None:
     home = core.home()
     runtime = home.runtime / runtime_id
     python = home.runtime_python(runtime_id)
-    done = subprocess.run([str(python), "-I", "-m", "venv", "--system-site-packages", "--without-pip", str(directory / ".venv")],
-                          capture_output=True, text=True)
+    try:
+        done = subprocess.run([str(python), "-I", "-m", "venv", "--system-site-packages", "--without-pip", str(directory / ".venv")],
+                              capture_output=True, stdin=subprocess.DEVNULL, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise EngineError("could not create the engine's Python environment: it did not finish within 300 s") from None
     if done.returncode != 0:
-        raise EngineError(f"could not create the engine's Python environment: {(done.stderr or done.stdout).strip()[:200]}")
+        raise EngineError(f"could not create the engine's Python environment: {core.child_text(done.stderr or done.stdout).strip()[:200]}")
     core.link_dir(directory / "node_modules", runtime / "node_modules")
     core.link_dir(directory / ".runtime" / "bin", runtime / "bin")
     home.packs.mkdir(parents=True, exist_ok=True)
@@ -344,11 +351,11 @@ def _self_test(directory: Path, runtime_id: str) -> None:
         raise EngineError("the engine archive has no skills/pptx/scripts/pptx.py")
     try:
         done = subprocess.run([str(engine_python(directory)), str(script), "--help"], env=engine_env(directory),
-                              capture_output=True, text=True, timeout=180, cwd=str(directory))
+                              capture_output=True, timeout=180, cwd=str(directory))
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise EngineError(f"the engine did not start: {exc}") from None
     if done.returncode != 0:
-        raise EngineError(f"the engine's self-test exited {done.returncode}: {(done.stderr or done.stdout).strip()[-200:]}")
+        raise EngineError(f"the engine's self-test exited {done.returncode}: {core.child_text(done.stderr or done.stdout).strip()[-200:]}")
     package = core.read_json(directory / "package.json")
     for name in (package.get("dependencies") or {}):
         if not (directory / "node_modules" / name / "package.json").is_file():
@@ -597,6 +604,7 @@ def accept_fresh(kind: str, manifest: dict, what: str) -> None:
             if kind == "channel":           # what the newest document chose: an older check may still activate that
                 seen["channel_engine"] = (manifest.get("engine") or {}).get("version")
                 seen["channel_client"] = (manifest.get("client") or {}).get("version")
+                seen["channel_client_rollback"] = (manifest.get("client") or {}).get("rollback") is True
             core.write_json(path, seen)
 
 
@@ -924,6 +932,10 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     if client_floor and client.get("version") and _manifest_time(manifest.get("server_time")) < float((update_state().get("floor") or {}).get("since") or 0) \
             and core.version_key(str(client["version"])) < core.version_key(str(client_floor)):
         client = {}                                 # an older client from a document issued before the reset: not installed
+    if client.get("version") and below_pin(str(client["version"]), client):
+        if client["version"] != __version__:
+            core.log(f"client {client['version']} not switched to: below {pinned_client()}, the version this computer's launcher pins")
+        client = {}
     if client.get("version") and client.get("sha256") and client["version"] != __version__:
         if not Job("client-update").alive():
             Job("client-update").spawn(["update", "--client-job", client["version"], client["sha256"], str(engine.get("runtime_id") or ""),
@@ -982,6 +994,34 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     return manifest
 
 
+def pinned_client() -> str | None:
+    """The highest client version a launcher on this computer pins (stage1_client_version in the launcher.json of the
+    skill folder that called us and in <home>/bin): the client never switches below it, so a runtime that still names
+    an older client (a release whose second step was not run) cannot step an installation down."""
+    pins = []
+    for stamp in (core.running_stamp(), _bin_stamp()):
+        version = str((stamp or {}).get("stage1_client_version") or "")
+        if version and core._SEMVER.match(version):
+            pins.append(version)
+    return max(pins, key=core.version_key) if pins else None
+
+
+def _bin_stamp() -> dict:
+    try:
+        return core.config()
+    except Status:
+        return {}
+
+
+def below_pin(version: str, manifest_client: dict | None = None) -> bool:
+    """True when switching to `version` would go below a launcher's pin and the manifest does not mark the client as a
+    deliberate rollback (`rollback: true`)."""
+    if (manifest_client or {}).get("rollback") is True:
+        return False
+    pin = pinned_client()
+    return bool(pin) and core.version_key(version) < core.version_key(pin)
+
+
 def update_client(version: str, sha256: str, runtime_id: str | None = None, issued: float | None = None) -> None:
     """Install the client the channel manifest names: the `client` part of the engine's runtime. Verify, unpack
     beside the running one, switch. It takes effect the next time the launcher starts the client. The switch is
@@ -1014,6 +1054,9 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None, issu
             return
         if floor.get("client") and when < float(floor.get("since") or 0) and core.version_key(version) < core.version_key(str(floor["client"])):
             core.log(f"client {version} not switched to: below the client installed at the last reset")
+            return
+        if below_pin(version, {"rollback": seen.get("channel_client_rollback") is True and seen.get("channel_client") == version}):
+            core.log(f"client {version} not switched to: below {pinned_client()}, the version this computer's launcher pins")
             return
         previous = core.read_text(home.client / "current.txt")
         core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
@@ -1144,8 +1187,9 @@ def _engine_refusal(directory: Path) -> Status | None:
     script = directory / "skills" / "pptx" / "scripts" / "pptx.py"
     try:
         probe = subprocess.run([str(engine_python(directory)), str(script), "--help"], env=engine_env(directory),
-                               capture_output=True, text=True, timeout=60)
-        answer = json.loads(probe.stdout.strip().splitlines()[-1]) if probe.returncode == 1 and probe.stdout.strip() else {}
+                               capture_output=True, timeout=60)
+        out = core.child_text(probe.stdout).strip()
+        answer = json.loads(out.splitlines()[-1]) if probe.returncode == 1 and out else {}
     except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):
         return None
     code = answer.get("code") if isinstance(answer, dict) else None
@@ -1160,6 +1204,8 @@ def _refusal_status(code: str) -> Status:
     launcher = quoted_launcher()
     if code == "entitlement_missing":
         return account.login_start()
+    if code == "entitlement_wrong_machine":     # nothing is deleted: the log in makes this computer its own installation
+        return account.login_start("this copy of Theodore was set up on another computer; this computer needs its own log in.")
     if code == "entitlement_expired":
         try:
             account.refresh()
@@ -1604,9 +1650,17 @@ def wait_for_renderer(args: list[str], wait: float = 25.0) -> None:
     if state.get("failed"):
         failed = state["failed"]
         raise _libreoffice_failed(failed)
+    phase = str(state.get("phase") or "starting")
+    still = core.now() - float(state.get("updated") or state.get("started") or core.now())
+    if job.alive() and still > STALL_SECONDS:      # every step is bounded: a record that does not move is not progress
+        raise Status("SETUP_FAILED", f"LibreOffice's installation has not moved for {int(still // 60)} minutes ({phase}, "
+                     f"{int(state.get('percent') or 0)}%); it is stuck, not still being installed.",
+                     "do not retry this call now; tell the user what this says: the slides cannot be previewed until "
+                     "LibreOffice is installed.",
+                     "Theodore's installation of LibreOffice, which renders the slides, is stuck, so I cannot preview the slides yet.")
     megabytes = int((libreoffice_pin() or {}).get("size", 0) / 1e6) or 300
     raise Status("SETUP_IN_PROGRESS", f"LibreOffice, which turns the slides into images for this call, is still being installed "
-                 f"({int(state.get('percent') or 0)}%, about {megabytes} MB in all).",
+                 f"({phase}, {int(state.get('percent') or 0)}%, about {megabytes} MB in all).",
                  "run the same command again in a minute.",
                  f"Theodore is downloading LibreOffice (about {megabytes} MB) to render the slides. I will continue as soon as it is here.")
 
@@ -1641,7 +1695,16 @@ def pe_machine(path: Path) -> int | None:
         return None
 
 
-def msi_unpack(archive: Path, target: Path) -> int:
+# Hard limits on the programs the client runs to unpack a tool: a program that hangs (msiexec showing its usage window
+# where nobody sees it, WINDOWS W-6) ends the step with a clear failure or the other way, never an endless wait.
+UNPACK_TIMEOUT_S = 600
+COPY_TIMEOUT_S = 600
+MOUNT_TIMEOUT_S = 300
+# A LibreOffice job whose record has not moved for this long is reported as stalled, not as "still being installed".
+STALL_SECONDS = 1200
+
+
+def msi_unpack(archive: Path, target: Path, job: Job | None = None) -> int:
     """Unpack an MSI package into `target` without the Windows Installer service: its tables and its embedded cabinet
     are read with msi.dll's database functions (in this process), the cabinet is expanded with Windows' expand.exe,
     and each file is moved to the folder the Directory table gives it (source names, as an administrative install
@@ -1718,7 +1781,7 @@ def msi_unpack(archive: Path, target: Path) -> int:
             query(database, f"SELECT `Data` FROM `_Streams` WHERE `Name`='{name}'", 1, stream_to=cab)
             system = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
             subprocess.run([str(system / "expand.exe"), str(cab), "-F:*", str(expanded)], check=True, capture_output=True,
-                           stdin=subprocess.DEVNULL, creationflags=0x08000000)
+                           stdin=subprocess.DEVNULL, creationflags=0x08000000, timeout=UNPACK_TIMEOUT_S)
             cab.unlink()
     finally:
         msi.MsiCloseHandle(database)
@@ -1737,7 +1800,9 @@ def msi_unpack(archive: Path, target: Path) -> int:
         return paths[directory]
 
     placed = 0
-    for key, component, name in files:
+    for index, (key, component, name) in enumerate(files):
+        if job and index % 500 == 0:
+            job.progress("unpacking LibreOffice", 100 * index / max(1, len(files)))
         found = expanded / key
         if not found.is_file():
             continue
@@ -1757,6 +1822,21 @@ def msi_unpack(archive: Path, target: Path) -> int:
     if not placed:
         raise OSError("no file of the package could be placed")
     return placed
+
+
+def msiexec_admin(archive: Path, target: Path, timeout: float = UNPACK_TIMEOUT_S) -> None:
+    """`msiexec /a` into `target`, quiet, bounded. One command string, the property as msiexec reads it
+    (TARGETDIR="C:\\Users\\Théo Tester\\..."): from a list, Python quotes the whole "TARGETDIR=..." when the path
+    has a space, msiexec rejects that form, shows its usage window where nobody sees it and waits (WINDOWS W-6)."""
+    system = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+    command = f'"{system / "msiexec.exe"}" /a "{archive}" /qn TARGETDIR="{target}"'
+    try:
+        subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout,
+                       creationflags=0x08000000 if IS_WINDOWS else 0)
+    except subprocess.TimeoutExpired:
+        raise OSError(f"msiexec /a did not finish within {int(timeout)} s") from None
+    except subprocess.CalledProcessError as exc:
+        raise OSError(f"msiexec /a returned {exc.returncode}") from None
 
 
 def install_libreoffice(job: Job | None = None) -> Path:
@@ -1792,37 +1872,43 @@ def install_libreoffice(job: Job | None = None) -> Path:
     core.remove_tree(partial)
     partial.mkdir(parents=True)
     if job:
-        job.progress("unpacking LibreOffice")
+        job.progress("unpacking LibreOffice", 0)
     try:
         if sys.platform == "darwin":
             mount = home.staging / "libreoffice-mount"
             core.remove_tree(mount)
             mount.mkdir(parents=True)
             subprocess.run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", str(mount), str(archive)],
-                           check=True, capture_output=True)
+                           check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=MOUNT_TIMEOUT_S)
             try:
                 apps = [a for a in mount.iterdir() if a.suffix == ".app"]
                 if not apps:
                     raise OSError("the disk image holds no application")
-                subprocess.run(["/bin/cp", "-R", str(apps[0]), str(partial / "LibreOffice.app")], check=True, capture_output=True)
+                subprocess.run(["/bin/cp", "-R", str(apps[0]), str(partial / "LibreOffice.app")], check=True, capture_output=True,
+                               stdin=subprocess.DEVNULL, timeout=COPY_TIMEOUT_S)
             finally:
-                subprocess.run(["/usr/bin/hdiutil", "detach", str(mount), "-force"], capture_output=True)
+                with contextlib.suppress(subprocess.SubprocessError, OSError):
+                    subprocess.run(["/usr/bin/hdiutil", "detach", str(mount), "-force"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
                 core.remove_tree(mount)
-        elif IS_WINDOWS:  # an administrative install only copies files: no elevation, nothing registered
+        elif IS_WINDOWS:
+            # Theodore's own unpack first (msi.dll's tables read in this process, the cabinet expanded by expand.exe):
+            # no Windows Installer service, which refuses network and batch logons (1601), no command line to quote, a
+            # bounded time and progress per file. An administrative install (`msiexec /a`, it only copies files) is the
+            # second way, also bounded.
             try:
-                subprocess.run(["msiexec", "/a", str(archive), "/qn", f"TARGETDIR={partial}"], check=True, capture_output=True)
-            except subprocess.CalledProcessError as exc:
-                # The Windows Installer service can refuse a session (1601: access denied to the service, seen for a
-                # standard user in network and batch logons). The package is then unpacked without the service.
-                core.log(f"libreoffice: msiexec /a returned {exc.returncode}; unpacking the package without Windows Installer")
+                msi_unpack(archive, partial, job)
+            except (OSError, subprocess.SubprocessError) as exc:
+                core.log(f"libreoffice: the unpack without Windows Installer failed ({exc}); trying an administrative install")
                 core.remove_tree(partial)
                 partial.mkdir(parents=True)
-                msi_unpack(archive, partial)
+                if job:
+                    job.progress("unpacking LibreOffice with Windows Installer", 0)
+                msiexec_admin(archive, partial)
             libreoffice_app_local_runtime(partial)
             (partial / archive.name).unlink(missing_ok=True)     # the image keeps a copy of the package (about 350 MB)
         else:
             raise OSError("no unpack method for this platform")
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         core.remove_tree(partial)
         raise api.setup_failed("DISK", f"LibreOffice could not be unpacked: {exc}") from None
     core.write_atomic(partial / ".version", pin["version"] + "\n", 0o644)

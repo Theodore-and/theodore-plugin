@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
-from support import RUNTIME_ID, SITE, ClientCase, Sandbox, engine_zip, pack_zip, status_lines
+from support import IS_WINDOWS, RUNTIME_ID, SITE, ClientCase, Sandbox, engine_zip, pack_zip, status_lines
 
 DAY = 86400
 
@@ -30,6 +30,8 @@ class SignIn(ClientCase):
         cred = self.box.home / "state" / "credentials"
         self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.box.home / "state" / "entitlement.json").stat().st_mode), 0o600)
+        if os.name != "nt":         # the engine, its manual and the packs: this user's alone (lane EXPOSURE)
+            self.assertEqual(stat.S_IMODE(self.box.home.stat().st_mode) & 0o077, 0)
         token = self.state("state/entitlement.json")["entitlement_token"]
         self.assertEqual(token.count("."), 2)
         secret = json.loads(cred.read_text())["installation_secret"]
@@ -139,6 +141,11 @@ class Specimen(ClientCase):
         self.sign_in()
         self.api.specimens = {"cover-01.jpg": JPEG, "Grid_2.b.jpg": JPEG + b"2"}
         self.temp = Path(self.box.env["TMPDIR"])
+        # Where sheets go: Theodore's own cache (the temporary folder only when the working folder contains the cache).
+        home, env = self.box.user_home, self.box.env
+        self.cache = (home / "Library" / "Caches" / "Theodore" / "specimens" if sys.platform == "darwin" else
+                      Path(env["LOCALAPPDATA"]) / "Theodore" / "Cache" / "specimens" if IS_WINDOWS else
+                      Path(env.get("XDG_CACHE_HOME") or home / ".cache") / "theodore" / "specimens")
         self.deck = self.box.tmp / "deck"
         (self.deck / ".pptx-state").mkdir(parents=True)
         self.work = self.box.tmp / "work"           # a working folder that does not contain the temporary folder
@@ -149,7 +156,8 @@ class Specimen(ClientCase):
         return super().client(*args, **kwargs)
 
     def folders(self, root: Path | None = None) -> list[Path]:
-        return sorted(p for p in (root or self.temp).iterdir() if p.name.startswith("theodore-specimens-"))
+        root = root or self.cache
+        return sorted(p for p in root.iterdir() if p.name.startswith("theodore-specimens-")) if root.is_dir() else []
 
     def specimen_requests(self) -> list[dict]:
         return [r for r in self.api.requests if "/guide/specimens/" in r["path"]]
@@ -170,6 +178,7 @@ class Specimen(ClientCase):
         self.assertEqual((one.read_bytes(), two.read_bytes()), (JPEG, JPEG + b"2"))
         self.assertEqual(one.parent, two.parent, "one folder per run")
         self.assertEqual(self.folders(), [one.parent])
+        self.assertEqual(self.folders(self.temp), [], "never the shared temporary folder when Theodore's cache can be used")
         self.assertEqual(stat.S_IMODE(one.parent.stat().st_mode), 0o700)
         self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in (one, two)}, {0o600})
         for kept_out in (self.box.home, self.deck):
@@ -296,7 +305,9 @@ class Specimen(ClientCase):
         self.api.specimens["edge.jpg"] = b"\xff\xd8" + b"x" * ((1 << 20) - 2)
         self.assertEqual(self.client("specimen", "edge.jpg").returncode, 0)
         self.api.specimen_type = "text/html"
-        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.fresh_temp())}), "INTERNAL", 78)
+        for held in self.folders():         # the edge sheet's folder: what follows must add none
+            shutil.rmtree(held)
+        self.refused(self.client("specimen", "cover-01.jpg"), "INTERNAL", 78)
 
     def fresh_temp(self) -> Path:
         self.temp = self.box.tmp / "tmp2"
@@ -377,7 +388,9 @@ class Specimen(ClientCase):
     def test_a_folder_uninstall_could_not_remove_keeps_its_record(self):
         # The record of a folder that could not be removed survives the removal of state/, so a
         # later uninstall finds it although TMPDIR changed.
-        path = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
+        # From the user's home, which contains Theodore's cache: the sheet goes to the temporary folder.
+        path = Path(self.client("specimen", "cover-01.jpg", cwd=self.box.user_home).stdout.strip())
+        self.assertEqual(self.temp, path.parent.parent)
         self.temp.chmod(0o555)                     # the folder cannot be removed from its parent
         self.addCleanup(lambda: self.temp.chmod(0o755))
         other = self.box.tmp / "another-tmp"
@@ -406,7 +419,7 @@ class Specimen(ClientCase):
         self.assertEqual(len(direction), 1, result.stdout)
         self.assertIn(f"{launcher} specimen <file>", direction[0])
         self.assertGreater(lines.index(direction[0]), lines.index("More."), "after the section")
-        body = "\n".join(lines[2:-1]) + "\n"
+        body = "\n".join(lines[lines.index("--- covers ---") + 1:-1]) + "\n"
         self.assertIn(f"({len(body)} chars, sha256 {hashlib.sha256(body.encode()).hexdigest()})", lines[-1], "the end line describes what was printed")
         plain = self.client("guide", "deck-design")
         self.assertNotIn("specimen <file>", plain.stdout, "a text without sheet links gets no direction")
@@ -429,6 +442,8 @@ class Guide(ClientCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.splitlines()
         self.assertEqual(lines[0], f"=== THEODORE pptx {self.ENGINE_VERSION} (beta), part 1/1 ===")
+        self.assertTrue(lines[1].startswith("THIS IS THE WHOLE TEXT: "), lines[1])      # three opening lines, then the header
+        lines = [lines[0]] + lines[4:]
         launcher = f'"{self.box.home / "bin" / "theodore"}"'
         self.assertEqual(lines[1], f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>")
         self.assertEqual(lines[2], f"          python3 ...  ->  {launcher} python ...")
@@ -438,7 +453,7 @@ class Guide(ClientCase):
         body = result.stdout.split("--- SKILL.md ---\n", 1)[1].rsplit("=== END", 1)[0]
         self.assertEqual(body, manual)                                      # verbatim
         digest = hashlib.sha256(manual.encode()).hexdigest()
-        self.assertEqual(lines[-1], f"=== END theodore pptx SKILL.md ({len(manual)} chars, sha256 {digest}) ===")
+        self.assertEqual(lines[-1], f"=== END theodore pptx SKILL.md ({len(manual)} chars, sha256 {digest}). THE TEXT IS COMPLETE. ===")
         self.assertEqual(len(self.api.heartbeats), 1)
 
     def test_beta_directions_come_from_the_server_and_are_not_stored(self):
@@ -499,6 +514,101 @@ class Guide(ClientCase):
         self.assertIn('guide deck-design craft --part 2 ===', one.stdout.splitlines()[-1])
         three = self.client("guide", "deck-design", "craft", "--part", "3")
         self.assertNotIn("NEXT PART", three.stdout.splitlines()[-1])
+
+    # WHOLETEXT (2026-11-15): one request for a text gives the whole text where the host keeps a long output whole
+    # (Claude Code); elsewhere, and with --part, no part can be mistaken for the whole text.
+    CRAFT = "".join(f"craft line {i:05d} " + "y" * 60 + "\n" for i in range(700))      # about 55,000 characters: three parts
+    CC = {"CLAUDECODE": "1"}
+
+    def whole_body(self, out: str, name: str) -> str:
+        return out.split(f"--- {name} ---\n", 1)[1].rsplit("=== END", 1)[0]
+
+    def assertOpening(self, out: str, skill: str, section: str | None):
+        head = out[:600]
+        self.assertIn("If the shell shows only a preview or the path of a saved output, read that file in full", head)
+        self.assertIn("searching it is not reading it", head)
+        args = f'skill "{skill}"' + (f', section "{section}"' if section else "")
+        self.assertIn(f"mcp__plugin_theodore_theodore__guide is available, it returns this text whole in one step", head)
+        self.assertIn(f"({args})", head)
+
+    def test_under_claude_code_a_paged_section_prints_whole_in_one_document(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = self.CRAFT
+        self.api.guide_whole_tail = {"craft": "\nLICENCE LINE.\n"}
+        result = self.client("guide", "deck-design", "craft", env=self.CC)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = result.stdout
+        self.assertEqual(out.splitlines()[0], "=== THEODORE deck-design g1 (beta), part 1/1 ===")
+        self.assertTrue(out.splitlines()[1].startswith(f"THIS IS THE WHOLE TEXT: {len(self.CRAFT) + 15} characters"), out[:300])
+        self.assertOpening(out, "deck-design", "craft")
+        self.assertEqual(self.whole_body(out, "craft"), self.CRAFT + "\nLICENCE LINE.\n", "the server's whole composition, byte for byte")
+        self.assertEqual([q.get("form") for q in self.api.guide_queries], ["whole"], "one request")
+        self.assertEqual([line[:7] for line in out.splitlines() if line.startswith("=== ")], ["=== THE", "=== END"])
+        self.assertNotIn("NEXT PART", out)
+        self.assertTrue(out.splitlines()[-1].endswith(". THE TEXT IS COMPLETE. ==="), out.splitlines()[-1])
+        licence = self.client("guide", "deck-design", "--license", env=self.CC).stdout
+        self.assertOpening(licence, "deck-design", "license")
+        self.assertNotIn("NEXT PART", licence)
+
+    def test_under_claude_code_an_older_paging_service_is_asked_for_every_part_in_order(self):
+        self.sign_in()
+        self.api.guide_whole = False
+        self.api.guides["deck-design"]["craft"] = self.CRAFT
+        result = self.client("guide", "deck-design", "craft", env=self.CC)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([(q.get("form"), q.get("part")) for q in self.api.guide_queries], [("whole", None), (None, "2"), (None, "3")])
+        parts = [self.CRAFT[i:i + 24000] for i in range(0, len(self.CRAFT), 24000)]
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(self.whole_body(result.stdout, "craft"), "".join(parts), "the parts joined in order, byte for byte")
+        self.assertEqual([line[:7] for line in result.stdout.splitlines() if line.startswith(("=== ", "THIS IS"))], ["=== THE", "THIS IS", "=== END"])
+        self.assertNotIn("NEXT PART", result.stdout)
+
+    def test_a_part_that_cannot_be_had_prints_nothing_of_the_text_and_says_what_is_missing(self):
+        self.sign_in()
+        self.api.guide_whole = False
+        self.api.guide_fail_parts = {2}
+        self.api.guides["deck-design"]["craft"] = self.CRAFT
+        result = self.client("guide", "deck-design", "craft", env=self.CC)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("craft line", result.stdout)
+        self.assertNotIn("=== THEODORE", result.stdout)
+        self.assertNotIn("COMPLETE", result.stdout)
+        first = result.stdout.splitlines()[0]
+        self.assertTrue(first.startswith("THEODORE "), first)
+        self.assertIn("part 2 of 3 (and the 1 after it) could not be fetched", first)
+        self.assertIn("Nothing of the text was printed", first)
+
+    def test_the_paged_form_says_at_both_ends_of_a_part_that_it_is_not_the_whole_text(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = self.CRAFT
+        launcher = f'"{self.box.home / "bin" / "theodore"}"'
+        for part, env in ((1, None), (2, self.CC), (3, None)):     # an unknown host, or --part given under Claude Code
+            args = ("guide", "deck-design", "craft") + (("--part", str(part)) if part > 1 or env else ())
+            out = self.client(*args, env=env).stdout
+            lines = out.splitlines()
+            self.assertEqual(lines[0], f"=== THEODORE deck-design g1 (beta), part {part}/3 ===")
+            self.assertTrue(lines[1].startswith(f"THIS IS PART {part} OF 3 OF ONE TEXT ("), lines[1])
+            self.assertTrue(lines[1].endswith("Nothing in it may be acted on before all 3 parts are read."), lines[1])
+            self.assertTrue(lines[4].startswith(f"The parts: {launcher} guide deck-design craft --part N, for N from 1 to 3"), lines[4])
+            self.assertOpening(out, "deck-design", "craft")
+            if part < 3:
+                self.assertIn(f"NOT COMPLETE: this is part {part} of 3 of one text; nothing in it may be acted on before the remaining parts are read. "
+                              f"NEXT PART: {launcher} guide deck-design craft --part {part + 1} ===", lines[-1])
+            else:
+                self.assertTrue(lines[-1].endswith("This is the last part: the text is complete once parts 1 to 2 are read as well. ==="), lines[-1])
+
+    def test_the_whole_text_costs_no_more_than_its_requests(self):
+        self.sign_in()
+        self.api.guide_whole = False
+        self.api.guides["deck-design"][""] = self.CRAFT
+        self.api.guide_delays["deck-design"] = [0.5] * 4
+        started = time.monotonic()
+        self.assertEqual(self.client("guide", "deck-design", "--part", "1").returncode, 0)
+        one = time.monotonic() - started
+        started = time.monotonic()
+        self.assertEqual(self.client("guide", "deck-design", env=self.CC).returncode, 0)
+        whole = time.monotonic() - started
+        self.assertLess(whole, one + 2 * 0.5 + 0.8, (one, whole))
 
     def test_deck_design_needs_the_network(self):
         self.sign_in()
@@ -730,7 +840,7 @@ class Engine(ClientCase):
             result = self.client(*args, env=env)
             self.assertEqual(result.returncode, 0, args)
             lines = result.stdout.splitlines()
-            first = lines[1] if args[0] == "guide" else lines[0]
+            first = lines[4] if args[0] == "guide" else lines[0]          # after the title and the three opening lines (WHOLETEXT)
             self.assertTrue(first.startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), (args, first))
             self.assertIn("guide pptx again before building.", first)
             self.assertNotIn("SERVED-POINTER", result.stdout)
@@ -1082,22 +1192,45 @@ class Engine(ClientCase):
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists())
         self.assertEqual(self.client("pptx", "version").stdout.strip(), "1.0.7")
 
-    def test_client_update_comes_from_the_runtime_manifest_and_applies_at_the_next_start(self):
+    def _relabelled_client(self, version: str) -> bytes:
         import io, tarfile
-        self.ready()
         source = self.box.tmp / "dist" / f"client-{__import__('build_client').client_version()}.tar"
         raw = io.BytesIO()
-        with tarfile.open(source) as old, tarfile.open(fileobj=raw, mode="w") as new:   # the same client, relabelled 0.1.1
+        with tarfile.open(source) as old, tarfile.open(fileobj=raw, mode="w") as new:   # the same client, relabelled
             for member in old.getmembers():
                 data = old.extractfile(member).read()
-                member.name = "0.1.1/" + member.name.split("/", 1)[1]
+                member.name = f"{version}/" + member.name.split("/", 1)[1]
                 new.addfile(member, io.BytesIO(data))
-        self.api.publish_client("0.1.1", raw.getvalue())
+        return raw.getvalue()
+
+    def test_client_update_comes_from_the_runtime_manifest_and_applies_at_the_next_start(self):
+        self.ready()
+        self.api.publish_client("99.0.1", self._relabelled_client("99.0.1"))
         self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
         self.box.wait_jobs()
-        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.1")
-        self.assertTrue((self.box.home / "client" / "0.1.1" / "theodore_client" / "cli.py").exists())
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "99.0.1")
+        self.assertTrue((self.box.home / "client" / "99.0.1" / "theodore_client" / "cli.py").exists())
         self.assertEqual(self.state("state/jobs/client-update.json").get("done"), True)
+
+    def test_the_client_never_steps_below_the_version_its_launcher_pins(self):
+        # P039 (rc.10 item 7): a runtime that still names an older client (a release whose client switch was not run)
+        # does not step an installation down; a manifest that marks the older client as a rollback does.
+        pinned = __import__("build_client").client_version()
+        self.ready()
+        self.api.publish_client("0.1.1", self._relabelled_client("0.1.1"))
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
+        self.box.wait_jobs()
+        current = self.box.home / "client" / "current.txt"
+        self.assertIn(current.read_text().strip() if current.exists() else pinned, (pinned,))
+        self.assertFalse((self.box.home / "client" / "0.1.1").exists())
+        self.assertIn("not switched to: below", (self.box.home / "logs" / "client.log").read_text())
+        # also when asked directly (the job a check started before this rule, an update --apply)
+        self.client("update", "--client-job", "0.1.1", self.api.client["sha256"], "", "0", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
+        self.assertIn(current.read_text().strip() if current.exists() else pinned, (pinned,))
+        self.api.publish_client("0.1.1", self._relabelled_client("0.1.1"), rollback=True)
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(14 * 3600)})
+        self.box.wait_jobs()
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.1")
 
     def test_engine_licence_refusals_become_statuses(self):
         self.ready()
@@ -1515,6 +1648,12 @@ class StatusDoctorUninstall(ClientCase):
         self.assertIn("left alone", first)
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["loose-file.txt", "memory"])
         self.assertEqual(foreign.read_text(), "not Theodore's")
+        # P039: the uninstall's record is kept beside the folder, not in the logs/ folder it removed (nor a new one)
+        record = self.box.home.parent / f"{self.box.home.name}-uninstall.log"
+        text = record.read_text()
+        self.assertIn(f"uninstall: {self.box.home}", text)
+        self.assertIn("uninstall: ended with exit code 0", text)
+        self.assertFalse((self.box.home / "logs").exists())
 
     def test_a_damaged_download_is_fetched_again_and_a_damaged_one_three_times_fails(self):
         # ACCEPT-LOCAL2: a runtime part arrived damaged once on a flaky network (HASH_MISMATCH) and the install failed.
@@ -1666,6 +1805,40 @@ class Hosts(ClientCase):
         self.assertIn(f"codex plugin marketplace add {plugin}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
 
+    @unittest.skipIf(IS_WINDOWS, "symbolic links: ChatGPT's Work mode is Linux")
+    def test_codex_with_read_only_settings_gets_the_skills_linked_and_uninstall_takes_them_back(self):
+        """Lane CHATGPT: in ChatGPT's Work mode ~/.codex is read-only, so `codex plugin add` fails; Theodore's two skills
+        are linked into ~/.agents/skills (read by Codex at each session start) instead, and only those links go back."""
+        log = self._fake_tools()
+        codex = self.box.tmp / "fakebin" / "codex"
+        codex.write_text(f'#!/bin/sh\necho "codex $*" >> "{log}"\ncase "$*" in "plugin add"*) echo "Error: config is read-only" >&2; exit 1;; esac\nexit 0\n')
+        plugin = self.box.home / "plugin"
+        (plugin / ".agents" / "plugins").mkdir(parents=True)
+        (plugin / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        for skill in ("deck-design", "pptx"):
+            (plugin / "plugins" / "theodore" / "skills" / skill).mkdir(parents=True)
+            (plugin / "plugins" / "theodore" / "skills" / skill / "SKILL.md").write_text(f"---\nname: {skill}\n---\n")
+        skills = Path(self.box.env["HOME"]) / ".agents" / "skills"
+        skills.mkdir(parents=True)
+        (skills / "mine").mkdir()
+        result = self.client("hosts", "register")
+        self.assertStatus(result, "OK", 0)
+        self.assertNotIn("codex: FAILED", result.stdout)
+        self.assertEqual(os.readlink(skills / "theodore-pptx"), str(plugin / "plugins" / "theodore" / "skills" / "pptx"))
+        self.assertTrue((skills / "theodore-deck-design" / "SKILL.md").is_file())
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)        # again: the same links, nothing else
+        self.assertEqual(sorted(p.name for p in skills.iterdir()), ["mine", "theodore-deck-design", "theodore-pptx"])
+        # A plugin update replaces Theodore's plugin copy in place: the links name the path, so they follow it.
+        shutil.rmtree(plugin / "plugins")
+        (plugin / "plugins" / "theodore" / "skills" / "pptx").mkdir(parents=True)
+        (plugin / "plugins" / "theodore" / "skills" / "pptx" / "SKILL.md").write_text("---\nname: pptx\nversion: next\n---\n")
+        self.assertIn("version: next", (skills / "theodore-pptx" / "SKILL.md").read_text())
+        (plugin / "plugins" / "theodore" / "skills" / "deck-design").mkdir(parents=True)
+        (plugin / "plugins" / "theodore" / "skills" / "deck-design" / "SKILL.md").write_text("---\nname: deck-design\n---\n")
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(sorted(p.name for p in skills.iterdir()), ["mine"], "only Theodore's links go")
+        self.assertTrue((plugin / "plugins" / "theodore" / "skills" / "pptx" / "SKILL.md").is_file(), "a link's target is never removed")
+
     def test_claude_falls_back_to_two_commands(self):
         log = self._fake_tools(claude_first_rc=1)
         self.client("hosts", "register")
@@ -1673,26 +1846,218 @@ class Hosts(ClientCase):
         self.assertIn(f"claude plugin marketplace add {self.api.base}/marketplace.json", calls)
         self.assertIn("claude plugin install theodore@theodore", calls)
 
-    def test_settings_are_offered_then_applied_then_taken_back_exactly(self):
+    def test_settings_are_applied_then_removed_then_taken_back_exactly(self):
         self._fake_tools()
         settings = self.box.user_home / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True)
         original = {"permissions": {"allow": ["Bash(git status)"]}, "model": "opus"}
         settings.write_text(json.dumps(original))
-        offer = self.client("hosts", "settings")
-        _f, nxt, tell = self.assertStatus(offer, "OK", 0)
-        self.assertIn("only if they agree run", nxt)
-        self.assertIn("hosts settings --apply", nxt)
-        self.assertTrue(tell.startswith("TELL THE USER: Would you like"))
-        self.assertEqual(json.loads(settings.read_text()), original, "nothing changes without consent")
+        shown = self.client("hosts", "settings")
+        _f, nxt, _t = self.assertStatus(shown, "OK", 0)
+        self.assertIn("hosts settings --remove", nxt)
+        self.assertEqual(json.loads(settings.read_text()), original, "showing them changes nothing")
+        script = self.box.user_home / ".claude" / "plugins" / "cache" / "theodore" / "theodore" / "0.3.10" / "skills" / "pptx" / "scripts" / "theodore"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\n")
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         applied = json.loads(settings.read_text())
         self.assertTrue(applied["extraKnownMarketplaces"]["theodore"]["autoUpdate"])
         launcher = str(self.box.home / "bin" / "theodore")
-        self.assertIn(f"Bash({launcher} *)", applied["permissions"]["allow"])
-        self.assertIn("Bash(git status)", applied["permissions"]["allow"])
+        allow = applied["permissions"]["allow"]
+        self.assertIn(f"Bash({launcher} *)", allow)
+        self.assertIn("Bash(git status)", allow)
+        self.assertIn("mcp__plugin_theodore_theodore", allow)
+        if not IS_WINDOWS:
+            self.assertIn(f'Bash(sh "{script}" *)', allow)
+        for rule in allow:
+            self.assertNotIn(rule, ("Bash(*)", "Bash", "Bash(cd *)", "Bash(cat *)", "Bash(sh *)"))
+            if rule.startswith("Bash(") and rule != "Bash(git status)":
+                self.assertTrue(str(self.box.user_home) in rule or str(self.box.home) in rule, "only Theodore's own launchers, by their exact paths")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertEqual(json.loads(settings.read_text()), applied, "idempotent")
+        self.assertStatus(self.client("hosts", "settings", "--remove"), "OK", 0)
+        removed = json.loads(settings.read_text())
+        self.assertEqual(removed["permissions"]["allow"], ["Bash(git status)"])
+        self.assertEqual(removed, original, "exactly what the settings added is taken out")
+        self.client("doctor")
+        self.assertEqual(json.loads(settings.read_text()), removed, "off stays off: no command puts them back")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(json.loads(settings.read_text()), original, "exactly as before, no empty key left")
+
+    def test_settings_allow_the_two_skills_and_read_the_render_cache_and_take_them_back(self):
+        self._fake_tools()
+        settings = self.box.user_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        original = {"permissions": {"allow": ["Skill(commit)"]}}
+        settings.write_text(json.dumps(original))
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        for rule in ("Skill(theodore:pptx)", "Skill(theodore:pptx *)", "Skill(theodore:deck-design)", "Skill(theodore:deck-design *)"):
+            self.assertIn(rule, allow)
+        self.assertEqual([r for r in allow if r.startswith("Skill(")],
+                         ["Skill(commit)", "Skill(theodore:pptx)", "Skill(theodore:pptx *)", "Skill(theodore:deck-design)", "Skill(theodore:deck-design *)"],
+                         "only Theodore's two skills, by their plugin names")
+        if sys.platform == "darwin":
+            renders = self.box.user_home / "Library" / "Caches" / "Theodore"
+        elif IS_WINDOWS:
+            renders = None      # under %LOCALAPPDATA%\Theodore, Theodore's home: covered by its rule (checked in-process below)
+        else:
+            renders = self.box.user_home / ".cache" / "theodore"
+        reads = [r for r in allow if r.startswith("Read(")]
+        if renders is not None:
+            self.assertIn(f"Read(/{renders}/**)", reads, "the engine's render cache, by its absolute path (`//`)")
+        for rule in reads:
+            self.assertTrue(rule.startswith("Read(//") and rule.endswith("/**)"), rule)
+            self.assertTrue(str(self.box.user_home) in rule or str(self.box.home) in rule, "only Theodore's own folders")
+        self.assertStatus(self.client("hosts", "settings", "--remove"), "OK", 0)
+        self.assertEqual(json.loads(settings.read_text()), original, "exactly what was added is taken out")
+
+    def test_read_rules_use_claude_codes_path_forms_on_each_system(self):
+        from theodore_client import commands, core
+        with mock.patch.object(core, "IS_WINDOWS", True):
+            self.assertEqual(commands._claude_read_rule(Path("C:\\Users\\Ann Lee\\AppData\\Local\\Theodore")),
+                             "Read(//c/Users/Ann Lee/AppData/Local/Theodore/**)")
+            self.assertIsNone(commands._claude_read_rule(Path("\\\\server\\share\\Theodore")), "a network share keeps its prompt")
+        with mock.patch.object(core, "IS_WINDOWS", False):
+            self.assertEqual(commands._claude_read_rule(Path("/Users/ann/Library/Caches/Theodore")), "Read(//Users/ann/Library/Caches/Theodore/**)")
+
+    def test_an_installation_from_before_gets_the_settings_once_at_its_next_command(self):
+        self._fake_tools()
+        settings = self.box.user_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}")
+        self.client("doctor")
+        launcher = str(self.box.home / "bin" / "theodore")
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertIn(f"Bash({launcher} *)", allow)
+        taken_out = json.loads(settings.read_text())
+        taken_out["permissions"]["allow"] = [r for r in allow if r != f"Bash({launcher} *)"]
+        settings.write_text(json.dumps(taken_out))
+        self.client("doctor")
+        self.assertNotIn(f"Bash({launcher} *)", json.loads(settings.read_text())["permissions"]["allow"], "once: a rule the user took out stays out")
+
+    def test_a_managed_policy_that_allows_only_its_own_rules_wins(self):
+        self._fake_tools()
+        managed = self.box.user_home / "managed-settings.json"
+        managed.write_text(json.dumps({"allowManagedPermissionRulesOnly": True}))
+        settings = self.box.user_home / ".claude" / "settings.json"
+        with mock.patch.dict(os.environ, {"THEODORE_TEST_CLAUDE_MANAGED": str(managed)}):
+            self.box.env["THEODORE_TEST_CLAUDE_MANAGED"] = str(managed)
+            try:
+                self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+                doctor = self.client("doctor")
+            finally:
+                self.box.env.pop("THEODORE_TEST_CLAUDE_MANAGED")
+        applied = json.loads(settings.read_text())
+        self.assertNotIn("permissions", applied, "no rule the policy would ignore")
+        self.assertIn("allows only its own permission rules", doctor.stdout)
+
+    def test_codex_rules_exact_paths_idempotent_and_taken_back(self):
+        self._fake_tools()
+        (self.box.home / "plugin" / ".agents" / "plugins").mkdir(parents=True)
+        (self.box.home / "plugin" / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        rules = Path(self.box.env["CODEX_HOME"]) / "rules"
+        rules.mkdir(parents=True)
+        (rules / "default.rules").write_text('prefix_rule(pattern = ["git", "status"])\n')
+        shown = self.client("hosts", "settings")
+        first, _nxt, _tell = self.assertStatus(shown, "OK", 0)
+        self.assertIn("outside Codex's sandbox", first)
+        self.assertFalse((rules / "theodore.rules").exists(), "showing them writes nothing")
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertFalse((rules / "theodore.rules").exists(), "a plain registration writes no rule")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        text = (rules / "theodore.rules").read_text()
+        launcher = str(self.box.home / "bin" / ("theodore.cmd" if IS_WINDOWS else "theodore"))
+        self.assertIn(f'prefix_rule(pattern = {json.dumps([launcher])}, decision = "allow")', text)
+        for line in text.splitlines():
+            if line.startswith("prefix_rule"):
+                self.assertIn(str(self.box.home), line, "only Theodore's own launchers, by their exact paths")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertEqual((rules / "theodore.rules").read_text(), text, "idempotent")
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertFalse((rules / "theodore.rules").exists())
+        self.assertEqual((rules / "default.rules").read_text(), 'prefix_rule(pattern = ["git", "status"])\n', "other rules untouched")
+
+    def test_a_refused_write_in_codexs_sandbox_names_the_one_approval(self):
+        from theodore_client import api
+        with mock.patch.dict(os.environ, {"CODEX_SANDBOX": "seatbelt"}):
+            status = api.setup_failed("DISK", "x is not writable")
+        self.assertIn("outside the sandbox (one approval)", status.next_step)
+        self.assertIn("hosts settings --remove", status.next_step)
+
+    # --- Claude Desktop: the local server in the app's configuration file ------------------------------------
+    def desktop_config(self, value=None) -> Path:
+        folder = (Path(self.box.env["APPDATA"]) / "Claude") if IS_WINDOWS else (self.box.user_home / "Library" / "Application Support" / "Claude")
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "claude_desktop_config.json"
+        if value is not None:
+            path.write_text(json.dumps(value))
+        return path
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_claude_desktop_gets_the_local_server_once_and_uninstall_takes_back_only_it(self):
+        original = {"preferences": {"sidebarMode": "chat"}, "mcpServers": {"files": {"command": "npx", "args": ["files"]}}}
+        path = self.desktop_config(original)
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("claude-desktop: registered", first)
+        written = json.loads(path.read_text())
+        entry = written["mcpServers"]["theodore"]
+        self.assertEqual(entry["args"][-3:], ["mcp", "--for", "claude-desktop"])
+        self.assertIn(str(self.box.home / "bin"), " ".join([entry["command"], *entry["args"]]))
+        self.assertEqual(written["mcpServers"]["files"], original["mcpServers"]["files"])
+        self.assertEqual(written["preferences"], original["preferences"])
+        again, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("claude-desktop: already registered", again)
+        self.assertEqual(json.loads(path.read_text()), written, "a second run changes nothing")
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), original)
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_claude_desktop_an_mcp_servers_object_theodore_created_goes_and_a_users_theodore_entry_stays(self):
+        path = self.desktop_config({"preferences": {}})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), {"preferences": {}}, "the object Theodore created is gone too")
+        mine = {"mcpServers": {"theodore": {"command": "/opt/my/theodore", "args": []}}}
+        path.write_text(json.dumps(mine))
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("did not write", first)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), mine, "never Theodore's to remove")
+        path.write_text("{not json")
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "RETRY", 75)
+        self.assertIn("not a valid JSON object", first)
+        self.assertEqual(path.read_text(), "{not json")
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_claude_desktop_uninstall_takes_back_the_entry(self):
+        path = self.desktop_config({"preferences": {}})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), {"preferences": {}})
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_the_last_words_say_to_reopen_the_claude_app_only_when_it_started_before_the_entry(self):
+        # The app reads its configuration only when it starts, and nothing makes it read it again: the user is told,
+        # once, to quit and reopen it; Theodore never quits it (it may be the app running this install, its Code tab).
+        self.desktop_config({"preferences": {}})
+        self.ready()
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        reopen = "To use Theodore in the Claude app's chats, quit the app and open it again once."
+        self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() - 3600)
+        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertIn(reopen, tell)
+        self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() + 60)       # opened after the entry
+        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertNotIn(reopen, tell)
+        self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = ""                          # not running: it loads at its next start
+        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertNotIn(reopen, tell)
+
+    def test_claude_desktop_not_on_this_computer_is_said_and_nothing_is_written(self):
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("claude-desktop: not found on this computer", first)
 
     # --- uninstall restores exactly what was there -----------------------------------------------------------
     def settings_file(self, value=None) -> Path:
@@ -2295,6 +2660,42 @@ class HostTest(ClientCase):
         workspace.mkdir()
         self.assertStatus(self.client("pptx", "start", str(workspace)), "SIGN_IN_REQUIRED", 65)
 
+    def test_an_engine_command_learns_a_revoke_from_its_hourly_background_check(self):
+        """Lane EXPOSURE: a device revoked while it stays online and runs only engine commands (no guide call) stopped
+        only when its licence expired (up to 7 days). An engine command now starts one detached refresh once the
+        licence is an hour old; the command itself never waits for it."""
+        self.ready()
+        job = self.box.home / "state" / "jobs" / "licence-check.json"
+        self.assertEqual(self.client("pptx", "exit", "0").returncode, 0)
+        self.box.wait_jobs()
+        self.assertFalse(job.exists(), "a licence issued less than an hour ago is not checked")
+        self.revoke()
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(2 * 3600)}
+        self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)     # this command runs: nothing waits
+        self.box.wait_jobs()
+        self.assertEqual(json.loads(job.read_text())["failed"]["cause"], "REFUSED")
+        self.gone()
+        self.assertStatus(self.client("pptx", "exit", "0", env=later), "SIGN_IN_REQUIRED", 65)
+
+    def test_the_background_licence_check_changes_nothing_offline_and_runs_at_most_once_an_hour(self):
+        self.ready()
+        job = self.box.home / "state" / "jobs" / "licence-check.json"
+        refreshes = self.api.refreshes
+        self.api.down = True
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(2 * 3600)}
+        self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)
+        self.box.wait_jobs()
+        first = json.loads(job.read_text())
+        self.assertEqual(first["failed"]["cause"], "NOT_CHECKED")
+        self.assertTrue((self.box.home / "state" / "entitlement.json").exists(), "offline: the licence stays")
+        self.assertTrue((self.box.home / "state" / "credentials").exists())
+        self.api.down = False
+        for _ in range(2):
+            self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)
+            self.box.wait_jobs()
+        self.assertEqual(json.loads(job.read_text())["started"], first["started"], "at most one check an hour")
+        self.assertEqual(self.api.refreshes, refreshes)
+
     def test_every_command_that_learns_of_a_revoke_clears_the_sign_in(self):
         for command in (["update", "--check"], ["update", "--apply"], ["prefs", "list"], ["packs", "install", "--all"],
                         ["report", "--kind", "feedback", "--title", "A title", "--details", "Some details", "--origin", "user_requested"],
@@ -2394,7 +2795,7 @@ class HostTest(ClientCase):
             result = self.client("guide", "deck-design", form)
             self.assertEqual(result.returncode, 0, form + result.stdout)
             self.assertIn("CRAFT-MARKER", result.stdout)
-            self.assertEqual(result.stdout.splitlines()[1], "--- craft ---")
+            self.assertEqual(result.stdout.splitlines()[4], "--- craft ---")       # after the title and the three opening lines
         self.assertIn(f"[critique](run: {launcher} guide deck-design critique)", self.client("guide", "deck-design", "craft.md").stdout)
         main = self.client("guide", "deck-design").stdout
         self.assertIn(f"Read [craft](run: {launcher} guide deck-design craft) now, then [forms](run: {launcher} guide deck-design forms) "
@@ -2418,7 +2819,7 @@ class HostTest(ClientCase):
         result = self.client("guide", "pptx", "served-part")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("SERVED-PPTX see [charts](references/pptxgenjs-charts.md)", result.stdout)
-        self.assertEqual(result.stdout.splitlines()[1], "--- served-part ---")
+        self.assertEqual(result.stdout.splitlines()[4], "--- served-part ---")     # after the title and the three opening lines
         before = len(self.api.requests)
         first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
         self.assertIn("guide pptx has no section 'not-served'.", first)
@@ -2640,6 +3041,45 @@ class Suspension(Revocation):
     """A suspended account (403 account_suspended) goes through the same central handler: every
     command that learns it ends with NO_ENTITLEMENT 70, prints no instructions, and deletes the licence. The credential
     is kept on purpose (the contract's 403: the installation is still valid and a suspension can be lifted)."""
+
+    def test_a_suspended_account_is_told_so_with_no_sign_in_link(self):
+        """Lane EXPOSURE: a sign-in cannot help a suspended account, so none is offered; the way out is Theodore."""
+        self.fresh()
+        self.api.account_state = "suspended"
+        work = self.box.tmp / "work"
+        work.mkdir()
+        result = self.client("guide", "deck-design", cwd=work)
+        first, nxt, tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+        self.assertIn("account is suspended", first)
+        self.assertIn("support@theodoreand.ai", tell)
+        self.assertNotIn("/device", result.stdout)
+        self.assertNotIn("sign-in", tell)
+        self.assertIn("do not start a sign-in", nxt)
+        self.api.account_state = "active"
+
+    def test_whoami_after_a_plan_refusal_says_the_plan_is_not_active(self):
+        """Lane EXPOSURE: before, whoami said "signed in … plan unknown … works offline until 1970-01-01"."""
+        self.fresh()
+        self.api.account_state = "inactive"
+        work = self.box.tmp / "work"
+        work.mkdir()
+        self.assertStatus(self.client("guide", "deck-design", cwd=work), "NO_ENTITLEMENT", 70)
+        result = self.client("whoami")
+        first, _nxt, tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+        self.assertIn("plan is not active", first)
+        self.assertNotIn("1970", result.stdout)
+        self.api.account_state = "active"
+        first, _nxt, _tell = self.assertStatus(self.client("whoami"), "OK", 0)       # the plan is back: the licence comes back
+        self.assertIn("plan beta", first)
+
+    def test_whoami_offline_without_a_licence_says_so(self):
+        self.fresh()
+        (self.box.home / "state" / "entitlement.json").unlink()
+        self.api.down = True
+        first, _nxt, _tell = self.assertStatus(self.client("whoami"), "OK", 0)
+        self.assertIn("no licence is stored", first)
+        self.assertNotIn("1970", first)
+        self.api.down = False
 
     def test_every_command_that_contacts_the_service(self):
         report = ["report", "--kind", "bug", "--title", "A title", "--details", "Some details"]
@@ -2873,6 +3313,9 @@ class HostAndCloud(unittest.TestCase):
         # Codex on this computer: npm and other installs (the variables Codex 0.160.1 sets for the commands it runs)
         self.assertEqual(self.host({"CODEX_MANAGED_BY_NPM": "1", "CODEX_THREAD_ID": "t"}), "codex")
         self.assertEqual(self.host({"CODEX_THREAD_ID": "t", "CODEX_VERSION": "0.160.1"}), "codex")
+        # Codex sets CLAUDE_PLUGIN_ROOT for the plugins it runs: a Codex desktop install is Codex (ORGWEB, H5)
+        self.assertEqual(self.host({"CLAUDE_PLUGIN_ROOT": "/x/.codex/plugins/theodore", "CODEX_THREAD_ID": "t"}), "codex")
+        self.assertEqual(self.host({"CLAUDE_PLUGIN_ROOT": "/p", "CODEX_HOME": "/h", "CLAUDECODE": "1"}), "claude-code")
         # ChatGPT Work / a Codex cloud task: a Codex runtime behind OpenAI's proxy on Linux
         work = {"CODEX_NETWORK_PROXY_ACTIVE": "1", "CODEX_PROXY_CERT": "/usr/local/share/ca-certificates/x.crt", "CODEX_THREAD_ID": "t"}
         self.assertEqual(self.host(work, linux=True), "chatgpt")
@@ -2931,11 +3374,11 @@ class ProxiesAndSandboxes(ClientCase):
         with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": "1"}):
             status = api.offline(caught.exception, "sign-in could not start")
             failed = api.setup_failed("NETWORK", f"the plugin could not be downloaded ({caught.exception.detail})")
-        self.assertEqual(status.name, "OFFLINE")
+        self.assertEqual((status.name, failed.name), ("CONNECTOR_REQUIRED", "CONNECTOR_REQUIRED"))
         for s in (status, failed):
-            self.assertIn('Allowed websites add theodoreand.ai and *.theodoreand.ai', s.tell_user)
-            self.assertIn("ChatGPT Work mode", s.tell_user)
-            self.assertIn("running the same command again is right (not before)", s.next_step)
+            self.assertIn('add theodoreand.ai and *.theodoreand.ai under Settings > Capabilities > Allowed websites', s.tell_user)
+            self.assertIn("Work mode", s.tell_user)
+            self.assertIn("call the Theodore connector's theodore_begin tool now", s.next_step)
         with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": ""}), \
                 mock.patch.object(Path, "is_dir", lambda p: False):
             plain = api.offline(caught.exception, "sign-in could not start")
@@ -2950,7 +3393,10 @@ class ProxiesAndSandboxes(ClientCase):
         _first, nxt, tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
         self.assertIn("this chat's workspace", tell)
         self.assertIn("press Approve", tell)
-        url = re.search(r"open (\S+) and", nxt).group(1)
+        # HOSTS2 gap 6: Codex desktop opened the link in its own browser, where the user is not logged in
+        self.assertIn("in your usual browser", tell)
+        self.assertIn("ask them to open it in the browser where they use Theodore (their usual browser), not in your own browser:", nxt)
+        url = re.search(r"not in your own browser: (\S+) \.", nxt).group(1)
         self.assertIn(url, tell)
         plain = self.client("login", "--start")
         self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])
@@ -3119,10 +3565,11 @@ def _job_alive(home: Path, name: str) -> bool:
 
 
 class EveryAddress(unittest.TestCase):
-    """RC9: from some networks one of the addresses Theodore's hosts resolve to does not answer, or takes the TCP
-    connection and never the TLS handshake, while another works. The client tries each address in turn (3 s each to
-    connect and finish the handshake), remembers the one that worked, leaves the choice to a proxy when there is one,
-    and verifies the certificate for the host name, never the address."""
+    """RC9, P039: from some networks one of the addresses Theodore's hosts resolve to does not answer, or takes the TCP
+    connection and never the TLS handshake, while another works. The client races the addresses (the next one starts
+    0.25 s after the one before, or at once when it failed; 3 s each to connect and finish the handshake), remembers
+    the one that worked in this process and, in state/addresses.json, for the next ones, leaves the choice to a proxy
+    when there is one, and verifies the certificate for the host name, never the address."""
 
     HOST = "dl.theodore.test"
 
@@ -3142,6 +3589,10 @@ class EveryAddress(unittest.TestCase):
         self.enterContext(mock.patch.object(api, "_ssl_context", lambda: ssl.create_default_context(cafile=self.bench.cert)))
         self.enterContext(mock.patch.object(api, "_OPENERS", {}))
         self.enterContext(mock.patch.object(api, "_GOOD_ADDRESS", {}, create=True))
+        self.folder = folder
+        self.kept = folder / "home" / "state" / "addresses.json"
+        self.real_address_file = api._address_file
+        self.enterContext(mock.patch.object(api, "_address_file", lambda: self.kept))
         self.enterContext(mock.patch.dict(os.environ, {k: "" for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
                                                                       "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")}))
         self.enterContext(mock.patch.object(_urlreq, "getproxies", lambda: {}))
@@ -3170,16 +3621,37 @@ class EveryAddress(unittest.TestCase):
         status, _headers, body = self.api.request("GET", f"https://{host or self.HOST}:{self.bench.live}/x", timeout=timeout)
         return status, body, time.monotonic() - began
 
+    def within(self, promise: float, regression: float, baseline: float) -> float:
+        """The longest a request may take: what the client promises, plus half the way to what a regression would cost
+        (no race: the hanging address's whole CONNECT_EACH), plus twice `baseline`, a request straight to the live
+        address measured now (slow on a loaded machine). Fixed bounds of 0.75 to 2.5 s failed the same way as the
+        installer's under load."""
+        return promise + (regression - promise) / 2 + 2 * baseline
+
+    def baseline(self) -> float:
+        """A request to the only, live address, the shorter of two; nothing it remembers is left behind."""
+        good, kept, addresses = dict(self.api._GOOD_ADDRESS), self.kept.read_bytes() if self.kept.exists() else None, self.addresses
+        self.addresses = [self.bench.live]
+        took = min(self.get()[2] for _ in range(2))
+        self.api._GOOD_ADDRESS.clear()
+        self.api._GOOD_ADDRESS.update(good)
+        self.kept.write_bytes(kept) if kept is not None else self.kept.unlink(missing_ok=True)
+        self.addresses = addresses
+        self.connects.clear()
+        return took
+
     def test_a_dead_first_address_falls_over_to_the_next_and_is_remembered(self):
+        bound = self.within(self.api.STAGGER, self.api.CONNECT_EACH, self.baseline())
         for dead in ("silent", "no_accept", "refused"):     # the handshake that hangs: the case a user met
             with self.subTest(dead=dead):
                 self.api._GOOD_ADDRESS.clear()
+                self.kept.unlink(missing_ok=True)        # a new computer: nothing remembered
                 self.connects.clear()
                 port = getattr(self.bench, dead)
                 self.addresses = [port, self.bench.live]
                 status, body, took = self.get()
                 self.assertEqual((status, body), (200, b"ok"))
-                self.assertLess(took, 5.0, f"{dead}: {took:.1f} s")        # 3 s for the dead one at most
+                self.assertLess(took, bound, f"{dead}: {took:.1f} s")      # the next address started 0.25 s later
                 self.assertEqual([a[1] for a in self.connects], [port, self.bench.live])
                 self.assertEqual(self.api._GOOD_ADDRESS[(self.HOST, self.bench.live)], ("127.0.0.1", self.bench.live))
                 # the next request starts with the address that worked
@@ -3188,8 +3660,89 @@ class EveryAddress(unittest.TestCase):
                 status, body, took = self.get()
                 self.assertEqual((status, body), (200, b"ok"))
                 self.assertEqual([a[1] for a in self.connects], [self.bench.live])
-                self.assertLess(took, 1.5)
+                self.assertLess(took, bound)
                 self.assertEqual(self.bench.accepted["silent"], silent_before)
+
+    DRIVER = r"""
+import json, os, socket, ssl, sys, time
+sys.path.insert(0, sys.argv[1])
+from theodore_client import api
+host, ports, cafile, method = sys.argv[2], [int(p) for p in sys.argv[3].split(",")], sys.argv[4], sys.argv[5]
+api.OWN_BASES.append("https://" + host)
+api._ssl_context = lambda: ssl.create_default_context(cafile=cafile)
+real = socket.getaddrinfo
+socket.getaddrinfo = lambda h, p, *a, **k: ([(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", q)) for q in ports]
+                                            if h == host else real(h, p, *a, **k))
+connects, Base = [], socket.socket
+class Recording(Base):
+    def connect(self, address):
+        connects.append(address[1])
+        return super().connect(address)
+socket.socket = Recording
+began = time.monotonic()
+try:
+    if method == "usage":       # the usage send: 2 s in all, no proxy allowance
+        status, _h, body = api.request("POST", f"https://{host}:{ports[-1]}/v1/usage", body=b"{}", timeout=2.0, exact_timeout=True)
+    else:
+        status, _h, body = api.request("GET", f"https://{host}:{ports[-1]}/x", timeout=20.0)
+    out = {"status": status}
+except Exception as exc:
+    out = {"error": str(exc)}
+out.update(took=time.monotonic() - began, connects=connects)
+print(json.dumps(out))
+"""
+
+    def other_process(self, home: Path, method: str = "get") -> dict:
+        """One request from a separate Python process with its own Theodore folder: nothing shared but the folder."""
+        env = {**os.environ, "THEODORE_HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1"}
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            env.pop(key, None)
+        env["NO_PROXY"] = env["no_proxy"] = "*"
+        done = subprocess.run([sys.executable, "-I", "-c", self.DRIVER, str(Path(__file__).resolve().parents[1] / "client"), self.HOST,
+                               ",".join(str(p) for p in self.addresses), self.bench.cert, method],
+                              capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def process_baseline(self, method: str = "get") -> float:
+        """`baseline` for other_process: the live address alone, from a Theodore folder of its own, the shorter of two."""
+        addresses, self.addresses = self.addresses, [self.bench.live]
+        took = []
+        for n in range(2):
+            home = self.folder / f"baseline-{method}-{n}"
+            (home / "state").mkdir(parents=True)
+            took.append(self.other_process(home, method)["took"])
+        self.addresses = addresses
+        return min(took)
+
+    def test_a_hanging_first_address_costs_once_across_processes(self):
+        # the owner's carrier: of the two addresses one takes the connection and never the handshake
+        home = self.folder / "proc-home"
+        (home / "state").mkdir(parents=True)
+        self.addresses = [self.bench.silent, self.bench.live]
+        bound = self.within(self.api.STAGGER, self.api.CONNECT_EACH, self.process_baseline())
+        first = self.other_process(home)
+        self.assertEqual(first.get("status"), 200, first)
+        self.assertEqual(first["connects"], [self.bench.silent, self.bench.live])
+        self.assertLess(first["took"], bound)
+        silent_before = self.bench.accepted["silent"]
+        for method in ("get", "usage"):     # every later process, the usage send among them, goes straight to the one that works
+            with self.subTest(method=method):
+                later = self.other_process(home, method)
+                self.assertEqual(later.get("status"), 200, later)
+                self.assertEqual(later["connects"], [self.bench.live])     # never the hanging one again
+                self.assertLess(later["took"], bound)
+        self.assertEqual(self.bench.accepted["silent"], silent_before)
+
+    def test_the_usage_send_gets_through_a_hanging_first_address_on_a_new_computer(self):
+        # nothing remembered yet: within the send's 2 s the second address is reached 0.25 s after the first
+        home = self.folder / "new-home"
+        (home / "state").mkdir(parents=True)
+        self.addresses = [self.bench.silent, self.bench.live]
+        bound = self.within(self.api.STAGGER, 2.0, self.process_baseline("usage"))      # past its 2 s the send has failed
+        sent = self.other_process(home, "usage")
+        self.assertEqual(sent.get("status"), 200, sent)
+        self.assertLess(sent["took"], bound)
 
     def test_every_address_dead_says_so(self):
         self.addresses = [self.bench.refused, self.bench.silent]
@@ -3200,12 +3753,57 @@ class EveryAddress(unittest.TestCase):
         self.assertIn(f"127.0.0.1: ", caught.exception.detail)
 
     def test_the_request_timeout_still_bounds_the_whole_connection(self):
-        self.addresses = [self.bench.silent, self.bench.no_accept, self.bench.live]
+        baseline = self.baseline()
+        self.addresses = [self.bench.silent, self.bench.no_accept]
         began = time.monotonic()
         with self.assertRaises(self.api.NetworkError) as caught:
             self.get(timeout=1.0)
-        self.assertLess(time.monotonic() - began, 2.5)
-        self.assertIn("not tried", caught.exception.detail)
+        # the request's 1 s and the race's last 0.25 s wait; each address's own 3 s would be the regression
+        self.assertLess(time.monotonic() - began, self.within(1.0 + 0.25, self.api.CONNECT_EACH, baseline))
+        self.assertIn("addresses of", caught.exception.detail)
+        # a third address that works is reached within the same second: the dead ones do not use it up
+        self.addresses = [self.bench.silent, self.bench.no_accept, self.bench.live]
+        status, body, took = self.get(timeout=1.0)
+        self.assertEqual((status, body), (200, b"ok"))
+        self.assertLess(took, self.within(2 * self.api.STAGGER, 1.0 + 0.25, baseline))     # it started 0.5 s in
+
+    def test_the_address_that_worked_is_kept_for_the_next_process(self):
+        self.addresses = [self.bench.silent, self.bench.live]
+        self.assertEqual(self.get()[:2], (200, b"ok"))
+        kept = json.loads(self.kept.read_text())
+        self.assertEqual(kept[f"{self.HOST}:{self.bench.live}"]["address"], "127.0.0.1")
+        self.assertEqual(kept[f"{self.HOST}:{self.bench.live}"]["port"], self.bench.live)
+        # a new process (nothing in memory) starts with it
+        self.api._GOOD_ADDRESS.clear()
+        self.connects.clear()
+        self.assertEqual(self.get()[:2], (200, b"ok"))
+        self.assertEqual([a[1] for a in self.connects], [self.bench.live])
+
+    def test_a_kept_address_that_stopped_working_is_replaced_and_an_old_one_is_not_used(self):
+        key = f"{self.HOST}:{self.bench.live}"
+        self.kept.parent.mkdir(parents=True, exist_ok=True)
+        bound = self.within(self.api.STAGGER, self.api.CONNECT_EACH, self.baseline())
+        for at, expect_first in ((time.time() - 60, self.bench.silent), (time.time() - self.api.ADDRESS_TTL - 60, self.bench.live)):
+            with self.subTest(age=time.time() - at):
+                self.kept.write_text(json.dumps({key: {"address": "127.0.0.1", "port": self.bench.silent, "at": int(at)}}))
+                self.api._GOOD_ADDRESS.clear()
+                self.connects.clear()
+                self.addresses = [self.bench.live, self.bench.silent]
+                status, body, took = self.get()
+                self.assertEqual((status, body), (200, b"ok"))
+                self.assertEqual(self.connects[0][1], expect_first)
+                self.assertLess(took, bound)
+                self.assertEqual(json.loads(self.kept.read_text())[key]["port"], self.bench.live)
+
+    def test_nothing_is_kept_without_a_theodore_folder(self):
+        # an install's first steps and an uninstall: no folder is created for it
+        self.enterContext(mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.folder / "absent")}))
+        self.enterContext(mock.patch.object(self.api.core, "_HOME", None))
+        self.assertIsNone(self.real_address_file())
+        (self.folder / "absent").mkdir()
+        self.assertEqual(self.real_address_file(), self.folder / "absent" / "state" / "addresses.json")
+        (self.folder / "absent" / ".theodore-uninstalling").write_text("1")
+        self.assertIsNone(self.real_address_file())
 
     def test_a_slow_link_still_gets_the_request_s_own_time(self):
         # every address only ran out of its 3 s: not a dead address but a slow link, which the request's own 20 s serve

@@ -234,11 +234,84 @@ sha256_of() {
 # transfer slower than 1 KB/s for 60 seconds (30 minutes at most): a stalled server cannot hold setup forever.
 # curl's -q comes first so that a user's .curlrc (which could add --location) is not read.
 proto() { case "$1" in http://127.0.0.1[:/]*|http://localhost[:/]*) echo =https,http ;; *) echo =https ;; esac; }
+# The installers' own code (install/install.sh, the same text; a test keeps them equal): every address is tried.
+# --- every address of Theodore's hosts (begin) ---
+# Theodore's hosts resolve to several addresses, and from some networks one of them does not answer, or completes the
+# TCP connection but never the TLS handshake (or resets it), while another works. curl moves to the next address only
+# when the TCP connection fails: after a handshake that hangs or is reset it gives up (exit 28 or 35), and --retry starts
+# again from the same first address. So, without a proxy, each address is tried in turn (curl --resolve: the name, its
+# SNI and its certificate check stay those of the host), 4 s each to connect and finish the handshake; the address that
+# worked is tried first for the rest of this run. When every address only ran out of time (a slow link, not a dead
+# address), the first is tried once more with the caller's own connect timeout. With a proxy (which chooses the address itself), for a loopback test
+# server, or when the addresses cannot be listed, curl runs as before.
+host_addresses() { # host: its addresses, IPv4 first, one per line, at most six
+  if command -v getent >/dev/null 2>&1; then
+    { getent ahostsv4 "$1" 2>/dev/null; getent ahostsv6 "$1" 2>/dev/null | grep -iv '^::ffff:'; } | awk '{ print $1 }'
+  elif command -v dscacheutil >/dev/null 2>&1; then
+    dscacheutil -q host -a name "$1" 2>/dev/null | sed -n 's/^ip_address: *//p'
+    dscacheutil -q host -a name "$1" 2>/dev/null | sed -n 's/^ipv6_address: *//p'
+  fi | grep -E '^[0-9A-Fa-f.:]+$' | awk '!seen[$0]++' | head -n 6
+}
+# curl_host tries url [curl options]: prints the HTTP status (000 when nothing answered) and returns curl's exit status.
+# The options carry -o; CURL_DATA, when set, is the body (sent on stdin, so it is never on a command line). `tries`
+# rounds at most (the earlier `--retry`): a round ends at the first address that answered.
+CURL_DATA=
+curl_once() { # url [curl options]
+  ch_u=$1; shift
+  if [ -n "$CURL_DATA" ]; then printf '%s' "$CURL_DATA" | curl "$@" --data-binary @- -w '%{http_code} %{time_appconnect}' "$ch_u"
+  else curl "$@" -w '%{http_code} %{time_appconnect}' "$ch_u"; fi
+}
+curl_host() {
+  ch_tries=$1 ch_url=$2; shift 2
+  ch_hostport=${ch_url#https://}; ch_hostport=${ch_hostport%%/*}; ch_host=${ch_hostport%%:*}; ch_port=443
+  case "$ch_hostport" in *:*) ch_port=${ch_hostport##*:} ;; esac
+  ch_addrs=
+  case "$ch_url" in https://*)
+    if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ]; then
+      case "$ch_host$ch_port" in ''|*[!A-Za-z0-9.-]*) ;; *) ch_addrs=$(host_addresses "$ch_host") ;; esac
+    fi ;;
+  esac
+  if [ -z "$ch_addrs" ]; then
+    ch_out=$(curl_once "$ch_url" "$@" --retry $((ch_tries - 1))); ch_rc=$?
+    printf '%s' "${ch_out%% *}"; return "$ch_rc"
+  fi
+  ch_key=$(printf '%s' "$ch_host" | tr '.-' '__')
+  eval "ch_good=\${GOOD_ADDR_$ch_key:-}"
+  [ -n "$ch_good" ] && ch_addrs=$(printf '%s\n%s\n' "$ch_good" "$ch_addrs" | awk '!seen[$0]++')
+  ch_round=1
+  while :; do
+    ch_slow=1
+    for ch_a in $ch_addrs; do
+      case "$ch_a" in *:*) ch_r="[$ch_a]" ;; *) ch_r=$ch_a ;; esac
+      ch_out=$(curl_once "$ch_url" "$@" --retry 0 --connect-timeout 4 --resolve "$ch_host:$ch_port:$ch_r"); ch_rc=$?
+      ch_http=${ch_out%% *} ch_appc=${ch_out#* }
+      if [ "$ch_rc" -ne 0 ] && [ "$ch_http" = 000 ] && [ "${ch_appc%%[1-9]*}" = "$ch_appc" ]; then
+        [ "$ch_rc" = 28 ] || ch_slow=
+        case "$ch_rc" in 7|28|35|52|55|56) continue ;; esac      # this address did not connect or finish the handshake
+      fi
+      ch_slow=
+      eval "GOOD_ADDR_$ch_key=\$ch_a"
+      break
+    done
+    [ "$ch_round" -lt "$ch_tries" ] || break
+    case "$ch_http:$ch_rc" in 408:*|429:*|5??:*|000:7|000:18|000:28|000:35|000:52|000:55|000:56) ;; *) break ;; esac  # as --retry
+    sleep "$ch_round"; ch_round=$((ch_round + 1))
+  done
+  if [ -n "$ch_slow" ]; then      # every address only ran out of its 4 s: a slow link, given the caller's own time once
+    for ch_a in $ch_addrs; do break; done
+    case "$ch_a" in *:*) ch_r="[$ch_a]" ;; *) ch_r=$ch_a ;; esac
+    ch_out=$(curl_once "$ch_url" "$@" --retry 0 --resolve "$ch_host:$ch_port:$ch_r"); ch_rc=$?
+    ch_http=${ch_out%% *}
+    [ "$ch_rc" -eq 0 ] && eval "GOOD_ADDR_$ch_key=\$ch_a"
+  fi
+  printf '%s' "$ch_http"; return "$ch_rc"
+}
+# --- every address of Theodore's hosts (end) ---
 fetch() { # url dest; on failure sets CAUSE and DETAIL
   CAUSE=NETWORK
   if command -v curl >/dev/null 2>&1; then
-    code=$(curl -q -sS --fail --proto "$(proto "$1")" --retry 2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 \
-      -o "$2" -w '%{http_code}' "$1" 2>"$B/fetch.err")
+    code=$(curl_host 3 "$1" -q -sS --fail --proto "$(proto "$1")" --connect-timeout 20 --speed-limit 1024 --speed-time 60 -m 1800 \
+      -o "$2" 2>"$B/fetch.err")
     rc=$?
     [ $rc -eq 0 ] && [ "$code" = 200 ] && return 0
     DETAIL="curl exit $rc, HTTP $code"
@@ -575,7 +648,14 @@ claude_cloud() {
 in_sandbox() {
   [ -n "${THEODORE_EPHEMERAL:-}" ] || [ -d /mnt/skills ] || [ -d /mnt/user-data ] || [ -d /home/oai ] || claude_cloud
 }
-SANDBOX_TELL='This workspace'"'"'s network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add theodoreand.ai and *.theodoreand.ai, then try again. ChatGPT'"'"'s ordinary chat has no internet access; ChatGPT Work mode does.'
+
+# A cloud sandbox that cannot reach Theodore's sites: the engine cannot run here, the Theodore connector can still
+# design the deck (README: CONNECTOR_REQUIRED). One status for the probe and for a bootstrap that failed later.
+CONNECTOR_NEXT="call the Theodore connector's theodore_begin tool now and follow what it returns: it gives the design guidance and the specimen sheets, and you build the deck with your own tools. If no Theodore connector is available to you, say so and give the user this link, which adds the connector to their Claude account in one step (they confirm it, choose Connect and log in): https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore&connectorUrl=https%3A%2F%2Fmcp.theodoreand.ai%2Fmcp Then they ask again, naming Theodore."
+connector_required() { # summary tell
+  status CONNECTOR_REQUIRED 74 "$1" "$CONNECTOR_NEXT" "$2"
+}
+CONNECTOR_TELL='Theodore'"'"'s engine cannot reach its sites from this workspace, so I am using the Theodore connector for the design. For the full engine, add theodoreand.ai and *.theodoreand.ai under Settings > Capabilities > Allowed websites (in ChatGPT, use Work mode), or use Theodore in an assistant on your computer, such as Claude Code.'
 
 failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes it, exits 68
   cause=$(sed -n 1p "$B/failed"); detail=$(sed -n 2p "$B/failed")
@@ -584,8 +664,7 @@ failed_status() { # reads $B/failed (cause on line 1, detail on line 2), removes
     NETWORK) next="check the internet connection, then run $RUN again."
              tell="Theodore could not download its files. Please check the internet connection."
              if in_sandbox; then
-               next="this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once they have changed it, running $RUN again is right (not before)."
-               tell=$SANDBOX_TELL
+               connector_required "cause NETWORK: $detail; this cloud workspace cannot reach Theodore's sites, so Theodore's engine cannot run here." "$CONNECTOR_TELL"
              fi ;;
     TLS_INTERCEPT) next="this network inspects HTTPS with a certificate this computer does not trust. Ask the user to have their IT team install the company root certificate, or to try another network; then run $RUN again."
              tell="This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate." ;;
@@ -637,13 +716,11 @@ if in_sandbox && command -v curl >/dev/null 2>&1; then
   rc=$?
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 6 ] || [ "$rc" -eq 7 ] && [ -z "${HTTPS_PROXY:-}${https_proxy:-}${ALL_PROXY:-}${all_proxy:-}" ] && ! claude_cloud; then
-      status CONNECTOR_REQUIRED 74 "this workspace has no internet access at all (no proxy, and $(printf '%s' "$probe" | sed 's#^[a-z]*://##; s#/.*##') cannot be resolved or reached), so Theodore's engine cannot run here." \
-        "do not retry here. If a Theodore connector is available, its guide tool gives the deck-design guidance (skill deck-design); tell the user that ChatGPT Work mode can install and run Theodore." \
-        "This chat has no internet access, so Theodore's engine cannot run in it. In ChatGPT, Work mode can install and run Theodore."
+      connector_required "this workspace has no internet access at all (no proxy, and $(printf '%s' "$probe" | sed 's#^[a-z]*://##; s#/.*##') cannot be resolved or reached), so Theodore's engine cannot run here." \
+        "This chat has no internet access, so Theodore's engine cannot run in it; I am using the Theodore connector for the design. In ChatGPT, Work mode can install and run Theodore."
     fi
-    status SETUP_FAILED 68 "cause NETWORK: this cloud workspace's network refuses or cannot resolve Theodore's download host (curl exit $rc)." \
-      "tell the user the setting below; once they have changed it, running $RUN again is right (not before)." \
-      "$SANDBOX_TELL"
+    connector_required "this cloud workspace's network refuses or cannot resolve Theodore's download host (curl exit $rc), so Theodore's engine cannot run here." \
+      "$CONNECTOR_TELL"
   fi
 fi
 
