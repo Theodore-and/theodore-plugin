@@ -191,6 +191,19 @@ class Installer(unittest.TestCase):
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
 
     @unittest.skipIf(IS_WINDOWS, "install.sh")
+    def test_in_codex_a_ready_install_ends_by_sending_the_deck_to_a_new_session(self):
+        """Lane CHATGPT: Codex loads the plugin, its tool and the rules only at a session's start; asked for a deck in the
+        install session, every Theodore command asked (19 approvals, measured). The last words send the deck to a new session."""
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234", env={"CODEX_THREAD_ID": "01a1df00-test"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("THEODORE OK: Theodore is ready: engine", result.stdout, "doctor's check is still printed")
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(first, "THEODORE OK: Theodore is ready (the check above).")
+        self.assertIn("If they ask for a deck in this session anyway, ask them to start a new session first", nxt)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+
+    @unittest.skipIf(IS_WINDOWS, "install.sh")
     def test_in_codex_a_slow_link_ends_with_nothing_to_poll(self):
         """Lane CHATGPT: Codex asks before every command of the install session, so the installer's last words there are
         OK with the download going on by itself, and tell the assistant to run nothing more (no doctor polls)."""
@@ -205,6 +218,7 @@ class Installer(unittest.TestCase):
         self.assertTrue(first.startswith("THEODORE OK: Theodore is installed and signed in; the rest of its runtime"), first)
         self.assertIn("run nothing more now, neither doctor nor this installer", nxt)
         self.assertIn("start a new session and ask for a deck", nxt)
+        self.assertIn("If they ask for a deck in this session anyway, ask them to start a new session first", nxt)
         self.assertNotIn("SETUP_IN_PROGRESS", first)
         self.box.wait_jobs(timeout=180)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")

@@ -573,7 +573,7 @@ if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the sam
     # In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the
     # first deck request in a new session waits for it.
     status OK 0 "Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (${where:-downloading})." \
-      "run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck." \
+      "run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval." \
       "Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck."
   fi
   status SETUP_IN_PROGRESS 67 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
@@ -582,6 +582,12 @@ if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the sam
 fi
 printf '%s\n' "$doctor_out"
 [ "$rc" -eq 0 ] || exit "$rc"
+if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$HOSTS_RC" -eq 0 ]; then
+  # Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session.
+  status OK 0 "Theodore is ready (the check above)." \
+    "run nothing more now. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval." \
+    "Theodore is ready. Start a new session and ask for your deck there."
+fi
 if [ "$HOSTS_RC" -ne 0 ]; then
   status RETRY 75 "Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above)." \
     "register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session." \
