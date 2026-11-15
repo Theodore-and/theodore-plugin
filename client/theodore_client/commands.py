@@ -122,7 +122,8 @@ def _end_line(skill: str, name: str, body: str, part: int, total: int, next_comm
 
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
-                    header_lines: list[str], command: str, section: str | None, opening: bool = True) -> None:
+                    header_lines: list[str], command: str, section: str | None, opening: bool = True,
+                    notices: bool = True) -> None:
     """One document: the whole text (total 1) or one part of it. `command` prints this text (without --part);
     `section` is how the guide tool names it; `opening` is False when the text is a tool's result."""
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
@@ -130,7 +131,7 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
     if opening:
         out += _opening(skill, name, body, part, total, command, section)
-    if part == 1:
+    if part == 1 and notices:
         out += [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
     out += header_lines
     out.append(f"--- {name} ---")
@@ -160,7 +161,7 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool)
     return _guide_remote(skill, "license" if license_text else section, part, whole=whole)
 
 
-def _guide_pptx(part: int, whole: bool = False, opening: bool = True) -> int:
+def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True) -> int:
     """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
     claims = account.require("pptx")
     install.require_runtime()
@@ -195,7 +196,7 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True) -> int:
         elif directions:
             header += directions.rstrip("\n").split("\n")
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
-                    f"{launcher} guide pptx", None, opening)
+                    f"{launcher} guide pptx", None, opening, notices)
     return 0
 
 

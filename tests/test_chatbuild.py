@@ -264,6 +264,25 @@ class Desktop(McpCase):
         self.assertNotIn("already started", later["content"][0]["text"])
         self.assertEqual(server.close(), b"")
 
+    def test_the_chat_manual_says_nothing_about_versions_and_leaves_the_notice_for_the_coding_hosts(self):
+        """An update notice says what changed since the last skill load, at any earlier time: in a chat, told mid-build,
+        it read "Theodore updated itself while building" when nothing had (an install's plugin update minutes before)."""
+        self.ready()
+        update = self.box.home / "state" / "update.json"
+        state = json.loads(update.read_text()) if update.exists() else {}
+        state["announce"] = {"plugin": {"version": "9.9.9"}}
+        update.write_text(json.dumps(state))
+        server = self.server(args=("--for", "claude-desktop"), env={"HOME": str(self.box.tmp)})
+        manual = server.call("theodore", action="manual")["content"][0]["text"]
+        self.assertNotIn("updated itself", manual)
+        self.assertNotIn("THEODORE NOTICE", manual)
+        server.close()
+        self.assertEqual(json.loads(update.read_text())["announce"], {"plugin": {"version": "9.9.9"}}, "still there for Claude Code")
+        plugin = self.server()
+        guide = plugin.call("guide", skill="pptx")["content"][0]["text"]
+        self.assertIn("THEODORE NOTICE: Theodore updated itself: plugin files 9.9.9", guide)
+        plugin.close()
+
     def test_the_tool_name_and_description_can_be_set_for_testing(self):
         """THEODORE_CHAT_TOOL_NAME / _DESCRIPTION (testing which name a chat picks): every answer names the tool in use."""
         self.ready()
@@ -460,7 +479,7 @@ class PluginServerInTheApp(McpCase):
         self.assertEqual(names(without), ["theodore"], "no entry: the plugin's server is the chat's one tool")
         code = self.start("claude-code", True)
         self.assertEqual(sorted(names(code)), ["guide", "list", "specimen"], "Claude Code keeps the plugin's tools")
-        agent = self.start("local-agent-mode-theodore", True)
+        agent = self.start("local-agent-mode-plugin:theodore:theodore", True)      # as the app names the plugin's server
         self.assertEqual(names(agent), [], "the app's agent mode is the app too: silent beside Theodore's entry")
         agent_alone = self.start("local-agent-mode-theodore", False)
         self.assertEqual(names(agent_alone), ["theodore"])
@@ -469,7 +488,7 @@ class PluginServerInTheApp(McpCase):
         for server in (with_entry, without, code, agent, agent_alone, codex):
             server.close()
         log = (self.box.home / "logs" / "client.log").read_text(encoding="utf-8")
-        self.assertIn("mcp initialize: client local-agent-mode-theodore (for plugin)", log)
+        self.assertIn("mcp initialize: client local-agent-mode-plugin:theodore:theodore (for plugin)", log)
 
 
 APP_TELL = ("TELL THE USER: Theodore is set up and ready for your presentations here. To have it used for every presentation "
@@ -502,7 +521,8 @@ class UseTheodoreTip(unittest.TestCase):
         return chatbuild.next_step(["finish", str(self.tmp)], '{"delivered": {"output": "/x/d.pptx"}}', 0)
 
     def test_the_claude_app_by_its_client_name(self):
-        for name in ("claude-ai", "Claude Desktop", "local-agent-mode-theodore", "local-agent-mode"):
+        for name in ("claude-ai", "Claude Desktop", "local-agent-mode-theodore", "local-agent-mode-plugin:theodore:theodore",
+                     "local-agent-mode"):
             self.assertTrue(chatbuild.is_claude_app(name), name)
         for name in ("claude-code", "Claude-Code", "codex-mcp-client", "codex", "test", "", None, "my-local-agent-mode"):
             self.assertFalse(chatbuild.is_claude_app(name), name)

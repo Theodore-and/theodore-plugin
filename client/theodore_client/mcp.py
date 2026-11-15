@@ -409,10 +409,13 @@ def _fetch_whole(skill: str, section: str | None) -> str:
 
 def _pptx_manual() -> str:
     """The pptx manual as the launcher prints it, whole, in one document (it comes with the engine); a tool result
-    needs none of the opening lines a long command output gets."""
+    needs none of the opening lines a long command output gets. On the chat route it carries no update notice: those
+    say what changed since the last skill load, at any earlier time (an install's plugin update minutes before), and a
+    chat told it mid-build said "Theodore updated itself while building" when nothing had. Nothing is applied during a
+    build, so a chat says nothing about versions; the notice stays for the coding hosts' next skill load."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        commands._guide_pptx(1, whole=True, opening=False)
+        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP)
     return buffer.getvalue()
 
 
