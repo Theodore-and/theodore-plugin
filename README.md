@@ -17,8 +17,8 @@ By hand:
 | Assistant | Command |
 | --- | --- |
 | Any, macOS or Linux | `( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
-| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; foreach ($i in 1..3) { curl.exe -q --proto =https -fsS --connect-timeout 10 -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 2 }; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue` |
-| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && (curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\install.cmd" https://theodoreand.ai/install.cmd || (ping -n 3 127.0.0.1 >nul & curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\install.cmd" https://theodoreand.ai/install.cmd) || (ping -n 3 127.0.0.1 >nul & curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\install.cmd" https://theodoreand.ai/install.cmd)) && call "!D!\install.cmd" & rmdir /s /q "!D!" 2>nul"` |
+| Any, Windows (PowerShell) | `$f = "$env:LOCALAPPDATA\Theodore-install"; $null = New-Item -ItemType Directory -Force -Path $f; curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "$f\install.cmd" https://theodoreand.ai/install.cmd` then, as a second command, `try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "$env:LOCALAPPDATA\Theodore-install\install.cmd"` |
+| Any, Windows (cmd) | `(if not exist "%LOCALAPPDATA%\Theodore-install" mkdir "%LOCALAPPDATA%\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\Theodore-install\install.cmd" https://theodoreand.ai/install.cmd` then, as a second command, `"%LOCALAPPDATA%\Theodore-install\install.cmd"` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
 | Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` (the installer above registers Codex from its own copy, the same as `codex plugin marketplace add ~/.theodore/plugin`) |
 
@@ -125,8 +125,8 @@ when nothing else is in it). What is left afterwards:
 - `.pptx-state/theodore-engine.json` inside your deck workspaces (harmless; delete it if you like).
 - Claude Code's cached copy of the plugin under `~/.claude/plugins/cache/theodore/` (about 60 KB of text).
   Claude Code marks it as orphaned and deletes it itself after 14 days.
-- Nothing of the installer: the install commands above download it into a new private folder and delete that
-  folder when it ends.
+- Nothing of the installer: the install commands above download it into a new private folder (Windows:
+  `%LOCALAPPDATA%\Theodore-install`, never the temporary folder) that the installer deletes when it ends.
 - In the system's temporary folder (`$TMPDIR`, `%TEMP%`): the engine's LibreOffice profile (`pptx-soffice-profile/`,
   `pptx-soffice-profile.warm-seed/`, `pptx-soffice-profile.lock`) and its empty lock files
   (`theodore-pptx-locks/*.lock`). The system clears that folder itself; they can be deleted at any time. Specimen
@@ -155,7 +155,7 @@ If the launcher is gone, deleting those subfolders and the keychain item by hand
 3. The client downloads the rest of the runtime against a signed manifest, signs the computer in (activation
    code or browser approval), installs the engine and prints the instructions.
    The deck-design text is fetched at each use and never stored. Its specimen images are not shipped either:
-   `theodore specimen <file>` fetches one into a private temporary folder. Nothing runs in the background, so the
+   `theodore specimen <file>` fetches one into a private folder in Theodore's own cache. Nothing runs in the background, so the
    folder is removed by the first Theodore command run after it is an hour old, and at the latest by the uninstall.
 4. Every status is three lines the assistant can act on:
 
