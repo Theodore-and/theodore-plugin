@@ -8,7 +8,8 @@ verbs, `pptx <verb> ...`) and reads and writes the deck's working files. What is
 - Commands: the first argument is one of the engine's verbs (VERBS); `python`, a shell, or any other program cannot be
   named. Options that drive another application (`doctor --powerpoint`, `--oracle`) are refused.
 - Folders: every path in the arguments, and every path a file action names, is resolved (symbolic links followed) and
-  must lie inside the deck's folder (the one the chat named, or ~/Documents/Theodore) or Theodore's render cache;
+  must lie inside the deck's folder (the one the chat named, or the default: ~/Theodore on macOS,
+  ~/Documents/Theodore elsewhere) or Theodore's render cache;
   reads may also open the engine's own manual and references. Writes are text files only (WRITABLE). The deck's folder
   itself is never the filesystem's root, the home folder, a hidden or system folder, or one that holds Theodore.
 - The deck script (deck.js, model-written JavaScript the engine runs with Node): every Node process the engine starts
@@ -29,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -58,6 +60,16 @@ OUTPUT_CHARS_MAX = 60_000           # a command's output, kept whole up to this 
 RUN_TIMEOUT_S = 900
 PROGRESS_EVERY_S = 5.0
 DEFAULT_FOLDER = ("Documents", "Theodore")
+# On macOS the Documents folder is protected: the first time the server's Python touches it, macOS asks the person
+# whether "python3.x" may (a prompt naming a program they never heard of; Don't Allow fails every build). The home
+# folder is not protected, so a Mac's default is ~/Theodore. Decided once, from Theodore's own state (never by looking
+# inside Documents, which may itself raise the prompt), and recorded in state/chat-folder.json so it never moves:
+# a Mac whose chat route ran before this record existed (state/chat, the engine's private home, is there) keeps
+# Documents/Theodore, where its earlier decks are.
+HOME_FOLDER = ("Theodore",)
+FOLDER_STATE = "chat-folder.json"
+# Said once to the user when the default folder could not be written and the deck goes to ~/Theodore instead.
+NOTICE: list[str] = []
 
 # The one tool's name in Claude Desktop's chat: `theodore`. THEODORE_CHAT_TOOL_NAME overrides it, for testing which
 # name a chat picks for a plain request (letters, digits, _ and -, at most 64); every answer follows the name in use.
@@ -174,7 +186,37 @@ def sandbox_home() -> Path:
 
 
 def default_folder() -> Path:
-    return Path.home().joinpath(*DEFAULT_FOLDER)
+    """The deck's folder when the chat names none (see HOME_FOLDER)."""
+    home = Path.home()
+    if sys.platform != "darwin":
+        return home.joinpath(*DEFAULT_FOLDER)
+    path = core.home().state / FOLDER_STATE
+    recorded = core.read_json(path)
+    recorded = recorded.get("default") if isinstance(recorded, dict) else None
+    if recorded in ("documents", "home"):
+        return home.joinpath(*(DEFAULT_FOLDER if recorded == "documents" else HOME_FOLDER))
+    earlier = _is_dir(sandbox_home())           # the chat route ran here before the record: its default was Documents
+    with contextlib.suppress(Exception):
+        core.write_json(path, {"default": "documents" if earlier else "home"}, 0o600)
+    return home.joinpath(*(DEFAULT_FOLDER if earlier else HOME_FOLDER))
+
+
+def default_label() -> str:
+    """The default folder as the texts name it."""
+    return "Theodore in the user's home folder" if sys.platform == "darwin" and default_folder().parent == Path.home() \
+        else "Documents/Theodore"
+
+
+def _writable_folder(folder: Path) -> bool:
+    """The folder exists (made when missing) and a file can be created in it: a protected or read-only folder is not."""
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        handle, probe = tempfile.mkstemp(prefix=".theodore-write-check-", dir=folder)
+        os.close(handle)
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
 
 
 def host_folder() -> str | None:
@@ -236,7 +278,8 @@ def folder_allowed(folder: Path) -> bool:
 
 def check_folder(raw) -> Path:
     """The deck's folder: the chat's (an absolute path on this computer) or the default, created when it is the
-    default. Refused: not absolute, not on this computer, the root, the home folder, a hidden or system folder, or a
+    default. A default that cannot be written gives way to ~/Theodore (said once to the user, NOTICE); a named folder
+    that cannot be written is refused with a status that names it. Refused: not absolute, not on this computer, the root, the home folder, a hidden or system folder, or a
     folder that holds Theodore's own (or lies inside it)."""
     if raw in (None, ""):
         hinted = host_folder()          # used only when it is a folder a deck may be built in; else the default
@@ -245,21 +288,34 @@ def check_folder(raw) -> Path:
                 raw = hinted
     if raw in (None, ""):
         folder = default_folder()
-        folder.mkdir(parents=True, exist_ok=True)
+        if _real(folder) not in FOLDERS and not _writable_folder(folder):
+            fallback = Path.home().joinpath(*HOME_FOLDER)
+            if fallback == folder or not _writable_folder(fallback):
+                raise Status("SETUP_FAILED", f"Theodore cannot write its default folder {folder} or {fallback} on this computer.",
+                             "ask the user for a folder on this computer that Theodore may write, and pass its full path as folder.",
+                             "Theodore could not save in its usual folder on this computer. Which folder should I save your deck in?")
+            NOTICE.append(f"Theodore could not save in {folder} on this computer (the system did not allow it), so this deck "
+                          f"is going to {fallback} instead.")
+            folder = fallback
     else:
         if not isinstance(raw, str):
             raise core.usage("folder is a path, as text.")
         folder = Path(raw).expanduser()
         if not folder.is_absolute():
             raise _refuse(f"the folder {raw} is not an absolute path on this computer.",
-                          "give the folder's full path on this computer (for example /Users/<name>/Documents/<folder>), or leave folder out to use Documents/Theodore.")
+                          f"give the folder's full path on this computer (for example /Users/<name>/Documents/<folder>), or leave folder out to use {default_label()}.")
         if not folder.is_dir():
             raise _refuse(f"there is no folder {raw} on this computer (a chat's own files can live elsewhere, in its sandbox).",
-                          "ask the user for the folder's path on this computer, or leave folder out to use Documents/Theodore.")
+                          f"ask the user for the folder's path on this computer, or leave folder out to use {default_label()}.")
+        if _real(folder) not in FOLDERS and folder_allowed(_real(folder)) and not _writable_folder(folder):
+            raise Status("USAGE", f"the folder {raw} cannot be written by Theodore on this computer (the system does not allow "
+                                  f"it, or it is read-only).",
+                         f"ask the user for another folder, or leave folder out to use {default_label()}.",
+                         f"Theodore cannot save in {raw}. Should I use another folder?")
     folder = _real(folder)
     if not folder_allowed(folder):
         raise _refuse(f"Theodore does not build decks in {folder}: it is the home folder, a system or hidden folder, or Theodore's own.",
-                      "use a folder of the user's documents (or leave folder out: Documents/Theodore).")
+                      f"use a folder of the user's documents (or leave folder out: {default_label()}).")
     if folder not in FOLDERS:
         FOLDERS.append(folder)
     return folder
@@ -382,6 +438,8 @@ def drop_licence_copy() -> None:
 def _prepare_sandbox() -> Path:
     """The engine's THEODORE_HOME for a chat: state/entitlement.json, a copy of the licence, and state/engine-clock.json,
     never behind the main one."""
+    with contextlib.suppress(Exception):
+        default_folder()            # the default is recorded before this folder exists (it marks an earlier chat route)
     base = sandbox_home()
     state = base / "state"
     (base / "tmp").mkdir(parents=True, exist_ok=True)
@@ -869,7 +927,7 @@ BUILD_POINTER = ('How the deck is built here: the build skill this guidance name
                  'guidance requires (action "guide"), open its sheets (action "specimen"), write the design note, then call '
                  f'{TOOL} with action "manual" once and follow it: start the deck with the note (action "run"), write deck.js, '
                  'apply, look at the slide images it returns, fix, finish. Pass folder: the full path on this computer of the '
-                 'folder the user named or attached; with none, leave folder out (Documents/Theodore).')
+                 'folder the user named or attached; with none, leave folder out (Theodore\'s default folder).')
 # Ends every guidance section and specimen answer: the way on to the build.
 THEN_BUILD = (f'Then, once the reading is done and the design note is written: {TOOL} with action "manual", and build with '
               'Theodore\'s engine as it says (never with another slide tool).')
@@ -882,7 +940,7 @@ def bindings(docs: Path | None) -> str:
         f'  pptx <verb> <args...>  ->  {TOOL} with action "run", args ["<verb>", "<args>", ...] (one list item per argument,',
         '                             no quotes, no shell); text the command reads on standard input (the design note for',
         '                             --storyline -) goes in stdin; folder is the deck\'s folder on this computer (the folder',
-        "                             the user named, its full path; leave it out for Documents/Theodore). Renders come back as images.",
+        "                             the user named, its full path; leave it out for Theodore's default folder). Renders come back as images.",
         f'  <pptx-skill-dir> = {where}   (read pptxgenjs.md and references/ there with action "read", path)',
         '  edit <wd>/deck.js, design.md or a part  ->  action "edit" (path, old, new) or "write" (path, content); "read" a file',
         '                             or an image path, "list" a folder. "reveal" shows a file in Finder, only when the user asks.',

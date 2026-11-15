@@ -67,6 +67,14 @@
   anything, or to ask the user (the chat changes its memory only on the person's own word); a test reads every string
   of the local server's answer code for it. The "is the Claude app" rule now includes `local-agent-mode-…`, so the
   plugin's own server stays silent there too beside Theodore's entry.
+- The chat route's default folder (lane CHATFOLDER): on macOS a deck with no folder named goes to `~/Theodore`, not
+  `~/Documents/Theodore`: Documents is protected, and the first touch by Theodore's Python raised a system prompt naming
+  "python3.x" (Don't Allow then failed every start with exit 1). Decided once from Theodore's own state, never by looking
+  in Documents, and kept in `~/.theodore/state/chat-folder.json`: a Mac whose chat route ran before (0.4.0's
+  `state/chat` is there) keeps `~/Documents/Theodore`, where its decks are. Windows and Linux keep `Documents/Theodore`.
+  A default that cannot be written gives way to `~/Theodore` (same confinement checks), and the answer tells the user
+  in one sentence where the deck is going and why; a folder the chat named that cannot be written is a USAGE status
+  that names it, with NEXT: ask the user for another folder, or leave folder out.
 - W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
   racing it over the same file and ending INTERNAL.
 
