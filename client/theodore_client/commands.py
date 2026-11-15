@@ -2078,7 +2078,7 @@ def _shim_apply(only_new: bool = False) -> str:
     try:
         folder.mkdir(parents=True, exist_ok=True)
         for path in targets:
-            if not path.is_file() or path.read_text(encoding="utf-8") != texts[path.name]:
+            if not core.shim_matches(path, texts[path.name]):
                 core.write_atomic(path, texts[path.name], 0o755)
     except OSError as exc:
         return f"short command: not written ({exc.__class__.__name__}: {exc})"
@@ -2128,7 +2128,7 @@ def _shim_written() -> bool:
     if not texts or not paths:
         return False
     try:
-        return all(p.name in texts and p.read_text(encoding="utf-8") == texts[p.name] for p in paths)
+        return all(p.name in texts and core.shim_matches(p, texts[p.name]) for p in paths)
     except OSError:
         return False
 

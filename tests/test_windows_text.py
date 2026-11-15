@@ -334,6 +334,21 @@ class WindowsShortCommand(unittest.TestCase):
         self.assertIn('exec sh "$b/theodore" "$@"', texts["theodore"], "Git Bash: the sh launcher, which carries every argument exactly")
         self.assertTrue(texts["theodore"].startswith("#!/bin/sh\n"))
 
+    def test_the_written_batch_file_is_recognised_as_theodores(self):
+        """WINDOWS's recount: read as text, the batch file's CRLF became LF, so it never matched what Theodore writes:
+        no short-name rules, and every text kept the long path."""
+        texts = core.shim_texts()
+        folder = self.tmp / STRANGE / ".local" / "bin"
+        for name, text in texts.items():
+            core.write_atomic(folder / name, text, 0o755)
+        self.assertTrue(all(core.shim_matches(folder / n, t) for n, t in texts.items()))
+        with mock.patch.object(commands, "_host_record", lambda: {"shim": {"files": [str(folder / n) for n in texts]}}):
+            self.assertTrue(commands._shim_written(), "its rules are written")
+        with mock.patch.dict(os.environ, {"PATH": str(folder)}), mock.patch.object(core.shutil, "which", lambda n: str(folder / "theodore.cmd")):
+            core.shim_reset()
+            self.assertEqual(core.quoted_launcher(), "theodore", "and the texts name it")
+            core.shim_reset()
+
     def test_a_home_elsewhere_gets_no_short_command_on_windows(self):
         with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "elsewhere")}), mock.patch.object(core, "_HOME", None):
             self.assertIsNone(core.shim_texts(), "no path is written into a batch file")

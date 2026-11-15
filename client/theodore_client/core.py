@@ -475,9 +475,18 @@ def shim_active() -> bool:
         texts = shim_texts()
         if found and texts:
             path = Path(found)
-            active = path.name in texts and path.read_text(encoding="utf-8") == texts[path.name]
+            active = path.name in texts and shim_matches(path, texts[path.name])
     _SHIM_ACTIVE[:] = [active]
     return active
+
+
+def shim_matches(path: Path, text: str) -> bool:
+    """The file holds exactly this text, byte for byte (read as bytes: a text read turns the batch file's CRLF into LF,
+    and the Windows short command then never matched; WINDOWS's recount)."""
+    try:
+        return path.read_bytes() == text.encode("utf-8")
+    except OSError:
+        return False
 
 
 def shim_reset() -> None:
