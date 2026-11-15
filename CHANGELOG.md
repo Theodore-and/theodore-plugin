@@ -10,6 +10,10 @@
   the plugin's guide tool returns it whole). Elsewhere, or with `--part`, each part says at its start and its end
   that it is part N of M and that nothing in it may be acted on before all are read; the last part and a whole text
   end by saying the text is complete. The local server's pptx manual is one document.
+- Tests and `ci/run.sh` no longer inherit the launching host's identity (lane WHOLETEXT2): `CLAUDECODE`, `CLAUDE_PID`,
+  `THEODORE_HOST`, `CLAUDE_CODE_*`, `CLAUDE_PLUGIN_*` and `CODEX_*` are removed before any target or suite runs, so a
+  check started from a Claude Code or Codex session gives the same results; a test of a host sets the variable itself.
+  Three tests read the line after the guide's opening lines.
 - Claude Desktop's chat builds the deck with Theodore's engine on this computer, set up by the same install, with no
   connector. The local server's one tool (`theodore`, so "Always allow" is still clicked once) gains the actions:
   - `manual`: the build instructions;

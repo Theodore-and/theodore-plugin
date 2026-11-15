@@ -840,7 +840,7 @@ class Engine(ClientCase):
             result = self.client(*args, env=env)
             self.assertEqual(result.returncode, 0, args)
             lines = result.stdout.splitlines()
-            first = lines[1] if args[0] == "guide" else lines[0]
+            first = lines[4] if args[0] == "guide" else lines[0]          # after the title and the three opening lines (WHOLETEXT)
             self.assertTrue(first.startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), (args, first))
             self.assertIn("guide pptx again before building.", first)
             self.assertNotIn("SERVED-POINTER", result.stdout)
@@ -2795,7 +2795,7 @@ class HostTest(ClientCase):
             result = self.client("guide", "deck-design", form)
             self.assertEqual(result.returncode, 0, form + result.stdout)
             self.assertIn("CRAFT-MARKER", result.stdout)
-            self.assertEqual(result.stdout.splitlines()[1], "--- craft ---")
+            self.assertEqual(result.stdout.splitlines()[4], "--- craft ---")       # after the title and the three opening lines
         self.assertIn(f"[critique](run: {launcher} guide deck-design critique)", self.client("guide", "deck-design", "craft.md").stdout)
         main = self.client("guide", "deck-design").stdout
         self.assertIn(f"Read [craft](run: {launcher} guide deck-design craft) now, then [forms](run: {launcher} guide deck-design forms) "
@@ -2819,7 +2819,7 @@ class HostTest(ClientCase):
         result = self.client("guide", "pptx", "served-part")
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("SERVED-PPTX see [charts](references/pptxgenjs-charts.md)", result.stdout)
-        self.assertEqual(result.stdout.splitlines()[1], "--- served-part ---")
+        self.assertEqual(result.stdout.splitlines()[4], "--- served-part ---")     # after the title and the three opening lines
         before = len(self.api.requests)
         first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
         self.assertIn("guide pptx has no section 'not-served'.", first)
