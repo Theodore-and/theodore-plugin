@@ -65,6 +65,9 @@ def emit(status: Status) -> int:
     if _REFUSAL and not getattr(status, "refusal", False):
         from . import account          # imported here: account imports this module
         status = account.refusal_status()
+    elif status.name == "SETUP_IN_PROGRESS":
+        from . import withdraw         # after access came back: says once why Theodore downloads again
+        status = withdraw.explain_setup(status)
     if _REFUSAL or status.name in SHEET_REFUSALS:
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)

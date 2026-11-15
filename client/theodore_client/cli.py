@@ -6,7 +6,7 @@ import argparse
 import contextlib
 import sys
 
-from . import account, api, commands, core, specimens, usage
+from . import account, api, commands, core, specimens, usage, withdraw
 from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
@@ -212,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.suppress(Exception):
             account.register_disk_secrets()
         specimens.sweep()
+        withdraw.resume()
         rest = argv[1:]
         for_host = rest[rest.index("--for") + 1] if "--for" in rest[:-1] else None
         return mcp.serve(blocked=blocked, for_host=for_host)
@@ -231,9 +232,11 @@ def _main(argv: list[str]) -> int:
     except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run
         pass
     specimens.sweep()       # specimen sheets older than an hour go before anything else is done
+    withdraw.resume()       # Theodore's files, when the service ended this computer's access and they are still here
     if argv[:1] and argv[0] not in _NO_USAGE_FLUSH:
         usage.flush()           # only when the oldest waiting usage event is older than 15 minutes; never raises
     code = _run(argv)
+    withdraw.resume()       # learned by this command: removed now that it is done (never while an engine runs)
     last = core.last_emitted()
     if last is not None and last.name != "OK" and code == last.code:
         usage.record_status(argv[0] if argv else None, last.name, last.cause)     # only while usage is on; never raises

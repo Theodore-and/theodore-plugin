@@ -42,6 +42,36 @@ LINK = re.compile(r"\]\(specimens/([A-Za-z0-9._-]{1,80}\.jpg)\)")
 DEVICES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT{i}" for i in range(10))}
 
 
+# The service ties each sheet it hands out to the account and installation it went to (lane PROTECT2): a JPEG comment
+# segment (FF FE) right after the start-of-image marker, holding MARK_PREFIX and an opaque token. Decoders skip comment
+# segments, so the image the assistant sees is the published one to the pixel; only the file's bytes differ per account.
+# Integrity is checked twice: the response's X-Theodore-Sha256 covers the bytes as they arrived, and the bytes without
+# that one segment must be the published sheet (its ETag, the quoted SHA-256 the service stores). If-None-Match names
+# that published hash, so a held sheet is still answered 304.
+MARK_PREFIX = b"theodore-mark/1 "
+
+
+def unmarked(raw: bytes) -> bytes:
+    """The sheet without the service's mark segment; anything else unchanged."""
+    if raw[:4] == b"\xff\xd8\xff\xfe" and len(raw) >= 6:
+        length = int.from_bytes(raw[4:6], "big")
+        if raw[6:6 + len(MARK_PREFIX)] == MARK_PREFIX and 4 + length <= len(raw):
+            return raw[:2] + raw[4 + length:]
+    return raw
+
+
+def content_sha256(raw: bytes) -> str:
+    """The published sheet's SHA-256: the one its ETag names, whatever account the copy was marked for."""
+    import hashlib
+    return hashlib.sha256(unmarked(raw)).hexdigest()
+
+
+def content_matches(raw: bytes, etag: str | None) -> bool:
+    """True unless the answer names its sheet (ETag) and these bytes, unmarked, are another one."""
+    tag = str(etag or "").strip().removeprefix("W/").strip('"').lower()
+    return not re.fullmatch(r"[0-9a-f]{64}", tag) or content_sha256(raw) == tag
+
+
 def valid_name(name: str) -> bool:
     return bool(NAME.fullmatch(name)) and name.split(".", 1)[0].upper() not in DEVICES
 
