@@ -1,5 +1,34 @@
 # Changes
 
+## 0.4.1
+
+- Theodore's own short command (lane PROMPTS): with the host settings, the set-up writes `theodore`, a two-line script
+  that only runs the stable launcher, into the first per-user folder on the shell's PATH: `~/.local/bin` (where
+  Claude Code's own installer puts `claude`) or `~/bin`; on Windows `theodore.cmd` plus a `theodore` script for Git
+  Bash in `%USERPROFILE%\.local\bin` or else `%LOCALAPPDATA%\Microsoft\WindowsApps` (on every user's PATH on a stock
+  Windows). Never over a file that is not Theodore's, never where another `theodore` comes first on PATH, not written
+  again once the person deletes it; `hosts settings --remove`, `hosts unregister` and the uninstall delete it.
+- While that command is on PATH, every text the client writes for the assistant (statuses, the Bindings lines, the
+  guide's section links and specimen line, "the launcher you used") names `theodore …` instead of the quoted long path,
+  which the model kept in a variable (`T="…"; "$T" …`, `$t=…; & $t …`) that no permission rule can match. The routing
+  line in CLAUDE.md and AGENTS.md keeps the full path for its uninstall command.
+- Rules (Claude Code 2.1.292, measured headless in default mode): `Bash(theodore *)` matches `theodore …` alone, after
+  `cd`, in pipes, `for` loops, here-documents and `T=theodore; "$T"`; written only while the short command is there and
+  taken out when it goes. On Windows, for the PowerShell tool: `PowerShell(theodore *)` and `PowerShell(& theodore *)`
+  (both measured), and for the launcher and each skill launcher by path `PowerShell(<path> *)` and
+  `PowerShell(& "<path>" *)` (the `&` form of a path matched no rule in the macOS probe; lane WINDOWS checks it on
+  Windows). Codex: `prefix_rule(["theodore"])`.
+- `Edit(**/.theodore/workspaces/**)`: the assistant writes and edits a deck's working files (`deck.js`, notes) in the
+  workspace folders Theodore's engine makes inside the user's folder without a file prompt. Nothing else; Theodore's
+  own folder has no `workspaces` subfolder. Said in the installer's last lines, install.md, README and SECURITY.md.
+- Codex on Windows starts Theodore's tool server: Codex reads one `mcp.json` on every system and the published one
+  starts it with `sh`, which Windows lacks; on Windows Theodore's own copy of the plugin (Codex's marketplace) now
+  starts `./skills/pptx/scripts/theodore.cmd`, rewritten at every unpack so plugin updates keep it.
+- W-9: `doctor` on Windows says Theodore's own PortableGit is downloading (and how far), with nothing to install,
+  instead of telling the person to install Git for Windows meanwhile.
+- W-12: the Windows uninstall's cleanup leaves its own folder before removing it, so no empty
+  `%TEMP%\theodore-uninstall-<random>` is left.
+
 ## 0.4.0
 
 - A text is read whole (lane WHOLETEXT): under Claude Code (CLAUDECODE=1), `theodore guide <skill> [section]`

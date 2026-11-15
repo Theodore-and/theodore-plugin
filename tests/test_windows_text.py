@@ -5,6 +5,7 @@ would read from it (a batch file is read in the OEM code page)."""
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
@@ -298,3 +299,104 @@ class ChildText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanupLeavesNoFolder(unittest.TestCase):
+    def test_the_script_leaves_its_own_folder_before_removing_it(self):
+        """W-12: cmd cannot remove its own current folder, so every uninstall left an empty theodore-uninstall-<random>."""
+        lines = commands._cleanup_script(list(core.OWNED), keep_specimen_record=True).split("\r\n")
+        last = next(i for i, line in enumerate(lines) if 'rmdir /s /q "%THEODORE_CLEANUP_WORK%"' in line)
+        self.assertEqual(lines[last - 1], 'cd /d "%THEODORE_CLEANUP_WORK%\\.."', "out of the folder, to %TEMP%, just before")
+        self.assertLess(lines.index(":end"), last - 1, "on every way out, a stopped cleanup included")
+
+
+class WindowsShortCommand(unittest.TestCase):
+    """Lane PROMPTS: `theodore` in a per-user folder on PATH, for the PowerShell tool and Git Bash alike."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.local = self.tmp / STRANGE / "AppData" / "Local"
+        (self.local / "Theodore" / "bin").mkdir(parents=True)
+        env = {"LOCALAPPDATA": str(self.local), "USERPROFILE": str(self.tmp / STRANGE), "HOME": str(self.tmp / STRANGE)}
+        patches = [mock.patch.dict(os.environ, env), mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core, "_HOME", None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop("THEODORE_HOME", None)
+
+    def test_the_batch_file_names_no_path_and_the_bash_script_runs_the_sh_launcher(self):
+        texts = core.shim_texts()
+        self.assertEqual(set(texts), {"theodore.cmd", "theodore"}, "PowerShell and cmd find the .cmd (PATHEXT), Git Bash the script")
+        batch = texts["theodore.cmd"]
+        self.assertTrue(batch.isascii(), "cmd reads a batch file in the OEM code page: no é in it")
+        self.assertIn('"%LOCALAPPDATA%\\Theodore\\bin\\theodore.cmd" %*', batch)
+        self.assertNotIn("call ", batch.lower(), "no CALL: it doubles carets and expands % again")
+        self.assertIn('exec sh "$b/theodore" "$@"', texts["theodore"], "Git Bash: the sh launcher, which carries every argument exactly")
+        self.assertTrue(texts["theodore"].startswith("#!/bin/sh\n"))
+
+    def test_a_home_elsewhere_gets_no_short_command_on_windows(self):
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "elsewhere")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNone(core.shim_texts(), "no path is written into a batch file")
+
+    def test_the_folders_it_may_use_and_only_on_path(self):
+        candidates = core.shim_dir_candidates()
+        self.assertEqual(candidates, [self.tmp / STRANGE / ".local" / "bin", self.local / "Microsoft" / "WindowsApps"])
+        with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(self.local / "Microsoft" / "WindowsApps"), "/usr/bin"])}):
+            self.assertEqual(core.shim_dir(), self.local / "Microsoft" / "WindowsApps", "a stock Windows: WindowsApps is on PATH")
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
+            self.assertIsNone(core.shim_dir(), "never a folder that is not on PATH")
+
+    def test_powershell_rules_for_the_launcher_the_skill_launchers_and_the_short_command(self):
+        launcher = str(core.home().launcher())
+        script = self.tmp / "cache" / "skills" / "pptx" / "scripts" / "theodore.cmd"
+        with mock.patch.object(commands, "_claude_skill_launchers", lambda: [script]), \
+                mock.patch.object(commands, "_render_cache_dirs", lambda: []), \
+                mock.patch.object(commands.specimens, "cache_root", lambda: self.local / "Theodore" / "Cache" / "specimens"), \
+                mock.patch.object(commands, "_shim_written", lambda: True):
+            rules = commands._permission_rules()
+        for rule in (f"PowerShell({launcher} *)", f'PowerShell(& "{launcher}" *)', f'PowerShell(& "{script}" *)',
+                     "PowerShell(theodore *)", "PowerShell(& theodore *)", "Bash(theodore *)", "Edit(**/.theodore/workspaces/**)"):
+            self.assertIn(rule, rules)
+        self.assertFalse([r for r in rules if r in ("PowerShell", "PowerShell(*)", "PowerShell(& *)", "Bash(*)")], "nothing broader")
+        with mock.patch.object(commands, "_claude_skill_launchers", lambda: []), mock.patch.object(commands, "_render_cache_dirs", lambda: []), \
+                mock.patch.object(commands.specimens, "cache_root", lambda: self.local / "Theodore" / "Cache" / "specimens"), \
+                mock.patch.object(commands, "_shim_written", lambda: False):
+            rules = commands._permission_rules()
+        self.assertFalse([r for r in rules if "(theodore " in r or "(& theodore " in r], "no rule for the name without the command")
+
+
+class CodexServerOnWindows(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(tempfile.mkdtemp()) / "mcp.json"
+
+    def test_the_sh_entry_becomes_the_batch_launcher(self):
+        published = json.loads((Path(support.PLUGIN) / "mcp.json").read_text())
+        self.path.write_text(json.dumps(published))
+        commands._codex_mcp_for_windows(self.path)
+        entry = json.loads(self.path.read_text())["mcpServers"]["theodore"]
+        self.assertEqual(entry["command"], "./skills/pptx/scripts/theodore.cmd", "the form lane WINDOWS saw Codex start")
+        self.assertEqual(entry["args"], ["mcp", "--for", "codex"])
+        self.assertEqual(entry["type"], "stdio")
+        self.assertTrue((Path(support.PLUGIN) / "skills" / "pptx" / "scripts" / "theodore.cmd").is_file())
+
+    def test_any_other_entry_is_left_as_it_is(self):
+        other = {"mcpServers": {"theodore": {"type": "stdio", "command": "node", "args": ["x"]}}}
+        self.path.write_text(json.dumps(other))
+        commands._codex_mcp_for_windows(self.path)
+        self.assertEqual(json.loads(self.path.read_text()), other)
+        self.path.write_text("not json")
+        commands._codex_mcp_for_windows(self.path)
+        self.assertEqual(self.path.read_text(), "not json")
+
+
+class GitBashBeingFetched(unittest.TestCase):
+    def test_a_running_portablegit_download_is_said_with_how_far(self):
+        """W-9: doctor told the person to install Git for Windows while Theodore's own PortableGit was downloading."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"THEODORE_HOME": tmp}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNone(commands._git_fetching())
+            job = commands.Job("git")
+            job.begin("git")
+            job.progress("downloading", 40)
+            self.assertEqual(commands._git_fetching(), "downloading, 40%")
+            job.finish()
+            self.assertIsNone(commands._git_fetching())

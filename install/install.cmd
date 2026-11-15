@@ -61,8 +61,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.4.0"
-set "PIN_CLIENT=client/client-0.4.0.tar 5cd94f6eb403db6c5190ac4657b1246d2230109f6be408dac37b87b9c893acd8"
+set "PIN_CLIENT_VERSION=0.4.1"
+set "PIN_CLIENT=client/client-0.4.1.tar 80207a35792eaa512d784301e8f06f84c44641d60c1a04bfaaa4e27dd25e7113"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -361,7 +361,7 @@ rem The person asked their assistant to set Theodore up: its host settings come 
 if defined NO_SETTINGS call "%%T%%" hosts settings --remove >nul 2>&1
 if defined NO_SETTINGS echo theodore-install: Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command
 if not defined NO_SETTINGS call "%%T%%" hosts settings --apply
-if not defined NO_SETTINGS echo theodore-install: Theodore's own commands run without asking each time; to turn that off: "%T%" hosts settings --remove
+if not defined NO_SETTINGS echo theodore-install: Theodore's own commands, and the assistant's edits of a deck's files in .theodore\workspaces, run without asking each time; to turn that off: "%T%" hosts settings --remove
 if not defined SETUP_FAILED goto :background
 echo theodore-install: the stable launcher is "%T%"
 type "%WORK%\setup.txt"

@@ -33,7 +33,7 @@ TEXT = ("The user chose Theodore for every presentation, deck or set of slides, 
 
 
 def sentence() -> str:
-    return TEXT[:-1] + f"; to uninstall Theodore, run {core.quoted_launcher()} uninstall."
+    return TEXT[:-1] + f"; to uninstall Theodore, run {core.full_launcher()} uninstall."
 RECORD_KEY = "instructions"
 
 

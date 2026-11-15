@@ -1937,6 +1937,83 @@ class Hosts(ClientCase):
         self.client("doctor")
         self.assertNotIn(f"Bash({launcher} *)", json.loads(settings.read_text())["permissions"]["allow"], "once: a rule the user took out stays out")
 
+    # --- the short command `theodore` and the workspace edit rule (lane PROMPTS, 0.4.1) ---------------------------------
+    def _short_command_box(self) -> tuple[Path, Path]:
+        self._fake_tools()
+        folder = self.box.user_home / ".local" / "bin"
+        self.box.env["PATH"] = f"{folder}{os.pathsep}{self.box.env['PATH']}"
+        settings = self.box.user_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"permissions": {"allow": ["Bash(git status)"]}}))
+        launcher = self.box.home / "bin" / "theodore"           # the stable launcher, here starting this client
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        from support import CLIENT_DIR
+        launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{CLIENT_DIR}" "$@"\n')
+        launcher.chmod(0o755)
+        return folder, settings
+
+    @unittest.skipIf(IS_WINDOWS, "the POSIX short command; Windows's is checked in test_windows_text")
+    def test_the_short_command_is_written_named_allowed_and_taken_back(self):
+        folder, settings = self._short_command_box()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        shim = folder / "theodore"
+        self.assertTrue(shim.is_file() and os.access(shim, os.X_OK), "written into the per-user folder on PATH, executable")
+        text = shim.read_text()
+        self.assertIn(str(self.box.home / "bin" / "theodore"), text, "it runs only the stable launcher, by its path")
+        self.assertIn("THEODORE_HOME=", text, "a home outside the default one goes with it")
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertIn("Bash(theodore *)", allow)
+        self.assertIn("Edit(**/.theodore/workspaces/**)", allow)
+        self.assertNotIn("PowerShell(theodore *)", allow, "PowerShell rules only on Windows")
+        for rule in allow:
+            self.assertNotIn(rule, ("Bash(*)", "Bash", "Edit", "Edit(**)", "Bash(cd *)", "Bash(sh *)"), "nothing broader than Theodore's own")
+        ran = subprocess.run([str(shim), "hosts", "settings"], env=self.box.env, capture_output=True, text=True, timeout=120)
+        first, nxt, _t = status_lines(ran.stdout)
+        self.assertTrue(first.startswith("THEODORE OK: settings on"), ran.stdout + ran.stderr)
+        self.assertIn("theodore hosts settings --remove", nxt, "texts name the short command once it is on PATH")
+        self.assertNotIn(f'"{self.box.home / "bin" / "theodore"}"', nxt, "and not the long quoted path")
+        rules = (Path(self.box.env["CODEX_HOME"]) / "rules" / "theodore.rules").read_text()
+        self.assertIn('prefix_rule(pattern = ["theodore"], decision = "allow")', rules, "Codex allows the same one name")
+        self.assertStatus(self.client("hosts", "settings", "--remove"), "OK", 0)
+        self.assertFalse(shim.exists(), "taken back with the settings")
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertEqual(allow, ["Bash(git status)"], "its rules and the workspace rule go too")
+        _f, nxt, _t = self.assertStatus(self.client("hosts", "settings"), "OK", 0)
+        self.assertIn(f'"{self.box.home / "bin" / "theodore"}" hosts settings --remove', nxt, "without it, the full path again")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertTrue(shim.is_file())
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertFalse(shim.exists(), "the uninstall's take-back removes it")
+
+    @unittest.skipIf(IS_WINDOWS, "the POSIX short command")
+    def test_a_short_command_the_person_deleted_stays_deleted_and_its_rule_goes(self):
+        folder, settings = self._short_command_box()
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        (folder / "theodore").unlink()
+        self.client("doctor")
+        self.assertFalse((folder / "theodore").exists(), "not written again by a later command")
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertNotIn("Bash(theodore *)", allow, "a rule for a name that is no longer Theodore's is taken out")
+        self.assertIn("Bash(git status)", allow)
+
+    @unittest.skipIf(IS_WINDOWS, "the POSIX short command")
+    def test_no_short_command_over_another_program_or_off_path(self):
+        folder, settings = self._short_command_box()
+        other = self.box.tmp / "otherbin"
+        other.mkdir()
+        (other / "theodore").write_text("#!/bin/sh\necho someone else\n")
+        (other / "theodore").chmod(0o755)
+        self.box.env["PATH"] = f"{other}{os.pathsep}{self.box.env['PATH']}"
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertFalse((folder / "theodore").exists(), "never where another theodore comes first")
+        self.assertNotIn("Bash(theodore *)", json.loads(settings.read_text())["permissions"]["allow"])
+        self.box.env["PATH"] = self.box.env["PATH"].replace(f"{other}{os.pathsep}", "")
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "theodore").write_text("#!/bin/sh\necho mine\n")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertEqual((folder / "theodore").read_text(), "#!/bin/sh\necho mine\n", "a file that is not Theodore's is never replaced")
+        self.assertNotIn("Bash(theodore *)", json.loads(settings.read_text())["permissions"]["allow"])
+
     def test_a_managed_policy_that_allows_only_its_own_rules_wins(self):
         self._fake_tools()
         managed = self.box.user_home / "managed-settings.json"

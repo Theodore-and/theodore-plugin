@@ -328,6 +328,8 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     elif part > total:
         raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     name = section or "SKILL.md"
+    for line in _LAUNCHER_LINES:        # "the launcher you used": named as this client names it (the short command when on PATH)
+        body = body.replace(line, f"Run {quoted_launcher()} with:")
     if section != "license" and skill != "pptx":   # a reference is a section of this guide, not a file: its link becomes the command that prints it (pptx references are files on disk)
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
@@ -875,8 +877,14 @@ def doctor(as_json: bool) -> int:
     written = _host_record().get(routing.RECORD_KEY) or {}
     add("ok", "instructions", "; ".join(f"{n}: {e.get('path')}" for n, e in sorted(written.items())) or "none written")
     if core.IS_WINDOWS and core.host_executable("claude") and not claude_git_bash():
-        add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
-            "load their instructions; Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
+        fetching = _git_fetching()
+        if fetching:        # Theodore's own PortableGit is on its way: nothing for the person to install (WINDOWS, W-9)
+            add("warn", "claude git bash", f"PortableGit is downloading in the background now ({fetching}); Theodore points Claude "
+                "Code at it when it is there, and a new session uses it; nothing to install")
+        else:
+            add("warn", "claude git bash", "not found: Claude Code then runs commands in PowerShell, where Theodore's skills cannot "
+                f"load their instructions; `{quoted_launcher()} tools install git` fetches PortableGit into Theodore's folder, "
+                "or Git for Windows (https://git-scm.com/downloads/win) provides Git Bash")
     notice = install.plugin_notice(daily=False)
     update = install.update_state().get("plugin_update") or {}
     if Job("plugin-update").alive():
@@ -939,8 +947,9 @@ def _still_missing(snap: dict) -> list[str]:
             missing.append(f"LibreOffice (slide previews): the next guide, doctor or rendering call starts its download again, "
                            f"or `{launcher} tools install libreoffice` now")
     if needs_git_bash():
-        git = Job("git")
-        missing.append("Git Bash for Claude Code: " + ("PortableGit is downloading in the background now" if git.alive() else
+        fetching = _git_fetching()
+        missing.append("Git Bash for Claude Code: " + (f"PortableGit is downloading in the background now ({fetching}); nothing to install"
+                                                       if fetching else
                        f"`{launcher} tools install git` fetches PortableGit into Theodore's folder (or install Git for Windows)"))
     return missing
 
@@ -996,7 +1005,10 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
         notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
                      else "Slide previews need LibreOffice, which is not installed.")
     if "claude git bash" in warned:
-        notes.append("Claude Code on this computer needs Git for Windows (git-scm.com) to load Theodore's skills; install it, then start a new session.")
+        notes.append("Theodore is fetching Git Bash for Claude Code in the background; nothing for you to install. Start a new "
+                     "session once it is there." if _git_fetching() else
+                     "Claude Code on this computer needs Git Bash to load Theodore's skills; I can fetch it into Theodore's folder, "
+                     "or you can install Git for Windows (git-scm.com). Then start a new session.")
     if desktop.reopen_needed(_host_record()):
         notes.append("To use Theodore in the Claude app's chats, quit the app and open it again once.")
     if "processor" in warned:
@@ -1313,6 +1325,17 @@ def _failure_cause(status_: Status) -> str:
     return found.group(1) if found else status_.name
 
 
+def _git_fetching() -> str | None:
+    """How far Theodore's own PortableGit download is ("downloading, 40%"), or None when it is not running."""
+    job = Job("git")
+    if not job.alive():
+        return None
+    state = job.read()
+    percent = state.get("percent")
+    phase = str(state.get("phase") or "downloading")
+    return f"{phase}, {int(percent)}%" if isinstance(percent, (int, float)) and percent > 0 else phase
+
+
 def needs_git_bash() -> bool:
     """Claude Code on Windows with no Git Bash where it looks: it would run Theodore's skill commands in PowerShell."""
     return core.IS_WINDOWS and bool(core.host_executable("claude")) and claude_git_bash() is None
@@ -1390,6 +1413,7 @@ def _claude_settings_path() -> Path:
 
 
 CLAUDE_MCP_RULE = "mcp__plugin_theodore_theodore"      # every tool of the plugin's own server (guide, specimen, list)
+CLAUDE_WORKSPACE_EDIT_RULE = "Edit(**/.theodore/workspaces/**)"     # Edit rules also cover Write (permissions docs)
 
 
 def _claude_skill_launchers() -> list[Path]:
@@ -1415,8 +1439,24 @@ def _permission_rules() -> list[str]:
     its own, so these also cover a pipe into or out of a read-only command and a `cd` inside the working folder."""
     launcher = str(core.home().launcher())
     rules = [f"Bash({launcher} *)", f'Bash("{launcher}" *)']
+    if core.IS_WINDOWS:
+        # Claude Code's PowerShell tool has its own rules (code.claude.com/docs/en/permissions#powershell). The launcher
+        # by its bare path matches when the path has no space; a quoted path needs `&`, which matched no rule in lane
+        # PROMPTS's probes on macOS (written for Windows, where WINDOWS checks it); the short command below always does.
+        rules += [f"PowerShell({launcher} *)", f'PowerShell(& "{launcher}" *)']
     for script in _claude_skill_launchers():
-        rules += [f'Bash("{script}" *)'] if core.IS_WINDOWS else [f'Bash(sh "{script}" *)', f"Bash(sh {script} *)"]
+        rules += [f'Bash("{script}" *)', f'PowerShell(& "{script}" *)'] if core.IS_WINDOWS \
+            else [f'Bash(sh "{script}" *)', f"Bash(sh {script} *)"]
+    if _shim_written():
+        # Theodore's short command by its one name, in the forms measured to match (lane PROMPTS, Claude Code 2.1.292):
+        # Bash `theodore …` alone, after `cd`, in pipes, loops and here-documents; PowerShell `theodore …` and `& theodore …`.
+        rules.append(f"Bash({core.SHIM_NAME} *)")
+        if core.IS_WINDOWS:
+            rules += [f"PowerShell({core.SHIM_NAME} *)", f"PowerShell(& {core.SHIM_NAME} *)"]
+    # The assistant's own edits of a deck's working files (deck.js, notes) in the deck workspaces Theodore's engine
+    # makes inside the user's folder: `<folder>/.theodore/workspaces/<deck>/`. Relative to the session's folder, at any
+    # depth under it; Theodore's own home (~/.theodore) has no `workspaces` folder, so its code is never covered.
+    rules.append(CLAUDE_WORKSPACE_EDIT_RULE)
     rules.append(CLAUDE_MCP_RULE)
     rules += [f"Skill({CLAUDE_PLUGIN}:{skill}{args})" for skill in ("pptx", "deck-design") for args in ("", " *")]
     # Reading Theodore's own folders: its home (the engine's texts), the engine's render caches (rendered slides) and the
@@ -1544,6 +1584,8 @@ def ensure_settings() -> None:
         if state == "off":
             return
         claude, codex = core.host_executable("claude"), core.host_executable("codex")
+        if claude or codex:
+            core.log(f"settings: {_shim_apply(only_new=state == 'on')}")
         for host, apply in ((claude, _claude_settings_apply), (codex, _codex_rules_apply)):
             if host:
                 core.log(f"settings: {apply(only_new=state == 'on')}")
@@ -1587,6 +1629,10 @@ def settings_remove() -> list[str]:
     _save_host_record(record)
     left: list[str] = []
     notes: list[str] = []
+    if record.get("shim"):
+        _shim_take_back(left, notes)
+        lines.append("the short command theodore removed" if not left else f"not removed: {'; '.join(left)}")
+        left = []
     if record.get("codex_rules"):
         _codex_rules_take_back(left, notes)
         lines.append("codex: Theodore's rules file removed" if not left else f"codex: not removed: {'; '.join(left)}")
@@ -1789,6 +1835,7 @@ def hosts(action: str, apply: bool, remove: bool = False) -> int:
             lines.append("claude-code: not found; nothing to set")
             lines.append("codex: not found; nothing to set")
         elif apply:
+            lines.append(_shim_apply())
             if claude:
                 lines.append(_claude_settings_apply())
             if codex:
@@ -1800,8 +1847,11 @@ def hosts(action: str, apply: bool, remove: bool = False) -> int:
             record = _host_record()
             what = []
             if claude:
-                what.append(f"Claude Code updates the Theodore plugin by itself and runs Theodore's own commands without a permission "
-                            f"prompt (entries in {_claude_settings_path()})")
+                what.append(f"Claude Code updates the Theodore plugin by itself, runs Theodore's own commands without a permission "
+                            f"prompt and edits a deck's working files in .theodore/workspaces without one (entries in {_claude_settings_path()})")
+            shim = _shim_paths(record)
+            if shim:
+                what.append(f"the short command {core.SHIM_NAME} ({', '.join(map(str, shim))}) runs Theodore's launcher")
             if codex:
                 what.append(f"Codex runs Theodore's commands without asking each time ({_codex_rules_path()}, Theodore's launcher by "
                             f"its exact paths; they run outside Codex's sandbox)")
@@ -1849,7 +1899,13 @@ def _claude_settings_apply(only_new: bool = False) -> str:
     if "allow" not in permissions:
         created.add("permissions.allow")
     allow = permissions.setdefault("allow", [])
-    added = [r for r in _permission_rules() if r not in allow and not (only_new and r in (record.get("rules") or []))] \
+    wanted = _permission_rules()
+    # A rule for the short command lives only as long as the command: when it is gone (taken out, or PATH changed),
+    # the rule Theodore wrote for it goes too, so it never allows another program of that name.
+    stale = [r for r in (record.get("rules") or []) if r in _short_rules() and r not in wanted]
+    allow[:] = [r for r in allow if r not in stale]
+    record["rules"] = [r for r in (record.get("rules") or []) if r not in stale]
+    added = [r for r in wanted if r not in allow and not (only_new and r in (record.get("rules") or []))] \
         if rules_allowed else []
     allow.extend(added)
     if not allow and "permissions.allow" in created:
@@ -1913,6 +1969,8 @@ def _codex_rule_patterns() -> list[list[str]]:
                 pattern = [str(script)] if core.IS_WINDOWS else ["sh", str(script)]
                 if pattern not in patterns:
                     patterns.append(pattern)
+    if _shim_written():
+        patterns.append([core.SHIM_NAME])       # the short command by its one name (it only runs the launcher)
     return patterns
 
 
@@ -1959,6 +2017,97 @@ def _codex_rules_take_back(left: list[str], notes: list[str]) -> None:
         _save_host_record(record)
     else:
         core.remove_tree(_host_record_path())
+
+
+# --- the short command `theodore` (lane PROMPTS) ---------------------------------------------------------------------
+# core.shim_texts says what it is. It is written into the first per-user folder on the PATH of the shell that runs the
+# set-up (core.shim_dir), never over a file that is not Theodore's, never where another `theodore` comes first on PATH,
+# and once only: a short command the person deleted is not written again (as a rule they took out).
+
+def _shim_paths(record: dict) -> list[Path]:
+    return [Path(p) for p in ((record.get("shim") or {}).get("files") or [])]
+
+
+def _shim_ours(path: Path) -> bool:
+    try:
+        return core.SHIM_MARK in path.read_text(encoding="utf-8", errors="replace")[:400]
+    except OSError:
+        return False
+
+
+def _shim_apply(only_new: bool = False) -> str:
+    record = _host_record()
+    texts = core.shim_texts()
+    folder = core.shim_dir()
+    if record.get("shim_gone") and only_new:
+        return "short command: left out (it was removed after Theodore wrote it)"
+    record.pop("shim_gone", None)
+    known = _shim_paths(record)
+    if known and not all(p.is_file() for p in known):
+        if only_new:                    # the person took it out: never written again
+            record["shim_gone"] = True
+            _save_host_record(record)
+            return "short command: left out (it was removed after Theodore wrote it)"
+    if not texts or not folder:
+        return "short command: not written (no per-user folder for it on this shell's PATH); Theodore's commands use the full launcher path"
+    if known and known[0].parent != folder:
+        _shim_take_back([], [])         # PATH changed since: the old one goes, the new one is written below
+        record = _host_record()
+    found = shutil.which(core.SHIM_NAME)
+    targets = [folder / name for name in texts]
+    if found and Path(found) not in targets and Path(found).parent != folder:
+        return f"short command: not written (another theodore comes first on PATH: {found})"
+    for path in targets:
+        if path.exists() and not _shim_ours(path):
+            return f"short command: not written ({path} exists and is not Theodore's)"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for path in targets:
+            if not path.is_file() or path.read_text(encoding="utf-8") != texts[path.name]:
+                core.write_atomic(path, texts[path.name], 0o755)
+    except OSError as exc:
+        return f"short command: not written ({exc.__class__.__name__}: {exc})"
+    record["shim"] = {"files": [str(p) for p in targets]}
+    _save_host_record(record)
+    core.shim_reset()
+    return f"short command: {core.SHIM_NAME} ({', '.join(str(p) for p in targets)})"
+
+
+def _shim_take_back(left: list[str], notes: list[str]) -> None:
+    record = _host_record()
+    shim = record.pop("shim", None)
+    if not shim:
+        return
+    kept = []
+    for path in _shim_paths({"shim": shim}):
+        if not path.exists():
+            continue
+        if not _shim_ours(path):
+            notes.append(f"{path} was replaced after Theodore wrote it, so it was left as it is")
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            left.append(f"the short command {path} ({exc.__class__.__name__})")
+            kept.append(str(path))
+    if kept:
+        record["shim"] = {"files": kept}
+    core.shim_reset()
+    if record:
+        _save_host_record(record)
+    else:
+        core.remove_tree(_host_record_path())
+
+
+def _short_rules() -> set[str]:
+    name = core.SHIM_NAME
+    return {f"Bash({name} *)", f"PowerShell({name} *)", f"PowerShell(& {name} *)"}
+
+
+def _shim_written() -> bool:
+    """The short command is this installation's and on PATH now (its rules are written only then)."""
+    core.shim_reset()
+    return bool(_host_record().get("shim")) and core.shim_active()
 
 
 def _legacy_marketplace(record: dict) -> dict | None:
@@ -2353,6 +2502,7 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
         if changed:
             edits.append(f"codex: its codex command was not found, so Theodore took back its registration by removing its two tables "
                          f"from {', '.join(changed)} directly (nothing else in the file changed)")
+    _shim_take_back(left, notes)
     _codex_rules_take_back(left, notes)
     record = _host_record()
     if "agents_skills" in record:
@@ -2384,6 +2534,30 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
 
 
 # --- the installer's plugin step ----------------------------------------------------------------------------------------
+
+CODEX_MCP_WINDOWS_COMMAND = "./skills/pptx/scripts/theodore.cmd"
+
+
+def _codex_mcp_for_windows(path: Path) -> None:
+    """Codex reads one mcp.json on every system, and the published one starts the tool server with `sh`, which Windows
+    does not have (no tool server, so Codex fell back to the shell route and its approvals). Codex's marketplace is
+    Theodore's own copy of the plugin (`codex plugin marketplace add <home>/plugin`), so on Windows that copy's entry
+    starts the batch launcher instead, the form lane WINDOWS saw start: written at every unpack, so plugin updates keep
+    it. Only the published `sh` form is changed; any other content is left as it is."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["theodore"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if not isinstance(entry, dict) or entry.get("command") != "sh":
+        return
+    args = entry.get("args")
+    if not isinstance(args, list) or not args or args[0] != "./skills/pptx/scripts/theodore":
+        return
+    entry["command"] = CODEX_MCP_WINDOWS_COMMAND
+    entry["args"] = args[1:]
+    core.write_atomic(path, json.dumps(data, indent=2) + "\n", 0o644)
+
 
 def install_plugin(dl_base: str, keys_text: str) -> int:
     """Fetch <dl>/plugin/latest.json, verify it with the keys the installer carries (they are pinned in the
@@ -2443,7 +2617,9 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
         raise core.internal("the plugin archive has no launcher.")
     core.remove_tree(home.plugin)
     os.rename(partial, home.plugin)
-    if not core.IS_WINDOWS:
+    if core.IS_WINDOWS:
+        _codex_mcp_for_windows(home.plugin / "plugins" / "theodore" / "mcp.json")
+    else:
         for name in ("pptx", "deck-design"):
             launcher = home.plugin / "plugins" / "theodore" / "skills" / name / "scripts" / "theodore"
             if launcher.exists():
@@ -2695,7 +2871,10 @@ def _cleanup_script(names: list[str], keep_specimen_record: bool) -> str:
               ":done", f"del /f /q {marker} >nul 2>&1", f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
     lines += [f'if exist "{root}\\{n}" (>>"{result}" echo left: {n})' for n in gone]
     # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
+    # Out of its own folder first: a process's current folder cannot be removed, so the empty
+    # %TEMP%\theodore-uninstall-<random> stayed after every uninstall (WINDOWS, W-12).
     lines += [f'if not exist "{root}" (>>"{result}" echo removed: the folder)', ":end", "ping -n 301 127.0.0.1 >nul",
+              'cd /d "%THEODORE_CLEANUP_WORK%\\.."',
               '(goto) 2>nul & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
               ":probe", f"if not exist {marker} exit /b 3", 'if not exist "%THEODORE_CLEANUP_SCRIPT%" exit /b 4', "exit /b 0"]
     text = "\r\n".join(lines) + "\r\n"
