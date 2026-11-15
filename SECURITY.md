@@ -40,9 +40,18 @@ What the client changes on this computer by itself: its own folder (client, runt
 the plugin), and, through the assistants' own plugin commands, the Theodore plugin in Claude Code and Codex when a
 newer one is published (it takes effect at their next session), and, when Claude Desktop is on this computer, one
 entry named `theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the
-uninstall removes it). It changes nothing else in their settings without your yes (`hosts settings --apply`: in
-Claude Code, plugin auto-update and a permission rule for the launcher; in Codex, `~/.codex/rules/theodore.rules`.
-With the Codex setting, Theodore's commands run outside Codex's sandbox without asking each time). A claude.ai account's plugin is never changed from a computer: the skill says
+uninstall removes it). Setting Theodore up also applies its host settings, without a separate question (the person
+asked their assistant to set Theodore up): in Claude Code (CLI, the desktop app's Code tab and the VS Code extension
+share `~/.claude/settings.json`), plugin auto-update for the Theodore marketplace and permission rules that allow only
+Theodore's own commands, by their exact installed paths (the stable launcher, the plugin's skill launchers and the
+plugin's own tool server), so they run without a prompt; in Codex, `~/.codex/rules/theodore.rules`, which allows
+Theodore's launcher by its exact paths. With the Codex rules, Theodore's commands, including the slide scripts it runs
+for your decks, run outside Codex's sandbox without asking each time. To leave them out, install with
+`--no-settings`; to take them back later, run `theodore hosts settings --remove` (the uninstall also removes exactly
+what was added). An organisation's managed Claude Code policy always wins: when it allows only its own permission
+rules, or does not allow Theodore's marketplace, Theodore does not add that setting, and `theodore doctor` says so in
+one line. An installation from before these settings were on by default gets them once, at its first Theodore
+command after it updates to 0.3.10, unless they were turned off. A claude.ai account's plugin is never changed from a computer: the skill says
 once per release how to update it there.
 
 ## What is sent

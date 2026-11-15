@@ -1702,39 +1702,87 @@ class Hosts(ClientCase):
         self.assertIn(f"claude plugin marketplace add {self.api.base}/marketplace.json", calls)
         self.assertIn("claude plugin install theodore@theodore", calls)
 
-    def test_settings_are_offered_then_applied_then_taken_back_exactly(self):
+    def test_settings_are_applied_then_removed_then_taken_back_exactly(self):
         self._fake_tools()
         settings = self.box.user_home / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True)
         original = {"permissions": {"allow": ["Bash(git status)"]}, "model": "opus"}
         settings.write_text(json.dumps(original))
-        offer = self.client("hosts", "settings")
-        _f, nxt, tell = self.assertStatus(offer, "OK", 0)
-        self.assertIn("only if they agree run", nxt)
-        self.assertIn("hosts settings --apply", nxt)
-        self.assertTrue(tell.startswith("TELL THE USER: Would you like"))
-        self.assertEqual(json.loads(settings.read_text()), original, "nothing changes without consent")
+        shown = self.client("hosts", "settings")
+        _f, nxt, _t = self.assertStatus(shown, "OK", 0)
+        self.assertIn("hosts settings --remove", nxt)
+        self.assertEqual(json.loads(settings.read_text()), original, "showing them changes nothing")
+        script = self.box.user_home / ".claude" / "plugins" / "cache" / "theodore" / "theodore" / "0.3.10" / "skills" / "pptx" / "scripts" / "theodore"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\n")
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         applied = json.loads(settings.read_text())
         self.assertTrue(applied["extraKnownMarketplaces"]["theodore"]["autoUpdate"])
         launcher = str(self.box.home / "bin" / "theodore")
-        self.assertIn(f"Bash({launcher} *)", applied["permissions"]["allow"])
-        self.assertIn("Bash(git status)", applied["permissions"]["allow"])
+        allow = applied["permissions"]["allow"]
+        self.assertIn(f"Bash({launcher} *)", allow)
+        self.assertIn("Bash(git status)", allow)
+        self.assertIn("mcp__plugin_theodore_theodore", allow)
+        if not IS_WINDOWS:
+            self.assertIn(f'Bash(sh "{script}" *)', allow)
+        for rule in allow:
+            self.assertNotIn(rule, ("Bash(*)", "Bash", "Bash(cd *)", "Bash(cat *)", "Bash(sh *)"))
+            if rule.startswith("Bash(") and rule != "Bash(git status)":
+                self.assertTrue(str(self.box.user_home) in rule or str(self.box.home) in rule, "only Theodore's own launchers, by their exact paths")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertEqual(json.loads(settings.read_text()), applied, "idempotent")
+        self.assertStatus(self.client("hosts", "settings", "--remove"), "OK", 0)
+        removed = json.loads(settings.read_text())
+        self.assertEqual(removed["permissions"]["allow"], ["Bash(git status)"])
+        self.assertEqual(removed, original, "exactly what the settings added is taken out")
+        self.client("doctor")
+        self.assertEqual(json.loads(settings.read_text()), removed, "off stays off: no command puts them back")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(json.loads(settings.read_text()), original, "exactly as before, no empty key left")
 
-    def test_codex_rules_only_with_consent_exact_paths_and_taken_back(self):
+    def test_an_installation_from_before_gets_the_settings_once_at_its_next_command(self):
+        self._fake_tools()
+        settings = self.box.user_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}")
+        self.client("doctor")
+        launcher = str(self.box.home / "bin" / "theodore")
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        self.assertIn(f"Bash({launcher} *)", allow)
+        taken_out = json.loads(settings.read_text())
+        taken_out["permissions"]["allow"] = [r for r in allow if r != f"Bash({launcher} *)"]
+        settings.write_text(json.dumps(taken_out))
+        self.client("doctor")
+        self.assertNotIn(f"Bash({launcher} *)", json.loads(settings.read_text())["permissions"]["allow"], "once: a rule the user took out stays out")
+
+    def test_a_managed_policy_that_allows_only_its_own_rules_wins(self):
+        self._fake_tools()
+        managed = self.box.user_home / "managed-settings.json"
+        managed.write_text(json.dumps({"allowManagedPermissionRulesOnly": True}))
+        settings = self.box.user_home / ".claude" / "settings.json"
+        with mock.patch.dict(os.environ, {"THEODORE_TEST_CLAUDE_MANAGED": str(managed)}):
+            self.box.env["THEODORE_TEST_CLAUDE_MANAGED"] = str(managed)
+            try:
+                self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+                doctor = self.client("doctor")
+            finally:
+                self.box.env.pop("THEODORE_TEST_CLAUDE_MANAGED")
+        applied = json.loads(settings.read_text())
+        self.assertNotIn("permissions", applied, "no rule the policy would ignore")
+        self.assertIn("allows only its own permission rules", doctor.stdout)
+
+    def test_codex_rules_exact_paths_idempotent_and_taken_back(self):
         self._fake_tools()
         (self.box.home / "plugin" / ".agents" / "plugins").mkdir(parents=True)
         (self.box.home / "plugin" / ".agents" / "plugins" / "marketplace.json").write_text("{}")
         rules = Path(self.box.env["CODEX_HOME"]) / "rules"
         rules.mkdir(parents=True)
         (rules / "default.rules").write_text('prefix_rule(pattern = ["git", "status"])\n')
-        offer = self.client("hosts", "settings")
-        first, nxt, tell = self.assertStatus(offer, "OK", 0)
-        self.assertIn("run outside Codex's sandbox", first)
-        self.assertIn("Theodore's commands run outside Codex's sandbox without asking each time", tell)
-        self.assertFalse((rules / "theodore.rules").exists(), "nothing without consent")
+        shown = self.client("hosts", "settings")
+        first, _nxt, _tell = self.assertStatus(shown, "OK", 0)
+        self.assertIn("outside Codex's sandbox", first)
+        self.assertFalse((rules / "theodore.rules").exists(), "showing them writes nothing")
         self.assertStatus(self.client("hosts", "register"), "OK", 0)
         self.assertFalse((rules / "theodore.rules").exists(), "a plain registration writes no rule")
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
@@ -1755,7 +1803,7 @@ class Hosts(ClientCase):
         with mock.patch.dict(os.environ, {"CODEX_SANDBOX": "seatbelt"}):
             status = api.setup_failed("DISK", "x is not writable")
         self.assertIn("outside the sandbox (one approval)", status.next_step)
-        self.assertIn("hosts settings --apply", status.next_step)
+        self.assertIn("hosts settings --remove", status.next_step)
 
     # --- Claude Desktop: the local server in the app's configuration file ------------------------------------
     def desktop_config(self, value=None) -> Path:

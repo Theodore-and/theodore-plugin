@@ -523,7 +523,7 @@ def _desktop_preference(action: str, args: dict) -> dict:
     if action != "list" and not isinstance(value, str):
         raise core.usage(f'preference_{action} needs {"text, the preference" if action == "add" else "id, as preference_list shows it"}.')
     out = _captured(lambda: commands.prefs(action, value if action != "list" else None))
-    return _text(out.replace("prefs list", f'action "preference_list"'))
+    return _text(out.replace("prefs list", 'action "preference_list"'))
 
 
 def _desktop_check(_args: dict) -> dict:

@@ -13,14 +13,20 @@
   unless the organisation turns them off. The app loads it when it is quit and opened again. Only that entry is
   written; a second run changes nothing; an entry named `theodore` that Theodore did not write is kept; uninstall
   takes back exactly the entry (and the `mcpServers` object when Theodore created it and it is empty).
-- Codex: `hosts settings --apply` (only with the user's yes) also writes `~/.codex/rules/theodore.rules`, rules that
-  allow Theodore's launcher by its exact installed paths. With this setting, Theodore's commands run outside Codex's
-  sandbox without asking each time. Uninstall deletes the file while it is still what Theodore wrote; other rules
-  are never touched. Without the yes nothing changes, and a refused write inside Codex's sandbox now names the one
-  approval it needs (TR-KN8R69).
-
-## 0.3.9
-
+- Host settings on by default (lane FRICTION): the installer applies `hosts settings --apply` itself, since the
+  person asked their assistant to set Theodore up. Claude Code (CLI, desktop Code tab, VS Code extension): plugin
+  auto-update and permission rules for Theodore's own commands only, by their exact installed paths: the stable
+  launcher bare and quoted, each skill launcher behind `sh` as the skills run it (Claude Code's plugin cache, one
+  folder per installed version, and Theodore's copy), and the plugin's tool server (`mcp__plugin_theodore_theodore`).
+  Codex: `~/.codex/rules/theodore.rules`, rules that allow Theodore's launcher by its exact installed paths; with it,
+  Theodore's commands run outside Codex's sandbox without asking each time. `--no-settings` leaves them out
+  (`--accept-settings` is still accepted and changes nothing); `theodore hosts settings --remove` takes back exactly
+  what they added and keeps them off; uninstall takes back exactly what was added. A managed Claude Code policy wins:
+  with `allowManagedPermissionRulesOnly`, or a marketplace policy that does not allow Theodore's, that setting is not
+  added and doctor says so in one line. An installation from before gets the settings once, at its first Theodore
+  command after updating to this version (unless turned off); later, rules are added only for launchers that are new
+  (a new plugin version's folder), never again one the user took out. The installer's last lines and doctor say in
+  one clause that Theodore's own commands run without asking, and how to turn that off.
 - A network where one of the service's addresses does not answer (it takes the connection and never the TLS
   handshake) no longer slows or breaks any client call. The client races the addresses (the next one starts 0.25 s
   after the one before, or at once when it failed; 3 s each to connect and finish the handshake) and keeps the one

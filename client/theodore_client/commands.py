@@ -805,6 +805,13 @@ def doctor(as_json: bool) -> int:
     if engine_failed.get("version") and engine_failed.get("version") != snap.get("engine"):
         add("warn", "engine update", f"engine {engine_failed['version']} is pending: it failed its check ({engine_failed.get('reason', 'unknown')}); "
             f"engine {snap.get('engine')} keeps working and the update is tried again after six hours")
+    if core.host_executable("claude") or core.host_executable("codex"):
+        off = _host_record().get("settings") == "off"
+        add("ok", "host settings", f"off: Claude Code and Codex ask before each Theodore command (on: {quoted_launcher()} hosts settings --apply)"
+            if off else f"on: Theodore's own commands run without asking each time (to turn that off: {quoted_launcher()} hosts settings --remove)")
+        note = claude_policy_note() if core.host_executable("claude") else None
+        if note:
+            add("ok", "claude policy", note)
     missing = _still_missing(snap)
     add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
     if resumed:
@@ -1298,9 +1305,74 @@ def _claude_settings_path() -> Path:
     return (Path(base) if base else Path.home() / ".claude") / "settings.json"
 
 
+CLAUDE_MCP_RULE = "mcp__plugin_theodore_theodore"      # every tool of the plugin's own server (guide, specimen, list)
+
+
+def _claude_skill_launchers() -> list[Path]:
+    """The plugin's skill launchers as Claude Code runs them (`sh "<skill folder>/scripts/theodore" ...`): in Claude
+    Code's plugin cache, one folder per installed version, and in Theodore's own copy of the plugin."""
+    base = _claude_settings_path().parent / "plugins" / "cache" / "theodore" / "theodore"
+    roots = [core.home().plugin / "plugins" / "theodore"]
+    if base.is_dir():
+        roots += sorted(p for p in base.iterdir() if p.is_dir())
+    found = []
+    for root in roots:
+        for skill in ("pptx", "deck-design"):
+            script = root / "skills" / skill / "scripts" / ("theodore.cmd" if core.IS_WINDOWS else "theodore")
+            if script.is_file():
+                found.append(script)
+    return found
+
+
 def _permission_rules() -> list[str]:
+    """Theodore's own commands, by their exact installed paths, in the forms the product's texts write them: the stable
+    launcher bare and quoted (the Bindings block's form), each skill launcher behind `sh` (the skills' own form; on
+    Windows the .cmd quoted), and the plugin's own tool server. Claude Code checks each part of a compound command on
+    its own, so these also cover a pipe into or out of a read-only command and a `cd` inside the working folder."""
     launcher = str(core.home().launcher())
-    return [f"Bash({launcher} *)", f'Bash("{launcher}" *)']
+    rules = [f"Bash({launcher} *)", f'Bash("{launcher}" *)']
+    for script in _claude_skill_launchers():
+        rules += [f'Bash("{script}" *)'] if core.IS_WINDOWS else [f'Bash(sh "{script}" *)', f"Bash(sh {script} *)"]
+    rules.append(CLAUDE_MCP_RULE)
+    if not core.IS_WINDOWS:     # reading Theodore's own folders (the engine's texts, rendered slides, specimen sheets)
+        for folder in (core.home().root, specimens.cache_root().parent):
+            rules.append(f"Read(/{folder}/**)")         # `//` starts an absolute path in a Claude Code Read rule
+    return rules
+
+
+def _claude_managed_settings() -> dict:
+    """The organisation's managed settings for Claude Code (the file its documentation names per system; {} when there
+    is none). Test seam: THEODORE_TEST_CLAUDE_MANAGED, honoured only when the API base is loopback."""
+    raw = os.environ.get("THEODORE_TEST_CLAUDE_MANAGED")
+    if raw and core.is_loopback_api():
+        path = Path(raw)
+    elif core.IS_WINDOWS:
+        path = Path(os.environ.get("ProgramFiles") or r"C:\Program Files") / "ClaudeCode" / "managed-settings.json"
+    elif sys.platform == "darwin":
+        path = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+    else:
+        path = Path("/etc/claude-code/managed-settings.json")
+    value = _load_settings(path) if path.exists() else {}
+    return value if isinstance(value, dict) else {}
+
+
+def claude_policy_note() -> str | None:
+    """One line for doctor when an organisation policy keeps Theodore's Claude Code settings from applying."""
+    managed = _claude_managed_settings()
+    if managed.get("allowManagedPermissionRulesOnly") is True:
+        return ("your organisation's Claude Code policy allows only its own permission rules, so Claude Code asks before "
+                "Theodore's commands; Theodore did not add its rule")
+    if not _claude_market_allowed(managed):
+        return ("your organisation's Claude Code policy decides which marketplaces may update, so Theodore did not turn on "
+                "its plugin's automatic updates")
+    return None
+
+
+def _claude_market_allowed(managed: dict) -> bool:
+    url = str(core.config().get("marketplace_url") or "")
+    blocked, strict = managed.get("blockedMarketplaces"), managed.get("strictKnownMarketplaces")
+    return not (isinstance(blocked, list) and any(url and url in json.dumps(b) for b in blocked)) and \
+        not (isinstance(strict, list) and not any(url and url in json.dumps(k) for k in strict))
 
 
 # What Theodore added or changed in each assistant's settings is recorded in state/host-settings.json when it does it
@@ -1349,8 +1421,76 @@ def _hosts_pending_path() -> Path:
 HOSTS_RETRY_S = 3600
 
 
+def ensure_settings() -> None:
+    """Theodore's host settings are on by default (`hosts settings --apply`, which the installer runs). An installation
+    from before they were (no "settings" in the record) gets them once, at its first command after the update; one
+    whose settings are on gets rules for launchers that are new since (a new plugin version's folder), never again a
+    rule the user took out; `hosts settings --remove` or the installer's --no-settings ("off") stops both. Never fails
+    or prints."""
+    try:
+        if not core.home().launcher().exists():
+            return
+        record = _host_record()
+        state = record.get("settings")
+        if state == "off":
+            return
+        claude, codex = core.host_executable("claude"), core.host_executable("codex")
+        for host, apply in ((claude, _claude_settings_apply), (codex, _codex_rules_apply)):
+            if host:
+                core.log(f"settings: {apply(only_new=state == 'on')}")
+    except Exception as exc:  # a convenience: never the reason a guide or doctor fails
+        core.log(f"settings: not applied ({exc.__class__.__name__}: {exc})")
+
+
+def settings_remove() -> list[str]:
+    """`hosts settings --remove`: take back the Claude Code rules and marketplace change and the Codex rules file that
+    the settings added (the registration and everything else stay), and keep them off."""
+    record = _host_record()
+    lines: list[str] = []
+    path = Path(record.get("path") or _claude_settings_path())
+    settings = _load_settings(path) if path.exists() else None
+    if isinstance(settings, dict) and (record.get("rules") or record.get("marketplace")):
+        permissions = settings.get("permissions")
+        allow = permissions.get("allow") if isinstance(permissions, dict) else None
+        if isinstance(allow, list):
+            permissions["allow"] = [r for r in allow if r not in (record.get("rules") or [])]
+        markets = settings.get("extraKnownMarketplaces")
+        entry = markets.get("theodore") if isinstance(markets, dict) else None
+        market = record.get("marketplace") or {}
+        if isinstance(entry, dict) and market.get("created") is False and market.get("set_auto_update") and entry.get("autoUpdate") is True:
+            prior = market.get("auto_update_prior") or {}
+            if prior.get("present"):
+                entry["autoUpdate"] = prior.get("value")
+            else:
+                entry.pop("autoUpdate", None)
+        elif isinstance(entry, dict) and market.get("created") and entry == market.get("entry"):
+            markets.pop("theodore")         # the settings created it: taken out whole
+        for key in sorted(record.get("created_keys") or [], key=lambda k: -k.count(".")):        # emptied keys it created
+            parent, _, leaf = key.rpartition(".")
+            holder = settings.get(parent) if parent else settings
+            if isinstance(holder, dict) and holder.get(leaf, None) in ([], {}):
+                del holder[leaf]
+        core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
+        record["rules"] = []
+        record.pop("marketplace", None)
+        lines.append(f"claude-code: Theodore's permission rules and automatic updates taken out of {path}")
+    record["settings"] = "off"
+    _save_host_record(record)
+    left: list[str] = []
+    notes: list[str] = []
+    if record.get("codex_rules"):
+        _codex_rules_take_back(left, notes)
+        lines.append("codex: Theodore's rules file removed" if not left else f"codex: not removed: {'; '.join(left)}")
+    record = _host_record()
+    record["settings"] = "off"
+    _save_host_record(record)
+    return lines + notes or ["nothing to take back"]
+
+
 def ensure_hosts() -> None:
-    """Finish the registration an installer left undone (see above). Never fails or prints in the command it runs in."""
+    """Finish the registration an installer left undone (see above), then the settings (ensure_settings). Never fails
+    or prints in the command it runs in."""
+    ensure_settings()
     marker = _hosts_pending_path()
     try:
         if not marker.exists():
@@ -1470,8 +1610,7 @@ def _register_hosts() -> list[str]:
     return lines
 
 
-def hosts(action: str, apply: bool) -> int:
-    home = core.home()
+def hosts(action: str, apply: bool, remove: bool = False) -> int:
     lines: list[str] = []
     claude, codex = core.host_executable("claude"), core.host_executable("codex")
     if action == "register":
@@ -1483,7 +1622,9 @@ def hosts(action: str, apply: bool) -> int:
         lines += [f"{name}: removed" for name, tool in (("claude-code", claude), ("codex", codex)) if tool]
         lines += edits + [f"not removed: {item}" for item in left] + notes
     elif action == "settings":
-        if not claude and not codex:
+        if remove:
+            lines += settings_remove()
+        elif not claude and not codex:
             lines.append("claude-code: not found; nothing to set")
             lines.append("codex: not found; nothing to set")
         elif apply:
@@ -1491,20 +1632,22 @@ def hosts(action: str, apply: bool) -> int:
                 lines.append(_claude_settings_apply())
             if codex:
                 lines.append(_codex_rules_apply())
+            note = claude_policy_note() if claude else None
+            if note:
+                lines.append(f"claude-code: {note}")
         else:
-            what, tell = [], []
+            record = _host_record()
+            what = []
             if claude:
-                what.append(f"Claude Code can update the Theodore plugin by itself and run {home.launcher()} without a permission prompt "
-                            f"(two entries in {_claude_settings_path()})")
-                tell.append("That changes two entries in your Claude Code settings.")
+                what.append(f"Claude Code updates the Theodore plugin by itself and runs Theodore's own commands without a permission "
+                            f"prompt (entries in {_claude_settings_path()})")
             if codex:
-                what.append(f"Codex can run Theodore's commands without asking each time ({_codex_rules_path()}, which allows "
-                            f"Theodore's launcher by its exact path; with it, Theodore's commands run outside Codex's sandbox)")
-                tell.append(CODEX_RULES_TELL)
-            return core.emit(Status("OK", f"optional, not applied: {'; '.join(what)}.",
-                                    f"ask the user whether they want that; only if they agree run: {quoted_launcher()} hosts settings --apply",
-                                    "Would you like Theodore's plugin to update itself and to run without asking permission each time? "
-                                    + " ".join(tell) + " Uninstalling Theodore takes it back."))
+                what.append(f"Codex runs Theodore's commands without asking each time ({_codex_rules_path()}, Theodore's launcher by "
+                            f"its exact paths; they run outside Codex's sandbox)")
+            state = "off (hosts settings --remove or --no-settings)" if record.get("settings") == "off" else "on"
+            return core.emit(Status("OK", f"settings {state}: {'; '.join(what) or 'no assistant found'}.",
+                                    f"to turn them off: {quoted_launcher()} hosts settings --remove; on again: "
+                                    f"{quoted_launcher()} hosts settings --apply", None))
     else:
         raise core.usage(f"unknown hosts action '{action}'.")
     for line in lines:
@@ -1518,7 +1661,7 @@ def hosts(action: str, apply: bool) -> int:
                             "Theodore is registered in the assistants found on this computer." if action == "register" else "Done."))
 
 
-def _claude_settings_apply() -> str:
+def _claude_settings_apply(only_new: bool = False) -> str:
     """Add exactly two things in Claude Code's user settings (marketplace auto-update and the launcher rule) and
     record what was added or changed: the rules, the keys and the file created, the marketplace entry created or the
     autoUpdate value it had before."""
@@ -1531,6 +1674,9 @@ def _claude_settings_apply() -> str:
             or not isinstance(markets.get("theodore", {}), dict):
         return f"claude-code: settings not changed ({path} has these keys in another shape than expected)"
     record = _host_record()
+    managed = _claude_managed_settings()
+    rules_allowed = managed.get("allowManagedPermissionRulesOnly") is not True      # never set what the policy forbids
+    market_allowed = _claude_market_allowed(managed)
     if record.get("file_created") and path.exists() and record.get("file_identity") != _identity(path):
         record["file_created"] = False      # replaced since Theodore made it: the user's file now, never Theodore's to delete
         record.pop("file_identity", None)
@@ -1542,13 +1688,22 @@ def _claude_settings_apply() -> str:
     if "allow" not in permissions:
         created.add("permissions.allow")
     allow = permissions.setdefault("allow", [])
-    added = [r for r in _permission_rules() if r not in allow]
+    added = [r for r in _permission_rules() if r not in allow and not (only_new and r in (record.get("rules") or []))] \
+        if rules_allowed else []
     allow.extend(added)
-    if "extraKnownMarketplaces" not in settings:
+    if not allow and "permissions.allow" in created:
+        permissions.pop("allow")
+        created.discard("permissions.allow")
+    if not permissions and "permissions" in created:
+        settings.pop("permissions")
+        created.discard("permissions")
+    if market_allowed and "extraKnownMarketplaces" not in settings:
         created.add("extraKnownMarketplaces")
-    markets = settings.setdefault("extraKnownMarketplaces", {})
     market = record.get("marketplace")
-    if "theodore" not in markets:
+    markets = settings.setdefault("extraKnownMarketplaces", {}) if market_allowed else {}
+    if not market_allowed:
+        pass
+    elif "theodore" not in markets:
         markets["theodore"] = {"source": {"source": "url", "url": str(core.config().get("marketplace_url") or "")}, "autoUpdate": True}
         market = {"created": True, "entry": json.loads(json.dumps(markets["theodore"]))}
     else:
@@ -1559,18 +1714,19 @@ def _claude_settings_apply() -> str:
         entry["autoUpdate"] = True
     core.write_atomic(path, json.dumps(settings, indent=2) + "\n", 0o644)
     record.update({"rules": sorted(set(record.get("rules") or []) | set(added)), "created_keys": sorted(created), "marketplace": market,
-                   "file_created": file_created, "path": str(path)})
+                   "file_created": file_created, "path": str(path), "settings": "on"})
     if file_created:
         record["file_identity"] = _identity(path)
     _save_host_record(record)
-    return f"claude-code: automatic updates on and launcher allowed in {path}"
+    done = (["automatic updates on"] if market_allowed else []) + (["Theodore's commands allowed"] if rules_allowed else [])
+    return f"claude-code: {' and '.join(done) or 'nothing set (your organisation policy decides these)'} in {path}"
 
 
 # --- Codex: a rules file for Theodore's launcher (lane ORGDIRECT, TR-KN8R69) ---------------------------------------
 # Codex's sandbox lets a command write only the workspace and, by default, reach no network, so every Theodore command
 # asks for an approval. A Codex rule with decision "allow" runs a matching command outside the sandbox without asking
-# (learn.chatgpt.com/docs/agent-configuration/rules). Written only by `hosts settings --apply` (the user's consent),
-# into a file of Theodore's own, matching the launcher by its exact installed paths; uninstall deletes the file while
+# (learn.chatgpt.com/docs/agent-configuration/rules). Written by `hosts settings --apply`, which the installer runs
+# (the person asked their assistant to set Theodore up; --no-settings or `hosts settings --remove` turns it off), into a file of Theodore's own, matching the launcher by its exact installed paths; uninstall deletes the file while
 # it is still what Theodore wrote.
 CODEX_RULES_TELL = ("With this setting, Theodore's commands run outside Codex's sandbox without asking each time, "
                     "including the slide scripts it runs for your decks.")
@@ -1600,22 +1756,25 @@ def _codex_rule_patterns() -> list[list[str]]:
 
 
 def _codex_rules_text() -> str:
-    lines = ["# Written by Theodore (hosts settings --apply, with the user's consent); its uninstall removes this file.",
+    lines = ["# Written by Theodore's set-up (hosts settings --apply); `theodore hosts settings --remove` and its uninstall remove this file.",
              "# Theodore's launcher, by its exact paths: with these rules its commands run outside Codex's sandbox without asking."]
     lines += [f"prefix_rule(pattern = {json.dumps(p)}, decision = \"allow\")" for p in _codex_rule_patterns()]
     return "\n".join(lines) + "\n"
 
 
-def _codex_rules_apply() -> str:
+def _codex_rules_apply(only_new: bool = False) -> str:
     path = _codex_rules_path()
     text = _codex_rules_text()
     record = _host_record()
+    if only_new and (not path.exists() or not record.get("codex_rules")):
+        return "codex: rules left as they are"
     if path.exists() and not record.get("codex_rules"):
         return f"codex: rules not changed ({path} exists and Theodore did not write it)"
     if path.exists() and core.sha256_file(path) != (record.get("codex_rules") or {}).get("sha256"):
         return f"codex: rules not changed ({path} was changed after Theodore wrote it)"
     core.write_atomic(path, text, 0o644)
     record["codex_rules"] = {"path": str(path), "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+    record["settings"] = "on"
     _save_host_record(record)
     return f"codex: Theodore's commands allowed to run without asking ({path})"
 

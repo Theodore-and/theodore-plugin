@@ -4,7 +4,9 @@ rem into %LOCALAPPDATA%\Theodore (or THEODORE_HOME). Written to be run by an AI 
 rem
 rem   install.cmd --code ABCD-1234        sign this computer in with a one-time code and set everything up
 rem   install.cmd                         the same, ending with a sign-in link instead of a code (no browser opens)
-rem   install.cmd --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
+rem   install.cmd --no-settings ...       leave out Theodore's host settings (on by default: plugin auto-update, and
+rem                                       Theodore's own commands allowed in Claude Code and Codex); --accept-settings
+rem                                       is still accepted and changes nothing
 rem   install.cmd --uninstall             remove Theodore from this computer
 rem
 rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
@@ -60,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.10"
-set "PIN_CLIENT=client/client-0.3.10.tar 3b19f477e9188b25415c0a41b323100377a066d399142f75ed1fa1158fbefa5f"
+set "PIN_CLIENT=client/client-0.3.10.tar 7d723405d5a75c67707c30bec503ab94ef77d7b110d3a86986d653dfac1a0470"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -72,7 +74,7 @@ set "HOME_DIR=%LOCALAPPDATA%\Theodore"
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
-set "ACCEPT="
+set "NO_SETTINGS="
 set "WORK="
 set "RC=0"
 rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
@@ -88,8 +90,9 @@ if "%~1"=="" goto :parsed
 if /i "%~1"=="--code" goto :arg_code
 if /i "%~1"=="--uninstall" set "UNINSTALL=1"
 if /i "%~1"=="--uninstall" goto :next_arg
-if /i "%~1"=="--accept-settings" set "ACCEPT=1"
 if /i "%~1"=="--accept-settings" goto :next_arg
+if /i "%~1"=="--no-settings" set "NO_SETTINGS=1"
+if /i "%~1"=="--no-settings" goto :next_arg
 goto :bad_option
 :next_arg
 shift
@@ -325,8 +328,11 @@ call "%T%" hosts register
 set "HOSTS_RC=%ERRORLEVEL%"
 rem Claude Code on Windows with no Git Bash cannot load the skills: PortableGit into Theodore's folder, Claude Code pointed at it.
 call "%T%" tools install git --if-needed
-if defined ACCEPT call "%T%" hosts settings --apply
-if not defined ACCEPT call "%T%" hosts settings
+rem The person asked their assistant to set Theodore up: its host settings come with it; --no-settings leaves them out.
+if defined NO_SETTINGS call "%T%" hosts settings --remove >nul 2>&1
+if defined NO_SETTINGS echo theodore-install: Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command
+if not defined NO_SETTINGS call "%T%" hosts settings --apply
+if not defined NO_SETTINGS echo theodore-install: Theodore's own commands run without asking each time; to turn that off: "%T%" hosts settings --remove
 if not defined SETUP_FAILED goto :background
 echo theodore-install: the stable launcher is %T%
 type "%WORK%\setup.txt"

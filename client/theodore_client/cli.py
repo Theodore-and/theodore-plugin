@@ -22,7 +22,7 @@ HELP = """Theodore client commands (run through the launcher):
   report --kind bug|feedback --title T --details D [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
   prefs add "<text>" | list | remove <id>
   packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
-  hosts register | unregister | settings [--apply]          activate --grant - | --grant-file F          uninstall
+  hosts register | unregister | settings [--apply | --remove]          activate --grant - | --grant-file F          uninstall
   usage [--show]                 where the usage counts stand; --show prints the next batch exactly as it would be sent
 """
 
@@ -102,6 +102,7 @@ def _parser() -> argparse.ArgumentParser:
     hs = sub.add_parser("hosts", add_help=False)
     hs.add_argument("action", choices=("register", "unregister", "settings"))
     hs.add_argument("--apply", action="store_true")
+    hs.add_argument("--remove", action="store_true")
     ac = sub.add_parser("activate", add_help=False)
     grant = ac.add_mutually_exclusive_group(required=True)
     grant.add_argument("--grant", help="'-': read the grant from standard input")
@@ -170,7 +171,7 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "setup":
         return commands.setup_job() if args.job else commands.setup(args.wait)
     if cmd == "hosts":
-        return commands.hosts(args.action, args.apply)
+        return commands.hosts(args.action, args.apply, args.remove)
     if cmd == "activate":
         return core.emit(account.activate_grant(account.read_grant(args.grant, args.grant_file)))
     if cmd == "uninstall":

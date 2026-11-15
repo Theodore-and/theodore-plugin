@@ -642,8 +642,9 @@ def setup_failed(cause: str, detail: str) -> Status:
         # Codex's sandbox lets a command write only the workspace: the one approval Theodore needs is for this command
         # to run outside it, once (lane ORGDIRECT, TR-KN8R69).
         nexts["DISK"] = (f"this runs inside Codex's sandbox, which does not let Theodore write {core.home().root}. Run the same command "
-                         f"again with permission to run outside the sandbox (one approval). To stop being asked for each Theodore "
-                         f"command, ask the user whether they want that; only if they agree run: {quoted_launcher()} hosts settings --apply")
+                         f"again with permission to run outside the sandbox (one approval). That same command also writes Theodore's "
+                         f"Codex rules, so its later commands are not asked about again (the user turns that off with "
+                         f"{quoted_launcher()} hosts settings --remove).")
     tells = {
         "NETWORK": "Theodore could not download its files. Please check the internet connection.",
         "TLS_INTERCEPT": "This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate.",

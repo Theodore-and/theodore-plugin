@@ -4,7 +4,9 @@
 #
 #   sh install.sh --code ABCD-1234        sign this computer in with a one-time code and set everything up
 #   sh install.sh                         the same, ending with a sign-in link instead of a code (no browser opens)
-#   sh install.sh --accept-settings ...   also turn on plugin auto-update and allow the launcher in Claude Code
+#   sh install.sh --no-settings ...       leave out Theodore's host settings (on by default: plugin auto-update, and
+#                                         Theodore's own commands allowed in Claude Code and Codex); --accept-settings
+#                                         is still accepted and changes nothing
 #   sh install.sh --uninstall             remove Theodore from this computer
 #
 # What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
@@ -30,7 +32,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.3.10"
-PIN_CLIENT="client/client-0.3.10.tar 3b19f477e9188b25415c0a41b323100377a066d399142f75ed1fa1158fbefa5f"
+PIN_CLIENT="client/client-0.3.10.tar 7d723405d5a75c67707c30bec503ab94ef77d7b110d3a86986d653dfac1a0470"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -43,7 +45,7 @@ HOME_DIR=${THEODORE_HOME:-${HOME:-}/.theodore}
 case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd -P)/$HOME_DIR" ;; esac
 CODE=
 UNINSTALL=
-ACCEPT=
+NO_SETTINGS=
 
 say() { printf 'theodore-install: %s\n' "$*"; }
 status() { printf 'THEODORE %s: %s\nNEXT: %s\nTELL THE USER: %s\n' "$1" "$3" "$4" "$5"; exit "$2"; }
@@ -58,7 +60,8 @@ while [ $# -gt 0 ]; do
     --code) CODE=${2:-}; shift ;;
     --code=*) CODE=${1#--code=} ;;
     --uninstall) UNINSTALL=1 ;;
-    --accept-settings) ACCEPT=1 ;;
+    --accept-settings) ;;                   # the settings are on by default now
+    --no-settings) NO_SETTINGS=1 ;;
     *) status USAGE 64 "unknown installer option $1." "run the installer with --code ABCD-1234, or with no option for a browser sign-in." \
          "I called the Theodore installer with a wrong option; I am correcting it." ;;
   esac
@@ -497,8 +500,15 @@ theodore() { THEODORE_HOME=$HOME_DIR sh "$T" "$@"; }
 say "registering Theodore in the assistants found on this computer"
 theodore hosts register
 HOSTS_RC=$?
-[ -n "$ACCEPT" ] && theodore hosts settings --apply
-[ -z "$ACCEPT" ] && theodore hosts settings
+# The person asked their assistant to set Theodore up: its host settings come with it (Theodore's own commands run
+# without a prompt, the plugin updates itself); --no-settings leaves them out, and an organisation policy always wins.
+if [ -n "$NO_SETTINGS" ]; then
+  theodore hosts settings --remove >/dev/null 2>&1
+  say "Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command"
+else
+  theodore hosts settings --apply
+  say "Theodore's own commands run without asking each time; to turn that off: \"$T\" hosts settings --remove"
+fi
 if [ -n "$SETUP_FAILED_OUT" ]; then
   say "the stable launcher is $T"
   printf '%s\n' "$SETUP_FAILED_OUT"

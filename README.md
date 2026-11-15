@@ -77,10 +77,14 @@ Outside that folder:
 - **Claude Desktop**, when the app is on the computer: one entry, `theodore`, in its `claude_desktop_config.json`,
   which starts `~/.theodore/bin/theodore mcp --for claude-desktop` so the app's chat can read Theodore's design
   guidance through one tool, `theodore` (it loads once the app is quit and opened again). Nothing else in that file changes.
-- **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
-  (automatic plugin updates for the Theodore marketplace; permission to run `~/.theodore/bin/theodore`
-  without a prompt), and in Codex the file `~/.codex/rules/theodore.rules`, which allows Theodore's launcher by its
-  exact path. With the Codex setting, Theodore's commands run outside Codex's sandbox without asking each time.
+- **Theodore's host settings**, applied by the installer (the person asked their assistant to set Theodore up):
+  in Claude Code's `settings.json` (shared by the CLI, the desktop app's Code tab and the VS Code extension),
+  automatic plugin updates for the Theodore marketplace and permission rules for Theodore's own commands only, by
+  their exact installed paths, so they run without a prompt; in Codex, the file `~/.codex/rules/theodore.rules`,
+  which allows Theodore's launcher by its exact paths. With the Codex rules, Theodore's commands run outside Codex's
+  sandbox without asking each time. Leave them out with the installer's `--no-settings`, take them back with
+  `theodore hosts settings --remove`; an organisation's managed policy always wins. An installation that updates to
+  0.3.10 gets them once, at its first Theodore command after the update, unless they were turned off.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. There are no hooks.
