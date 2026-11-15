@@ -2,6 +2,14 @@
 
 ## 0.4.0
 
+- A text is read whole (lane WHOLETEXT): under Claude Code (CLAUDECODE=1), `theodore guide <skill> [section]`
+  without `--part` prints the whole text as one document (one `form=whole` request; an older paging service is asked
+  for every part in order, and a part that cannot be had prints nothing of the text and names the missing part), so
+  the host keeps it whole inline or in its own saved-output file; Theodore still writes no guidance text to disk.
+  Every output begins with short status lines (its length; read a saved output in full, searching is not reading;
+  the plugin's guide tool returns it whole). Elsewhere, or with `--part`, each part says at its start and its end
+  that it is part N of M and that nothing in it may be acted on before all are read; the last part and a whole text
+  end by saying the text is complete. The local server's pptx manual is one document.
 - Claude Desktop's chat builds the deck with Theodore's engine on this computer, set up by the same install, with no
   connector. The local server's one tool (`theodore`, so "Always allow" is still clicked once) gains the actions:
   - `manual`: the build instructions;

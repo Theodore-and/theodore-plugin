@@ -167,6 +167,7 @@ class FakeApi:
         self.guide_queries: list[dict] = []
         self.guide_index: dict | None = None           # GET /v1/guide/deck-design?form=index; None: an older server (answers the text)
         self.guide_whole = True                        # False: an older server that ignores form=whole and pages
+        self.guide_fail_parts: set[int] = set()         # parts answered 503 (a part that cannot be had mid-way)
         self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
         self.preferences: list[dict] = []
         self.reports: list[dict] = []
@@ -572,6 +573,8 @@ class FakeApi:
             else:
                 parts = [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
             index = int(query.get("part", "1"))
+            if index in self.guide_fail_parts:
+                return self._error(h, 503, "unavailable", "part unavailable")
             if index < 1 or index > len(parts):
                 return self._error(h, 404, "not_found", "no such part")
             etag = '"' + sha256_hex((self.guide_version + parts[index - 1] + str(index) + str(query.get("form"))).encode("utf-8"))[:16] + '"'

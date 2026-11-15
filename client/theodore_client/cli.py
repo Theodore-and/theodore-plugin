@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     g = sub.add_parser("guide", add_help=False)
     g.add_argument("skill")
     g.add_argument("section", nargs="?")
-    g.add_argument("--part", type=int, default=1)
+    g.add_argument("--part", type=int, default=None)
     g.add_argument("--license", action="store_true")
     sp = sub.add_parser("specimen", add_help=False)
     sp.add_argument("files", nargs="*")
