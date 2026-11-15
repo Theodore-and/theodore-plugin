@@ -66,6 +66,17 @@
 
 ## 0.3.10
 
+- Licence (lane EXPOSURE): an engine command (`pptx …`, `python …`) whose stored licence is more than an hour old
+  starts one detached licence refresh, at most one an hour, never waited for and silent. A device revoked, or an
+  account suspended, deleted or without a plan, while the computer stays online and runs only engine commands now
+  stops within about an hour instead of when its licence expires (up to 7 days). Offline nothing changes.
+- Theodore's folder (`~/.theodore`) is this user's alone on macOS and Linux: the group's and others' permissions are
+  removed (the owner's are kept), so other accounts on the computer cannot read the engine, its manual or the packs.
+- A suspended account (403 `account_suspended`, which the service now also answers for its revoked computers while the
+  suspension lasts) is told so with Theodore's address and no sign-in link: a sign-in cannot help it. A plan refusal
+  says the plan is not active. After a suspension is lifted, the computer is told it needs one new sign-in.
+- `whoami` with a sign-in but no stored licence asks the service once: a refused account gets the refusal's status
+  (never "plan unknown … 1970-01-01"); offline it says no licence is stored yet.
 - Claude Desktop: when the app is on this computer, `hosts register` (the installer runs it) adds Theodore's local
   server to the app's own `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude`, Windows
   `%APPDATA%\Claude` and the Microsoft Store build's folder): the entry `theodore` runs this installation's stable

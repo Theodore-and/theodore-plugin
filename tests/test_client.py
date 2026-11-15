@@ -30,6 +30,8 @@ class SignIn(ClientCase):
         cred = self.box.home / "state" / "credentials"
         self.assertEqual(stat.S_IMODE(cred.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.box.home / "state" / "entitlement.json").stat().st_mode), 0o600)
+        if os.name != "nt":         # the engine, its manual and the packs: this user's alone (lane EXPOSURE)
+            self.assertEqual(stat.S_IMODE(self.box.home.stat().st_mode) & 0o077, 0)
         token = self.state("state/entitlement.json")["entitlement_token"]
         self.assertEqual(token.count("."), 2)
         secret = json.loads(cred.read_text())["installation_secret"]
@@ -2561,6 +2563,42 @@ class HostTest(ClientCase):
         workspace.mkdir()
         self.assertStatus(self.client("pptx", "start", str(workspace)), "SIGN_IN_REQUIRED", 65)
 
+    def test_an_engine_command_learns_a_revoke_from_its_hourly_background_check(self):
+        """Lane EXPOSURE: a device revoked while it stays online and runs only engine commands (no guide call) stopped
+        only when its licence expired (up to 7 days). An engine command now starts one detached refresh once the
+        licence is an hour old; the command itself never waits for it."""
+        self.ready()
+        job = self.box.home / "state" / "jobs" / "licence-check.json"
+        self.assertEqual(self.client("pptx", "exit", "0").returncode, 0)
+        self.box.wait_jobs()
+        self.assertFalse(job.exists(), "a licence issued less than an hour ago is not checked")
+        self.revoke()
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(2 * 3600)}
+        self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)     # this command runs: nothing waits
+        self.box.wait_jobs()
+        self.assertEqual(json.loads(job.read_text())["failed"]["cause"], "REFUSED")
+        self.gone()
+        self.assertStatus(self.client("pptx", "exit", "0", env=later), "SIGN_IN_REQUIRED", 65)
+
+    def test_the_background_licence_check_changes_nothing_offline_and_runs_at_most_once_an_hour(self):
+        self.ready()
+        job = self.box.home / "state" / "jobs" / "licence-check.json"
+        refreshes = self.api.refreshes
+        self.api.down = True
+        later = {"THEODORE_TEST_CLOCK_OFFSET": str(2 * 3600)}
+        self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)
+        self.box.wait_jobs()
+        first = json.loads(job.read_text())
+        self.assertEqual(first["failed"]["cause"], "NOT_CHECKED")
+        self.assertTrue((self.box.home / "state" / "entitlement.json").exists(), "offline: the licence stays")
+        self.assertTrue((self.box.home / "state" / "credentials").exists())
+        self.api.down = False
+        for _ in range(2):
+            self.assertEqual(self.client("pptx", "exit", "0", env=later).returncode, 0)
+            self.box.wait_jobs()
+        self.assertEqual(json.loads(job.read_text())["started"], first["started"], "at most one check an hour")
+        self.assertEqual(self.api.refreshes, refreshes)
+
     def test_every_command_that_learns_of_a_revoke_clears_the_sign_in(self):
         for command in (["update", "--check"], ["update", "--apply"], ["prefs", "list"], ["packs", "install", "--all"],
                         ["report", "--kind", "feedback", "--title", "A title", "--details", "Some details", "--origin", "user_requested"],
@@ -2906,6 +2944,45 @@ class Suspension(Revocation):
     """A suspended account (403 account_suspended) goes through the same central handler: every
     command that learns it ends with NO_ENTITLEMENT 70, prints no instructions, and deletes the licence. The credential
     is kept on purpose (the contract's 403: the installation is still valid and a suspension can be lifted)."""
+
+    def test_a_suspended_account_is_told_so_with_no_sign_in_link(self):
+        """Lane EXPOSURE: a sign-in cannot help a suspended account, so none is offered; the way out is Theodore."""
+        self.fresh()
+        self.api.account_state = "suspended"
+        work = self.box.tmp / "work"
+        work.mkdir()
+        result = self.client("guide", "deck-design", cwd=work)
+        first, nxt, tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+        self.assertIn("account is suspended", first)
+        self.assertIn("support@theodoreand.ai", tell)
+        self.assertNotIn("/device", result.stdout)
+        self.assertNotIn("sign-in", tell)
+        self.assertIn("do not start a sign-in", nxt)
+        self.api.account_state = "active"
+
+    def test_whoami_after_a_plan_refusal_says_the_plan_is_not_active(self):
+        """Lane EXPOSURE: before, whoami said "signed in … plan unknown … works offline until 1970-01-01"."""
+        self.fresh()
+        self.api.account_state = "inactive"
+        work = self.box.tmp / "work"
+        work.mkdir()
+        self.assertStatus(self.client("guide", "deck-design", cwd=work), "NO_ENTITLEMENT", 70)
+        result = self.client("whoami")
+        first, _nxt, tell = self.assertStatus(result, "NO_ENTITLEMENT", 70)
+        self.assertIn("plan is not active", first)
+        self.assertNotIn("1970", result.stdout)
+        self.api.account_state = "active"
+        first, _nxt, _tell = self.assertStatus(self.client("whoami"), "OK", 0)       # the plan is back: the licence comes back
+        self.assertIn("plan beta", first)
+
+    def test_whoami_offline_without_a_licence_says_so(self):
+        self.fresh()
+        (self.box.home / "state" / "entitlement.json").unlink()
+        self.api.down = True
+        first, _nxt, _tell = self.assertStatus(self.client("whoami"), "OK", 0)
+        self.assertIn("no licence is stored", first)
+        self.assertNotIn("1970", first)
+        self.api.down = False
 
     def test_every_command_that_contacts_the_service(self):
         report = ["report", "--kind", "bug", "--title", "A title", "--details", "Some details"]

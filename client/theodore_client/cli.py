@@ -112,6 +112,7 @@ def _parser() -> argparse.ArgumentParser:
     ip.add_argument("--keys", required=True)
     un = sub.add_parser("uninstall", add_help=False)
     un.add_argument("--keep-hosts", action="store_true")
+    sub.add_parser("licence-check", add_help=False)        # the detached refresh an engine command starts: not for assistants
     us = sub.add_parser("usage", add_help=False)
     us.add_argument("--show", action="store_true")
     return parser
@@ -180,6 +181,8 @@ def _dispatch(argv: list[str]) -> int:
         return commands.install_plugin(args.dl_base, args.keys)
     if cmd == "usage":
         return usage.show(args.show)
+    if cmd == "licence-check":
+        return account.licence_check_job()
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 
@@ -236,7 +239,7 @@ def _main(argv: list[str]) -> int:
 
 # Commands that never send the usage counts at their start: the one that shows them, and those that end the sign-in or
 # the installation (logout and uninstall remove the ledger).
-_NO_USAGE_FLUSH = ("usage", "logout", "uninstall", "install-plugin", "help", "-h", "--help")
+_NO_USAGE_FLUSH = ("usage", "logout", "uninstall", "install-plugin", "licence-check", "help", "-h", "--help")
 
 
 def _run(argv: list[str]) -> int:
