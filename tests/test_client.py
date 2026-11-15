@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
-from support import RUNTIME_ID, SITE, ClientCase, Sandbox, engine_zip, pack_zip, status_lines
+from support import IS_WINDOWS, RUNTIME_ID, SITE, ClientCase, Sandbox, engine_zip, pack_zip, status_lines
 
 DAY = 86400
 
@@ -1722,6 +1722,95 @@ class Hosts(ClientCase):
         self.assertIn("Bash(git status)", applied["permissions"]["allow"])
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(json.loads(settings.read_text()), original, "exactly as before, no empty key left")
+
+    def test_codex_rules_only_with_consent_exact_paths_and_taken_back(self):
+        self._fake_tools()
+        (self.box.home / "plugin" / ".agents" / "plugins").mkdir(parents=True)
+        (self.box.home / "plugin" / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        rules = Path(self.box.env["CODEX_HOME"]) / "rules"
+        rules.mkdir(parents=True)
+        (rules / "default.rules").write_text('prefix_rule(pattern = ["git", "status"])\n')
+        offer = self.client("hosts", "settings")
+        first, nxt, tell = self.assertStatus(offer, "OK", 0)
+        self.assertIn("run outside Codex's sandbox", first)
+        self.assertIn("Theodore's commands run outside Codex's sandbox without asking each time", tell)
+        self.assertFalse((rules / "theodore.rules").exists(), "nothing without consent")
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertFalse((rules / "theodore.rules").exists(), "a plain registration writes no rule")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        text = (rules / "theodore.rules").read_text()
+        launcher = str(self.box.home / "bin" / ("theodore.cmd" if IS_WINDOWS else "theodore"))
+        self.assertIn(f'prefix_rule(pattern = {json.dumps([launcher])}, decision = "allow")', text)
+        for line in text.splitlines():
+            if line.startswith("prefix_rule"):
+                self.assertIn(str(self.box.home), line, "only Theodore's own launchers, by their exact paths")
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        self.assertEqual((rules / "theodore.rules").read_text(), text, "idempotent")
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertFalse((rules / "theodore.rules").exists())
+        self.assertEqual((rules / "default.rules").read_text(), 'prefix_rule(pattern = ["git", "status"])\n', "other rules untouched")
+
+    def test_a_refused_write_in_codexs_sandbox_names_the_one_approval(self):
+        from theodore_client import api
+        with mock.patch.dict(os.environ, {"CODEX_SANDBOX": "seatbelt"}):
+            status = api.setup_failed("DISK", "x is not writable")
+        self.assertIn("outside the sandbox (one approval)", status.next_step)
+        self.assertIn("hosts settings --apply", status.next_step)
+
+    # --- Claude Desktop: the local server in the app's configuration file ------------------------------------
+    def desktop_config(self, value=None) -> Path:
+        folder = (Path(self.box.env["APPDATA"]) / "Claude") if IS_WINDOWS else (self.box.user_home / "Library" / "Application Support" / "Claude")
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "claude_desktop_config.json"
+        if value is not None:
+            path.write_text(json.dumps(value))
+        return path
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_claude_desktop_gets_the_local_server_once_and_uninstall_takes_back_only_it(self):
+        original = {"preferences": {"sidebarMode": "chat"}, "mcpServers": {"files": {"command": "npx", "args": ["files"]}}}
+        path = self.desktop_config(original)
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("claude-desktop: registered", first)
+        written = json.loads(path.read_text())
+        entry = written["mcpServers"]["theodore"]
+        self.assertEqual(entry["args"][-3:], ["mcp", "--for", "claude-desktop"])
+        self.assertIn(str(self.box.home / "bin"), " ".join([entry["command"], *entry["args"]]))
+        self.assertEqual(written["mcpServers"]["files"], original["mcpServers"]["files"])
+        self.assertEqual(written["preferences"], original["preferences"])
+        again, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("claude-desktop: already registered", again)
+        self.assertEqual(json.loads(path.read_text()), written, "a second run changes nothing")
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), original)
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_claude_desktop_an_mcp_servers_object_theodore_created_goes_and_a_users_theodore_entry_stays(self):
+        path = self.desktop_config({"preferences": {}})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), {"preferences": {}}, "the object Theodore created is gone too")
+        mine = {"mcpServers": {"theodore": {"command": "/opt/my/theodore", "args": []}}}
+        path.write_text(json.dumps(mine))
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("did not write", first)
+        self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), mine, "never Theodore's to remove")
+        path.write_text("{not json")
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "RETRY", 75)
+        self.assertIn("not a valid JSON object", first)
+        self.assertEqual(path.read_text(), "{not json")
+
+    @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
+    def test_claude_desktop_uninstall_takes_back_the_entry(self):
+        path = self.desktop_config({"preferences": {}})
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertStatus(self.client("uninstall"), "OK", 0)
+        self.assertEqual(json.loads(path.read_text()), {"preferences": {}})
+
+    def test_claude_desktop_not_on_this_computer_is_said_and_nothing_is_written(self):
+        first, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        self.assertIn("claude-desktop: not found on this computer", first)
 
     # --- uninstall restores exactly what was there -----------------------------------------------------------
     def settings_file(self, value=None) -> Path:

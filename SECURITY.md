@@ -38,8 +38,11 @@ command. LibreOffice, when Theodore fetches it, comes unmodified from The Docume
 
 What the client changes on this computer by itself: its own folder (client, runtime, engines, packs, its copy of
 the plugin), and, through the assistants' own plugin commands, the Theodore plugin in Claude Code and Codex when a
-newer one is published (it takes effect at their next session). It changes nothing else in their settings without
-your yes (`hosts settings --apply`). A claude.ai account's plugin is never changed from a computer: the skill says
+newer one is published (it takes effect at their next session), and, when Claude Desktop is on this computer, one
+entry named `theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the
+uninstall removes it). It changes nothing else in their settings without your yes (`hosts settings --apply`: in
+Claude Code, plugin auto-update and a permission rule for the launcher; in Codex, `~/.codex/rules/theodore.rules`.
+With the Codex setting, Theodore's commands run outside Codex's sandbox without asking each time). A claude.ai account's plugin is never changed from a computer: the skill says
 once per release how to update it there.
 
 ## What is sent

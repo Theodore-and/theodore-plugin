@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, install, routing, specimens, usage
+from . import __version__, account, api, core, credentials, desktop, install, routing, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -1455,6 +1455,7 @@ def _register_hosts() -> list[str]:
                      "installers put it)")
     else:
         lines.append("codex: not found on this computer")
+    lines += desktop.register(record)                              # Claude Desktop's chat: the local server
     record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
     lines += routed
     if record:
@@ -1480,16 +1481,28 @@ def hosts(action: str, apply: bool) -> int:
         lines += [f"{name}: removed" for name, tool in (("claude-code", claude), ("codex", codex)) if tool]
         lines += edits + [f"not removed: {item}" for item in left] + notes
     elif action == "settings":
-        if not claude:
+        if not claude and not codex:
             lines.append("claude-code: not found; nothing to set")
+            lines.append("codex: not found; nothing to set")
         elif apply:
-            lines.append(_claude_settings_apply())
+            if claude:
+                lines.append(_claude_settings_apply())
+            if codex:
+                lines.append(_codex_rules_apply())
         else:
-            return core.emit(Status("OK", f"optional, not applied: Claude Code can update the Theodore plugin by itself and run {home.launcher()} "
-                                          f"without a permission prompt (two entries in {_claude_settings_path()}).",
+            what, tell = [], []
+            if claude:
+                what.append(f"Claude Code can update the Theodore plugin by itself and run {home.launcher()} without a permission prompt "
+                            f"(two entries in {_claude_settings_path()})")
+                tell.append("That changes two entries in your Claude Code settings.")
+            if codex:
+                what.append(f"Codex can run Theodore's commands without asking each time ({_codex_rules_path()}, which allows "
+                            f"Theodore's launcher by its exact path; with it, Theodore's commands run outside Codex's sandbox)")
+                tell.append(CODEX_RULES_TELL)
+            return core.emit(Status("OK", f"optional, not applied: {'; '.join(what)}.",
                                     f"ask the user whether they want that; only if they agree run: {quoted_launcher()} hosts settings --apply",
                                     "Would you like Theodore's plugin to update itself and to run without asking permission each time? "
-                                    "That changes two entries in your Claude Code settings; uninstalling Theodore takes them back."))
+                                    + " ".join(tell) + " Uninstalling Theodore takes it back."))
     else:
         raise core.usage(f"unknown hosts action '{action}'.")
     for line in lines:
@@ -1549,6 +1562,81 @@ def _claude_settings_apply() -> str:
         record["file_identity"] = _identity(path)
     _save_host_record(record)
     return f"claude-code: automatic updates on and launcher allowed in {path}"
+
+
+# --- Codex: a rules file for Theodore's launcher (lane ORGDIRECT, TR-KN8R69) ---------------------------------------
+# Codex's sandbox lets a command write only the workspace and, by default, reach no network, so every Theodore command
+# asks for an approval. A Codex rule with decision "allow" runs a matching command outside the sandbox without asking
+# (learn.chatgpt.com/docs/agent-configuration/rules). Written only by `hosts settings --apply` (the user's consent),
+# into a file of Theodore's own, matching the launcher by its exact installed paths; uninstall deletes the file while
+# it is still what Theodore wrote.
+CODEX_RULES_TELL = ("With this setting, Theodore's commands run outside Codex's sandbox without asking each time, "
+                    "including the slide scripts it runs for your decks.")
+
+
+def _codex_rules_path() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "rules" / "theodore.rules"
+
+
+def _codex_rule_patterns() -> list[list[str]]:
+    """The stable launcher, and the plugin's two skill launchers where they are on disk now (Theodore's plugin copy and
+    Codex's cache of it), each as the skills run it."""
+    home = core.home()
+    patterns = [[str(home.launcher())]] + ([] if core.IS_WINDOWS else [["sh", str(home.launcher())]])
+    base = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "plugins" / "cache" / "theodore"
+    roots = [home.plugin / "plugins" / "theodore"]
+    if base.is_dir():
+        roots += sorted(p.parent for p in base.rglob("skills") if p.is_dir())
+    for root in roots:
+        for skill in ("pptx", "deck-design"):
+            script = root / "skills" / skill / "scripts" / ("theodore.cmd" if core.IS_WINDOWS else "theodore")
+            if script.is_file():
+                pattern = [str(script)] if core.IS_WINDOWS else ["sh", str(script)]
+                if pattern not in patterns:
+                    patterns.append(pattern)
+    return patterns
+
+
+def _codex_rules_text() -> str:
+    lines = ["# Written by Theodore (hosts settings --apply, with the user's consent); its uninstall removes this file.",
+             "# Theodore's launcher, by its exact paths: with these rules its commands run outside Codex's sandbox without asking."]
+    lines += [f"prefix_rule(pattern = {json.dumps(p)}, decision = \"allow\")" for p in _codex_rule_patterns()]
+    return "\n".join(lines) + "\n"
+
+
+def _codex_rules_apply() -> str:
+    path = _codex_rules_path()
+    text = _codex_rules_text()
+    record = _host_record()
+    if path.exists() and not record.get("codex_rules"):
+        return f"codex: rules not changed ({path} exists and Theodore did not write it)"
+    if path.exists() and core.sha256_file(path) != (record.get("codex_rules") or {}).get("sha256"):
+        return f"codex: rules not changed ({path} was changed after Theodore wrote it)"
+    core.write_atomic(path, text, 0o644)
+    record["codex_rules"] = {"path": str(path), "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+    _save_host_record(record)
+    return f"codex: Theodore's commands allowed to run without asking ({path})"
+
+
+def _codex_rules_take_back(left: list[str], notes: list[str]) -> None:
+    record = _host_record()
+    rules = record.pop("codex_rules", None)
+    if not rules:
+        return
+    path = Path(rules.get("path") or _codex_rules_path())
+    if path.is_file():
+        if core.sha256_file(path) != rules.get("sha256"):
+            notes.append(f"codex: {path} was changed after Theodore wrote it, so it was left as it is")
+        else:
+            try:
+                path.unlink()
+            except OSError as exc:
+                left.append(f"the Codex rules file {path} ({exc.__class__.__name__})")
+                record["codex_rules"] = rules
+    if record:
+        _save_host_record(record)
+    else:
+        core.remove_tree(_host_record_path())
 
 
 def _legacy_marketplace(record: dict) -> dict | None:
@@ -1943,6 +2031,16 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
         if changed:
             edits.append(f"codex: its codex command was not found, so Theodore took back its registration by removing its two tables "
                          f"from {', '.join(changed)} directly (nothing else in the file changed)")
+    _codex_rules_take_back(left, notes)
+    record = _host_record()
+    if desktop.RECORD_KEY in record:
+        changed = desktop.unregister(record, left, notes)
+        if changed:
+            edits.append(f"claude-desktop: its theodore entry was removed from {', '.join(changed)} (nothing else in the file changed)")
+        if record:
+            _save_host_record(record)
+        else:
+            core.remove_tree(_host_record_path())
     _take_back_instructions(left)
     _codex_leftovers()                      # reads the record: before it goes
     if len(left) == problems_before:

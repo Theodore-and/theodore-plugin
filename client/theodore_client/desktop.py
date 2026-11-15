@@ -1,0 +1,163 @@
+"""Claude Desktop: Theodore's local server as an entry in the app's own configuration file.
+
+Why: on a Claude Team or Enterprise plan only an Owner can add a remote connector, while local MCP servers in
+claude_desktop_config.json are on for every member unless the organisation turns them off (MDM key
+`isLocalDevMcpEnabled`, default true; Enterprise: "Allow local MCP servers"). The entry runs this installation's
+stable launcher, `theodore mcp --for claude-desktop`, which serves the guidance and the specimen sheets through this
+computer's own sign-in, held in memory only (mcp.py). The app reads the file when it starts.
+
+Only the `mcpServers.theodore` entry is ever written or removed; every other key, server and preference stays as it
+was. The record (state/host-settings.json, key `claude_desktop`) says which file it was written to, the entry as
+written and whether Theodore created the `mcpServers` object, so the uninstall takes back exactly that, and an entry
+the user made or changed since is never removed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from . import core
+
+ENTRY_NAME = "theodore"
+RECORD_KEY = "claude_desktop"
+FOR = "claude-desktop"
+
+
+def config_dirs() -> list[Path]:
+    """The app's folders that exist on this computer (it creates its folder on first start)."""
+    if core.IS_WINDOWS:
+        found = []
+        appdata = os.environ.get("APPDATA")
+        if appdata and (Path(appdata) / "Claude").is_dir():
+            found.append(Path(appdata) / "Claude")
+        # The Microsoft Store build keeps its roaming folder inside its package.
+        local = os.environ.get("LOCALAPPDATA")
+        packages = Path(local) / "Packages" if local else None
+        if packages and packages.is_dir():
+            for package in sorted(packages.glob("Claude_*")):
+                folder = package / "LocalCache" / "Roaming" / "Claude"
+                if folder.is_dir():
+                    found.append(folder)
+        return found
+    if os.uname().sysname == "Darwin":
+        folder = Path.home() / "Library" / "Application Support" / "Claude"
+        return [folder] if folder.is_dir() else []
+    return []                               # Claude Desktop is published for macOS and Windows only
+
+
+def entry() -> dict:
+    """The entry for this installation. On Windows the launcher is a batch file, which the app starts through cmd."""
+    launcher = str(core.home().launcher())
+    if core.IS_WINDOWS:
+        return {"command": os.environ.get("COMSPEC") or "cmd.exe", "args": ["/d", "/c", launcher, "mcp", "--for", FOR]}
+    return {"command": launcher, "args": ["mcp", "--for", FOR]}
+
+
+def _ours(value, written: dict | None) -> bool:
+    """An entry Theodore wrote: the one recorded, or one that runs this installation's launcher with `mcp --for`."""
+    if not isinstance(value, dict):
+        return False
+    if written is not None and value == written:
+        return True
+    return value == entry()
+
+
+def _load(path: Path):
+    """The file's object, {} when there is no file, None when it is not a JSON object (then nothing is touched)."""
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write(path: Path, value: dict) -> None:
+    core.write_atomic(path, json.dumps(value, indent=2, ensure_ascii=False) + "\n", 0o644 if not core.IS_WINDOWS else None)
+
+
+def register(record: dict) -> list[str]:
+    """Add the entry to each Claude Desktop configuration file found; one line per file. Idempotent."""
+    folders = config_dirs()
+    if not folders:
+        return ["claude-desktop: not found on this computer"]
+    lines = []
+    files = record.get(RECORD_KEY) or {}
+    for folder in folders:
+        path = folder / "claude_desktop_config.json"
+        settings = _load(path)
+        if settings is None:
+            lines.append(f"claude-desktop: FAILED ({path} is not a valid JSON object; it was not changed)")
+            continue
+        servers = settings.get("mcpServers")
+        if servers is not None and not isinstance(servers, dict):
+            lines.append(f"claude-desktop: FAILED ({path} has mcpServers in another shape than expected; it was not changed)")
+            continue
+        mine = files.get(str(path)) or {}
+        current = (servers or {}).get(ENTRY_NAME)
+        wanted = entry()
+        if current is not None and not _ours(current, mine.get("entry")):
+            lines.append(f"claude-desktop: an entry named {ENTRY_NAME} that Theodore did not write is in {path}; it was kept")
+            files.setdefault(str(path), {"ours": False})
+            continue
+        if current == wanted:
+            lines.append("claude-desktop: already registered")
+        else:
+            created_servers = servers is None
+            settings.setdefault("mcpServers", {})[ENTRY_NAME] = wanted
+            try:
+                _write(path, settings)
+            except OSError as exc:
+                lines.append(f"claude-desktop: FAILED ({path} could not be written: {exc.__class__.__name__})")
+                continue
+            lines.append("claude-desktop: registered (it loads when the Claude app is quit and opened again)")
+            mine = {"ours": True, "created_servers": bool(mine.get("created_servers")) or created_servers}
+        mine.update({"ours": True, "entry": wanted})
+        files[str(path)] = mine
+    if files:
+        record[RECORD_KEY] = files
+    return lines
+
+
+def unregister(record: dict, left: list[str], notes: list[str]) -> list[str]:
+    """Remove the entries the record says Theodore wrote, each only while it is still what Theodore wrote. Returns the
+    files changed. Updates `record` in place (the key goes once nothing is left to take back)."""
+    files = record.get(RECORD_KEY) or {}
+    changed = []
+    for name, mine in list(files.items()):
+        path = Path(name)
+        if not mine.get("ours"):
+            files.pop(name)
+            notes.append(f"claude-desktop: the {ENTRY_NAME} entry in {path} was there before Theodore and was kept")
+            continue
+        settings = _load(path)
+        if settings is None:
+            left.append(f"the {ENTRY_NAME} entry in {path} (the file is not a valid JSON object now; remove the entry by hand)")
+            continue
+        servers = settings.get("mcpServers")
+        current = servers.get(ENTRY_NAME) if isinstance(servers, dict) else None
+        if current is None:
+            files.pop(name)
+            continue
+        if not _ours(current, mine.get("entry")):
+            files.pop(name)
+            notes.append(f"claude-desktop: the {ENTRY_NAME} entry in {path} was changed after Theodore wrote it, so it was left as it is")
+            continue
+        del servers[ENTRY_NAME]
+        if mine.get("created_servers") and servers == {}:
+            del settings["mcpServers"]
+        try:
+            _write(path, settings)
+        except OSError as exc:
+            left.append(f"the {ENTRY_NAME} entry in {path} ({exc.__class__.__name__}; remove it by hand)")
+            continue
+        files.pop(name)
+        changed.append(str(path))
+    if files:
+        record[RECORD_KEY] = files
+    else:
+        record.pop(RECORD_KEY, None)
+    return changed

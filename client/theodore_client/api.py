@@ -638,6 +638,12 @@ def setup_failed(cause: str, detail: str) -> Status:
         "DISK": f"free disk space or make {core.home().root} writable, then run the same command again.",
         "HASH_MISMATCH": "run the same command again. If it fails twice, stop and tell the user to write to support@theodoreand.ai.",
     }
+    if cause == "DISK" and core.codex_sandboxed():
+        # Codex's sandbox lets a command write only the workspace: the one approval Theodore needs is for this command
+        # to run outside it, once (lane ORGDIRECT, TR-KN8R69).
+        nexts["DISK"] = (f"this runs inside Codex's sandbox, which does not let Theodore write {core.home().root}. Run the same command "
+                         f"again with permission to run outside the sandbox (one approval). To stop being asked for each Theodore "
+                         f"command, ask the user whether they want that; only if they agree run: {quoted_launcher()} hosts settings --apply")
     tells = {
         "NETWORK": "Theodore could not download its files. Please check the internet connection.",
         "TLS_INTERCEPT": "This network inspects secure connections and blocked Theodore's download. Your IT team can fix it by installing the company certificate.",

@@ -74,9 +74,13 @@ Outside that folder:
   `%USERPROFILE%\.cache` and `%TEMP%`); the uninstall removes all of them (only files of the names the engine writes).
 - **Your deck workspaces** get one small file, `.pptx-state/theodore-engine.json`, naming the engine version
   that started the workspace, so an update never changes a deck halfway through.
+- **Claude Desktop**, when the app is on the computer: one entry, `theodore`, in its `claude_desktop_config.json`,
+  which starts `~/.theodore/bin/theodore mcp --for claude-desktop` so the app's chat can read Theodore's design
+  guidance (it loads once the app is quit and opened again). Nothing else in that file changes.
 - **Only if you say yes** when the installer offers it: two entries in Claude Code's `settings.json`
   (automatic plugin updates for the Theodore marketplace; permission to run `~/.theodore/bin/theodore`
-  without a prompt).
+  without a prompt), and in Codex the file `~/.codex/rules/theodore.rules`, which allows Theodore's launcher by its
+  exact path. With the Codex setting, Theodore's commands run outside Codex's sandbox without asking each time.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. There are no hooks.
@@ -129,7 +133,9 @@ when nothing else is in it). What is left afterwards:
   marketplace entry it created (left as it is, and said so, if you changed it since), restores an `autoUpdate` value
   it changed (an explicit `false` included), removes a marketplace only if Theodore's registration added it, and
   removes a key, an empty `config.toml` or a `settings.json` only if Theodore created it and it is empty again.
-  Anything you added, empty or not, stays. Codex's empty plugin cache folder for Theodore goes.
+  Anything you added, empty or not, stays. Codex's empty plugin cache folder for Theodore goes, and so does its
+  `theodore.rules` while it is still what Theodore wrote. In Claude Desktop's `claude_desktop_config.json`, only the
+  `theodore` entry Theodore wrote goes (and `mcpServers` if Theodore created it and it is empty again).
 - Your account at theodoreand.ai. Remove this device, or the account, in the portal.
 
 If the launcher is gone, deleting those subfolders and the keychain item by hand does the same.

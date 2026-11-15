@@ -21,8 +21,8 @@ ENTRY = "# Deck design\n\nENTRY-MARKER é—“quoted”\n" + "".join(f"line {i:
 class Server:
     """One `theodore mcp` process: send a message, read its answer line."""
 
-    def __init__(self, case: ClientCase, env: dict | None = None):
-        self.proc = subprocess.Popen([sys.executable, "-I", str(CLIENT_DIR), "mcp"], env={**case.box.env, **(env or {})},
+    def __init__(self, case: ClientCase, env: dict | None = None, args: tuple = ()):
+        self.proc = subprocess.Popen([sys.executable, "-I", str(CLIENT_DIR), "mcp", *args], env={**case.box.env, **(env or {})},
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(case.box.tmp))
         self.next_id = 0
         self.notifications: list[dict] = []
@@ -227,6 +227,39 @@ class Guide(McpCase):
         section = tool["inputSchema"]["properties"]["section"]
         self.assertEqual(section["anyOf"][0]["enum"], ["craft"])
         self.assertEqual(section["anyOf"][1], {"type": "string"})
+
+
+class ClaudeDesktop(McpCase):
+    """`mcp --for claude-desktop`: the entry Theodore writes in Claude Desktop's configuration (desktop.py)."""
+
+    def test_the_connector_names_deck_design_only_and_the_same_texts(self):
+        self.sign_in()
+        self.api.guide_index = INDEX
+        self.api.guides["deck-design"][""] = ENTRY
+        self.api.guides["deck-design"]["craft"] = "CRAFT TEXT\n"
+        self.api.specimens = {"cover-01.jpg": JPEG}
+        server = self.server(args=("--for", "claude-desktop"))
+        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
+        self.assertEqual(sorted(tools), ["theodore_begin", "theodore_guide", "theodore_specimen"])
+        for tool in tools.values():
+            self.assertTrue(tool["annotations"]["readOnlyHint"])
+            self.assertTrue(tool["title"])
+            for phrase in ("call this first", "before any", "instead of", "built-in"):
+                self.assertNotIn(phrase, tool["description"].lower(), "directory review: no routing over other tools")
+        self.assertEqual(tools["theodore_guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
+        self.assertNotIn("skill", tools["theodore_guide"]["inputSchema"]["properties"])
+        begin = server.call("theodore_begin")
+        self.assertEqual(begin["content"][0]["text"], ENTRY)
+        self.assertEqual(server.call("theodore_guide", section="craft")["content"][0]["text"], "CRAFT TEXT\n")
+        image = server.call("theodore_specimen", file="cover-01.jpg")["content"][0]
+        self.assertEqual(base64.b64decode(image["data"]), JPEG)
+        self.assertIn("tool", {q.get("bindings") for q in self.api.guide_queries})
+        self.assertIn("unknown tool", server.call("guide", skill="deck-design")["content"][0]["text"], "the plugin's names are not served here")
+        self.assertEqual(server.close(), b"")
+
+    def test_without_the_flag_the_plugin_server_is_unchanged(self):
+        server = self.server(args=("--for", "something-else"))
+        self.assertEqual(sorted(t["name"] for t in server.send("tools/list")["result"]["tools"]), ["guide", "list", "specimen"])
 
 
 class Specimen(McpCase):

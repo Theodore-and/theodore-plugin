@@ -205,7 +205,9 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.suppress(Exception):
             account.register_disk_secrets()
         specimens.sweep()
-        return mcp.serve(blocked=blocked)
+        rest = argv[1:]
+        for_host = rest[rest.index("--for") + 1] if "--for" in rest[:-1] else None
+        return mcp.serve(blocked=blocked, for_host=for_host)
     if argv[:1] == ["skill"]:       # injected into a skill by the host: whatever happens, exit 0 with something to act on
         code = _main(argv)
         return 0 if code != 130 else code

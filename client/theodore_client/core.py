@@ -195,6 +195,11 @@ def _chatgpt_cloud() -> bool:
         and (bool(os.environ.get("CODEX_PROXY_CERT")) or Path("/opt/codex/runtimes").is_dir())
 
 
+def codex_sandboxed() -> bool:
+    """This command runs inside Codex's local sandbox (Codex sets CODEX_SANDBOX for the commands it sandboxes)."""
+    return bool(os.environ.get("CODEX_SANDBOX")) and not _chatgpt_cloud()
+
+
 def host_name() -> str:
     """The assistant that called us, as far as the environment says (sent as `host`).
 

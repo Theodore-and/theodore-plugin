@@ -1,5 +1,22 @@
 # Changes
 
+## 0.3.10
+
+- Claude Desktop: when the app is on this computer, `hosts register` (the installer runs it) adds Theodore's local
+  server to the app's own `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude`, Windows
+  `%APPDATA%\Claude` and the Microsoft Store build's folder): the entry `theodore` runs this installation's stable
+  launcher, `theodore mcp --for claude-desktop`. Desktop chat then has `theodore_begin`, `theodore_guide` and
+  `theodore_specimen` (deck-design guidance and specimen sheets through this computer's sign-in, held in memory
+  only), with no connector an organisation Owner must add: local servers are on for Team and Enterprise members
+  unless the organisation turns them off. The app loads it when it is quit and opened again. Only that entry is
+  written; a second run changes nothing; an entry named `theodore` that Theodore did not write is kept; uninstall
+  takes back exactly the entry (and the `mcpServers` object when Theodore created it and it is empty).
+- Codex: `hosts settings --apply` (only with the user's yes) also writes `~/.codex/rules/theodore.rules`, rules that
+  allow Theodore's launcher by its exact installed paths. With this setting, Theodore's commands run outside Codex's
+  sandbox without asking each time. Uninstall deletes the file while it is still what Theodore wrote; other rules
+  are never touched. Without the yes nothing changes, and a refused write inside Codex's sandbox now names the one
+  approval it needs (TR-KN8R69).
+
 ## 0.3.9
 
 - A network where one of the service's addresses does not answer (it takes the connection and never the TLS

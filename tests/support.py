@@ -316,6 +316,7 @@ class Sandbox:
                         "COMPUTERNAME", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "NUMBER_OF_PROCESSORS"):
                 if key in os.environ:
                     self.env[key] = os.environ[key]
+            self.env["APPDATA"] = str(self.user_home / "AppData" / "Roaming")     # Claude Desktop's folder: never the real one
         (self.tmp / "tmp").mkdir()
         if api:
             self.write_launcher_json()
