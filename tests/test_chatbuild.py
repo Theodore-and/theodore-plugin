@@ -21,6 +21,7 @@ from test_mcp import JPEG, McpCase, Server  # noqa: E402
 from theodore_client import chatbuild, core  # noqa: E402
 
 GUARD = CLIENT_DIR / "theodore_client" / "node_guard.js"
+DEFAULT = ("Theodore",) if sys.platform == "darwin" else ("Documents", "Theodore")     # a fresh install's default folder
 
 
 class Paths(unittest.TestCase):
@@ -302,12 +303,12 @@ class Desktop(McpCase):
         other = server.send("tools/call", {"name": "theodore", "arguments": {"action": "run", "args": ["list"]},
                                            "_meta": {"x-codex-turn-metadata": {"thread_id": "019a0000-0000-0000-0000-000000000000"}}})["result"]
         seen = json.loads(other["content"][0]["text"].split("\n", 1)[1])
-        self.assertEqual(Path(seen["cwd"]).resolve(), (self.box.tmp / "Documents" / "Theodore").resolve(), "an unknown thread: the default")
+        self.assertEqual(Path(seen["cwd"]).resolve(), self.box.tmp.joinpath(*DEFAULT).resolve(), "an unknown thread: the default")
         session.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread, "cwd": str(self.box.tmp)}}) + "\n")
         home = server.send("tools/call", {"name": "theodore", "arguments": {"action": "run", "args": ["list"]},
                                           "_meta": {"threadId": thread}})["result"]
         seen = json.loads(home["content"][0]["text"].split("\n", 1)[1])
-        self.assertEqual(Path(seen["cwd"]).resolve(), (self.box.tmp / "Documents" / "Theodore").resolve(), "a thread in the home folder: the default")
+        self.assertEqual(Path(seen["cwd"]).resolve(), self.box.tmp.joinpath(*DEFAULT).resolve(), "a thread in the home folder: the default")
         self.assertEqual(server.close(), b"")
 
     def test_a_finished_deck_or_one_from_another_session_is_never_changed(self):
@@ -338,12 +339,12 @@ class Desktop(McpCase):
         self.assertFalse(shown.get("isError"), "reading a finished deck is fine")
         self.assertEqual(server.close(), b"")
 
-    def test_without_a_folder_the_deck_goes_to_documents_theodore(self):
+    def test_without_a_folder_the_deck_goes_to_the_default_folder(self):
         self.ready()
         server = self.server(args=("--for", "claude-desktop"), env={"HOME": str(self.box.tmp)})
         answer = server.call("theodore", action="run", args=["list"])
         seen = json.loads(answer["content"][0]["text"].split("\n", 1)[1])
-        self.assertEqual(Path(seen["cwd"]).resolve(), (self.box.tmp / "Documents" / "Theodore").resolve())
+        self.assertEqual(Path(seen["cwd"]).resolve(), self.box.tmp.joinpath(*DEFAULT).resolve())
         self.assertEqual(server.close(), b"")
 
     def test_images_the_output_names_come_back_and_files_round_trip(self):
@@ -591,3 +592,95 @@ class UseTheodoreTipThroughTheServer(McpCase):
                              ("", "claude-desktop")):
             self.assertEqual(self.check(client, host).strip(), ok + PLAIN_TELL, client)
 
+
+
+class DefaultFolder(unittest.TestCase):
+    """Where a deck goes when the chat names no folder (lane CHATFOLDER): on a Mac ~/Theodore, since the Documents
+    folder is protected and its first touch raises a system prompt naming Theodore's Python; a Mac whose chat route
+    ran before keeps Documents/Theodore; elsewhere Documents/Theodore. A folder that cannot be written never ends in a
+    bare exit 1."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(lambda: [os.chmod(p, 0o700) for p in self.tmp.rglob("*") if p.is_dir()])
+        self.home = Path(os.path.realpath(self.tmp)) / "home"
+        self.home.mkdir()
+        saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "THEODORE_HOME", "THEODORE_CACHE_DIR")}
+        os.environ.update({"HOME": str(self.home), "USERPROFILE": str(self.home), "THEODORE_HOME": str(self.home / ".theodore"),
+                           "THEODORE_CACHE_DIR": str(self.home / "cache")})
+        core._HOME = None
+        chatbuild.FOLDERS.clear()
+        chatbuild.NOTICE.clear()
+
+        def restore():
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            core._HOME = None
+            chatbuild.FOLDERS.clear()
+            chatbuild.NOTICE.clear()
+        self.addCleanup(restore)
+        self.record = self.home / ".theodore" / "state" / chatbuild.FOLDER_STATE
+
+    def on(self, platform: str):
+        return self.mock.patch.object(chatbuild.sys, "platform", platform)
+
+    def test_a_fresh_mac_builds_in_theodore_in_the_home_folder_and_keeps_it(self):
+        with self.on("darwin"):
+            self.assertEqual(chatbuild.check_folder(None), self.home / "Theodore")
+            self.assertFalse((self.home / "Documents").exists(), "Documents is never touched")
+            self.assertEqual(json.loads(self.record.read_text()), {"default": "home"})
+            chatbuild._prepare_sandbox()                     # the chat route runs: the recorded choice stays
+            self.assertEqual(chatbuild.default_folder(), self.home / "Theodore")
+        self.assertEqual(chatbuild.NOTICE, [])
+
+    def test_a_mac_whose_chat_route_ran_before_keeps_documents_theodore(self):
+        (self.home / ".theodore" / "state" / "chat" / "state").mkdir(parents=True)    # 0.4.0's chat route ran here
+        with self.on("darwin"):
+            self.assertEqual(chatbuild.check_folder(None), self.home / "Documents" / "Theodore")
+            self.assertEqual(json.loads(self.record.read_text()), {"default": "documents"})
+
+    def test_windows_and_linux_keep_documents_theodore(self):
+        for platform in ("win32", "linux"):
+            chatbuild.FOLDERS.clear()
+            with self.on(platform):
+                self.assertEqual(chatbuild.check_folder(None), self.home / "Documents" / "Theodore", platform)
+        self.assertFalse(self.record.exists())
+
+    @unittest.skipIf(IS_WINDOWS or os.geteuid() == 0, "folder permissions as on macOS and Linux")
+    def test_a_default_that_cannot_be_written_gives_way_to_theodore_in_the_home_folder_with_a_sentence(self):
+        (self.home / "Documents" / "Theodore").mkdir(parents=True)
+        os.chmod(self.home / "Documents" / "Theodore", 0o500)       # as macOS answers Don't Allow, or a read-only folder
+        with self.on("linux"):
+            self.assertEqual(chatbuild.check_folder(None), self.home / "Theodore")
+        self.assertEqual(chatbuild.NOTICE, [f"Theodore could not save in {self.home / 'Documents' / 'Theodore'} on this computer "
+                                            f"(the system did not allow it), so this deck is going to {self.home / 'Theodore'} instead."])
+        self.assertTrue(chatbuild.folder_allowed(self.home / "Theodore"), "the fallback passes the same checks")
+        (self.home / "Theodore").rmdir()
+        chatbuild.FOLDERS.clear()
+        os.chmod(self.home, 0o500)                                  # neither can be written: a status, never exit 1
+        try:
+            with self.on("linux"), self.assertRaises(core.Status) as caught:
+                chatbuild.check_folder(None)
+        finally:
+            os.chmod(self.home, 0o700)
+        self.assertEqual(caught.exception.name, "SETUP_FAILED")
+        self.assertIn("ask the user for a folder", caught.exception.next_step)
+
+    @unittest.skipIf(IS_WINDOWS or os.geteuid() == 0, "folder permissions as on macOS and Linux")
+    def test_a_named_folder_that_cannot_be_written_is_a_status_that_names_it(self):
+        named = self.home / "Documents" / "Board"
+        named.mkdir(parents=True)
+        os.chmod(named, 0o500)
+        with self.on("darwin"), self.assertRaises(core.Status) as caught:
+            chatbuild.check_folder(str(named))
+        status = caught.exception
+        self.assertEqual(status.name, "USAGE")
+        self.assertIn(f"the folder {named} cannot be written", status.summary)
+        self.assertEqual(status.next_step, "ask the user for another folder, or leave folder out to use Theodore in the user's home folder.")
+        self.assertEqual(chatbuild.NOTICE, [])

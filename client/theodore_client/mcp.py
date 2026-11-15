@@ -120,7 +120,8 @@ def desktop_tools(index: dict | None = None) -> list[dict]:
                      "description": 'run: the engine command without "pptx", one item per argument, e.g. ["apply", "<workspace>"].'},
             "stdin": {"type": "string", "description": "run: text the command reads on standard input (the design note for --storyline -)."},
             "folder": {"type": "string", "description": "The deck's folder: its full path on this computer (the folder the user "
-                                                        "named or attached). Left out: Documents/Theodore in the user's home."},
+                                                        "named or attached). Left out: Theodore's default folder (Theodore in the user's home "
+                                                        "on a Mac, Documents/Theodore elsewhere)."},
             "images": {"type": "boolean", "description": "run: return the render images the command produced (default true)."},
             "path": {"type": "string", "description": "read, write, edit, list, reveal: a path in the deck's folder (or, to read, its renders and the build manual's files)."},
             "content": {"type": "string", "description": "write: the file's whole text."},
@@ -596,6 +597,10 @@ def desktop_call(args: dict) -> dict:
         result = chatbuild.reveal(args.get("path"), args.get("folder"))
     else:
         raise core.usage(f"action is one of: {', '.join(DESKTOP_ACTIONS)}.")
+    if chatbuild.NOTICE and not result.get("isError") and isinstance(result.get("content"), list):
+        # The default folder could not be written and the deck went to ~/Theodore: said once, for the user.
+        result["content"].insert(0, {"type": "text", "text": "TELL THE USER: " + chatbuild.NOTICE.pop() + "\n"})
+        chatbuild.NOTICE.clear()
     if action in chatbuild.FILE_ACTIONS:         # the engine's output and the user's files are passed on as they are
         return result
     for block in result.get("content") or []:
