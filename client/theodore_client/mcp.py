@@ -66,9 +66,9 @@ FOR: str | None = None              # set by serve(): None for the plugin's serv
 # The plugin's own server (no --for) runs in the coding hosts and, when a Claude account has Theodore's plugin on, in the
 # Claude app's chat too. In a chat it must not be a second Theodore server: it serves the chat's one tool, or nothing at
 # all when the app already starts Theodore's own entry (desktop.py), so a person meets one tool and one approval.
-# A client named as the Claude app (its name has "claude" in it and is not Claude Code's "claude-code") is a chat;
-# every other client keeps the plugin's tools as before (Claude Code, Codex, tests, anything unknown).
-CODING_CLIENTS = ("claude-code",)
+# A client named as the Claude app (chatbuild.is_claude_app: its chat, a name with "claude" in it other than Claude
+# Code's "claude-code", or its agent mode, "local-agent-mode-...") is a chat; every other client keeps the plugin's
+# tools as before (Claude Code, Codex, tests, anything unknown).
 SILENT = False                      # the plugin's server in a chat whose app runs Theodore's entry: no tools
 DESKTOP_TOOL = chatbuild.TOOL          # `theodore`; THEODORE_CHAT_TOOL_NAME overrides it for testing (chatbuild.TOOL)
 DESKTOP_ACTIONS = ("begin", "guide", "specimen", "manual", "run", "read", "write", "edit", "list", "reveal", "report",
@@ -550,9 +550,16 @@ def _desktop_preference(action: str, args: dict) -> dict:
 
 def _desktop_check(_args: dict) -> dict:
     account.require("deck-design")
-    return _status(Status("OK", "Theodore is set up on this computer and signed in; its design guidance reaches this chat.",
-                          f'to make or rework a presentation, call {DESKTOP_TOOL} with action "begin".',
-                          "Theodore is set up and ready for your presentations here."))
+    return _status(_check_status())
+
+
+def _check_status() -> Status:
+    """The check's answer once Theodore is set up and signed in."""
+    tell = "Theodore is set up and ready for your presentations here."
+    if chatbuild.APP_CLIENT:            # the Claude app: the sentence the person can say, never a request to keep it
+        tell += " " + chatbuild.USE_THEODORE_TIP
+    return Status("OK", "Theodore is set up on this computer and signed in; its design guidance reaches this chat.",
+                  f'to make or rework a presentation, call {DESKTOP_TOOL} with action "begin".', tell)
 
 
 def desktop_call(args: dict) -> dict:
@@ -646,8 +653,8 @@ def _adopt_client(info) -> None:
     global FOR, SILENT
     name = str((info or {}).get("name") or "") if isinstance(info, dict) else ""
     core.log(f"mcp initialize: client {name[:60] or 'unnamed'} (for {FOR or 'plugin'})")
-    lowered = name.lower()
-    if FOR is not None or "claude" not in lowered or lowered.startswith(CODING_CLIENTS):
+    chatbuild.APP_CLIENT = chatbuild.is_claude_app(name)
+    if FOR is not None or not chatbuild.APP_CLIENT:
         return
     from . import desktop
     FOR = DESKTOP

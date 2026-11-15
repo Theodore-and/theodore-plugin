@@ -55,6 +55,18 @@
   code was not used and works until its hour is up). The installers also no longer call a code "not accepted" when the
   service could not be reached or answered 5xx. `login --code`'s wrong-code line says codes last an hour (it said 10
   minutes).
+- The Claude app's chat (lane CHATASK): for a Claude app client only (its chat, `claude-ai`, or its agent mode,
+  `local-agent-mode-…`; never Claude Code, Codex or an unknown client), the `check` answer's TELL THE USER line adds
+  the sentence the person can say so the chat uses Theodore for every presentation without naming it ("From now on,
+  use Theodore for any presentation, deck or slide request. Please remember that."), and so does what the finish
+  answer tells the user, for the first two decks delivered on this computer, and only if the user had to name
+  Theodore to get the deck (`~/.theodore/state/chat-tip.json`; a missing or unreadable count is zero and never fails
+  a delivery). Installed from the Code tab, the person learns it at install: `hosts register`, when Theodore's entry
+  in the Claude app was written or already there, and `doctor`, while the app still has to be reopened, add "In the
+  Claude app's chat, after reopening the app, say once: "…" and it uses Theodore for every presentation." No answer asks the assistant to save or remember
+  anything, or to ask the user (the chat changes its memory only on the person's own word); a test reads every string
+  of the local server's answer code for it. The "is the Claude app" rule now includes `local-agent-mode-…`, so the
+  plugin's own server stays silent there too beside Theodore's entry.
 - W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
   racing it over the same file and ending INTERNAL.
 

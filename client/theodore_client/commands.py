@@ -1024,7 +1024,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
                      "Claude Code on this computer needs Git Bash to load Theodore's skills; I can fetch it into Theodore's folder, "
                      "or you can install Git for Windows (git-scm.com). Then start a new session.")
     if desktop.reopen_needed(_host_record()):
-        notes.append("To use Theodore in the Claude app's chats, quit the app and open it again once.")
+        from .chatbuild import INSTALL_TIP
+        notes.append("To use Theodore in the Claude app's chats, quit the app and open it again once. " + INSTALL_TIP)
     if "processor" in warned:
         notes.append("This computer runs Windows on ARM, so Theodore uses its x64 build through Windows' emulation, which is slower.")
     if "service" in warned:
@@ -1905,8 +1906,11 @@ def hosts(action: str, apply: bool, remove: bool = False) -> int:
         return core.emit(Status("RETRY", f"an assistant could not be set up: {'; '.join(failed)}",
                                 f"register by hand with the commands under 'Other ways' at {core.site_url('/install')}, then continue.",
                                 "Theodore is installed, but I could not add it to one of your assistants automatically. I will add it by hand."))
-    return core.emit(Status("OK", "; ".join(lines) or "nothing to do.", "continue.",
-                            "Theodore is registered in the assistants found on this computer." if action == "register" else "Done."))
+    tell = "Theodore is registered in the assistants found on this computer." if action == "register" else "Done."
+    if action == "register" and any(l.startswith("claude-desktop: registered") or l == "claude-desktop: already registered" for l in lines):
+        from .chatbuild import INSTALL_TIP
+        tell += " " + INSTALL_TIP
+    return core.emit(Status("OK", "; ".join(lines) or "nothing to do.", "continue.", tell))
 
 
 def _claude_settings_apply(only_new: bool = False) -> str:
