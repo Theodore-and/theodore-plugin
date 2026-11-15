@@ -46,6 +46,15 @@
   skill folder's launcher by absolute path only "if the shell answers that `theodore` is not found" (lane WINDOWS's
   recount: a model given "where that command is on PATH, else …" took the path).
 - `doctor` says whether `theodore` is on this shell's PATH, and plainly when it was written but is not found there.
+- W-17: a sign-in the service refuses because the account already has its maximum number of computers logged in
+  (HTTP 409 `conflict`, `details.reason` `computer_limit`) is no longer reported as an expired or used code followed by
+  a sign-in link that fails the same way. `login --code`, `login --finish` and both installers (install.sh,
+  install.cmd) end with `THEODORE COMPUTER_LIMIT` (exit 70, the code of NO_ENTITLEMENT; the backend's frozen list does
+  not name it yet) carrying the service's own message: no link, nothing to retry; the person removes a computer in
+  Settings, under Computers and assistants (`/app/settings#connected`), then pastes the same set-up sentence again (the
+  code was not used and works until its hour is up). The installers also no longer call a code "not accepted" when the
+  service could not be reached or answered 5xx. `login --code`'s wrong-code line says codes last an hour (it said 10
+  minutes).
 - W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
   racing it over the same file and ending INTERNAL.
 

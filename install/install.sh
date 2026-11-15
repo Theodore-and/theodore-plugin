@@ -32,7 +32,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.4.1"
-PIN_CLIENT="client/client-0.4.1.tar 790ab87c9e712157e9638de3ba35cec67d61fd66f78e1b8730628c764a6aec1b"
+PIN_CLIENT="client/client-0.4.1.tar f119f73016761dcfa108a48fb25fd8170118bb5d4410d3464dc78b2950356f56"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -412,6 +412,7 @@ checked() { # file sha what: delete and stop on a mismatch
 }
 
 # --- 1. redeem the one-time code first: it lasts an hour, the downloads may take longer ------------------------------
+RATE_WAIT= LIMIT_REFUSED=
 if [ -n "$CODE" ]; then
   name=$(hostname 2>/dev/null | tr -cd 'A-Za-z0-9._-' | cut -c1-60)
   body=$(printf '{"code":"%s","device_name":"%s","platform":"%s","arch":"%s","host":"%s","client_version":"%s"}' \
@@ -437,6 +438,18 @@ if [ -n "$CODE" ]; then
     RATE_WAIT=$(( (${RATE_WAIT:-3600} + 59) / 60 ))
     rm -f "$answer"
     say "too many log-ins on this Theodore account in the last hour, so this computer is not signed in yet; the one-time code was not used (try again in $RATE_WAIT minutes)"
+    CODE=
+  elif [ "$http" = 409 ] && grep -q '"computer_limit"' "$answer" 2>/dev/null; then
+    # W-17: the account already has its maximum number of computers logged in. The code was not used (it works until
+    # it expires) and a browser sign-in would be refused the same way: no link. The answer holds no secret; the client
+    # turns it into the last status (login --refused), with the service's own message.
+    mv -f "$answer" "$WORK/activation.refused" && LIMIT_REFUSED=$WORK/activation.refused
+    say "the Theodore service did not log this computer in: this account already has its maximum number of computers logged in (the one-time code was not used); what to do follows at the end"
+    CODE=
+  elif [ "$http" = 000 ] || [ "${http#5}" != "$http" ]; then
+    rm -f "$answer"
+    case "$http" in 000) why="the Theodore service could not be reached" ;; *) why="the Theodore service answered HTTP $http" ;; esac
+    say "$why, so the one-time code was not used; if this computer is not logged in already, a login link follows at the end"
     CODE=
   else
     rm -f "$answer"
@@ -564,10 +577,15 @@ fi
 
 # --- 7. the check the assistant reports: the last line says what failed, if anything did ------------------------------
 say "the stable launcher is \"$T\""
-if [ -n "${RATE_WAIT:-}" ] && ! theodore whoami >/dev/null 2>&1; then
+if [ -n "$RATE_WAIT" ] && ! theodore whoami >/dev/null 2>&1; then
   status RETRY 75 "Theodore is installed, but this computer is not signed in: there have been too many log-ins on this Theodore account in the last hour, and the one-time code was not used. Try again in $RATE_WAIT minutes." \
     "do not retry now. Tell the user, and run the same install line again in $RATE_WAIT minutes (with a fresh sentence from the Theodore site if the code has expired by then)." \
     "There have been too many Theodore log-ins on your account in the last hour. Please try again in about $RATE_WAIT minutes; your code was not used."
+fi
+if [ -n "$LIMIT_REFUSED" ] && ! theodore whoami >/dev/null 2>&1; then
+  # W-17: the computer limit, never a sign-in link (it would be refused the same way)
+  theodore login --refused "$LIMIT_REFUSED"
+  exit $?
 fi
 if ! theodore whoami >/dev/null 2>&1; then
   # Not signed in (no code, or it was not accepted): the last block carries the sign-in link for the assistant to

@@ -437,6 +437,23 @@ class InstallCmdRateLimit(unittest.TestCase):
         self.assertEqual(body.split(" ")[6], "1500", "the service's JSON body, as the batch file splits it")
 
 
+class InstallCmdComputerLimit(unittest.TestCase):
+    """W-17 in install.cmd (its run is on Windows CI): the 409 computer_limit answer is kept for the client's last status
+    (no sign-in link), and no answer or a 5xx is never called a code that was not accepted. As install.sh."""
+
+    def test_the_branches(self):
+        text = (Path(support.ROOT) / "install" / "install.cmd").read_text(encoding="ascii")
+        self.assertIn('if "%HTTP%"=="409" "%SYS32%\\findstr.exe" /c:"computer_limit" "%SAFE%\\activation.pending" >nul 2>&1 && '
+                      'move /y "%SAFE%\\activation.pending" "%WORK%\\activation.refused"', text)
+        self.assertIn(":sign_in_last\nif defined LIMIT_REFUSED goto :limit_last\n", text)
+        self.assertIn('call "%%T%%" login --refused "%%LIMIT_REFUSED%%"', text)
+        self.assertIn('set "LIMIT_REFUSED="', text)
+        for http in ('"%HTTP%"=="000"', '"%HTTP:~0,1%"=="5"'):
+            self.assertIn(f"if {http} goto :stage1", text)
+        sh = (Path(support.ROOT) / "install" / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("theodore login --refused \"$LIMIT_REFUSED\"", sh)
+
+
 class OneLibreOfficeInstall(unittest.TestCase):
     """W-15: a second LibreOffice install while one runs (the installer's background job plus `tools install
     libreoffice`) raced over the same .part file and ended INTERNAL; it now reports the first one's progress."""

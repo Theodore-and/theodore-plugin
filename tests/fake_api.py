@@ -187,6 +187,10 @@ class FakeApi:
         self.usage_events: dict[str, dict] = {}   # event_id -> event, as the server keeps one per id
         self.activations: list[dict] = []             # /v1/device/activate bodies, without the code
         self.activation_rate_limited: int | None = None   # seconds: /v1/device/activate answers 429 rate_limited (W-16)
+        # W-17: the account's computer limit. /v1/device/activate (a right code) and an approved /v1/device/token answer
+        # 409 conflict with details {reason: computer_limit, limit}, as the service does; the code or approval stays unspent.
+        self.computer_limit: int | None = None
+        self.activation_failure: tuple[int, str] | None = None   # (HTTP status, error code) /v1/device/activate answers (W-17)
         self.refreshes = 0
         api = self
 
@@ -307,8 +311,17 @@ class FakeApi:
         if h.command != "HEAD":
             h.wfile.write(raw)
 
-    def _error(self, h, status: int, code: str, message: str = "", headers: dict | None = None):
-        self._send(h, status, {"error": {"code": code, "message": message or code, "request_id": uuid.uuid4().hex}}, headers)
+    def _error(self, h, status: int, code: str, message: str = "", headers: dict | None = None, details: dict | None = None):
+        error = {"code": code, "message": message or code, "request_id": uuid.uuid4().hex}
+        if details is not None:
+            error["details"] = details
+        self._send(h, status, {"error": error}, headers)
+
+    def _computer_limit(self, h):
+        limit = self.computer_limit
+        return self._error(h, 409, "conflict", f"This account already has {limit} computers logged in, the most it can have. Remove one "
+                           "you no longer use in Settings, under Computers and assistants, then log in again.",
+                           details={"reason": "computer_limit", "limit": limit})
 
     def _device_error(self, h, code: str):
         self._send(h, 400, {"error": code, "error_description": code.replace("_", " ")})
@@ -462,15 +475,21 @@ class FakeApi:
                 return self._device_error(h, "access_denied")
             if device["status"] == "consumed":
                 return self._device_error(h, "expired_token")
+            if self.computer_limit is not None:
+                return self._computer_limit(h)
             device["status"] = "consumed"
             return self._send(h, 200, self._bundle(device["meta"]))
         if route == ["device", "activate"] and method == "POST":
             if self.activation_rate_limited is not None:      # the service's per-account limit: the code is not spent
                 wait = self.activation_rate_limited
                 return self._error(h, 429, "rate_limited", f"Too many requests. Try again in {wait} seconds.", headers={"Retry-After": str(wait)})
+            if self.activation_failure is not None:           # a failure of the service: the code is not spent
+                return self._error(h, *self.activation_failure)
             entry = self.activation_codes.get(normalize_code(body.get("code")))
             if not entry or entry["used"]:
                 return self._device_error(h, "invalid_grant")
+            if self.computer_limit is not None:
+                return self._computer_limit(h)
             entry["used"] = True
             self.activations.append({k: v for k, v in body.items() if k != "code"})
             return self._send(h, 200, self._bundle(body))

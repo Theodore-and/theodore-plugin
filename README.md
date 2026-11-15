@@ -186,6 +186,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | 68 | SETUP_FAILED | Cause NETWORK, TLS_INTERCEPT, PROXY_AUTH, DISK or HASH_MISMATCH |
 | 69 | UNSUPPORTED_PLATFORM | No engine build for this computer |
 | 70 | NO_ENTITLEMENT | The account's plan does not include this part of Theodore |
+| 70 | COMPUTER_LIMIT | The account already has its maximum number of computers logged in; one is removed in Settings first |
 | 71 | OFFLINE | The service cannot be reached and the offline period has ended, or the command needs the network |
 | 72 | UPDATE_REQUIRED | The engine or the plugin must update first |
 | 73 | BLOCKED_BY_POLICY | Paused by the publisher, blocked by the computer's policy, or automatic reports are off |

@@ -64,6 +64,49 @@ class SignIn(ClientCase):
         self.api.activation_rate_limited = None
         self.assertStatus(self.client("login", "--code", "AAAA-2222"), "OK", 0)
 
+    def _assert_computer_limit(self, result, *, installed: bool = False):
+        """W-17: the account's computer limit, in the service's words; no sign-in link, nothing to retry."""
+        first, nxt, tell = self.assertStatus(result, "COMPUTER_LIMIT", 70)
+        self.assertTrue(first.startswith("THEODORE COMPUTER_LIMIT: " + ("Theodore is installed, but " if installed else "")
+                                         + "the Theodore service did not log this computer in (computer_limit): This account already "
+                                         "has 10 computers logged in, the most it can have."), first)
+        self.assertIn("do not retry, do not offer a sign-in link and do not run any other Theodore command", nxt)
+        self.assertIn("Your Theodore account already has its maximum number of computers logged in", tell)
+        self.assertIn("Settings, under Computers and assistants (site.example.test/app/settings#connected)", tell)
+        for text in (first, nxt, tell):
+            self.assertNotIn("/device?code=", text)
+            self.assertNotIn("not accepted", text)
+            self.assertNotIn("not valid", text)
+        return first, nxt, tell
+
+    def test_a_code_refused_for_the_computer_limit_says_so_and_stays_usable(self):
+        self.api.issue_activation_code("AAAA-3333")
+        self.api.computer_limit = 10
+        first, _nxt, tell = self._assert_computer_limit(self.client("login", "--code", "AAAA-3333"))
+        self.assertIn("The one-time code was not used; it works until it expires, an hour after it was made.", first)
+        self.assertIn("then paste the same set-up sentence again; if more than an hour has passed since you copied it, copy a fresh "
+                      "one from Get started at site.example.test/app.", tell)
+        self.assertNotIn("/v1/device/code", [r["path"] for r in self.api.requests], "no browser sign-in is started")
+        self.api.computer_limit = None          # a computer was removed: the same code works
+        self.assertStatus(self.client("login", "--code", "AAAA-3333"), "OK", 0)
+
+    def test_an_approved_sign_in_refused_for_the_computer_limit_gives_no_new_link(self):
+        self.client("login", "--start")
+        self.api.approve_device()
+        self.api.computer_limit = 10
+        _first, _nxt, tell = self._assert_computer_limit(self.client("login", "--finish", "--wait", "5"))
+        self.assertIn("then paste the set-up sentence from Get started at site.example.test/app again.", tell)
+        self.assertFalse((self.box.home / "state" / "device.json").exists(), "the refused approval is not kept")
+        self.assertEqual(len(self.api.devices), 1, "no new sign-in was started")
+
+    def test_the_installers_saved_refusal_becomes_the_last_status(self):
+        saved = self.box.tmp / "activation.refused"
+        saved.write_text(json.dumps({"error": {"code": "conflict", "request_id": "r", "details": {"reason": "computer_limit", "limit": 10},
+                                               "message": "This account already has 10 computers logged in, the most it can have."}}))
+        self._assert_computer_limit(self.client("login", "--refused", str(saved)), installed=True)
+        saved.write_text("not json")            # anything else: the sign-in link, as before
+        self.assertStatus(self.client("login", "--refused", str(saved)), "SIGN_IN_REQUIRED", 65)
+
     def _exit(self, name: str) -> int:
         from theodore_client.contract import EXIT
         return EXIT[name]
