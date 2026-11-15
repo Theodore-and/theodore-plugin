@@ -75,6 +75,12 @@
   A default that cannot be written gives way to `~/Theodore` (same confinement checks), and the answer tells the user
   in one sentence where the deck is going and why; a folder the chat named that cannot be written is a USAGE status
   that names it, with NEXT: ask the user for another folder, or leave folder out.
+- The chat route's build manual carries no update notice ("THEODORE NOTICE: Theodore updated itself: ... Tell the user
+  once"): it said what changed since the last skill load at any earlier time (in the acceptance run, the install's
+  plugin update three minutes before), and the chat told the person "Theodore updated itself to a newer version while
+  building" when nothing had. Nothing is applied during a build, so a chat says nothing about versions; the notice
+  stays pending for Claude Code's next skill load. The Claude app entry's command is pinned as Theodore's stable
+  launcher (`~/.theodore/bin/theodore mcp --for claude-desktop`).
 - W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
   racing it over the same file and ending INTERNAL.
 

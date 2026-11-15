@@ -2174,6 +2174,8 @@ class Hosts(ClientCase):
         entry = written["mcpServers"]["theodore"]
         self.assertEqual(entry["args"][-3:], ["mcp", "--for", "claude-desktop"])
         self.assertIn(str(self.box.home / "bin"), " ".join([entry["command"], *entry["args"]]))
+        if not IS_WINDOWS:      # Theodore's stable launcher, which starts its own runtime Python; never a system one
+            self.assertEqual([entry["command"], *entry["args"]], [str(self.box.home / "bin" / "theodore"), "mcp", "--for", "claude-desktop"])
         self.assertEqual(written["mcpServers"]["files"], original["mcpServers"]["files"])
         self.assertEqual(written["preferences"], original["preferences"])
         again, _n, _t = self.assertStatus(self.client("hosts", "register"), "OK", 0)
