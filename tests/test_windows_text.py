@@ -149,9 +149,57 @@ class BatchFiles(unittest.TestCase):
                     continue
                 self.assertIsNone(re.search(r'\bcall "%[A-Za-z_]+%', line, re.I), f"{path.name}:{n}: {line}")
 
+    def test_install_cmd_waits_in_codex_as_install_sh(self):
+        """Lane CHATGPT's Codex install wait, the same in install.cmd: 540 s by default under CODEX_THREAD_ID, a line a
+        minute while it waits, and, still downloading, OK with nothing to poll (only when every assistant was registered)."""
+        cmd = (support.ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
+        self.assertIn('set "SETUP_WAIT_DEFAULT=180"\nif defined CODEX_THREAD_ID set "SETUP_WAIT_DEFAULT=540"', cmd.replace("\r\n", "\n"))
+        self.assertIn("set /a SETUP_STEP=60", cmd)
+        self.assertIn("theodore-install: still downloading (!SETUP_NOW!); this installer waits at most !SETUP_LEFT! s more, "
+                      "then the download goes on by itself", cmd)
+        ok = cmd.index("echo THEODORE OK: Theodore is installed and signed in; the rest of its runtime and its engine finish "
+                       "downloading by themselves in the background")
+        self.assertLess(cmd.index('if not "%HOSTS_RC%"=="0" goto :doctor_in_progress'), ok)
+        self.assertIn("echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. "
+                      "Tell the user to start a new session and ask for a deck.", cmd)
+        self.assertLess(ok, cmd.index("echo THEODORE SETUP_IN_PROGRESS: Theodore is installed;"))
+
     def test_the_batch_files_are_ascii(self):
         for path in self.FILES:
             self.assertTrue(path.read_bytes().isascii(), path)
+
+
+class DesktopEntry(unittest.TestCase):
+    def entry(self, home: str) -> dict:
+        from theodore_client import desktop
+        with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.dict(os.environ, {"COMSPEC": "C:\\Windows\\system32\\cmd.exe"}), \
+                mock.patch.object(core, "home", lambda: mock.Mock(launcher=lambda: home + "\\bin\\theodore.cmd")):
+            return desktop.entry()
+
+    def test_a_plain_path_keeps_the_form_that_works(self):
+        value = self.entry("C:\\Users\\Théo Tester\\AppData\\Local\\Theodore")
+        self.assertEqual(["/d", "/c", "C:\\Users\\Théo Tester\\AppData\\Local\\Theodore\\bin\\theodore.cmd", "mcp", "--for", "claude-desktop"], value["args"])
+        self.assertNotIn("env", value)
+
+    def test_a_path_cmd_would_parse_goes_through_the_env_and_survives_json(self):
+        import json
+        home = "C:\\Users\\Tom & Jerry (x) 50%off ^a!\\AppData\\Local\\Theodore"
+        value = self.entry(home)
+        self.assertEqual(["/d", "/v:on", "/c", "!THEODORE_DESKTOP_LAUNCHER!", "mcp", "--for", "claude-desktop"], value["args"])
+        for arg in value["args"]:
+            self.assertFalse(set(arg) & set(' "&()^%'), arg)       # nothing the app's quoting or cmd's parsing touches
+        self.assertEqual(f'"{home}\\bin\\theodore.cmd"', json.loads(json.dumps(value, ensure_ascii=False))["env"]["THEODORE_DESKTOP_LAUNCHER"])
+
+
+class LauncherPartialUninstall(unittest.TestCase):
+    def test_its_last_line_reads_paths_after_parsing(self):
+        text = (support.LAUNCHER_DIR / "theodore.cmd").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if l.startswith("(for %%D in (%OWNED_DIRS%) do rmdir"))
+        before = text.splitlines()[text.splitlines().index(line) - 2]
+        self.assertEqual("setlocal EnableDelayedExpansion", before)
+        self.assertNotIn("call echo", line)
+        self.assertNotIn("%HOME_DIR%", line)
+        self.assertNotIn("%LEFT", line)
 
 
 class ChildText(unittest.TestCase):

@@ -349,7 +349,7 @@ class HostLimits(unittest.TestCase):
         cmd = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
         self.assertNotIn("--wait 1800", sh + cmd)
         self.assertIn('SETUP_WAIT=${THEODORE_INSTALL_WAIT:-180}', sh)
-        self.assertIn('set "SETUP_WAIT=180"', cmd)
+        self.assertIn('set "SETUP_WAIT_DEFAULT=180"', cmd)
         for text, setup, marker, register, doctor in (
                 (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
                 (cmd, 'call "%%LAUNCHER%%" setup --wait %SETUP_WAIT% >"%WORK%\\setup.txt"', 'state\\hosts.pending', '\ncall "%%T%%" hosts register',

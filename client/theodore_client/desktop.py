@@ -49,11 +49,21 @@ def config_dirs() -> list[Path]:
     return []                               # Claude Desktop is published for macOS and Windows only
 
 
+# Characters that make cmd's /c drop the quotes around a path (or, %, expand it): C:\Users\Tom & Jerry.
+CMD_SPECIAL = set('&<>()@^|%!"')
+
+
 def entry() -> dict:
-    """The entry for this installation. On Windows the launcher is a batch file, which the app starts through cmd."""
+    """The entry for this installation. On Windows the launcher is a batch file, which the app starts through cmd.
+    A launcher path with a character cmd treats specially goes in the entry's env, quoted, and cmd reads it with
+    delayed expansion, which comes after cmd has parsed & ( ) ^ |: they stay part of the path."""
     launcher = str(core.home().launcher())
     if core.IS_WINDOWS:
-        return {"command": os.environ.get("COMSPEC") or "cmd.exe", "args": ["/d", "/c", launcher, "mcp", "--for", FOR]}
+        cmd = os.environ.get("COMSPEC") or "cmd.exe"
+        if CMD_SPECIAL & set(launcher):
+            return {"command": cmd, "args": ["/d", "/v:on", "/c", "!THEODORE_DESKTOP_LAUNCHER!", "mcp", "--for", FOR],
+                    "env": {"THEODORE_DESKTOP_LAUNCHER": f'"{launcher}"'}}
+        return {"command": cmd, "args": ["/d", "/c", launcher, "mcp", "--for", FOR]}
     return {"command": launcher, "args": ["mcp", "--for", FOR]}
 
 

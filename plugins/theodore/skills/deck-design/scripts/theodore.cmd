@@ -866,7 +866,11 @@ set /a BTRY+=1
 ping -n 2 127.0.0.1 >nul
 goto :bare_retry
 :bare_retry_done
-(for %%D in (%OWNED_DIRS%) do rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1) & rmdir "%HOME_DIR%" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "%HOME_DIR%\%%D" set "LEFT=%LEFT%; Theodore's folders in %HOME_DIR%") & if defined LEFT (call echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: %%LEFT:~2%%.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& call echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: %%LEFT:~2%%. Your decks were not touched.& exit /b 75) else (call echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed%%OCMSG%%.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
+rem Delayed expansion for the last line: a value is read after cmd has parsed the line, so a path with & ( ) ^ or %
+rem stays text (CALL ECHO parsed it again: C:\Users\Tom & Jerry ended the message at the &).
+setlocal EnableDelayedExpansion
+set "BL="
+(for %%D in (%OWNED_DIRS%) do rmdir /s /q "!HOME_DIR!\%%D" >nul 2>&1) & rmdir "!HOME_DIR!" >nul 2>&1 & (for %%D in (%OWNED_DIRS%) do if exist "!HOME_DIR!\%%D" set "BL=1") & (if defined BL set "LEFT=!LEFT!; Theodore's folders in !HOME_DIR!") & if defined LEFT (echo THEODORE RETRY: Theodore was not fully installed and some of it could not be removed: !LEFT:~2!.& echo NEXT: tell the user what is left; each item above is a folder that can be deleted by hand.& echo TELL THE USER: Theodore is mostly removed, but these pieces could not be: !LEFT:~2!. Your decks were not touched.& exit /b 75) else (echo THEODORE OK: Theodore was not fully installed; its folders, its registrations and its render cache were removed!OCMSG!.& echo NEXT: nothing to do.& echo TELL THE USER: Theodore is uninstalled.& exit /b 0)
 
 :old_engine_caches
 rem The engine's caches before 1.0.0-rc.7 (the client's _remove_old_engine_caches): %USERPROFILE%\.cache\pptx-slide-raster

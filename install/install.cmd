@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.10"
-set "PIN_CLIENT=client/client-0.3.10.tar 56d3fa86b82a4c29384ece3bd35b23b64ce55d84340a70dd8e465f7745c88f80"
+set "PIN_CLIENT=client/client-0.3.10.tar ff44789d455801e609cf6be32b6738d5cf54d8e723e49c2f1ad4786d3fb9e487"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -296,13 +296,42 @@ if not exist "%HOME_DIR%\state\hosts.pending" type nul >"%HOME_DIR%\state\hosts.
 rem --- 4. runtime and engine: a background job, so the first deck request does not wait ----------------------------
 rem The job outlives this installer. It is waited for a few minutes at most: an assistant's command has a time limit
 rem (Claude Code stops a command after 10 minutes), and the job must not be what that limit stops.
-set "SETUP_WAIT=180"
+rem Codex (CODEX_THREAD_ID: its CLI, the ChatGPT app's Codex mode, ChatGPT's Work mode) lets a command run longer and asks
+rem before each command of the session that runs this installer (its rules load at the next session): wait longer here,
+rem so the assistant has nothing to poll. As install.sh.
+set "SETUP_WAIT_DEFAULT=180"
+if defined CODEX_THREAD_ID set "SETUP_WAIT_DEFAULT=540"
+set "SETUP_WAIT=%SETUP_WAIT_DEFAULT%"
 if defined THEODORE_INSTALL_WAIT set "SETUP_WAIT=%THEODORE_INSTALL_WAIT%"
-echo.%SETUP_WAIT%| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*" >nul || set "SETUP_WAIT=180"
+echo.%SETUP_WAIT%| "%SYS32%\findstr.exe" /r /x "[0-9][0-9]*" >nul || set "SETUP_WAIT=%SETUP_WAIT_DEFAULT%"
 echo theodore-install: downloading the rest of Theodore's runtime and its engine (about 100 to 130 MB in all) in the background; this is the long step
+if defined CODEX_THREAD_ID goto :setup_codex_start
 set "THEODORE_BOOTSTRAP_WAIT=%SETUP_WAIT%"
 call "%%LAUNCHER%%" setup --wait %SETUP_WAIT% >"%WORK%\setup.txt"
 set "RC=%ERRORLEVEL%"
+goto :setup_waited
+:setup_codex_start
+rem Codex shows a long command's output as it comes: a line a minute says the download is moving, so the assistant has
+rem no reason to inspect processes (each such command asks first in this session). The wait goes in steps of a minute.
+set /a SETUP_LEFT=SETUP_WAIT
+:setup_codex_step
+set /a SETUP_STEP=60
+if %SETUP_LEFT% LSS 60 set /a SETUP_STEP=SETUP_LEFT
+set "THEODORE_BOOTSTRAP_WAIT=%SETUP_STEP%"
+call "%%LAUNCHER%%" setup --wait %SETUP_STEP% >"%WORK%\setup.txt"
+set "RC=%ERRORLEVEL%"
+set /a SETUP_LEFT-=SETUP_STEP
+if not "%RC%"=="67" goto :setup_waited
+if %SETUP_LEFT% LEQ 0 goto :setup_waited
+set "SETUP_NOW= downloading."
+for /f "tokens=1,* delims=:" %%A in ('%SYS32%\findstr.exe /b /c:"THEODORE SETUP_IN_PROGRESS:" "%WORK%\setup.txt"') do set "SETUP_NOW=%%B"
+setlocal EnableDelayedExpansion
+set "SETUP_NOW=!SETUP_NOW:~1!"
+if "!SETUP_NOW:~-1!"=="." set "SETUP_NOW=!SETUP_NOW:~0,-1!"
+echo theodore-install: still downloading (!SETUP_NOW!); this installer waits at most !SETUP_LEFT! s more, then the download goes on by itself
+endlocal
+goto :setup_codex_step
+:setup_waited
 set "THEODORE_BOOTSTRAP_WAIT="
 set "SETUP_FAILED="
 if "%RC%"=="0" goto :setup_done
@@ -363,6 +392,22 @@ if not "%RC%"=="67" goto :doctor_shown
 rem Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
 rem "the same command", which here would be this installer).
 "%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
+rem In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the first
+rem deck request in a new session waits for it. As install.sh.
+if not defined CODEX_THREAD_ID goto :doctor_in_progress
+if not "%HOSTS_RC%"=="0" goto :doctor_in_progress
+set "WHERE= downloading."
+for /f "tokens=1,* delims=:" %%A in ('%SYS32%\findstr.exe /b /c:"THEODORE SETUP_IN_PROGRESS:" "%WORK%\doctor.txt"') do set "WHERE=%%B"
+setlocal EnableDelayedExpansion
+set "WHERE=!WHERE:~1!"
+if "!WHERE:~-1!"=="." set "WHERE=!WHERE:~0,-1!"
+echo THEODORE OK: Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (!WHERE!).
+echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck.
+echo TELL THE USER: Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck.
+endlocal
+set "RC=0"
+goto :finish
+:doctor_in_progress
 echo THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended.
 echo NEXT: run "%T%" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line.
 echo TELL THE USER: Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it.

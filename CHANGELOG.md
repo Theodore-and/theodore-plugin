@@ -22,6 +22,14 @@
   `theodore-specimens-<random>`, which the host settings' Read rule covers, instead of the system's temporary folder
   (shared, swept and indexed by other tools); the temporary folder only when the working folder contains the cache.
   Their life is unchanged: removed after an hour by the next Theodore call, all of them at uninstall.
+- Windows Codex install (as install.sh, lane CHATGPT): under `CODEX_THREAD_ID` install.cmd waits up to 540 s for the
+  download, with a line a minute while it waits, and, still downloading with every assistant registered, ends with
+  THEODORE OK and "run nothing more now, neither doctor nor this installer" instead of an in-progress status to poll.
+- Windows, a user name with & or a parenthesis: Claude Desktop's entry, when the launcher path has a character cmd
+  treats specially, carries it in the entry's `env` (`THEODORE_DESKTOP_LAUNCHER`, quoted) and runs
+  `cmd /d /v:on /c !THEODORE_DESKTOP_LAUNCHER! mcp --for claude-desktop` (delayed expansion comes after cmd has parsed
+  the line); other paths keep the entry as it was. The launcher's uninstall of a partial installation reports what is
+  left with delayed expansion instead of CALL ECHO, so the message is no longer cut at the &.
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an
