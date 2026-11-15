@@ -102,8 +102,11 @@ class Installer(unittest.TestCase):
         import subprocess
         installer = installer or self.box.installer()
         command = cmd_command(str(installer), *args) if IS_WINDOWS else ["/bin/sh", str(installer), *args]
-        return subprocess.run(command, env={**self.box.env, **(env or {})}, capture_output=True, text=True,
-                              timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+        # The installer gives the rest of the setup 180 s and then returns 67 (it goes on in the background). On a
+        # loaded test machine the local fake's downloads can take longer (windows-x64, 2026-11-15): tests that expect a
+        # finished install give it time; the slow-link test sets its own two seconds.
+        return subprocess.run(command, env={**self.box.env, "THEODORE_INSTALL_WAIT": "900", **(env or {})}, capture_output=True,
+                              text=True, timeout=1800, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
 
     def test_install_with_a_code_then_again_then_uninstall(self):
         self.api.issue_activation_code("ABCD-1234")
