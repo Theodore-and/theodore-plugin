@@ -341,7 +341,9 @@ class FakeApi:
         error = {"code": code, "message": message or code, "request_id": uuid.uuid4().hex}
         if details is not None:
             error["details"] = details
-        self._send(h, status, {"error": error}, headers)
+        # As the service serialises it (JSON.stringify: no space after ":" or ","). install.cmd reads the wait out of a
+        # 429's message by word position, so the spacing is part of what the fake must get right (windows-x64, 2026-11-15).
+        self._send(h, status, json.dumps({"error": error}, separators=(",", ":")).encode("utf-8"), headers)
 
     def _computer_limit(self, h):
         limit = self.computer_limit

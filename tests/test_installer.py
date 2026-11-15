@@ -134,7 +134,7 @@ class Installer(unittest.TestCase):
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
         self.assertIn(f"codex plugin marketplace add {home / 'plugin'}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
-        self.assertIn("Theodore's own commands, and the assistant's edits of a deck's files in .theodore/workspaces, run without asking each time; to turn that off:", out)
+        self.assertIn(f"Theodore's own commands, and the assistant's edits of a deck's files in .theodore{os.sep}workspaces, run without asking each time; to turn that off:", out)
         self.assertIn("hosts settings --remove", out)
         applied = json.loads((self.box.user_home / ".claude" / "settings.json").read_text())
         self.assertTrue(applied["extraKnownMarketplaces"]["theodore"]["autoUpdate"], "the settings come with the set-up")
