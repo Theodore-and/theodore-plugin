@@ -48,6 +48,9 @@
 - Windows, Claude Desktop (WINDOWS W-7): "quit and reopen the Claude app" was said when only Claude Code's CLI was
   running (it is claude.exe too). The app counts as running only for its own program files: the per-user build under
   `%LOCALAPPDATA%\AnthropicClaude\app-<version>\` or its package under `WindowsApps\Claude_<...>\`.
+- Uninstall's record (WINDOWS W-8): the uninstall's last words name the record it keeps beside Theodore's folder
+  (`~/.theodore-uninstall.log`, `%LOCALAPPDATA%\Theodore-uninstall.log`; it can be deleted), and on Windows a new log
+  starts with a UTF-8 byte-order mark, so Notepad and PowerShell 5.1 read C:\Users\Théo as written.
 - Tests: the every-address timing bounds (installer and client) are what the code promises (4 s per address in
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an

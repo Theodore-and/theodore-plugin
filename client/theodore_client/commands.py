@@ -2700,7 +2700,8 @@ def _uninstall(keep_hosts: bool) -> int:
             return 75
         print(f"THEODORE OK: Theodore was removed from this computer (registrations and sign-in removed; {what}).\n"
               f"NEXT: nothing to do. If {root} is still there after two minutes, it can be deleted by hand: nothing of "
-              "Theodore runs any more. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
+              "Theodore runs any more. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless. "
+              f"A record of this uninstall stays in {core.uninstall_log()}; it can be deleted.\n"
               "TELL THE USER: Theodore is uninstalled; its folder disappears within a minute or two. Your decks and workspaces were not touched.",
               flush=True)
         return 0
@@ -2732,6 +2733,7 @@ def _uninstall(keep_hosts: bool) -> int:
               "TELL THE USER: Theodore's files are removed, but a few pieces could not be: " + "; ".join(left) + ". Your decks were not touched.", flush=True)
         return 75
     print(f"THEODORE OK: Theodore was removed from this computer ({what}; sign-in removed).\n"
-          "NEXT: nothing to do. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless.\n"
+          "NEXT: nothing to do. Deck workspaces keep a small .pptx-state/theodore-engine.json file; it is harmless. "
+          f"A record of this uninstall stays in {core.uninstall_log()}; it can be deleted.\n"
           "TELL THE USER: Theodore is uninstalled. Your decks and workspaces were not touched.", flush=True)
     return 0

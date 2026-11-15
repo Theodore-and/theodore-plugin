@@ -248,6 +248,25 @@ class PowerShellInstallLine(unittest.TestCase):
         self.assertTrue(line.strip().startswith("Windows PowerShell: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; "), line)
 
 
+class UninstallRecord(unittest.TestCase):
+    def test_a_new_log_on_windows_starts_with_a_utf8_mark_once(self):
+        target = Path(tempfile.mkdtemp()) / STRANGE / "Theodore-uninstall.log"
+        target.parent.mkdir(parents=True)
+        with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core, "_LOG_FILE", target):
+            core.log("uninstall: C:\\Users\\Théo Tester\\AppData\\Local\\Theodore")
+            core.log("uninstall: ended")
+        raw = target.read_bytes()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        self.assertEqual(1, raw.count(b"\xef\xbb\xbf"))
+        self.assertIn("Théo Tester", raw.decode("utf-8-sig"))
+
+    def test_elsewhere_the_log_has_no_mark(self):
+        target = Path(tempfile.mkdtemp()) / "x.log"
+        with mock.patch.object(core, "IS_WINDOWS", False), mock.patch.object(core, "_LOG_FILE", target):
+            core.log("é")
+        self.assertFalse(target.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+
 class ChildText(unittest.TestCase):
     def test_utf8_from_a_child_is_read_as_utf8(self):
         path = "C:\\Users\\Théo Tester\\测试"
