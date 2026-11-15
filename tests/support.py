@@ -32,6 +32,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(CLIENT_DIR))
 
 from fake_api import FakeApi, sha256_hex  # noqa: E402
+
+# The tests never inherit the identity of the host that launched them (WHOLETEXT2, 2026-11-15): run from a Claude Code
+# or Codex session, CLAUDECODE and the like would change what the client prints. Every variable the client reads to
+# name its host goes, here, for the in-process tests and every command they start; a test of a host sets it itself.
+HOST_MARKERS = ("CLAUDECODE", "CLAUDE_PID", "THEODORE_HOST")
+HOST_MARKER_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_")
+for _name in [n for n in os.environ if n in HOST_MARKERS or n.startswith(HOST_MARKER_PREFIXES)]:
+    del os.environ[_name]
 import build_client  # noqa: E402
 
 FAKE_PPTX = r'''"""A stand-in engine entry for the client's tests. It only echoes what it was asked."""

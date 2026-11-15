@@ -45,6 +45,11 @@ CACHE="$OUT/cache"
 # Verified downloads are kept by their pinned sha256 for every job (bootstrap_python.py, build_bundle.py): a rerun never
 # fetches them again. The containers see the same folder at /repo/ci/out/cache.
 export THEODORE_FETCH_STORE="$CACHE/by-sha256"
+# No result depends on where the check is launched: the host that runs it (Claude Code, Codex) exports variables the
+# client reads to name its host; none reaches a target (tests/support.py removes them too, for a suite run by hand).
+for _marker in $(env | grep -E '^(CLAUDECODE|CLAUDE_PID|THEODORE_HOST|CLAUDE_CODE_[A-Z0-9_]*|CLAUDE_PLUGIN_[A-Z0-9_]*|CODEX_[A-Z0-9_]*)=' | cut -d= -f1); do
+  unset "$_marker"
+done
 # ubuntu:22.04 (glibc 2.35; the runtime's floor is 2.28): the multi-arch index digest, pulled 2026-11-10.
 UBUNTU="ubuntu@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11"
 GITLEAKS_VERSION=8.30.1
