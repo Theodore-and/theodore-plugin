@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.3.10"
-set "PIN_CLIENT=client/client-0.3.10.tar 2159be363b495756d2b7314a167af43c133b996b7b0971d9fef25c7f6dcc33ae"
+set "PIN_CLIENT=client/client-0.3.10.tar d7eb0c05d00339318461bb3f49f1cf14fdf3e352ae77cba2fc91ed928ad0d108"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -364,7 +364,7 @@ rem Still downloading in the background: doctor's checks, then a status that nam
 rem "the same command", which here would be this installer).
 "%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
 echo THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended.
-echo NEXT: run "%T%" doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer).
+echo NEXT: run "%T%" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line.
 echo TELL THE USER: Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it.
 goto :finish
 :doctor_shown

@@ -38,8 +38,8 @@ decks there too, and that workspace is the computer this page means.
      (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
      (or from GitHub: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
-3. Check: run `theodore doctor` by the path the installer printed ("the stable launcher is ..."). Report its
-   last line to the user.
+3. Check: the installer ends with Theodore's own check (doctor). Report its last line to the user; run another
+   command only when a NEXT line asks for it, by the path the installer printed ("the stable launcher is ...").
 4. Tell the user to start a new session and ask for a deck.
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or
 API key.

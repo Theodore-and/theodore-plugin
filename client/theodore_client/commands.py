@@ -695,8 +695,10 @@ def status(as_json: bool, wait: float) -> int:
     account.import_pending_activation()
     deadline = time.monotonic() + max(0.0, wait)
     snap = _snapshot()
-    while not snap["runtime_ready"] and time.monotonic() < deadline:
-        if not Job("setup").alive():
+    # --wait also waits for the engine while the setup job is still fetching it (the installer's NEXT uses it, so the
+    # assistant waits in one call instead of sleeping between checks).
+    while (not snap["runtime_ready"] or (not snap["engine"] and Job("setup").alive())) and time.monotonic() < deadline:
+        if not snap["runtime_ready"] and not Job("setup").alive():
             install.setup_status()
         time.sleep(1.0)
         snap = _snapshot()
@@ -1335,10 +1337,35 @@ def _permission_rules() -> list[str]:
     for script in _claude_skill_launchers():
         rules += [f'Bash("{script}" *)'] if core.IS_WINDOWS else [f'Bash(sh "{script}" *)', f"Bash(sh {script} *)"]
     rules.append(CLAUDE_MCP_RULE)
-    if not core.IS_WINDOWS:     # reading Theodore's own folders (the engine's texts, rendered slides, specimen sheets)
-        for folder in (core.home().root, specimens.cache_root().parent):
-            rules.append(f"Read(/{folder}/**)")         # `//` starts an absolute path in a Claude Code Read rule
+    rules += [f"Skill({CLAUDE_PLUGIN}:{skill}{args})" for skill in ("pptx", "deck-design") for args in ("", " *")]
+    # Reading Theodore's own folders: its home (the engine's texts), the engine's render caches (rendered slides) and the
+    # specimen cache. A folder inside another one listed is covered by that one's rule.
+    folders: list[Path] = []
+    for folder in (core.home().root, *_render_cache_dirs(), specimens.cache_root().parent):
+        folder = Path(os.path.abspath(folder))
+        if folder not in folders:
+            folders.append(folder)
+    for folder in folders:
+        if not any(other != folder and other in folder.parents for other in folders):
+            rule = _claude_read_rule(folder)
+            if rule:
+                rules.append(rule)
     return rules
+
+
+CLAUDE_PLUGIN = "theodore"      # a plugin's skills are named <plugin>:<skill> in Claude Code (`Skill(theodore:pptx)`)
+
+
+def _claude_read_rule(folder: Path) -> str | None:
+    """A Claude Code Read allow rule for everything under an absolute folder. `//` starts an absolute path in a Read
+    rule; on Windows Claude Code matches paths in POSIX form, `C:\\Users\\a` as `/c/Users/a` (its permissions page).
+    None for a Windows path without a drive letter (a network share), which keeps its own prompt."""
+    text = str(folder)
+    if core.IS_WINDOWS:
+        if len(text) < 3 or text[1] != ":" or not text[0].isalpha():
+            return None
+        return f"Read(//{text[0].lower()}{text[2:].replace(chr(92), '/').rstrip('/')}/**)"
+    return f"Read(/{text.rstrip('/')}/**)"
 
 
 def _claude_managed_settings() -> dict:

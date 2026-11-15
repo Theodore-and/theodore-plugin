@@ -186,7 +186,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
         self.assertTrue(first.startswith("THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime"), first)
         stable = self.box.home / "bin" / STABLE
-        self.assertIn(f'run "{stable}" doctor in 20 seconds', nxt)
+        self.assertIn(f'run "{stable}" status --wait 100', nxt)
         self.assertIn("not this installer", nxt)
         self.assertLess(took, 45, "the installer does not wait for the whole download")
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.host_calls(),

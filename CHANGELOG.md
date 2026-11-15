@@ -17,6 +17,20 @@
   install.sh; 0.25 s stagger and 3 s per address in the client) plus half the way to a regression's cost, plus twice a
   fast run of the same script or request measured in the test, so a loaded machine no longer fails them while an
   address tried twice or a doubled timeout still does.
+- Host settings (lane WINFIX): Claude Code's rules now also allow Theodore's two skills by their plugin names,
+  `Skill(theodore:pptx)`, `Skill(theodore:deck-design)` and each with ` *` (any arguments), so loading them no longer
+  asks; and they allow reading the engine's render caches (rendered slides) by their own absolute paths, besides
+  Theodore's home and the specimen cache: macOS `~/Library/Caches/Theodore` (and the older engines'
+  `pptx-runtime`), Linux `~/.cache/theodore`, Windows `%LOCALAPPDATA%\Theodore` (its `Cache` holds the renders) and
+  `%LOCALAPPDATA%\pptx-runtime`. Windows gets Read rules for the first time, in the form Claude Code matches there
+  (`Read(//c/Users/.../Theodore/**)`); a folder on a network share gets none. All are recorded like the other rules:
+  an installation whose settings are on gets them at its next command, and `hosts settings --remove` and uninstall
+  take back exactly what was added.
+- While the download goes on after the installer has ended, its NEXT is `theodore status --wait 100`, which waits
+  for the runtime and the engine and returns as soon as they are there, instead of doctor every 20 seconds: one
+  waiting command in place of a sleep and repeated checks. `status --wait` now also waits for the engine while the
+  setup job is fetching it. The install page's check step reports the installer's last line (doctor's) instead of
+  running doctor again.
 
 ## 0.3.10
 

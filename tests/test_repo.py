@@ -358,7 +358,9 @@ class HostLimits(unittest.TestCase):
             self.assertLess(text.index(setup), text.index(register))
             self.assertLess(text.index(register), text.index(doctor))
             self.assertIn("run the same command again", text[text.index(doctor):], "doctor's in-progress status is replaced")
-            self.assertIn("doctor in 20 seconds, and again until it no longer says SETUP_IN_PROGRESS (not this installer).", text)
+            self.assertIn(" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says "
+                          "SETUP_IN_PROGRESS (not this installer), then report its last line.", text)
+            self.assertNotIn("in 20 seconds", text[text.index(doctor):], "no sleeping between checks: one waiting command")
         # 67 (still downloading) goes on to the registration; 68 is reported after it.
         self.assertIn('  67) say "the download goes on in the background after this installer has ended" ;;', sh)
         self.assertIn('  68) SETUP_FAILED_OUT=$setup_out ;;', sh)

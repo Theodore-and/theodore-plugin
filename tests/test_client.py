@@ -1741,6 +1741,43 @@ class Hosts(ClientCase):
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
         self.assertEqual(json.loads(settings.read_text()), original, "exactly as before, no empty key left")
 
+    def test_settings_allow_the_two_skills_and_read_the_render_cache_and_take_them_back(self):
+        self._fake_tools()
+        settings = self.box.user_home / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        original = {"permissions": {"allow": ["Skill(commit)"]}}
+        settings.write_text(json.dumps(original))
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
+        allow = json.loads(settings.read_text())["permissions"]["allow"]
+        for rule in ("Skill(theodore:pptx)", "Skill(theodore:pptx *)", "Skill(theodore:deck-design)", "Skill(theodore:deck-design *)"):
+            self.assertIn(rule, allow)
+        self.assertEqual([r for r in allow if r.startswith("Skill(")],
+                         ["Skill(commit)", "Skill(theodore:pptx)", "Skill(theodore:pptx *)", "Skill(theodore:deck-design)", "Skill(theodore:deck-design *)"],
+                         "only Theodore's two skills, by their plugin names")
+        if sys.platform == "darwin":
+            renders = self.box.user_home / "Library" / "Caches" / "Theodore"
+        elif IS_WINDOWS:
+            renders = None      # under %LOCALAPPDATA%\Theodore, Theodore's home: covered by its rule (checked in-process below)
+        else:
+            renders = self.box.user_home / ".cache" / "theodore"
+        reads = [r for r in allow if r.startswith("Read(")]
+        if renders is not None:
+            self.assertIn(f"Read(/{renders}/**)", reads, "the engine's render cache, by its absolute path (`//`)")
+        for rule in reads:
+            self.assertTrue(rule.startswith("Read(//") and rule.endswith("/**)"), rule)
+            self.assertTrue(str(self.box.user_home) in rule or str(self.box.home) in rule, "only Theodore's own folders")
+        self.assertStatus(self.client("hosts", "settings", "--remove"), "OK", 0)
+        self.assertEqual(json.loads(settings.read_text()), original, "exactly what was added is taken out")
+
+    def test_read_rules_use_claude_codes_path_forms_on_each_system(self):
+        from theodore_client import commands, core
+        with mock.patch.object(core, "IS_WINDOWS", True):
+            self.assertEqual(commands._claude_read_rule(Path("C:\\Users\\Ann Lee\\AppData\\Local\\Theodore")),
+                             "Read(//c/Users/Ann Lee/AppData/Local/Theodore/**)")
+            self.assertIsNone(commands._claude_read_rule(Path("\\\\server\\share\\Theodore")), "a network share keeps its prompt")
+        with mock.patch.object(core, "IS_WINDOWS", False):
+            self.assertEqual(commands._claude_read_rule(Path("/Users/ann/Library/Caches/Theodore")), "Read(//Users/ann/Library/Caches/Theodore/**)")
+
     def test_an_installation_from_before_gets_the_settings_once_at_its_next_command(self):
         self._fake_tools()
         settings = self.box.user_home / ".claude" / "settings.json"
