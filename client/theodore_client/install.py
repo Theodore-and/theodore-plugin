@@ -597,6 +597,7 @@ def accept_fresh(kind: str, manifest: dict, what: str) -> None:
             if kind == "channel":           # what the newest document chose: an older check may still activate that
                 seen["channel_engine"] = (manifest.get("engine") or {}).get("version")
                 seen["channel_client"] = (manifest.get("client") or {}).get("version")
+                seen["channel_client_rollback"] = (manifest.get("client") or {}).get("rollback") is True
             core.write_json(path, seen)
 
 
@@ -924,6 +925,10 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     if client_floor and client.get("version") and _manifest_time(manifest.get("server_time")) < float((update_state().get("floor") or {}).get("since") or 0) \
             and core.version_key(str(client["version"])) < core.version_key(str(client_floor)):
         client = {}                                 # an older client from a document issued before the reset: not installed
+    if client.get("version") and below_pin(str(client["version"]), client):
+        if client["version"] != __version__:
+            core.log(f"client {client['version']} not switched to: below {pinned_client()}, the version this computer's launcher pins")
+        client = {}
     if client.get("version") and client.get("sha256") and client["version"] != __version__:
         if not Job("client-update").alive():
             Job("client-update").spawn(["update", "--client-job", client["version"], client["sha256"], str(engine.get("runtime_id") or ""),
@@ -982,6 +987,34 @@ def check_updates(*, force: bool = False, wait: float = 15.0, timeout: float = U
     return manifest
 
 
+def pinned_client() -> str | None:
+    """The highest client version a launcher on this computer pins (stage1_client_version in the launcher.json of the
+    skill folder that called us and in <home>/bin): the client never switches below it, so a runtime that still names
+    an older client (a release whose second step was not run) cannot step an installation down."""
+    pins = []
+    for stamp in (core.running_stamp(), _bin_stamp()):
+        version = str((stamp or {}).get("stage1_client_version") or "")
+        if version and core._SEMVER.match(version):
+            pins.append(version)
+    return max(pins, key=core.version_key) if pins else None
+
+
+def _bin_stamp() -> dict:
+    try:
+        return core.config()
+    except Status:
+        return {}
+
+
+def below_pin(version: str, manifest_client: dict | None = None) -> bool:
+    """True when switching to `version` would go below a launcher's pin and the manifest does not mark the client as a
+    deliberate rollback (`rollback: true`)."""
+    if (manifest_client or {}).get("rollback") is True:
+        return False
+    pin = pinned_client()
+    return bool(pin) and core.version_key(version) < core.version_key(pin)
+
+
 def update_client(version: str, sha256: str, runtime_id: str | None = None, issued: float | None = None) -> None:
     """Install the client the channel manifest names: the `client` part of the engine's runtime. Verify, unpack
     beside the running one, switch. It takes effect the next time the launcher starts the client. The switch is
@@ -1014,6 +1047,9 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None, issu
             return
         if floor.get("client") and when < float(floor.get("since") or 0) and core.version_key(version) < core.version_key(str(floor["client"])):
             core.log(f"client {version} not switched to: below the client installed at the last reset")
+            return
+        if below_pin(version, {"rollback": seen.get("channel_client_rollback") is True and seen.get("channel_client") == version}):
+            core.log(f"client {version} not switched to: below {pinned_client()}, the version this computer's launcher pins")
             return
         previous = core.read_text(home.client / "current.txt")
         core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
@@ -1160,6 +1196,8 @@ def _refusal_status(code: str) -> Status:
     launcher = quoted_launcher()
     if code == "entitlement_missing":
         return account.login_start()
+    if code == "entitlement_wrong_machine":     # nothing is deleted: the log in makes this computer its own installation
+        return account.login_start("this copy of Theodore was set up on another computer; this computer needs its own log in.")
     if code == "entitlement_expired":
         try:
             account.refresh()

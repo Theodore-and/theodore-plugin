@@ -2291,6 +2291,19 @@ def _windows_cleanup(root: Path, names: list[str], keep_specimen_record: bool) -
 
 
 def uninstall(keep_hosts: bool) -> int:
+    """Its record goes beside Theodore's folder (core.uninstall_log), never into the logs/ folder it removes."""
+    core.log_elsewhere(core.uninstall_log())
+    core.log(f"uninstall: {core.home().root} (registrations {'kept' if keep_hosts else 'removed'})")
+    try:
+        code = _uninstall(keep_hosts)
+    except BaseException as exc:
+        core.log(f"uninstall: stopped ({exc.__class__.__name__}: {exc})")
+        raise
+    core.log(f"uninstall: ended with exit code {code}")
+    return code
+
+
+def _uninstall(keep_hosts: bool) -> int:
     home = core.home()
     left: list[str] = []
     notes: list[str] = []

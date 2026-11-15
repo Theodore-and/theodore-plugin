@@ -101,6 +101,21 @@ def remember(answer_enabled, asked_at: float) -> None:
         _save(state)
 
 
+def learned_at_sign_in(answer_enabled) -> None:
+    """The log-in answer's usage_enabled (servers from 2026-11-15 on). A boolean is remembered as a refresh's answer
+    would be; absent (an older server) leaves the switch unknown, so the first licensed command asks with a refresh
+    (should_ask), whatever an earlier sign-in on this computer had learned."""
+    if isinstance(answer_enabled, bool):
+        remember(answer_enabled, core.now())
+        return
+    with core.lock("usage", timeout=10):
+        state = _state()
+        if "enabled" in state or "asked_at" in state:
+            for key in ("enabled", "at", "source", "asked_at"):
+                state.pop(key, None)
+            _save(state)
+
+
 def forget() -> None:
     """Signed out: the ledger, the pending batch and the switch go (a later sign-in may be another account)."""
     with core.lock("usage", timeout=10):

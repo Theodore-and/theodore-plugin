@@ -1,5 +1,30 @@
 # Changes
 
+## 0.3.9
+
+- A network where one of the service's addresses does not answer (it takes the connection and never the TLS
+  handshake) no longer slows or breaks any client call. The client races the addresses (the next one starts 0.25 s
+  after the one before, or at once when it failed; 3 s each to connect and finish the handshake) and keeps the one
+  that answered in `state/addresses.json` for 7 days, so the next commands, in other processes too, go straight to
+  it. A kept address that stops answering is replaced after the same 0.25 s; one the name no longer resolves to is
+  not used. The usage send at the end of a deck (2 s in all) gets through on such a network; a batch that gets no
+  answer is still kept and sent later under the same id (never lost, never counted twice).
+- The launchers' own downloads (the first runtime and client) try every address the way the installers do (the same
+  code, word for word).
+- install.md and the one line a summarising fetch gets: each download is tried up to three times, 10 s each to
+  connect, since a new attempt usually reaches another address.
+- The usage switch comes with the log-in answer (servers from 2026-11-15): a new installation needs no licence
+  refresh to learn it. Against an older server the first licensed command still asks once.
+- The client never switches below the version its launcher pins, unless the release manifest marks that client as a
+  rollback (`client.rollback: true`).
+- Device binding, client side (off until the service turns it on): each installation makes a P-256 key at sign-in
+  (an installation from before 0.3.9 at its next licence refresh), kept inside the credential; registers its public
+  half; and signs a single-use nonce at each licence refresh, with an HMAC of this computer's identifier. A service
+  that does not know these routes is left alone for a day. An engine that refuses a licence made for another
+  computer (`entitlement_wrong_machine`, engines from rc.10) asks for a log in on this one.
+- `uninstall` writes what it did beside Theodore's folder (`~/.theodore-uninstall.log`), not into the folder it removes.
+- `ci/run.sh all` starts the Windows job before it waits for the shared lock.
+
 ## 0.3.8
 
 - Theodore now tries every address of its service before reporting a connection failure, so a network that cannot

@@ -156,6 +156,19 @@ def _adopt(bundle: dict) -> None:
     if (core.home().state / "update.json").exists():   # a sign-in starts from fresh replay times (installed versions stay the floor)
         _fresh_update_state("signed in")
     core.remove_tree(core.home().state / "device.json")
+    try:            # device binding: a new installation registers its key now (an older server: nothing happens)
+        from . import device
+        device.forget()
+        cred = credentials.load()
+        if cred:
+            device.bind(device.ensure_key(cred))
+    except Exception as exc:        # noqa: BLE001  never in the way of the sign-in
+        core.log(f"device: not bound at sign-in ({exc.__class__.__name__})")
+    try:            # usage counts: a server that says the switch in the log-in answer saves the first refresh
+        from . import usage
+        usage.learned_at_sign_in(bundle.get("usage_enabled"))
+    except Exception as exc:        # noqa: BLE001  never in the way of the sign-in
+        core.log(f"usage: switch at sign-in not recorded ({exc.__class__.__name__})")
 
 
 def register_disk_secrets() -> None:
@@ -193,10 +206,17 @@ def refresh(timeout: float = 20.0, *, nudge_updates: bool = True) -> dict:
     body = {"client_version": __version__, "plugin_version": core.plugin_version(), "host": core.host_name()}
     if engine:
         body["engine_version"] = engine
+    from . import device
+    proof_headers, proof_fields = device.for_refresh(cred, timeout=min(timeout, 8.0))
+    body.update(proof_fields)
+    cred = credentials.load() or cred
     asked_at = core.now()
     try:
-        answer = api.call_json("licence_refresh", bearer=cred["installation_secret"], body=body, timeout=timeout)
+        answer = api.call_json("licence_refresh", bearer=cred["installation_secret"], body=body, timeout=timeout,
+                               headers=proof_headers or None)
     except api.ApiError as error:
+        if error.code == "device_proof_required":
+            raise                   # the proof could not be made this time (no nonce): the licence stays until it expires
         if error.code in DELETE_TOKEN_ON or error.http_status in (401, 403):
             delete_token()
         if error.code in DELETE_CREDENTIAL_ON:
@@ -494,6 +514,8 @@ def _fresh_update_state(reason: str) -> None:
 def logout() -> Status:
     credentials.delete()
     delete_token()
+    from . import device
+    device.forget()
     _fresh_update_state("signed out")
     core.remove_tree(core.home().state / "device.json")
     from . import usage

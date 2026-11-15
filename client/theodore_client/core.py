@@ -285,9 +285,12 @@ def cloud_sandbox() -> bool:
         or any(Path(p).is_dir() for p in ("/mnt/skills", "/mnt/user-data", "/home/oai"))
 
 
-# What the user changes when a cloud sandbox cannot reach Theodore's sites (installers and launcher say the same).
-SANDBOX_NETWORK_NEXT = ("this cloud workspace's network does not allow Theodore's sites. Tell the user the setting below; once "
-                        "they have changed it, running the same command again is right (not before).")
+# A cloud sandbox that cannot reach Theodore's sites: the engine cannot run there, the Theodore connector can still
+# design the deck (CONNECTOR_REQUIRED; the launcher says the same).
+SANDBOX_NETWORK_NEXT = ("call the Theodore connector's theodore_begin tool now and follow what it returns: it gives the design "
+                        "guidance and the specimen sheets, and you build the deck with your own tools. If no Theodore connector "
+                        "is available to you, say so and tell the user the one step to add it: Customize > Plugins > Theodore > "
+                        "Connectors, connect Theodore, then ask again.")
 
 
 def sandbox_network_tell() -> str:
@@ -297,9 +300,9 @@ def sandbox_network_tell() -> str:
         host = ""
     root = ".".join(host.split(".")[-2:]) or host
     sites = f"{host} and *.{root}" if host else "Theodore's website and its subdomains"
-    return (f"This workspace's network does not let Theodore reach its sites. In Claude, open Settings > Capabilities, and "
-            f"under \"Use the internet while making files\" > Allowed websites add {sites}, then try again. "
-            "ChatGPT's ordinary chat has no internet access; ChatGPT Work mode does.")
+    return (f"Theodore's engine cannot reach its sites from this workspace, so I am using the Theodore connector for the design. "
+            f"For the full engine, add {sites} under Settings > Capabilities > Allowed websites (in ChatGPT, use Work mode), "
+            "or use Theodore in an assistant on your computer, such as Claude Code.")
 
 
 # --- data directory ------------------------------------------------------------------------------------------------------
@@ -849,10 +852,33 @@ class Job:
         return not self.alive()
 
 
+_LOG_FILE: Path | None = None       # set by uninstall: its record goes outside the folder it removes
+
+
+def uninstall_log() -> Path:
+    """Where an uninstall keeps its record: beside Theodore's folder, never inside it (~/.theodore-uninstall.log,
+    %LOCALAPPDATA%\\Theodore-uninstall.log), so what it did can still be read once the folder is gone."""
+    root = home().root
+    return root.parent / f"{root.name}-uninstall.log"
+
+
+def log_elsewhere(path: Path) -> None:
+    """From now on this process logs to `path` (kept under 256 KB: an older record is cut first), not to logs/."""
+    global _LOG_FILE
+    with contextlib.suppress(OSError):
+        if path.exists() and path.stat().st_size > 256 * 1024:
+            path.write_text(path.read_text(encoding="utf-8", errors="replace")[-64 * 1024:], encoding="utf-8")
+    _LOG_FILE = path
+
+
 def log(message: str) -> None:
     with contextlib.suppress(OSError):
-        home().logs.mkdir(parents=True, exist_ok=True)
-        with open(home().logs / "client.log", "a", encoding="utf-8") as handle:
+        if _LOG_FILE is not None:
+            target = _LOG_FILE
+        else:
+            home().logs.mkdir(parents=True, exist_ok=True)
+            target = home().logs / "client.log"
+        with open(target, "a", encoding="utf-8") as handle:
             handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {scrub_secrets(message)}\n")
 
 

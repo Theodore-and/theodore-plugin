@@ -1082,22 +1082,45 @@ class Engine(ClientCase):
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists())
         self.assertEqual(self.client("pptx", "version").stdout.strip(), "1.0.7")
 
-    def test_client_update_comes_from_the_runtime_manifest_and_applies_at_the_next_start(self):
+    def _relabelled_client(self, version: str) -> bytes:
         import io, tarfile
-        self.ready()
         source = self.box.tmp / "dist" / f"client-{__import__('build_client').client_version()}.tar"
         raw = io.BytesIO()
-        with tarfile.open(source) as old, tarfile.open(fileobj=raw, mode="w") as new:   # the same client, relabelled 0.1.1
+        with tarfile.open(source) as old, tarfile.open(fileobj=raw, mode="w") as new:   # the same client, relabelled
             for member in old.getmembers():
                 data = old.extractfile(member).read()
-                member.name = "0.1.1/" + member.name.split("/", 1)[1]
+                member.name = f"{version}/" + member.name.split("/", 1)[1]
                 new.addfile(member, io.BytesIO(data))
-        self.api.publish_client("0.1.1", raw.getvalue())
+        return raw.getvalue()
+
+    def test_client_update_comes_from_the_runtime_manifest_and_applies_at_the_next_start(self):
+        self.ready()
+        self.api.publish_client("99.0.1", self._relabelled_client("99.0.1"))
         self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
         self.box.wait_jobs()
-        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.1")
-        self.assertTrue((self.box.home / "client" / "0.1.1" / "theodore_client" / "cli.py").exists())
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "99.0.1")
+        self.assertTrue((self.box.home / "client" / "99.0.1" / "theodore_client" / "cli.py").exists())
         self.assertEqual(self.state("state/jobs/client-update.json").get("done"), True)
+
+    def test_the_client_never_steps_below_the_version_its_launcher_pins(self):
+        # P039 (rc.10 item 7): a runtime that still names an older client (a release whose client switch was not run)
+        # does not step an installation down; a manifest that marks the older client as a rollback does.
+        pinned = __import__("build_client").client_version()
+        self.ready()
+        self.api.publish_client("0.1.1", self._relabelled_client("0.1.1"))
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
+        self.box.wait_jobs()
+        current = self.box.home / "client" / "current.txt"
+        self.assertIn(current.read_text().strip() if current.exists() else pinned, (pinned,))
+        self.assertFalse((self.box.home / "client" / "0.1.1").exists())
+        self.assertIn("not switched to: below", (self.box.home / "logs" / "client.log").read_text())
+        # also when asked directly (the job a check started before this rule, an update --apply)
+        self.client("update", "--client-job", "0.1.1", self.api.client["sha256"], "", "0", env={"THEODORE_TEST_CLOCK_OFFSET": str(7 * 3600)})
+        self.assertIn(current.read_text().strip() if current.exists() else pinned, (pinned,))
+        self.api.publish_client("0.1.1", self._relabelled_client("0.1.1"), rollback=True)
+        self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": str(14 * 3600)})
+        self.box.wait_jobs()
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), "0.1.1")
 
     def test_engine_licence_refusals_become_statuses(self):
         self.ready()
@@ -1515,6 +1538,12 @@ class StatusDoctorUninstall(ClientCase):
         self.assertIn("left alone", first)
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["loose-file.txt", "memory"])
         self.assertEqual(foreign.read_text(), "not Theodore's")
+        # P039: the uninstall's record is kept beside the folder, not in the logs/ folder it removed (nor a new one)
+        record = self.box.home.parent / f"{self.box.home.name}-uninstall.log"
+        text = record.read_text()
+        self.assertIn(f"uninstall: {self.box.home}", text)
+        self.assertIn("uninstall: ended with exit code 0", text)
+        self.assertFalse((self.box.home / "logs").exists())
 
     def test_a_damaged_download_is_fetched_again_and_a_damaged_one_three_times_fails(self):
         # ACCEPT-LOCAL2: a runtime part arrived damaged once on a flaky network (HASH_MISMATCH) and the install failed.
@@ -2931,11 +2960,11 @@ class ProxiesAndSandboxes(ClientCase):
         with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": "1"}):
             status = api.offline(caught.exception, "sign-in could not start")
             failed = api.setup_failed("NETWORK", f"the plugin could not be downloaded ({caught.exception.detail})")
-        self.assertEqual(status.name, "OFFLINE")
+        self.assertEqual((status.name, failed.name), ("CONNECTOR_REQUIRED", "CONNECTOR_REQUIRED"))
         for s in (status, failed):
-            self.assertIn('Allowed websites add theodoreand.ai and *.theodoreand.ai', s.tell_user)
-            self.assertIn("ChatGPT Work mode", s.tell_user)
-            self.assertIn("running the same command again is right (not before)", s.next_step)
+            self.assertIn('add theodoreand.ai and *.theodoreand.ai under Settings > Capabilities > Allowed websites', s.tell_user)
+            self.assertIn("Work mode", s.tell_user)
+            self.assertIn("call the Theodore connector's theodore_begin tool now", s.next_step)
         with mock.patch.dict(os.environ, {"THEODORE_EPHEMERAL": ""}), \
                 mock.patch.object(Path, "is_dir", lambda p: False):
             plain = api.offline(caught.exception, "sign-in could not start")
@@ -3119,10 +3148,11 @@ def _job_alive(home: Path, name: str) -> bool:
 
 
 class EveryAddress(unittest.TestCase):
-    """RC9: from some networks one of the addresses Theodore's hosts resolve to does not answer, or takes the TCP
-    connection and never the TLS handshake, while another works. The client tries each address in turn (3 s each to
-    connect and finish the handshake), remembers the one that worked, leaves the choice to a proxy when there is one,
-    and verifies the certificate for the host name, never the address."""
+    """RC9, P039: from some networks one of the addresses Theodore's hosts resolve to does not answer, or takes the TCP
+    connection and never the TLS handshake, while another works. The client races the addresses (the next one starts
+    0.25 s after the one before, or at once when it failed; 3 s each to connect and finish the handshake), remembers
+    the one that worked in this process and, in state/addresses.json, for the next ones, leaves the choice to a proxy
+    when there is one, and verifies the certificate for the host name, never the address."""
 
     HOST = "dl.theodore.test"
 
@@ -3142,6 +3172,10 @@ class EveryAddress(unittest.TestCase):
         self.enterContext(mock.patch.object(api, "_ssl_context", lambda: ssl.create_default_context(cafile=self.bench.cert)))
         self.enterContext(mock.patch.object(api, "_OPENERS", {}))
         self.enterContext(mock.patch.object(api, "_GOOD_ADDRESS", {}, create=True))
+        self.folder = folder
+        self.kept = folder / "home" / "state" / "addresses.json"
+        self.real_address_file = api._address_file
+        self.enterContext(mock.patch.object(api, "_address_file", lambda: self.kept))
         self.enterContext(mock.patch.dict(os.environ, {k: "" for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
                                                                       "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")}))
         self.enterContext(mock.patch.object(_urlreq, "getproxies", lambda: {}))
@@ -3174,12 +3208,13 @@ class EveryAddress(unittest.TestCase):
         for dead in ("silent", "no_accept", "refused"):     # the handshake that hangs: the case a user met
             with self.subTest(dead=dead):
                 self.api._GOOD_ADDRESS.clear()
+                self.kept.unlink(missing_ok=True)        # a new computer: nothing remembered
                 self.connects.clear()
                 port = getattr(self.bench, dead)
                 self.addresses = [port, self.bench.live]
                 status, body, took = self.get()
                 self.assertEqual((status, body), (200, b"ok"))
-                self.assertLess(took, 5.0, f"{dead}: {took:.1f} s")        # 3 s for the dead one at most
+                self.assertLess(took, 1.5, f"{dead}: {took:.1f} s")        # the next address started 0.25 s later
                 self.assertEqual([a[1] for a in self.connects], [port, self.bench.live])
                 self.assertEqual(self.api._GOOD_ADDRESS[(self.HOST, self.bench.live)], ("127.0.0.1", self.bench.live))
                 # the next request starts with the address that worked
@@ -3191,6 +3226,74 @@ class EveryAddress(unittest.TestCase):
                 self.assertLess(took, 1.5)
                 self.assertEqual(self.bench.accepted["silent"], silent_before)
 
+    DRIVER = r"""
+import json, os, socket, ssl, sys, time
+sys.path.insert(0, sys.argv[1])
+from theodore_client import api
+host, ports, cafile, method = sys.argv[2], [int(p) for p in sys.argv[3].split(",")], sys.argv[4], sys.argv[5]
+api.OWN_BASES.append("https://" + host)
+api._ssl_context = lambda: ssl.create_default_context(cafile=cafile)
+real = socket.getaddrinfo
+socket.getaddrinfo = lambda h, p, *a, **k: ([(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", q)) for q in ports]
+                                            if h == host else real(h, p, *a, **k))
+connects, Base = [], socket.socket
+class Recording(Base):
+    def connect(self, address):
+        connects.append(address[1])
+        return super().connect(address)
+socket.socket = Recording
+began = time.monotonic()
+try:
+    if method == "usage":       # the usage send: 2 s in all, no proxy allowance
+        status, _h, body = api.request("POST", f"https://{host}:{ports[-1]}/v1/usage", body=b"{}", timeout=2.0, exact_timeout=True)
+    else:
+        status, _h, body = api.request("GET", f"https://{host}:{ports[-1]}/x", timeout=20.0)
+    out = {"status": status}
+except Exception as exc:
+    out = {"error": str(exc)}
+out.update(took=time.monotonic() - began, connects=connects)
+print(json.dumps(out))
+"""
+
+    def other_process(self, home: Path, method: str = "get") -> dict:
+        """One request from a separate Python process with its own Theodore folder: nothing shared but the folder."""
+        env = {**os.environ, "THEODORE_HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1"}
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            env.pop(key, None)
+        env["NO_PROXY"] = env["no_proxy"] = "*"
+        done = subprocess.run([sys.executable, "-I", "-c", self.DRIVER, str(Path(__file__).resolve().parents[1] / "client"), self.HOST,
+                               ",".join(str(p) for p in self.addresses), self.bench.cert, method],
+                              capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_a_hanging_first_address_costs_once_across_processes(self):
+        # the owner's carrier: of the two addresses one takes the connection and never the handshake
+        home = self.folder / "proc-home"
+        (home / "state").mkdir(parents=True)
+        self.addresses = [self.bench.silent, self.bench.live]
+        first = self.other_process(home)
+        self.assertEqual(first.get("status"), 200, first)
+        self.assertEqual(first["connects"], [self.bench.silent, self.bench.live])
+        self.assertLess(first["took"], 1.5)
+        silent_before = self.bench.accepted["silent"]
+        for method in ("get", "usage"):     # every later process, the usage send among them, goes straight to the one that works
+            with self.subTest(method=method):
+                later = self.other_process(home, method)
+                self.assertEqual(later.get("status"), 200, later)
+                self.assertEqual(later["connects"], [self.bench.live])
+                self.assertLess(later["took"], 0.75)
+        self.assertEqual(self.bench.accepted["silent"], silent_before)
+
+    def test_the_usage_send_gets_through_a_hanging_first_address_on_a_new_computer(self):
+        # nothing remembered yet: within the send's 2 s the second address is reached 0.25 s after the first
+        home = self.folder / "new-home"
+        (home / "state").mkdir(parents=True)
+        self.addresses = [self.bench.silent, self.bench.live]
+        sent = self.other_process(home, "usage")
+        self.assertEqual(sent.get("status"), 200, sent)
+        self.assertLess(sent["took"], 1.0)
+
     def test_every_address_dead_says_so(self):
         self.addresses = [self.bench.refused, self.bench.silent]
         with self.assertRaises(self.api.NetworkError) as caught:
@@ -3200,12 +3303,54 @@ class EveryAddress(unittest.TestCase):
         self.assertIn(f"127.0.0.1: ", caught.exception.detail)
 
     def test_the_request_timeout_still_bounds_the_whole_connection(self):
-        self.addresses = [self.bench.silent, self.bench.no_accept, self.bench.live]
+        self.addresses = [self.bench.silent, self.bench.no_accept]
         began = time.monotonic()
         with self.assertRaises(self.api.NetworkError) as caught:
             self.get(timeout=1.0)
         self.assertLess(time.monotonic() - began, 2.5)
-        self.assertIn("not tried", caught.exception.detail)
+        self.assertIn("addresses of", caught.exception.detail)
+        # a third address that works is reached within the same second: the dead ones do not use it up
+        self.addresses = [self.bench.silent, self.bench.no_accept, self.bench.live]
+        status, body, took = self.get(timeout=1.0)
+        self.assertEqual((status, body), (200, b"ok"))
+        self.assertLess(took, 1.0)
+
+    def test_the_address_that_worked_is_kept_for_the_next_process(self):
+        self.addresses = [self.bench.silent, self.bench.live]
+        self.assertEqual(self.get()[:2], (200, b"ok"))
+        kept = json.loads(self.kept.read_text())
+        self.assertEqual(kept[f"{self.HOST}:{self.bench.live}"]["address"], "127.0.0.1")
+        self.assertEqual(kept[f"{self.HOST}:{self.bench.live}"]["port"], self.bench.live)
+        # a new process (nothing in memory) starts with it
+        self.api._GOOD_ADDRESS.clear()
+        self.connects.clear()
+        self.assertEqual(self.get()[:2], (200, b"ok"))
+        self.assertEqual([a[1] for a in self.connects], [self.bench.live])
+
+    def test_a_kept_address_that_stopped_working_is_replaced_and_an_old_one_is_not_used(self):
+        key = f"{self.HOST}:{self.bench.live}"
+        self.kept.parent.mkdir(parents=True, exist_ok=True)
+        for at, expect_first in ((time.time() - 60, self.bench.silent), (time.time() - self.api.ADDRESS_TTL - 60, self.bench.live)):
+            with self.subTest(age=time.time() - at):
+                self.kept.write_text(json.dumps({key: {"address": "127.0.0.1", "port": self.bench.silent, "at": int(at)}}))
+                self.api._GOOD_ADDRESS.clear()
+                self.connects.clear()
+                self.addresses = [self.bench.live, self.bench.silent]
+                status, body, took = self.get()
+                self.assertEqual((status, body), (200, b"ok"))
+                self.assertEqual(self.connects[0][1], expect_first)
+                self.assertLess(took, 1.5)
+                self.assertEqual(json.loads(self.kept.read_text())[key]["port"], self.bench.live)
+
+    def test_nothing_is_kept_without_a_theodore_folder(self):
+        # an install's first steps and an uninstall: no folder is created for it
+        self.enterContext(mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.folder / "absent")}))
+        self.enterContext(mock.patch.object(self.api.core, "_HOME", None))
+        self.assertIsNone(self.real_address_file())
+        (self.folder / "absent").mkdir()
+        self.assertEqual(self.real_address_file(), self.folder / "absent" / "state" / "addresses.json")
+        (self.folder / "absent" / ".theodore-uninstalling").write_text("1")
+        self.assertIsNone(self.real_address_file())
 
     def test_a_slow_link_still_gets_the_request_s_own_time(self):
         # every address only ran out of its 3 s: not a dead address but a slow link, which the request's own 20 s serve

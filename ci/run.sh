@@ -510,10 +510,10 @@ cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; rel
 trap 'cleanup' EXIT
 trap 'exit 130' INT TERM HUP
 case "$TARGET" in
-  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives|all) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
+  macos-arm64|macos-x64|linux-x64|linux-arm64|network|archives) acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)" ;;
 esac
-# `selected` takes the lock itself, after its Windows job has started: that job runs on its own machine, and waiting in
-# the queue first only delayed the longest job of the run.
+# `selected` and `all` take the lock themselves, after their Windows job has started: that job runs on its own machine,
+# and waiting in the queue first only delayed the longest job of the run.
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
@@ -571,6 +571,7 @@ case "$TARGET" in
     else
       result windows-x64 shim not-run; result windows-x64 runtime not-run
     fi
+    acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)"
     limited 900 secrets run_secrets
     heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 ""
     heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64"

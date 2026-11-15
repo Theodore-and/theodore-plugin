@@ -16,9 +16,9 @@ By hand:
 
 | Assistant | Command |
 | --- | --- |
-| Any, macOS or Linux | `( d=$(mktemp -d) && curl -q --proto '=https' -fsS -o "$d/install.sh" https://theodoreand.ai/install.sh && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
-| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; curl.exe -q --proto =https -fsS -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue` |
-| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && curl.exe -q --proto =https -fsS -o "!D!\install.cmd" https://theodoreand.ai/install.cmd && call "!D!\install.cmd" & rmdir /s /q "!D!" 2>nul"` |
+| Any, macOS or Linux | `( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh"; rc=$?; rm -rf "$d"; exit $rc )` |
+| Any, Windows (PowerShell) | `$d = Join-Path $env:TEMP ("theodore-" + [guid]::NewGuid()); $null = New-Item -ItemType Directory -Path $d -ErrorAction Stop; foreach ($i in 1..3) { curl.exe -q --proto =https -fsS --connect-timeout 10 -o "$d\install.cmd" https://theodoreand.ai/install.cmd; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 2 }; if ($LASTEXITCODE -eq 0) { & "$d\install.cmd" }; Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue` |
+| Any, Windows (cmd) | `cmd /d /v:on /c "set D=%TEMP%\theodore-!RANDOM!!RANDOM!!RANDOM!&& mkdir "!D!" && (curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\install.cmd" https://theodoreand.ai/install.cmd || (ping -n 3 127.0.0.1 >nul & curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\install.cmd" https://theodoreand.ai/install.cmd) || (ping -n 3 127.0.0.1 >nul & curl.exe -q --proto =https -fsS --connect-timeout 10 -o "!D!\install.cmd" https://theodoreand.ai/install.cmd)) && call "!D!\install.cmd" & rmdir /s /q "!D!" 2>nul"` |
 | Claude Code only | `claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json` |
 | Codex only | `codex plugin marketplace add Theodore-and/theodore-plugin` then `codex plugin add theodore@theodore` (the installer above registers Codex from its own copy, the same as `codex plugin marketplace add ~/.theodore/plugin`) |
 

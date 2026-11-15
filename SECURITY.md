@@ -18,7 +18,7 @@ installer's are in `install/`.
 | When | What for | How often |
 | --- | --- | --- |
 | Sign-in | An activation code or a browser approval, once per computer | once |
-| Licence refresh | Renews the signed licence | at most once per 12 hours, when you use Theodore |
+| Licence refresh | Renews the signed licence; where the service binds licences to computers, first asks for a single-use nonce and signs it with this installation's key (below) | at most once per 12 hours, when you use Theodore |
 | Update check | Asks which engine, client and asset-pack versions are current, and reads the signed `plugin/latest.json` (the current plugin version) | at the first Theodore command of each assistant session that loads the pptx instructions, then at most once per 6 hours |
 | Plugin update | When the published plugin is newer than an assistant's copy: Theodore's own copy of the plugin is downloaded (signed document, pinned sha256) and the assistant's own command updates its copy (`claude plugin marketplace update theodore` and `claude plugin update theodore@theodore`; `codex plugin add theodore@theodore`) | once per release and session, in the background |
 | Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
@@ -30,7 +30,10 @@ installer's are in `install/`.
 | `theodore prefs` | Saving, listing or removing a preference you asked to keep | when used |
 
 Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand.ai` (installer and sign-in
-pages). LibreOffice, when Theodore fetches it, comes unmodified from The Document Foundation
+pages). Each of these names resolves to several addresses; the client races them (the next one starts a quarter of a
+second after the one before) and keeps the one that answered in `state/addresses.json` (the address and when, nothing
+else) for up to 7 days, so that a network where one address does not answer costs that delay once, not at every
+command. LibreOffice, when Theodore fetches it, comes unmodified from The Document Foundation
 (`download.documentfoundation.org`) and is checked against a pinned SHA-256.
 
 What the client changes on this computer by itself: its own folder (client, runtime, engines, packs, its copy of
@@ -118,6 +121,13 @@ changed since the client last learned it, the service refuses the report, stores
   Settings in the portal (Computers and assistants). It is kept in the macOS keychain (through `/usr/bin/security`), in a
   DPAPI-protected file on Windows, and in a file readable only by you on Linux (also on a Mac when the
   keychain is not available, for example over SSH). It is never printed or logged.
+- From 0.3.9 each installation also has its own key (ECDSA P-256), made on this computer at sign-in and kept inside the
+  installation credential, in the same store, so it is protected and removed with it. Only its public half is sent,
+  once, to register it with the installation (`state/binding.json` records that it was). Where the service binds
+  licences to computers, a licence refresh carries a signature made with this key and a value derived from this
+  computer's identifier and the installation id (an HMAC: the identifier itself never leaves the computer, and two
+  installations on one computer give different values), so a copied credential cannot refresh elsewhere and a
+  copied licence can be refused on another computer. A service that does not bind licences ignores both.
 - The licence is a signed token that the engine checks offline. It is refreshed when online and lasts 7 days
   from the last refresh: Theodore's engine works offline for up to 7 days. The deck-design guidance always
   needs a connection.
@@ -175,7 +185,10 @@ changed since the client last learned it, the service refuses the report, stores
 ## Removing everything
 
 `theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
-plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). It first stops Theodore's own running
+plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). What it did is
+written beside Theodore's folder, never inside it (`~/.theodore-uninstall.log`; Windows:
+`%LOCALAPPDATA%\Theodore-uninstall.log`), so it can still be read once the folder is gone; it holds paths and
+outcomes, no credential, and can be deleted at any time. It first stops Theodore's own running
 processes (background downloads, the tool server), each found by the file Theodore wrote for it. On Windows the folders
 go after the client has exited: a cleanup removes them, retrying for up to two minutes while Windows releases the last
 files, and writes its result to a file in the temporary folder that the status names; running the installer with

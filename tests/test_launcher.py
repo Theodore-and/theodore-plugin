@@ -314,25 +314,29 @@ class Failures(LauncherCase):
         self._record("ChatGPT ordinary chat (no network at all)", result)
         first, nxt, tell = self.assertStatus(result, "CONNECTOR_REQUIRED", 74)
         self.assertIn("no internet access at all", first)
-        self.assertIn("do not retry here", nxt)
+        self.assertIn("theodore_begin", nxt)
         self.assertIn("Work mode can install and run Theodore", tell)
         self.assertNotIn("Allowed websites", tell)
         self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
 
     @unittest.skipIf(IS_WINDOWS, "theodore.cmd: no cloud sandbox runs Windows; its wording is unchanged")
-    def test_a_claude_sandbox_that_blocks_our_hosts_names_the_setting_and_says_retrying_is_right(self):
+    def test_a_claude_sandbox_that_blocks_our_hosts_sends_the_assistant_to_the_connector(self):
+        # P039 (lane HOSTS, Claude Desktop chat): SETUP_FAILED with the Allowed-websites advice left the assistant to
+        # build the deck with another slide skill. The engine cannot run there; the connector designs the deck.
         dead = f"http://127.0.0.1:{closed_port()}"
         self.box.write_launcher_json(stage1_client_url=f"{dead}/client.tar")
         # a Claude cloud session whose proxy refuses the host: here the connection fails, the session is Claude's
         result = self.run_launcher("guide", "deck-design", env={"CLAUDE_CODE_REMOTE": "true", "CLAUDE_CODE_SESSION_ORIGIN": "claude_ai_chat"})
         self._record("Claude sandbox, theodoreand.ai not allowed", result)
-        first, nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
-        self.assertIn("cause NETWORK", first)
-        self.assertIn("running ", nxt)
-        self.assertIn("again is right (not before)", nxt)
-        self.assertIn('Settings > Capabilities, and under "Use the internet while making files" > Allowed websites add '
-                      'theodoreand.ai and *.theodoreand.ai', tell)
-        self.assertIn("ChatGPT Work mode does", tell)
+        first, nxt, tell = self.assertStatus(result, "CONNECTOR_REQUIRED", 74)
+        self.assertIn("cannot run here", first)
+        self.assertIn("call the Theodore connector's theodore_begin tool now and follow what it returns", nxt)
+        self.assertIn("build the deck with your own tools", nxt)
+        self.assertIn("If no Theodore connector is available to you, say so", nxt)
+        self.assertIn("Customize > Plugins > Theodore > Connectors", nxt)
+        self.assertIn("Allowed websites", tell)
+        self.assertIn("theodoreand.ai and *.theodoreand.ai", tell)
+        self.assertIn("Claude Code", tell)
         # the same through a proxy that answers 403 for the host, in any sandbox
         import http.server, threading
         class Refuse(http.server.BaseHTTPRequestHandler):
@@ -346,7 +350,7 @@ class Failures(LauncherCase):
         url = f"http://127.0.0.1:{proxy.server_address[1]}"
         self.box.write_launcher_json(stage1_client_url="http://198.51.100.7/client.tar")
         result = self.run_launcher("guide", "deck-design", env={"THEODORE_EPHEMERAL": "1", "http_proxy": url, "HTTPS_PROXY": url, "no_proxy": "", "NO_PROXY": ""})
-        first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
+        first, _nxt, tell = self.assertStatus(result, "CONNECTOR_REQUIRED", 74)
         self.assertIn("Allowed websites", tell)
         self.assertFalse((self.box.home / "logs" / "bootstrap.log").exists(), "no bootstrap is attempted")
         # a proxy that lets the tunnel open and then is not the host (an interception with a certificate the sandbox
@@ -365,9 +369,26 @@ class Failures(LauncherCase):
         self.box.write_launcher_json(stage1_client_url="https://theodore.invalid/client.tar")
         result = self.run_launcher("guide", "deck-design", env={"CLAUDE_CODE_REMOTE": "true", "HTTPS_PROXY": url, "https_proxy": url,
                                                                 "no_proxy": "", "NO_PROXY": ""})
-        first, _nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
-        self.assertIn("cause NETWORK", first)
+        first, _nxt, tell = self.assertStatus(result, "CONNECTOR_REQUIRED", 74)
+        self.assertIn("cannot run here", first)
         self.assertIn("Allowed websites", tell)
+
+    @unittest.skipIf(IS_WINDOWS, "a POSIX sh launcher test")
+    def test_a_download_that_failed_says_connector_in_a_sandbox_and_check_the_connection_on_a_laptop(self):
+        # the bootstrap's own download failed (the probe passed, or ran before the network went): the recorded
+        # failure is read at the next call. A cloud sandbox gets the connector; an ordinary offline laptop keeps its
+        # message.
+        failed = self.box.home / "state" / "bootstrap" / "failed"
+        for env, name, code, wanted in (({"THEODORE_EPHEMERAL": "1"}, "CONNECTOR_REQUIRED", 74, "theodore_begin"),
+                                        ({"CLAUDE_CODE_REMOTE": "", "THEODORE_EPHEMERAL": ""}, "SETUP_FAILED", 68, "check the internet connection")):
+            with self.subTest(name=name):
+                failed.parent.mkdir(parents=True, exist_ok=True)
+                failed.write_text("NETWORK\ncurl exit 6, HTTP 000\n")
+                _first, nxt, tell = self.assertStatus(self.run_launcher("guide", "deck-design", env=env), name, code)
+                self.assertIn(wanted, nxt)
+                if name == "SETUP_FAILED":
+                    self.assertNotIn("connector", nxt + tell)
+                    self.assertIn("Please check the internet connection", tell)
 
     @unittest.skipIf(IS_WINDOWS, "a POSIX sh launcher test")
     def test_a_flag_set_to_no_is_not_a_sandbox(self):
