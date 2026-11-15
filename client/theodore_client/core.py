@@ -907,7 +907,8 @@ def log_elsewhere(path: Path) -> None:
     global _LOG_FILE
     with contextlib.suppress(OSError):
         if path.exists() and path.stat().st_size > 256 * 1024:
-            path.write_text(path.read_text(encoding="utf-8", errors="replace")[-64 * 1024:], encoding="utf-8")
+            path.write_text(("\ufeff" if IS_WINDOWS else "") + path.read_text(encoding="utf-8-sig", errors="replace")[-64 * 1024:],
+                            encoding="utf-8")
     _LOG_FILE = path
 
 
@@ -918,8 +919,11 @@ def log(message: str) -> None:
         else:
             home().logs.mkdir(parents=True, exist_ok=True)
             target = home().logs / "client.log"
+        # On Windows a new log starts with a UTF-8 byte-order mark: Notepad and PowerShell 5.1 then read it as UTF-8
+        # (without one they read the ANSI code page: C:\Users\Théo showed mangled, WINDOWS W-8).
+        bom = "\ufeff" if IS_WINDOWS and not os.path.exists(target) else ""
         with open(target, "a", encoding="utf-8") as handle:
-            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {scrub_secrets(message)}\n")
+            handle.write(f"{bom}{time.strftime('%Y-%m-%dT%H:%M:%S')} [{os.getpid()}] {scrub_secrets(message)}\n")
 
 
 def user_agent() -> str:
