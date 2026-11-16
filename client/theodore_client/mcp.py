@@ -86,15 +86,22 @@ DESKTOP_DESCRIPTION = (
 DESKTOP_DESCRIPTION = str(os.environ.get("THEODORE_CHAT_TOOL_DESCRIPTION") or "").strip()[:2000] or DESKTOP_DESCRIPTION
 DESKTOP_TITLE = "Theodore"
 # What the service's texts say, and what this one tool's answers say instead.
-SERVICE_TOOL_BINDINGS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or '
-                         '<name>.md is read by calling this same Theodore tool guide with section "<name>", and a link '
-                         'written specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+# The service's sentence (theodore apps/worker/src/services/workflow.ts, localLinkBindings, tool form): for role "slide"
+# it adds ` and role "slide"` after the section, and so does this tool's wording.
+_SERVICE_TOOL_BINDINGS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or '
+                          '<name>.md is read by calling this same Theodore tool guide with section "<name>"{role}, and a link '
+                          'written specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+SLIDE_ROLE_WORDS = ' and role "slide"'
+SERVICE_TOOL_BINDINGS = _SERVICE_TOOL_BINDINGS.format(role="")
+SERVICE_TOOL_BINDINGS_SLIDE = _SERVICE_TOOL_BINDINGS.format(role=SLIDE_ROLE_WORDS)
 DESKTOP_BINDINGS = (f'Links in this guidance are read with the Theodore tool {DESKTOP_TOOL}: a link written references/<name>.md '
-                    f'or <name>.md is read by calling {DESKTOP_TOOL} with action "guide" and section "<name>", and a link '
+                    f'or <name>.md is read by calling {DESKTOP_TOOL} with action "guide" and section "<name>"{{role}}, and a link '
                     f'written specimens/<file>.jpg is opened by calling {DESKTOP_TOOL} with action "specimen" and file "<file>" '
                     f'(or a list of up to {SPECIMEN_MAX_PER_CALL} files). A report this guidance asks for is sent with action "report" (kind, '
                     f'title, details, and verb, code or origin when there are), and a lasting preference is saved with action '
                     f'"preference_add" (text).')
+DESKTOP_BINDINGS_SLIDE = DESKTOP_BINDINGS.format(role=SLIDE_ROLE_WORDS)
+DESKTOP_BINDINGS = DESKTOP_BINDINGS.format(role="")
 SERVICE_LAUNCHER_LINES = ("Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd "
                           "on Windows) with:", "Run the Theodore launcher you used to get these instructions with:")
 DESKTOP_LAUNCHER_LINE = (f'Call the {DESKTOP_TOOL} tool with action "report" and, as its fields kind, title, details, verb, code '
@@ -145,14 +152,14 @@ def desktop_tools(index: dict | None = None) -> list[dict]:
 def desktop_text(text: str, begin: bool = False) -> str:
     """A service text as this one tool's answer: its tool and launcher bindings name `theodore` and the action. The
     entry document always ends with the bindings, also from a service that sent none."""
-    out = text.replace(SERVICE_TOOL_BINDINGS, DESKTOP_BINDINGS)
+    out = text.replace(SERVICE_TOOL_BINDINGS, DESKTOP_BINDINGS).replace(SERVICE_TOOL_BINDINGS_SLIDE, DESKTOP_BINDINGS_SLIDE)
     for line in SERVICE_LAUNCHER_LINES:
         out = out.replace(line, DESKTOP_LAUNCHER_LINE)
     # The remote connector's own names stay where a text sends the assistant to that connector (CONNECTOR_REQUIRED).
     out = re.sub(r"(?<!connector's )`?theodore_(begin|guide|specimen|report|preference_add|preference_list|preference_remove)`?",
                  lambda m: f'`{DESKTOP_TOOL}` with action "{m.group(1)}"', out)
     out = re.sub(rf'`{re.escape(DESKTOP_TOOL)}` with action "(\w+)" tool', rf'`{DESKTOP_TOOL}` tool with action "\1"', out)
-    if begin and DESKTOP_BINDINGS not in out:
+    if begin and DESKTOP_BINDINGS not in out and DESKTOP_BINDINGS_SLIDE not in out:
         out = out.rstrip("\n") + "\n\n" + DESKTOP_BINDINGS + "\n"
     return out
 

@@ -263,6 +263,23 @@ class Guide(McpCase):
 class ClaudeDesktop(McpCase):
     """`mcp --for claude-desktop`: the entry Theodore writes in Claude Desktop's configuration (desktop.py)."""
 
+    # The service's tool-form link sentence as the backend composes it (localLinkBindings, tool form), word for word.
+    SERVICE_LINKS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or <name>.md '
+                     'is read by calling this same Theodore tool guide with section "<name>"{role}, and a link written '
+                     'specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+
+    def test_the_link_sentence_is_rewritten_for_the_lead_and_for_a_slide(self):
+        self.sign_in()
+        for role, words in ((None, ""), ("slide", ' and role "slide"')):
+            with self.subTest(role=role):
+                self.api.guides["deck-design"]["craft"] = "CRAFT TEXT\n" + self.SERVICE_LINKS.format(role=words) + "\n"
+                server = self.server(args=("--for", "claude-desktop"))
+                text = server.call("theodore", action="guide", section="craft", **({"role": role} if role else {}))["content"][0]["text"]
+                server.close()
+                self.assertNotIn("Theodore tools:", text, "the service's sentence is replaced")
+                self.assertIn('read by calling theodore with action "guide" and section "<name>"' + words + ", and a link", text)
+                self.assertIn('opened by calling theodore with action "specimen" and file "<file>"', text)
+
     def test_one_tool_named_theodore_serves_every_action(self):
         """The app asks for an approval per tool of a local server: exactly one tool, so "Always allow" is clicked once."""
         from theodore_client import mcp

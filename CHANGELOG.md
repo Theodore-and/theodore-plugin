@@ -15,6 +15,9 @@
   that do not compose (unclosed, an end alone, nested, or any other theodore marker such as Studio's) lose no text: the
   marker lines go, nothing else, and the client log says so. The same composition on every route that hands out the
   manual: `guide pptx`, the skill body, the plugin tool's pptx guide, and the chat tool's `manual` and a `read` of it.
+- The chat tool's rewrite of the service's link sentence matches both of the service's wordings: the lead's and the
+  slide's (`... with section "<name>" and role "slide", ...`), which becomes the chat tool's `action "guide" and
+  section "<name>" and role "slide"`.
 - Close-ups by bare code (F1): `theodore specimen HC3` and the tool server's specimen action take a code matching
   `^[A-Z]{2}[0-9]{1,3}$` as the file `HC3.jpg`; file names work as before (at most 8 a call). A code and its file name
   are one held sheet, with the same ETag revalidation. The tool's `file` schema accepts the code pattern beside the
