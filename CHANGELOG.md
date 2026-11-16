@@ -1,5 +1,16 @@
 # Changes
 
+## 0.4.3
+
+- Windows launcher: the "is the home writable" probe can no longer collide between launchers (lane P043). cmd has no
+  process id and seeds %RANDOM% from the clock in seconds, so launchers started in the same second drew the same probe
+  file name; one deleted the file another had just written, and that one answered `SETUP_FAILED cause DISK ... not
+  writable` (exit 68) on a writable home (seen with 8 launchers at once on an empty home). The probe is now a folder
+  made with mkdir, which is atomic and fails when the name exists: only the launcher whose mkdir made it writes in it
+  and removes it, and one that drew a taken name tries the next (the attempt number is part of the name, 32 at most).
+  The sh launcher's probe is named by its process id (`$$`), unique among running processes: unchanged.
+- Launcher generation 11.
+
 ## 0.4.2
 
 - The reader's role (lane P042b, the combined release's F2): `theodore guide <skill> [section] --role slide` sends
