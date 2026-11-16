@@ -56,6 +56,7 @@ GITLEAKS_VERSION=8.30.1
 HOST=
 KEY=
 AZURE=
+STANDING=
 KNOWN=
 LOGS=${THEODORE_CI_LOGS:-$HOME/theodore-ci}
 TARGET=${1:-}
@@ -197,7 +198,7 @@ run_windows() {
   retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
   # On a throwaway Azure machine the pinned CPython and the bundle cache live in C:\theodore-ci-cache, which outlives
   # the run (a prepared image keeps it). The suites run one after another unless CI_WINDOWS_PARALLEL=1.
-  keep=; [ -z "$AZURE" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
+  keep=; [ -z "$AZURE$STANDING" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
   # The suites side by side (CI_WINDOWS_PARALLEL=1) failed the first-run tests' 60 s stage-2 wait twice under load on
   # 8 vCPU (2026-11-13): one after another stays the default until that wait is fixed.
   mode=serial; [ "${CI_WINDOWS_PARALLEL:-}" != 1 ] || mode=
@@ -227,6 +228,35 @@ run_windows() {
     mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows.seconds"
   fi
   rm -f "$dir/repo.tar"
+}
+
+# --- Windows on the standing build machine ----------------------------------------------------------------------------------
+# With --azure, Windows goes to the standing build machine CI_WIN_MACHINE (default plugin-win; ci/build-machine.sh, the
+# same file as the engine's scripts/build-machine.sh) when it exists: started for this run with a lease, its warm
+# C:\theodore-ci-cache kept (the pinned CPython, the bundle download cache), deallocated after the run when no other run
+# holds it. CI_WIN_MACHINE=none, a machine that is missing, in use or does not start: the throwaway VM, as before.
+standing_name() {
+  m=${CI_WIN_MACHINE:-plugin-win}
+  [ "$m" != none ] && [ -f "${BUILD_MACHINE_HOME:-$HOME/.theodore-build}/$m/host" ] && echo "$m"
+}
+run_windows_standing() {
+  m=$(standing_name); dir="$OUT/windows-x64"; mkdir -p "$dir"
+  started=$(date +%s)
+  export BUILD_MACHINE_LEASE_PID=$$
+  trap "bash '$ROOT/ci/build-machine.sh' stop '$m' >> '$dir/standing.log' 2>&1" EXIT
+  trap 'exit 130' INT TERM HUP
+  if HOST=$(bash "$ROOT/ci/build-machine.sh" start "$m" 2>>"$dir/standing.log"); then
+    KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN=$(bash "$ROOT/ci/build-machine.sh" known-hosts "$m") STANDING=1
+    say "windows-x64: standing machine $m ready after $(( $(date +%s) - started )) s"
+    run_windows
+    bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
+    trap - EXIT INT TERM HUP
+  else
+    trap - EXIT INT TERM HUP
+    bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
+    say "windows-x64: the standing machine $m is in use or did not start (ci/out/windows-x64/standing.log): a throwaway VM instead"
+    HOST=; run_windows_azure
+  fi
 }
 
 # --- Windows on a throwaway Azure VM ---------------------------------------------------------------------------------------
@@ -527,7 +557,8 @@ case "$TARGET" in
   linux-x64) heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
   linux-arm64) heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
   windows-x64) mkdir -p "$OUT/windows-x64"; commit > "$OUT/windows-x64/commit"
-               if [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
+               if [ -n "$AZURE" ] && standing_name >/dev/null; then run_windows_standing
+               elif [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
   archives) heavy 900 archives run_archives ;;
   record) record ;;
   require) require ;;
