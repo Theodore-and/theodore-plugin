@@ -723,6 +723,29 @@ class Failures(LauncherCase):
             ours = (launcher == self.box.launcher) == (winner == self.api.base)
             self.assertEqual(code, 74 if ours else 64, f"{launcher}: {out}")
 
+    @unittest.skipUnless(IS_WINDOWS, "cmd's %RANDOM%: an environment variable of that name takes its place")
+    def test_the_write_probe_never_touches_a_name_another_launcher_drew(self):
+        # Launchers started in the same second draw the same %RANDOM% numbers. RANDOM=7 in the environment makes the
+        # draw known: another launcher's probes under the names this one draws first are already there. Before 0.4.3
+        # the probe was the file .write-test.77, which this launcher wrote over and deleted (the other launcher then
+        # found its probe gone: "not writable"). From 0.4.3 each probe is a folder only its maker's mkdir created.
+        dead = f"http://127.0.0.1:{closed_port()}"
+        self.box.write_launcher_json(stage1_client_url=f"{dead}/client.tar")
+        bootstrap = self.box.home / "state" / "bootstrap"
+        bootstrap.mkdir(parents=True)
+        held_file = bootstrap / ".write-test.77"                 # the old name, as another (older) launcher holds it
+        held_file.write_text("x\n")
+        held_folder = bootstrap / ".write-test.77.1"             # the first new name, as another launcher holds it
+        held_folder.mkdir()
+        (held_folder / "probe").write_text("x\n")
+        result = self.run_launcher("version", env={"RANDOM": "7", "THEODORE_EPHEMERAL": "1"})
+        self.assertNotIn("cause DISK", result.stdout)
+        self.assertEqual(result.returncode, 74, f"{result.stdout}\n{result.stderr}")
+        self.assertEqual(held_file.read_text(), "x\n", "another launcher's probe is never written over or removed")
+        self.assertEqual((held_folder / "probe").read_text(), "x\n")
+        self.assertEqual(sorted(p.name for p in bootstrap.glob(".write-test.*")), [".write-test.77", ".write-test.77.1"],
+                         "this launcher's own probe is gone")
+
     def odd_roots(self) -> list[Path]:
         roots = [self.box.tmp / "100%proof"]
         if not IS_WINDOWS:

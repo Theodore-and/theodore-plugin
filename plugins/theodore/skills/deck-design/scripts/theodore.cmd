@@ -100,13 +100,8 @@ call :job_alive
 if not errorlevel 1 goto :progress_status
 
 if not exist "%B%" mkdir "%B%" 2>nul
-rem Several launchers may start at once and batch has no process id: a name of its own, written again once if another
-rem launcher that drew the same name removed it in between.
-set "WT=%B%\.write-test.%RANDOM%%RANDOM%"
-( >"%WT%" echo x ) 2>nul
-if not exist "%WT%" ( >"%WT%" echo x ) 2>nul
-if not exist "%WT%" goto :not_writable
-del /q "%WT%" >nul 2>&1
+call :write_test
+if errorlevel 1 goto :not_writable
 rem The folder is this service's from here on, or another's: then refuse.
 call :claim_env
 call :read_env
@@ -280,6 +275,25 @@ if not defined HOME_API exit /b 0
 if "%HOME_API:~-1%"=="/" set "HOME_API=%HOME_API:~0,-1%"
 if /i not "%HOME_API%"=="%MY_API%" set "FOREIGN=1"
 exit /b 0
+
+:write_test
+rem Whether the home is writable, in a probe folder of this launcher's own. Batch has no process id, and %RANDOM% is
+rem seeded from the clock in seconds, so launchers started in the same second draw the same numbers in the same order.
+rem mkdir is atomic and fails when the name exists: the launcher whose mkdir made a name owns it and is the only one
+rem that writes in it or removes it; another that drew the same name takes the next one (the attempt is part of the
+rem name). Errorlevel 1 only when no name could be made, or the file in it could not be written.
+set /a WTN=0
+:write_test_next
+set /a WTN+=1
+if %WTN% GTR 32 exit /b 1
+set "WT=%B%\.write-test.%RANDOM%%RANDOM%.%WTN%"
+mkdir "%WT%" 2>nul || goto :write_test_next
+( >"%WT%\probe" echo x ) 2>nul
+set "WTOK=1"
+if not exist "%WT%\probe" set "WTOK="
+rmdir /s /q "%WT%" >nul 2>&1
+if defined WTOK exit /b 0
+exit /b 1
 
 :claim_env
 rem One exclusive step: the record is written whole beside its place and renamed into it; a rename never replaces an

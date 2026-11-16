@@ -7,7 +7,8 @@
 #   ci/azure-windows.sh down <state-dir>   delete its resource group (and wait), then the state folder
 #   ci/azure-windows.sh admit <state-dir>  add the /24 this machine leaves from now to the SSH rule (its address can
 #                                          change during a run; ci/run.sh calls it when the machine stops answering)
-#   ci/azure-windows.sh sweep [hours]      delete every throwaway group left behind (tag purpose=theodore-plugin-ci
+#   ci/azure-windows.sh sweep [hours]      delete every throwaway group left behind, except one a live run on this Mac
+#                                          holds ($THEODORE_CI_LOGS/azure-live/<group>) (tag purpose=theodore-plugin-ci
 #                                          and a theodore-plugin-ci-<UTC> name); with hours, only those older; and
 #                                          clear ci/out/azure-windows when the group it names no longer exists
 #   ci/azure-windows.sh capture <state-dir>  the machine (deallocated) becomes the next version of the prepared image;
@@ -35,6 +36,9 @@
 set -euo pipefail
 # shellcheck source=azure-place.sh
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/azure-place.sh"
+
+# The groups live runs on this Mac hold (one file per group, the holder's pid): sweep keeps them.
+LIVE=${THEODORE_CI_LOGS:-$HOME/theodore-ci}/azure-live
 
 say() { printf 'azure-windows: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
@@ -91,6 +95,9 @@ up() {
   say "image: ${image##*/galleries/}"
   local group; group="$PREFIX-$(date -u +%Y%m%d%H%M%S)"
   echo "$group" > "$STATE/group"
+  # Held: the run that made it (CI_AZURE_HOLDER, default the caller, ci/run.sh) is named in the live list, and no sweep
+  # deletes the group while that process lives (another worktree's sweep included).
+  mkdir -p "$LIVE"; echo "${CI_AZURE_HOLDER:-$PPID}" > "$LIVE/$group"
   # Any way out of `up` before the machine answers deletes the group again (a failed up never leaves one behind).
   trap 'st=$?; if [ "$st" -ne 0 ] && [ -f "$STATE/group" ]; then say "up failed: deleting its group"; down || true; fi' EXIT
   # Who may connect: CI_AZURE_SSH_FROM (space-separated prefixes), else every /24 this machine was seen leaving
@@ -197,7 +204,7 @@ down() {
     [ $n -lt 6 ] || die "could not delete $group (network?): its auto-shutdown deallocates it, and the next run's sweep deletes it"
     sleep 30
   done
-  rm -rf "${STATE:?}"
+  rm -rf "${STATE:?}"; rm -f "$LIVE/$group"
   say "deleted $group"
 }
 
@@ -259,6 +266,9 @@ sweep() {
   [ -z "$hours" ] || [[ "$hours" =~ ^[0-9]+$ ]] || die "sweep takes a number of hours"
   for group in $(az group list --tag purpose=$PURPOSE --query '[].name' -o tsv); do
     [[ "$group" =~ ^$PREFIX-[0-9]{14}$ ]] || { say "skipping $group: not a name this script makes"; continue; }
+    if [ -f "$LIVE/$group" ] && kill -0 "$(cat "$LIVE/$group")" 2>/dev/null; then
+      say "keeping $group: run $(cat "$LIVE/$group") on this Mac still holds it"; continue
+    fi
     if [ -n "$hours" ]; then
       made=${group##*-}
       age=$(( $(date -u +%s) - $(date -u -j -f %Y%m%d%H%M%S "$made" +%s 2>/dev/null || date -u -d "${made:0:8} ${made:8:2}:${made:10:2}:${made:12:2}" +%s) ))
@@ -267,6 +277,7 @@ sweep() {
     say "deleting leftover $group"; azr group delete -n "$group" --yes -o none; found=$((found + 1))
   done
   say "sweep: $found group(s) deleted"
+  local f; for f in "$LIVE"/*; do if [ -e "$f" ] && ! kill -0 "$(cat "$f")" 2>/dev/null; then rm -f "$f"; fi; done
   local dir="$ROOT/ci/out/azure-windows"
   if [ -f "$dir/group" ] && [ "$(az group exists -n "$(cat "$dir/group")" -o tsv 2>/dev/null)" = false ]; then
     say "clearing $dir: its group $(cat "$dir/group") no longer exists"; rm -rf "${dir:?}"

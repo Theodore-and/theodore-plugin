@@ -78,7 +78,15 @@ print("\n".join(ids(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]))))
     if (-not $launcherIds.Count) { $groups = [ordered]@{ 'launcher-0' = @('tests.test_launcher') } }  # could not list: the suite whole
     $groups['installer'] = @('tests.test_installer')
     $slow = @('tests.test_launcher', 'tests.test_installer')
-    $groups['rest'] = @(Get-ChildItem "$repo\tests" -Filter 'test_*.py' | ForEach-Object { 'tests.' + $_.BaseName } | Where-Object { $slow -notcontains $_ } | Sort-Object)
+    # The other suites in three groups, largest module first into the lightest group (by file size): one 'rest' group
+    # was itself the long pole once the launcher suite was split.
+    $restFiles = @(Get-ChildItem "$repo\tests" -Filter 'test_*.py' | Where-Object { $slow -notcontains ('tests.' + $_.BaseName) } | Sort-Object Length -Descending)
+    $m = 3; $load = @(0) * $m
+    for ($i = 0; $i -lt $m; $i++) { $groups["rest-$i"] = @() }
+    foreach ($f in $restFiles) {
+        $k = 0; for ($i = 1; $i -lt $m; $i++) { if ($load[$i] -lt $load[$k]) { $k = $i } }
+        $groups["rest-$k"] += 'tests.' + $f.BaseName; $load[$k] += $f.Length
+    }
     $shimSync = Step "$out\shim.log" "tools\sync_launchers.py --check"
     $procs = [ordered]@{}
     $t0 = Get-Date
@@ -96,7 +104,7 @@ print("\n".join(ids(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]))))
     $ok = @{}
     foreach ($g in $procs.Keys) {
         $ok[$g] = ($procs[$g].ExitCode -eq 0)
-        $log = if ($g -eq 'rest') { "$out\shim.log" } else { "$out\runtime.log" }
+        $log = if ($g -like 'rest-*') { "$out\shim.log" } else { "$out\runtime.log" }
         [IO.File]::AppendAllText($log, "===== $g ($($groups[$g].Count) names): exit $($procs[$g].ExitCode)`r`n")
         foreach ($part in "$out\$g.out", "$out\$g.part") {  # the program's own bytes, as Step keeps them
             if (-not (Test-Path $part)) { continue }
@@ -106,10 +114,11 @@ print("\n".join(ids(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]))))
         }
     }
     [IO.File]::AppendAllText("$out\timing.txt", "suites side by side ($($procs.Count) processes): $([int]((Get-Date) - $t0).TotalSeconds) s`r`n")
-    $suites = -not @($ok.Keys | Where-Object { $_ -ne 'rest' -and -not $ok[$_] }).Count
+    $suites = -not @($ok.Keys | Where-Object { $_ -notlike 'rest-*' -and -not $ok[$_] }).Count
+    $rest = -not @($ok.Keys | Where-Object { $_ -like 'rest-*' -and -not $ok[$_] }).Count
     [IO.File]::AppendAllText("$out\shim.log", "===== the launcher and installer suites ran once, in runtime.log: $(if ($suites) { 'pass' } else { 'fail' })`r`n")
     $runtime = $runtime -and $suites
-    $shim = $shimSync -and $ok['rest'] -and $suites
+    $shim = $shimSync -and $rest -and $suites
     Remove-Item -Recurse -Force "$base\p" -ErrorAction SilentlyContinue
 }
 Result shim $shim

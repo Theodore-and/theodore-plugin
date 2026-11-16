@@ -56,6 +56,7 @@ GITLEAKS_VERSION=8.30.1
 HOST=
 KEY=
 AZURE=
+STANDING=
 KNOWN=
 LOGS=${THEODORE_CI_LOGS:-$HOME/theodore-ci}
 TARGET=${1:-}
@@ -196,16 +197,20 @@ run_windows() {
   # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
   retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
   # On a throwaway Azure machine the pinned CPython and the bundle cache live in C:\theodore-ci-cache, which outlives
-  # the run (a prepared image keeps it). The suites run one after another unless CI_WINDOWS_PARALLEL=1.
-  keep=; [ -z "$AZURE" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
-  # The suites side by side (CI_WINDOWS_PARALLEL=1) failed the first-run tests' 60 s stage-2 wait twice under load on
-  # 8 vCPU (2026-11-13): one after another stays the default until that wait is fixed.
-  mode=serial; [ "${CI_WINDOWS_PARALLEL:-}" != 1 ] || mode=
+  # the run (a prepared image keeps it).
+  keep=; [ -z "$AZURE$STANDING" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
+  # The suites side by side (each test once; windows-run.ps1), the default since the first-run tests wait for the
+  # background stage 2 as long as a machine running every suite at once needs (tests/support.py wait_jobs, 240 s; it was
+  # 60 s and failed twice under that load on 8 vCPU, 2026-11-13). CI_WINDOWS_SERIAL=1: one after another.
+  mode=; [ "${CI_WINDOWS_SERIAL:-}" != 1 ] || mode=serial
   # The poll's limit: the last run that passed here, plus half and 15 min (CI_WINDOWS_TIMEOUT overrides; 3 h without one).
+  # The history is kept per kind of machine (a warm standing machine's time must never budget a cold throwaway run: the
+  # engine's watchdog cut rc.17's Windows build that way), and the limit never goes under 5400 s (it is for a hang).
+  if [ -n "$STANDING" ]; then hist="-standing"; elif [ -n "$AZURE" ]; then hist="-azure"; else hist="-host"; fi
   limit=${CI_WINDOWS_TIMEOUT:-}
   if [ -z "$limit" ]; then
-    last=$(cat "$LOGS/history/plugin-windows.seconds" 2>/dev/null)
-    case "$last" in ''|*[!0-9]*) limit=10800 ;; *) limit=$(( last * 3 / 2 + 900 )); [ "$limit" -ge 1800 ] || limit=1800 ;; esac
+    last=$(cat "$LOGS/history/plugin-windows$hist.seconds" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) limit=10800 ;; *) limit=$(( last * 3 / 2 + 900 )); [ "$limit" -ge 5400 ] || limit=5400 ;; esac
   fi
   say "windows-x64: poll limit $limit s"
   if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\theodore-ci\\repo | Out-Null$keep\"" > "$dir/remote.log" 2>&1 &&
@@ -224,9 +229,38 @@ run_windows() {
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(tr -d '\r' < "$dir/$job.result")"; done
   [ -z "${wstart:-}" ] || echo "$(( $(date +%s) - wstart ))" > "$dir/job.seconds"
   if [ "$(tr -d '\r' < "$dir/shim.result")" = pass ] && [ "$(tr -d '\r' < "$dir/runtime.result")" = pass ] && [ -n "${wstart:-}" ]; then
-    mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows.seconds"
+    mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows$hist.seconds"
   fi
   rm -f "$dir/repo.tar"
+}
+
+# --- Windows on the standing build machine ----------------------------------------------------------------------------------
+# With --azure, Windows goes to the standing build machine CI_WIN_MACHINE (default plugin-win; ci/build-machine.sh, the
+# same file as the engine's scripts/build-machine.sh) when it exists: started for this run with a lease, its warm
+# C:\theodore-ci-cache kept (the pinned CPython, the bundle download cache), deallocated after the run when no other run
+# holds it. CI_WIN_MACHINE=none, a machine that is missing, in use or does not start: the throwaway VM, as before.
+standing_name() {
+  m=${CI_WIN_MACHINE:-plugin-win}
+  [ "$m" != none ] && [ -f "${BUILD_MACHINE_HOME:-$HOME/.theodore-build}/$m/host" ] && echo "$m"
+}
+run_windows_standing() {
+  m=$(standing_name); dir="$OUT/windows-x64"; mkdir -p "$dir"
+  started=$(date +%s)
+  export BUILD_MACHINE_LEASE_PID=$$
+  trap "bash '$ROOT/ci/build-machine.sh' stop '$m' >> '$dir/standing.log' 2>&1" EXIT
+  trap 'exit 130' INT TERM HUP
+  if HOST=$(bash "$ROOT/ci/build-machine.sh" start "$m" 2>>"$dir/standing.log"); then
+    KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN=$(bash "$ROOT/ci/build-machine.sh" known-hosts "$m") STANDING=1
+    say "windows-x64: standing machine $m ready after $(( $(date +%s) - started )) s"
+    run_windows
+    bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
+    trap - EXIT INT TERM HUP
+  else
+    trap - EXIT INT TERM HUP
+    bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
+    say "windows-x64: the standing machine $m is in use or did not start (ci/out/windows-x64/standing.log): a throwaway VM instead"
+    HOST=; run_windows_azure
+  fi
 }
 
 # --- Windows on a throwaway Azure VM ---------------------------------------------------------------------------------------
@@ -392,6 +426,7 @@ plugins/*/skills/*/SKILL.md|text
 plugins/*/README.md|text
 ci/windows-*.ps1|windows
 ci/azure-*.sh|windows
+ci/build-machine.sh|windows
 plugins/*/scripts/*.cmd|windows
 install/install.cmd|windows
 client/truststore/_windows.py|windows
@@ -527,7 +562,8 @@ case "$TARGET" in
   linux-x64) heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
   linux-arm64) heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
   windows-x64) mkdir -p "$OUT/windows-x64"; commit > "$OUT/windows-x64/commit"
-               if [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
+               if [ -n "$AZURE" ] && standing_name >/dev/null; then run_windows_standing
+               elif [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
   archives) heavy 900 archives run_archives ;;
   record) record ;;
   require) require ;;
