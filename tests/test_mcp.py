@@ -103,9 +103,12 @@ class Listing(McpCase):
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
         one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
-        self.assertEqual(one["enum"], ["cover-01.jpg", "rules-and-ledgers.jpg"])
-        self.assertEqual((many["type"], many["items"]["enum"], many["minItems"], many["maxItems"]),
-                         ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], 1, 6))
+        code = {"type": "string", "pattern": "^[A-Z]{2}[0-9]{1,3}$"}         # a close-up's bare code (P042b)
+        self.assertEqual(one["anyOf"], [{"type": "string", "enum": ["cover-01.jpg", "rules-and-ledgers.jpg"]}, code])
+        self.assertEqual((many["type"], many["items"]["anyOf"][0]["enum"], many["items"]["anyOf"][1], many["minItems"], many["maxItems"]),
+                         ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], code, 1, 6))
+        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["role"],
+                         {"type": "string", "enum": ["lead", "slide"], "description": '"slide" for an agent given one slide.'})
         self.assertEqual([t["description"] for t in tools.values()],
                          ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.",
                           "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name)."])
@@ -169,6 +172,22 @@ class Guide(McpCase):
         missing = server.call("guide", skill="deck-design", section="nosuch")
         self.assertTrue(missing["content"][0]["text"].startswith("THEODORE USAGE: "))
 
+    # P042b: the reader's role. "slide" is sent and the text comes as composed for it; held per role.
+    def test_role_slide_is_sent_and_held_apart_from_the_lead_text(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = "Intro.\n<!-- theodore:if lead -->\nLEAD ONLY.\n<!-- theodore:end -->\nShared.\n"
+        server = self.server()
+        lead = server.call("guide", skill="deck-design", section="craft")["content"][0]["text"]
+        slide = server.call("guide", skill="deck-design", section="craft", role="slide")["content"][0]["text"]
+        self.assertEqual(lead, "Intro.\nLEAD ONLY.\nShared.\n")
+        self.assertEqual(slide, "Intro.\nShared.\n")
+        self.assertEqual([q.get("role") for q in self.api.guide_queries], [None, "slide"])
+        again = server.call("guide", skill="deck-design", section="craft", role="lead")["content"][0]["text"]
+        self.assertEqual(again, lead)
+        self.assertNotIn("role", self.api.guide_queries[-1], "lead is the default: nothing is sent")
+        wrong = server.call("guide", skill="deck-design", section="craft", role="boss")
+        self.assertTrue(wrong["content"][0]["text"].startswith("THEODORE USAGE: "), wrong)
+
     def test_an_older_service_that_pages_is_joined_in_order(self):
         self.sign_in()
         self.api.guide_whole = False
@@ -197,6 +216,18 @@ class Guide(McpCase):
         self.assertTrue(text.splitlines()[1].startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), text[:400])
         self.assertNotIn("SERVED-POINTER", text)
         self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
+
+    def test_pptx_manual_is_composed_for_the_role(self):
+        """The engine's manual carries role markers on disk; the tool composes it as `guide pptx [--role slide]` does."""
+        self.ready()
+        (self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md").write_text(
+            "# Manual\n<!-- theodore:if lead -->\nSend the reviewer message.\n<!-- theodore:end -->\nFinish.\n")
+        server = self.server()
+        lead = server.call("guide", skill="pptx")["content"][0]["text"]
+        slide = server.call("guide", skill="pptx", role="slide")["content"][0]["text"]
+        self.assertIn("# Manual\nSend the reviewer message.\nFinish.\n", lead)
+        self.assertIn("# Manual\nFinish.\n", slide)
+        self.assertNotIn("theodore:", lead + slide)
 
     def test_pptx_manual_comes_from_the_engine(self):
         self.ready()
@@ -231,6 +262,23 @@ class Guide(McpCase):
 
 class ClaudeDesktop(McpCase):
     """`mcp --for claude-desktop`: the entry Theodore writes in Claude Desktop's configuration (desktop.py)."""
+
+    # The service's tool-form link sentence as the backend composes it (localLinkBindings, tool form), word for word.
+    SERVICE_LINKS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or <name>.md '
+                     'is read by calling this same Theodore tool guide with section "<name>"{role}, and a link written '
+                     'specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+
+    def test_the_link_sentence_is_rewritten_for_the_lead_and_for_a_slide(self):
+        self.sign_in()
+        for role, words in ((None, ""), ("slide", ' and role "slide"')):
+            with self.subTest(role=role):
+                self.api.guides["deck-design"]["craft"] = "CRAFT TEXT\n" + self.SERVICE_LINKS.format(role=words) + "\n"
+                server = self.server(args=("--for", "claude-desktop"))
+                text = server.call("theodore", action="guide", section="craft", **({"role": role} if role else {}))["content"][0]["text"]
+                server.close()
+                self.assertNotIn("Theodore tools:", text, "the service's sentence is replaced")
+                self.assertIn('read by calling theodore with action "guide" and section "<name>"' + words + ", and a link", text)
+                self.assertIn('opened by calling theodore with action "specimen" and file "<file>"', text)
 
     def test_one_tool_named_theodore_serves_every_action(self):
         """The app asks for an approval per tool of a local server: exactly one tool, so "Always allow" is clicked once."""
@@ -326,6 +374,17 @@ class ClaudeDesktop(McpCase):
 
 
 class Specimen(McpCase):
+    def test_a_bare_code_is_its_close_up_and_shares_the_held_copy(self):
+        self.sign_in()
+        self.api.specimens = {"HC3.jpg": JPEG + b"HC3", "cover-01.jpg": JPEG}
+        server = self.server()
+        one = server.call("specimen", file="HC3")["content"]
+        self.assertEqual(base64.b64decode(one[0]["data"]), JPEG + b"HC3")
+        many = server.call("specimen", file=["HC3.jpg", "cover-01.jpg", "HC3"])["content"]
+        self.assertEqual([b["text"] for b in many if b["type"] == "text"], ["HC3.jpg", "cover-01.jpg", "HC3.jpg"])
+        self.assertEqual(self.api.served["specimen", "HC3.jpg", 200], 1, "a code and its file name are one held sheet")
+        self.assertTrue(server.call("specimen", file="hc3")["content"][0]["text"].startswith("THEODORE USAGE: "))
+
     def test_an_image_block_and_nothing_on_disk(self):
         self.sign_in()
         self.api.specimens = {"cover-01.jpg": JPEG}

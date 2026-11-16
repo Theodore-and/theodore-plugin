@@ -838,6 +838,10 @@ def read(path_in, folder_in, offset=None, limit=None) -> dict:
         raise _refuse(f"{path.name} is not a text file; Theodore reads text files and images here.",
                       'to read a deck, run ["start", "--from", "<deck.pptx>", "--brief", "read"] and read its deck.js, or ["slide", "show", ...].')
     text = path.read_text(encoding="utf-8", errors="replace")
+    docs = _engine_docs()
+    if docs is not None and path == docs / "SKILL.md":     # the manual read as a file: composed as `manual` gives it
+        from . import commands
+        text = commands.compose_manual(text, None)
     lines = text.splitlines(keepends=True)
     start = max(0, int(offset or 1) - 1) if isinstance(offset, int) else 0
     end = start + int(limit) if isinstance(limit, int) and limit > 0 else len(lines)

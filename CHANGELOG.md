@@ -1,5 +1,28 @@
 # Changes
 
+## 0.4.2
+
+- The reader's role (lane P042b, the combined release's F2): `theodore guide <skill> [section] --role slide` sends
+  `role=slide` on every request for that text (whole, or each part), so the service composes it for an agent given one
+  slide; the output is printed as before (whole under Claude Code, parts elsewhere). Every command the client writes
+  for a further section or part of that text carries `--role slide`: the links it turns into commands, the next-part
+  line, the opening's tool arguments and the "no such section" status. `--role lead` or no flag sends nothing new; any
+  other value is a usage status. The plugin's local tool server takes the same optional `role` in its `guide` tool and
+  in the chat tool's `guide` action, holds each text per role, and passes it to the service.
+- The engine's pptx manual (its SKILL.md on disk, never served) is composed for the role by the client: marker lines
+  `<!-- theodore:if lead -->` / `<!-- theodore:end -->` (whole lines, outside fenced blocks) are removed; with
+  `--role slide` (or the tool's role "slide") the lead blocks go too. A file without markers prints as before; markers
+  that do not compose (unclosed, an end alone, nested, or any other theodore marker such as Studio's) lose no text: the
+  marker lines go, nothing else, and the client log says so. The same composition on every route that hands out the
+  manual: `guide pptx`, the skill body, the plugin tool's pptx guide, and the chat tool's `manual` and a `read` of it.
+- The chat tool's rewrite of the service's link sentence matches both of the service's wordings: the lead's and the
+  slide's (`... with section "<name>" and role "slide", ...`), which becomes the chat tool's `action "guide" and
+  section "<name>" and role "slide"`.
+- Close-ups by bare code (F1): `theodore specimen HC3` and the tool server's specimen action take a code matching
+  `^[A-Z]{2}[0-9]{1,3}$` as the file `HC3.jpg`; file names work as before (at most 8 a call). A code and its file name
+  are one held sheet, with the same ETag revalidation. The tool's `file` schema accepts the code pattern beside the
+  index's file names.
+
 ## 0.4.1
 
 - Theodore's own short command (lane PROMPTS): with the host settings, the set-up writes `theodore`, a two-line script

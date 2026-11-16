@@ -47,6 +47,9 @@ HELD_SHEET_BYTES_MAX = 64 << 20
 HELD_GUIDES_MAX = 64
 HELD_GUIDE_CHARS_MAX = 16 << 20
 
+ROLE = {"type": "string", "enum": list(commands.ROLES), "description": '"slide" for an agent given one slide.'}
+CODE_PATTERN = "^[A-Z]{2}[0-9]{1,3}$"           # a close-up's bare code (specimens.CODE): HC3 is HC3.jpg
+
 DESCRIPTIONS = {
     "list": "Lists the files of a Theodore skill.",
     "guide": "Returns one file of a Theodore skill, whole.",
@@ -83,15 +86,22 @@ DESKTOP_DESCRIPTION = (
 DESKTOP_DESCRIPTION = str(os.environ.get("THEODORE_CHAT_TOOL_DESCRIPTION") or "").strip()[:2000] or DESKTOP_DESCRIPTION
 DESKTOP_TITLE = "Theodore"
 # What the service's texts say, and what this one tool's answers say instead.
-SERVICE_TOOL_BINDINGS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or '
-                         '<name>.md is read by calling this same Theodore tool guide with section "<name>", and a link '
-                         'written specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+# The service's sentence (theodore apps/worker/src/services/workflow.ts, localLinkBindings, tool form): for role "slide"
+# it adds ` and role "slide"` after the section, and so does this tool's wording.
+_SERVICE_TOOL_BINDINGS = ('Links in this guidance are read with the Theodore tools: a link written references/<name>.md or '
+                          '<name>.md is read by calling this same Theodore tool guide with section "<name>"{role}, and a link '
+                          'written specimens/<file>.jpg is opened by calling the Theodore tool specimen with file "<file>".')
+SLIDE_ROLE_WORDS = ' and role "slide"'
+SERVICE_TOOL_BINDINGS = _SERVICE_TOOL_BINDINGS.format(role="")
+SERVICE_TOOL_BINDINGS_SLIDE = _SERVICE_TOOL_BINDINGS.format(role=SLIDE_ROLE_WORDS)
 DESKTOP_BINDINGS = (f'Links in this guidance are read with the Theodore tool {DESKTOP_TOOL}: a link written references/<name>.md '
-                    f'or <name>.md is read by calling {DESKTOP_TOOL} with action "guide" and section "<name>", and a link '
+                    f'or <name>.md is read by calling {DESKTOP_TOOL} with action "guide" and section "<name>"{{role}}, and a link '
                     f'written specimens/<file>.jpg is opened by calling {DESKTOP_TOOL} with action "specimen" and file "<file>" '
                     f'(or a list of up to {SPECIMEN_MAX_PER_CALL} files). A report this guidance asks for is sent with action "report" (kind, '
                     f'title, details, and verb, code or origin when there are), and a lasting preference is saved with action '
                     f'"preference_add" (text).')
+DESKTOP_BINDINGS_SLIDE = DESKTOP_BINDINGS.format(role=SLIDE_ROLE_WORDS)
+DESKTOP_BINDINGS = DESKTOP_BINDINGS.format(role="")
 SERVICE_LAUNCHER_LINES = ("Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd "
                           "on Windows) with:", "Run the Theodore launcher you used to get these instructions with:")
 DESKTOP_LAUNCHER_LINE = (f'Call the {DESKTOP_TOOL} tool with action "report" and, as its fields kind, title, details, verb, code '
@@ -115,7 +125,7 @@ def desktop_tools(index: dict | None = None) -> list[dict]:
                                       'manual: the build instructions; run: one Theodore engine command (args, stdin, folder), '
                                       'its output and render images; read, write, edit, list: the deck\'s files (path); '
                                       'reveal: show a file in Finder or Explorer, only when the user asks.'},
-            "section": section, "file": file,
+            "section": section, "file": file, "role": ROLE,
             "args": {"type": "array", "items": {"type": "string"},
                      "description": 'run: the engine command without "pptx", one item per argument, e.g. ["apply", "<workspace>"].'},
             "stdin": {"type": "string", "description": "run: text the command reads on standard input (the design note for --storyline -)."},
@@ -142,14 +152,14 @@ def desktop_tools(index: dict | None = None) -> list[dict]:
 def desktop_text(text: str, begin: bool = False) -> str:
     """A service text as this one tool's answer: its tool and launcher bindings name `theodore` and the action. The
     entry document always ends with the bindings, also from a service that sent none."""
-    out = text.replace(SERVICE_TOOL_BINDINGS, DESKTOP_BINDINGS)
+    out = text.replace(SERVICE_TOOL_BINDINGS, DESKTOP_BINDINGS).replace(SERVICE_TOOL_BINDINGS_SLIDE, DESKTOP_BINDINGS_SLIDE)
     for line in SERVICE_LAUNCHER_LINES:
         out = out.replace(line, DESKTOP_LAUNCHER_LINE)
     # The remote connector's own names stay where a text sends the assistant to that connector (CONNECTOR_REQUIRED).
     out = re.sub(r"(?<!connector's )`?theodore_(begin|guide|specimen|report|preference_add|preference_list|preference_remove)`?",
                  lambda m: f'`{DESKTOP_TOOL}` with action "{m.group(1)}"', out)
     out = re.sub(rf'`{re.escape(DESKTOP_TOOL)}` with action "(\w+)" tool', rf'`{DESKTOP_TOOL}` tool with action "\1"', out)
-    if begin and DESKTOP_BINDINGS not in out:
+    if begin and DESKTOP_BINDINGS not in out and DESKTOP_BINDINGS_SLIDE not in out:
         out = out.rstrip("\n") + "\n\n" + DESKTOP_BINDINGS + "\n"
     return out
 
@@ -168,13 +178,15 @@ def _plugin_tools(index: dict | None = None) -> list[dict]:
     # The deck-design sections as a folder would list them; any other name is still accepted (a pptx section the
     # service serves to this account, lane STUDIO), and an unknown one answers that there is no such section.
     section = {"anyOf": [{"type": "string", "enum": sections}, {"type": "string"}]} if sections else {"type": "string"}
-    sheet = {"type": "string", **({"enum": sheets} if sheets else {})}
+    sheet = {"anyOf": [{"type": "string", "enum": sheets}, {"type": "string", "pattern": CODE_PATTERN}]} if sheets \
+        else {"type": "string"}
     return [
         {"name": "list", "description": DESCRIPTIONS["list"],
          "inputSchema": {"type": "object", "properties": {"skill": {"type": "string", "enum": list(SKILLS)}},
                          "required": ["skill"], "additionalProperties": False}},
         {"name": "guide", "description": DESCRIPTIONS["guide"],
-         "inputSchema": {"type": "object", "properties": {"skill": {"type": "string", "enum": list(SKILLS)}, "section": section},
+         "inputSchema": {"type": "object", "properties": {"skill": {"type": "string", "enum": list(SKILLS)}, "section": section,
+                                                          "role": ROLE},
                          "required": ["skill"], "additionalProperties": False},
          "_meta": {"anthropic/maxResultSizeChars": GUIDE_MAX_RESULT_CHARS}},
         {"name": "specimen", "description": DESCRIPTIONS["specimen"],
@@ -189,7 +201,7 @@ def _plugin_tools(index: dict | None = None) -> list[dict]:
 INDEX: dict | None = None          # {"version", "sections", "specimens", "etag"} of deck-design, when known
 NOTIFY: list[dict] = []            # notifications the server sends after its next answer
 SHEETS: dict[str, tuple[str, bytes, str | None]] = {}       # name -> (sha256, bytes, index ETag it was fetched under)
-GUIDES: dict[tuple[str, str], tuple[str, str]] = {}         # (skill, section) -> (ETag, whole text)
+GUIDES: dict[tuple[str, str, str], tuple[str, str]] = {}    # (skill, section, role or "") -> (ETag, whole text)
 VALIDATED_AT: float | None = None  # time.monotonic() of the service's last confirmation of INDEX (and of this device)
 
 
@@ -230,7 +242,7 @@ def _hold_sheet(name: str, value: tuple[str, bytes, str | None]) -> None:
     _hold(SHEETS, name, value, lambda v: len(v[1]), HELD_SHEETS_MAX, HELD_SHEET_BYTES_MAX)
 
 
-def _hold_guide(key: tuple[str, str], value: tuple[str, str]) -> None:
+def _hold_guide(key: tuple[str, str, str], value: tuple[str, str]) -> None:
     _hold(GUIDES, key, value, lambda v: len(v[1]), HELD_GUIDES_MAX, HELD_GUIDE_CHARS_MAX)
 
 
@@ -360,18 +372,18 @@ def _status(status: Status) -> dict:
 
 # --- guide ---------------------------------------------------------------------------------------------------------------
 
-def _fetch_whole(skill: str, section: str | None) -> str:
+def _fetch_whole(skill: str, section: str | None, role: str | None = None) -> str:
     """The whole document as the service sends it: one answer with form=whole; an older service that still pages
-    is asked for every part, joined in order."""
+    is asked for every part, joined in order. `role` "slide": the text as composed for an agent given one slide."""
     claims = account.require(skill)
     del claims
-    query = {"form": "whole", "bindings": "tool"}
+    query = {"form": "whole", "bindings": "tool", **({"role": role} if role else {})}
     what = f"guide {skill}"
     if section:
         name = commands._section_name(section)
         if not commands.SECTION_NAME.fullmatch(name):
-            raise commands._no_such_section(skill, name)
-    key = (skill, name if section else "")
+            raise commands._no_such_section(skill, name, role)
+    key = (skill, name if section else "", role or "")
     held = GUIDES.get(key)
     conditional = {"If-None-Match": held[0]} if held else None
     if section:
@@ -380,7 +392,7 @@ def _fetch_whole(skill: str, section: str | None) -> str:
                                                  query=query, headers=conditional)
         except api.ApiError:
             GUIDES.pop(key, None)
-            raise commands._no_such_section(skill, name) from None
+            raise commands._no_such_section(skill, name, role) from None
         route, extra = "guide_section", {"section": name}
     else:
         status, headers, raw = commands._api("guide", what, skill=skill, query=query, headers=conditional)
@@ -407,7 +419,7 @@ def _fetch_whole(skill: str, section: str | None) -> str:
     return text
 
 
-def _pptx_manual() -> str:
+def _pptx_manual(role: str | None = None) -> str:
     """The pptx manual as the launcher prints it, whole, in one document (it comes with the engine); a tool result
     needs none of the opening lines a long command output gets. On the chat route it carries no update notice: those
     say what changed since the last skill load, at any earlier time (an install's plugin update minutes before), and a
@@ -415,19 +427,22 @@ def _pptx_manual() -> str:
     build, so a chat says nothing about versions; the notice stays for the coding hosts' next skill load."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP)
+        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP, role=role)
     return buffer.getvalue()
 
 
 def tool_guide(args: dict) -> dict:
     skill, section = args.get("skill"), args.get("section")
+    if args.get("role") is not None and not isinstance(args.get("role"), str):
+        raise core.usage("role is a string.")
+    role = commands._role(args.get("role"))
     if skill not in SKILLS:
         raise core.usage(f"unknown skill {skill!r}. The skills are: {', '.join(SKILLS)}.")
     if section is not None and not isinstance(section, str):
         raise core.usage("section is a string.")
     if skill == "pptx" and not section:
-        return _text(_pptx_manual())
-    return _text(_fetch_whole(skill, section or None))
+        return _text(_pptx_manual(role))
+    return _text(_fetch_whole(skill, section or None, role))
 
 
 # --- specimen ------------------------------------------------------------------------------------------------------------
@@ -475,7 +490,7 @@ def tool_specimen(args: dict) -> dict:
     with its status and no image."""
     asked = args.get("file")
     many = isinstance(asked, list)
-    names = asked if many else [asked]
+    names = [specimens.file_name(name) for name in (asked if many else [asked])]     # a bare code is its close-up's file
     if many and not 1 <= len(names) <= SPECIMEN_MAX_PER_CALL:
         raise core.usage(f"specimen takes one file or a list of 1 to {SPECIMEN_MAX_PER_CALL} files; {len(names)} were given. "
                          f"Ask for the rest in another call.")
@@ -575,7 +590,7 @@ def desktop_call(args: dict) -> dict:
     elif action == "guide":
         if not isinstance(args.get("section"), str) or not args["section"]:
             raise core.usage('action "guide" needs section, the name a link references/<name>.md gives.')
-        result = tool_guide({"skill": "deck-design", "section": args["section"]})
+        result = tool_guide({"skill": "deck-design", "section": args["section"], "role": args.get("role")})
     elif action == "specimen":
         result = tool_specimen({"file": args.get("file")})
     elif action == "report":

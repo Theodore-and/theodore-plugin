@@ -10,8 +10,8 @@ from . import account, api, commands, core, specimens, usage, withdraw
 from .core import Status
 
 HELP = """Theodore client commands (run through the launcher):
-  guide <pptx|deck-design> [section] [--part N] [--license]   print the skill instructions
-  specimen <file.jpg> [...]      fetch deck-design specimen sheets (at most 8) and print where they are
+  guide <pptx|deck-design> [section] [--part N] [--license] [--role lead|slide]   print the skill instructions
+  specimen <file.jpg|CODE> [...] fetch deck-design specimen sheets (at most 8) and print where they are
   skill <pptx|deck-design>       the skill's instructions as a skill file's body (always exits 0)
   mcp                            serve the guide and specimen tools to the assistant (MCP over standard input and output)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
@@ -40,6 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     g.add_argument("section", nargs="?")
     g.add_argument("--part", type=int, default=None)
     g.add_argument("--license", action="store_true")
+    g.add_argument("--role")
     sp = sub.add_parser("specimen", add_help=False)
     sp.add_argument("files", nargs="*")
     lg = sub.add_parser("login", add_help=False)
@@ -130,7 +131,7 @@ def _dispatch(argv: list[str]) -> int:
     args = _parser().parse_args(argv)
     cmd = args.command
     if cmd == "guide":
-        return commands.guide(args.skill, args.section, args.part, args.license)
+        return commands.guide(args.skill, args.section, args.part, args.license, args.role)
     if cmd == "skill":
         return commands.skill(args.name)
     if cmd == "specimen":

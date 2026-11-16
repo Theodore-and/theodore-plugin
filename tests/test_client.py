@@ -257,6 +257,20 @@ class Specimen(ClientCase):
         self.assertEqual(self.api.served["specimen", "cover-01.jpg", 304], 1)
         self.assertEqual(self.folders(), [one.parent], "nothing new written")
 
+    def test_a_bare_code_names_its_close_up_and_shares_its_held_copy(self):
+        self.api.specimens["HC3.jpg"] = JPEG + b"HC3"
+        result = self.client("specimen", "HC3", "cover-01.jpg")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        code, cover = (Path(line) for line in result.stdout.splitlines())
+        self.assertEqual((code.name, code.read_bytes()), ("HC3.jpg", JPEG + b"HC3"))
+        again = self.client("specimen", "HC3.jpg")
+        self.assertEqual(Path(again.stdout.strip()), code, "the code and its file name are one held sheet")
+        self.assertEqual(self.api.served["specimen", "HC3.jpg", 200], 1)
+        self.assertEqual(self.api.served["specimen", "HC3.jpg", 304], 1)
+        self.assertEqual([r["path"] for r in self.specimen_requests()][:2], ["/v1/guide/specimens/HC3.jpg", "/v1/guide/specimens/cover-01.jpg"])
+        for wrong in ("hc3", "HC3456", "H3"):
+            self.assertStatus(self.client("specimen", wrong), "USAGE", 64)
+
     def test_reuse_one_fetch_per_distinct_sheet_across_calls(self):
         names = [f"s{i}.jpg" for i in range(10)]
         self.api.specimens = {name: JPEG + name.encode() for name in names}
@@ -489,7 +503,73 @@ class Specimen(ClientCase):
         self.assertEqual(self.specimen_requests(), [])
 
 
+# An invented manual with one role block (the engine ships the pptx SKILL.md with role markers; the client composes it).
+ROLE_MANUAL = ("# Manual\n\nBuild the deck.\n\n<!-- theodore:if lead -->\n## Review\n\nSend the reviewer message.\n"
+               "<!-- theodore:end -->\n\n```\n<!-- theodore:if lead -->\nA fenced example stays as it is.\n```\n\nFinish.\n")
+
+
+class ManualRoles(unittest.TestCase):
+    """compose_manual, in-process: the role dimension of the marker grammar on the engine's on-disk manual."""
+
+    def setUp(self):
+        from support import CLIENT_DIR
+        sys.path.insert(0, str(CLIENT_DIR))
+        from theodore_client import commands
+        self.compose = commands.compose_manual
+        self.logged: list[str] = []
+        original = commands.core.log
+        commands.core.log = self.logged.append
+        self.addCleanup(setattr, commands.core, "log", original)
+
+    def test_lead_keeps_the_blocks_and_slide_drops_them_markers_never_show(self):
+        lead, slide = self.compose(ROLE_MANUAL, None), self.compose(ROLE_MANUAL, "slide")
+        fenced = "```\n<!-- theodore:if lead -->\nA fenced example stays as it is.\n```\n"
+        self.assertEqual(lead, "# Manual\n\nBuild the deck.\n\n## Review\n\nSend the reviewer message.\n\n" + fenced + "\nFinish.\n")
+        self.assertEqual(slide, "# Manual\n\nBuild the deck.\n\n\n" + fenced + "\nFinish.\n")
+        self.assertEqual(self.logged, [])
+
+    def test_a_file_with_no_markers_is_unchanged(self):
+        text = "# Manual\n\nNo markers.\n```\n<!-- theodore:end -->\n```\n"
+        self.assertIs(self.compose(text, "slide"), text)
+
+    def test_broken_markers_lose_no_text_and_are_logged(self):
+        cases = {
+            "not closed": "A\n<!-- theodore:if lead -->\nB\n",
+            "end alone": "A\n<!-- theodore:end -->\nB\n",
+            "nested": "A\n<!-- theodore:if lead -->\n<!-- theodore:if lead -->\nB\n<!-- theodore:end -->\n<!-- theodore:end -->\n",
+            "studio": "A\n<!-- theodore:if studio -->\nB\n<!-- theodore:else -->\nC\n<!-- theodore:end -->\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.logged.clear()
+                expected = "".join(line for line in text.splitlines(keepends=True) if not line.startswith("<!--"))
+                self.assertEqual(self.compose(text, "slide"), expected)
+                self.assertEqual(self.compose(text, None), expected)
+                self.assertEqual(len(self.logged), 2, self.logged)
+                self.assertIn("do not compose", self.logged[0])
+
+
 class Guide(ClientCase):
+    def test_the_pptx_manual_is_composed_for_the_role(self):
+        self.sign_in()
+        self.assertStatus(self.client("guide", "pptx"), "SETUP_IN_PROGRESS", 67)
+        self.box.wait_jobs()
+        (self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md").write_text(ROLE_MANUAL)
+        body = lambda out: out.split("--- SKILL.md ---\n", 1)[1].rsplit("=== END", 1)[0]
+        lead = self.client("guide", "pptx")
+        self.assertEqual(lead.returncode, 0, lead.stdout + lead.stderr)
+        self.assertIn("Send the reviewer message.", body(lead.stdout))
+        self.assertEqual(body(lead.stdout).count("<!-- theodore:"), 1, "only the fenced example keeps its marker")
+        self.assertEqual(body(self.client("guide", "pptx", "--role", "lead").stdout), body(lead.stdout))
+        slide = self.client("guide", "pptx", "--role", "slide").stdout
+        self.assertNotIn("Send the reviewer message.", body(slide))
+        self.assertIn("A fenced example stays as it is.", body(slide))
+        self.assertIn("Finish.", body(slide))
+        self.assertTrue(slide.splitlines()[-1].endswith(". THE TEXT IS COMPLETE. ==="))
+        skill = self.client("skill", "pptx").stdout
+        self.assertIn("Send the reviewer message.", skill)
+        self.assertNotIn("<!-- theodore:if lead -->\n## Review", skill)
+
     def test_not_signed_in_starts_the_browser_sign_in(self):
         result = self.client("guide", "pptx")
         _first, nxt, _tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)
@@ -568,6 +648,44 @@ class Guide(ClientCase):
         licence = self.client("guide", "deck-design", "--license")
         self.assertIn("Apache License", licence.stdout)
         self.assertStatus(self.client("guide", "deck-design", "nosuchsection"), "USAGE", 64)
+
+    # P042b: the reader's role. "slide" is sent on every request for the text, and every command the client writes for a
+    # further section or part carries it; "lead" or no flag sends nothing new.
+    ROLE_TEXT = ("Intro.\n<!-- theodore:if lead -->\nLEAD ONLY.\n<!-- theodore:end -->\n"
+                 "Read [the forms](references/forms.md) next.\n")
+
+    def test_role_slide_is_sent_and_links_carry_it(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = self.ROLE_TEXT
+        launcher = f'"{self.box.home / "bin" / "theodore"}"'
+        for env in ({}, self.CC):
+            self.api.guide_queries.clear()
+            slide = self.client("guide", "deck-design", "craft", "--role", "slide", env=env)
+            self.assertEqual(slide.returncode, 0, slide.stdout + slide.stderr)
+            self.assertNotIn("LEAD ONLY", slide.stdout)
+            self.assertIn(f"Read [the forms](run: {launcher} guide deck-design forms --role slide) next.", slide.stdout)
+            self.assertEqual([q.get("role") for q in self.api.guide_queries], ["slide"])
+            self.assertTrue(slide.stdout.splitlines()[-1].endswith(". THE TEXT IS COMPLETE. ==="))
+        self.assertIn('(skill "deck-design", section "craft", role "slide")', slide.stdout[:800])
+        for role in (("--role", "lead"), ()):
+            self.api.guide_queries.clear()
+            lead = self.client("guide", "deck-design", "craft", *role).stdout
+            self.assertIn("LEAD ONLY", lead)
+            self.assertIn(f"(run: {launcher} guide deck-design forms) next.", lead)
+            self.assertEqual([q.get("role") for q in self.api.guide_queries], [None])
+        self.assertStatus(self.client("guide", "deck-design", "craft", "--role", "boss"), "USAGE", 64)
+        self.api.guides["deck-design"][""] = self.ROLE_TEXT
+        main = self.client("guide", "deck-design", "--role", "slide").stdout
+        self.assertNotIn("LEAD ONLY", main)
+
+    def test_role_slide_in_parts_names_it_in_every_next_part(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = "c" * 50000
+        one = self.client("guide", "deck-design", "craft", "--role", "slide")
+        self.assertIn("guide deck-design craft --role slide --part 2 ===", one.stdout.splitlines()[-1])
+        two = self.client("guide", "deck-design", "craft", "--role", "slide", "--part", "2")
+        self.assertIn("guide deck-design craft --role slide --part 3 ===", two.stdout.splitlines()[-1])
+        self.assertEqual([(q.get("role"), q.get("part")) for q in self.api.guide_queries], [("slide", None), ("slide", "2")])
 
     def test_deck_design_paging_from_the_server(self):
         self.sign_in()
