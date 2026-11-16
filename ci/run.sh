@@ -68,6 +68,11 @@ while [ $# -gt 0 ]; do
 done
 
 say() { printf 'ci: %s\n' "$*"; }
+# The shim job's suite: every test module once. CI_SHIM_PROCESSES (default 1, as before: unittest discover) above 1 runs
+# the modules in that many processes (ci/par_unittest.py: the same tests, each once; test_client, the longest, dealt
+# out test by test), which passes only when the units ran as many tests as discovery lists.
+if [ "${CI_SHIM_PROCESSES:-1}" -gt 1 ] 2>/dev/null; then SHIM_SUITE="ci/par_unittest.py $CI_SHIM_PROCESSES --split test_client"
+else SHIM_SUITE="-m unittest discover -s tests -v"; fi
 result() { # name job pass|fail|not-run
   mkdir -p "$OUT/$1"; printf '%s\n' "$3" > "$OUT/$1/$2.result"; say "$1 $2: $3"
 }
@@ -85,7 +90,7 @@ run_mac() { # name platform-key arch-prefix
     { result "$name" shim fail; result "$name" runtime fail; return; }
   say "$name: $($prefix "$PY" -c 'import platform,sys; print(sys.version.split()[0], platform.machine())')"
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
-    $prefix "$PY" tools/sync_launchers.py --check && $prefix "$PY" -m unittest discover -s tests -v ) > "$dir/shim.log" 2>&1 \
+    $prefix "$PY" tools/sync_launchers.py --check && $prefix "$PY" $SHIM_SUITE ) > "$dir/shim.log" 2>&1 \
     && result "$name" shim pass || result "$name" shim fail
   [ -n "${CI_SHIM_ONLY:-}" ] && { result "$name" runtime not-run; rm -rf "${dir:?}/work" "${dir:?}/tmp"; return; }
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
@@ -119,7 +124,7 @@ run_linux() { # name docker-platform platform-key
     chown -R tester /repo/ci/out/$name /repo/ci/out/cache
     su tester -c 'cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
-      ( \$PY tools/sync_launchers.py --check && \$PY -m unittest discover -s tests -v ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
+      ( \$PY tools/sync_launchers.py --check && \$PY $SHIM_SUITE ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
       $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'exit 0;' )  # shim only: the runner records runtime as not-run
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
