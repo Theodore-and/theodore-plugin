@@ -426,6 +426,7 @@ plugins/*/skills/*/SKILL.md|text
 plugins/*/README.md|text
 ci/windows-*.ps1|windows
 ci/azure-*.sh|windows
+ci/build-machine.sh|windows
 plugins/*/scripts/*.cmd|windows
 install/install.cmd|windows
 client/truststore/_windows.py|windows
