@@ -283,6 +283,20 @@ class Desktop(McpCase):
         self.assertIn("THEODORE NOTICE: Theodore updated itself: plugin files 9.9.9", guide)
         plugin.close()
 
+    def test_the_chat_manual_and_a_read_of_it_are_composed_for_the_lead(self):
+        self.ready()
+        skill = self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md"
+        skill.write_text("# Manual\n<!-- theodore:if lead -->\nSend the reviewer message.\n<!-- theodore:end -->\nFinish.\n")
+        folder = self.box.tmp / "Documents" / "Board"
+        folder.mkdir(parents=True)
+        server = self.server(args=("--for", "claude-desktop"), env={"HOME": str(self.box.tmp)})
+        manual = server.call("theodore", action="manual")["content"][0]["text"]
+        self.assertIn("# Manual\nSend the reviewer message.\nFinish.\n", manual)
+        read = server.call("theodore", action="read", folder=str(folder), path=str(skill))["content"][0]["text"]
+        self.assertIn("\n# Manual\nSend the reviewer message.\nFinish.\n", read)
+        self.assertNotIn("theodore:", manual + read)
+        server.close()
+
     def test_the_tool_name_and_description_can_be_set_for_testing(self):
         """THEODORE_CHAT_TOOL_NAME / _DESCRIPTION (testing which name a chat picks): every answer names the tool in use."""
         self.ready()

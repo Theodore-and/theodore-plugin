@@ -159,6 +159,51 @@ def _role(role: str | None) -> str | None:
     return role
 
 
+# The engine's pptx manual is a file on disk, never served, so the client composes its role blocks (the combined
+# release's F2): `<!-- theodore:if lead -->` ... `<!-- theodore:end -->`, whole lines outside fenced blocks. For the lead
+# (the default) the marker lines go and the blocks stay; for `slide` the blocks go too. A file whose markers do not
+# compose (an end with no block, a block left open, a block inside a block, or any other theodore marker such as
+# Studio's, which never occurs on disk) loses no text: only its marker lines go, and the log says so.
+ROLE_OPEN = "<!-- theodore:if lead -->"
+ROLE_CLOSE = "<!-- theodore:end -->"
+_MARKER = re.compile(r"<!--\s*theodore:.*-->")
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def compose_manual(text: str, role: str | None, what: str = "pptx SKILL.md") -> str:
+    lines = text.splitlines(keepends=True)
+    kept: list[str] = []
+    plain: list[str] = []           # the text with marker lines removed and nothing dropped
+    fence, inside, broken = "", False, ""
+    for number, line in enumerate(lines, 1):
+        bare = line.strip()
+        opened = _FENCE.match(line)
+        if fence:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence) and not line.strip(" \r\n`~"):
+                fence = ""
+        elif opened:
+            fence = opened.group(1)
+        elif _MARKER.fullmatch(bare):
+            if bare == ROLE_OPEN and not inside:
+                inside = True
+            elif bare == ROLE_CLOSE and inside:
+                inside = False
+            elif not broken:
+                broken = f"line {number}: {bare[:60]}"
+            continue
+        plain.append(line)
+        if not (inside and role == "slide"):
+            kept.append(line)
+    if inside and not broken:
+        broken = "a lead block is not closed"
+    if len(plain) == len(lines):
+        return text                 # no markers: as it is
+    if broken:
+        core.log(f"{what}: its role markers do not compose ({broken}); printed with the marker lines removed, nothing dropped.")
+        return "".join(plain)
+    return "".join(kept)
+
+
 def guide(skill: str, section: str | None, part: int | None, license_text: bool, role: str | None = None) -> int:
     """`part` None: the whole text where the host keeps a long output whole, else part 1 of the paged form."""
     role = _role(role)
@@ -199,6 +244,7 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: b
         text = (directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8")
     except OSError:
         raise core.internal(f"engine {version} has no skills/pptx/SKILL.md.") from None
+    text = compose_manual(text, role)
     install.touch_used(version)
     _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
     parts = [text] if whole else split_parts(text)
@@ -456,7 +502,7 @@ def _pptx_body() -> str:
         raise _engine_downloading(f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. Do not use another slide tool meanwhile.")
     directory = install.engine_dir(version)
     try:
-        text = (directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8")
+        text = compose_manual((directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8"), None)
     except OSError:
         raise core.internal(f"engine {version} has no skills/pptx/SKILL.md.") from None
     install.touch_used(version)

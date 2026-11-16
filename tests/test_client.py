@@ -503,7 +503,73 @@ class Specimen(ClientCase):
         self.assertEqual(self.specimen_requests(), [])
 
 
+# An invented manual with one role block (the engine ships the pptx SKILL.md with role markers; the client composes it).
+ROLE_MANUAL = ("# Manual\n\nBuild the deck.\n\n<!-- theodore:if lead -->\n## Review\n\nSend the reviewer message.\n"
+               "<!-- theodore:end -->\n\n```\n<!-- theodore:if lead -->\nA fenced example stays as it is.\n```\n\nFinish.\n")
+
+
+class ManualRoles(unittest.TestCase):
+    """compose_manual, in-process: the role dimension of the marker grammar on the engine's on-disk manual."""
+
+    def setUp(self):
+        from support import CLIENT_DIR
+        sys.path.insert(0, str(CLIENT_DIR))
+        from theodore_client import commands
+        self.compose = commands.compose_manual
+        self.logged: list[str] = []
+        original = commands.core.log
+        commands.core.log = self.logged.append
+        self.addCleanup(setattr, commands.core, "log", original)
+
+    def test_lead_keeps_the_blocks_and_slide_drops_them_markers_never_show(self):
+        lead, slide = self.compose(ROLE_MANUAL, None), self.compose(ROLE_MANUAL, "slide")
+        fenced = "```\n<!-- theodore:if lead -->\nA fenced example stays as it is.\n```\n"
+        self.assertEqual(lead, "# Manual\n\nBuild the deck.\n\n## Review\n\nSend the reviewer message.\n\n" + fenced + "\nFinish.\n")
+        self.assertEqual(slide, "# Manual\n\nBuild the deck.\n\n\n" + fenced + "\nFinish.\n")
+        self.assertEqual(self.logged, [])
+
+    def test_a_file_with_no_markers_is_unchanged(self):
+        text = "# Manual\n\nNo markers.\n```\n<!-- theodore:end -->\n```\n"
+        self.assertIs(self.compose(text, "slide"), text)
+
+    def test_broken_markers_lose_no_text_and_are_logged(self):
+        cases = {
+            "not closed": "A\n<!-- theodore:if lead -->\nB\n",
+            "end alone": "A\n<!-- theodore:end -->\nB\n",
+            "nested": "A\n<!-- theodore:if lead -->\n<!-- theodore:if lead -->\nB\n<!-- theodore:end -->\n<!-- theodore:end -->\n",
+            "studio": "A\n<!-- theodore:if studio -->\nB\n<!-- theodore:else -->\nC\n<!-- theodore:end -->\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.logged.clear()
+                expected = "".join(line for line in text.splitlines(keepends=True) if not line.startswith("<!--"))
+                self.assertEqual(self.compose(text, "slide"), expected)
+                self.assertEqual(self.compose(text, None), expected)
+                self.assertEqual(len(self.logged), 2, self.logged)
+                self.assertIn("do not compose", self.logged[0])
+
+
 class Guide(ClientCase):
+    def test_the_pptx_manual_is_composed_for_the_role(self):
+        self.sign_in()
+        self.assertStatus(self.client("guide", "pptx"), "SETUP_IN_PROGRESS", 67)
+        self.box.wait_jobs()
+        (self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md").write_text(ROLE_MANUAL)
+        body = lambda out: out.split("--- SKILL.md ---\n", 1)[1].rsplit("=== END", 1)[0]
+        lead = self.client("guide", "pptx")
+        self.assertEqual(lead.returncode, 0, lead.stdout + lead.stderr)
+        self.assertIn("Send the reviewer message.", body(lead.stdout))
+        self.assertEqual(body(lead.stdout).count("<!-- theodore:"), 1, "only the fenced example keeps its marker")
+        self.assertEqual(body(self.client("guide", "pptx", "--role", "lead").stdout), body(lead.stdout))
+        slide = self.client("guide", "pptx", "--role", "slide").stdout
+        self.assertNotIn("Send the reviewer message.", body(slide))
+        self.assertIn("A fenced example stays as it is.", body(slide))
+        self.assertIn("Finish.", body(slide))
+        self.assertTrue(slide.splitlines()[-1].endswith(". THE TEXT IS COMPLETE. ==="))
+        skill = self.client("skill", "pptx").stdout
+        self.assertIn("Send the reviewer message.", skill)
+        self.assertNotIn("<!-- theodore:if lead -->\n## Review", skill)
+
     def test_not_signed_in_starts_the_browser_sign_in(self):
         result = self.client("guide", "pptx")
         _first, nxt, _tell = self.assertStatus(result, "SIGN_IN_REQUIRED", 65)

@@ -217,6 +217,18 @@ class Guide(McpCase):
         self.assertNotIn("SERVED-POINTER", text)
         self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
 
+    def test_pptx_manual_is_composed_for_the_role(self):
+        """The engine's manual carries role markers on disk; the tool composes it as `guide pptx [--role slide]` does."""
+        self.ready()
+        (self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md").write_text(
+            "# Manual\n<!-- theodore:if lead -->\nSend the reviewer message.\n<!-- theodore:end -->\nFinish.\n")
+        server = self.server()
+        lead = server.call("guide", skill="pptx")["content"][0]["text"]
+        slide = server.call("guide", skill="pptx", role="slide")["content"][0]["text"]
+        self.assertIn("# Manual\nSend the reviewer message.\nFinish.\n", lead)
+        self.assertIn("# Manual\nFinish.\n", slide)
+        self.assertNotIn("theodore:", lead + slide)
+
     def test_pptx_manual_comes_from_the_engine(self):
         self.ready()
         text = self.server().call("guide", skill="pptx")["content"][0]["text"]
