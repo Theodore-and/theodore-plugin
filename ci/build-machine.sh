@@ -97,7 +97,9 @@ remote_ps() {
 }
 # The work folders the runners use (engine: run.sh's C:\theo-n; plugin: ci/run.sh's C:\theodore-ci). Never the caches.
 WORK_FOLDERS="'C:\\theo-n','C:\\theodore-ci'"
-CLEAN_PS="foreach (\$d in @($WORK_FOLDERS)) { Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like \"*\$d\\*\" -and \$_.ProcessId -ne \$PID } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }; foreach (\$i in 1..6) { Remove-Item -Recurse -Force \$d -ErrorAction SilentlyContinue; if (-not (Test-Path \$d)) { break }; Start-Sleep 5 } }"
+# What the boot task runs (rd through \\?\: parity leaves paths past 260 characters, which Remove-Item cannot delete)
+BOOT_PS="cmd /d /c 'rd /s /q \\\\?\\C:\\theo-n'; cmd /d /c 'rd /s /q \\\\?\\C:\\theodore-ci'"
+CLEAN_PS="foreach (\$d in @($WORK_FOLDERS)) { Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like \"*\$d\\*\" -and \$_.ProcessId -ne \$PID } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }; foreach (\$i in 1..6) { if (Test-Path \$d) { & { \$ErrorActionPreference = 'Continue'; & cmd.exe /d /c \"rd /s /q \\\\?\\\$d\" 2>&1 | Out-Null } }; if (-not (Test-Path \$d)) { break }; Start-Sleep 5 } }"
 
 create() {
   command -v az >/dev/null || die "the Azure CLI (az) is not installed"
@@ -133,7 +135,7 @@ icacls C:\\ProgramData\\ssh\\administrators_authorized_keys /inheritance:r /gran
 if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) { New-NetFirewallRule -Name sshd -DisplayName sshd -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null }
 # At every boot: the runners' work folders go (engine source and payloads never outlive a run on this disk)
 New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null
-Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value "foreach (\`\$d in @($WORK_FOLDERS)) { Remove-Item -Recurse -Force \`\$d -ErrorAction SilentlyContinue }"
+Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value "$BOOT_PS"
 \$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\\theo-boot\\clean.ps1'
 Register-ScheduledTask -TaskName theo-clean-at-boot -Action \$a -Trigger (New-ScheduledTaskTrigger -AtStartup) -User SYSTEM -RunLevel Highest -Force | Out-Null
 # Defender would scan every file a compile writes: the caches and work folders are left out of real-time scanning
@@ -169,7 +171,7 @@ start() {
   # One run at a time: a second run (its work folder, its cleanup) would collide with the first. It is told so (exit 3)
   # and goes to a throwaway machine instead.
   state_lock
-  others=$(live_leases | grep -vx "$pid" | tr '\n' ' ')
+  others=$(live_leases | { grep -vx "$pid" || true; } | tr '\n' ' ')
   if [ -n "${others// /}" ]; then state_unlock; say "$NAME is in use by $others"; exit 3; fi
   echo "$(date -u +%FT%TZ)" > "$ST/leases/$pid"
   state_unlock
@@ -185,7 +187,7 @@ start() {
   # The only run on it: what an earlier run that died left in the work folders goes now (with its processes), and the
   # boot task's list is written again (it may predate a folder added here).
   if [ "$(live_leases | grep -vcx "$pid")" = 0 ]; then
-    remote_ps "$CLEAN_PS; New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null; Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value \"foreach (\`\$d in @($WORK_FOLDERS)) { Remove-Item -Recurse -Force \`\$d -ErrorAction SilentlyContinue }\"" >/dev/null 2>&1 \
+    remote_ps "$CLEAN_PS; New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null; Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value \"$BOOT_PS\"" >"$ST/clean.log" 2>&1 \
       || say "the work folders could not be cleared now"
   fi
   say "$NAME ready after $((SECONDS - t0)) s"
@@ -199,7 +201,9 @@ stop() {
   local live; live=$(live_leases | tr '\n' ' ')
   if [ -n "${live// /}" ]; then state_unlock; say "$NAME still used by: $live; left running"; return 0; fi
   [ -z "${BUILD_MACHINE_KEEP:-}" ] || { state_unlock; say "BUILD_MACHINE_KEEP: $NAME left running"; return 0; }
-  remote_ps "$CLEAN_PS" >/dev/null 2>&1 || say "the work folders could not be removed now; the boot task removes them at the next start"
+  if [ "$(power)" = running ]; then
+    remote_ps "$CLEAN_PS" >/dev/null 2>&1 || say "the work folders could not be removed now; the boot task removes them at the next start"
+  fi
   # held through the deallocation: a start that comes now waits, then starts the machine again
   azr vm deallocate -g "$GROUP" -n "$VM" -o none && say "$NAME deallocated"
   state_unlock
