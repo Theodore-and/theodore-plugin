@@ -134,7 +134,7 @@ class Installer(unittest.TestCase):
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
         self.assertIn(f"codex plugin marketplace add {home / 'plugin'}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
-        self.assertIn("Theodore's own commands run without asking each time; to turn that off:", out)
+        self.assertIn(f"Theodore's own commands, and the assistant's edits of a deck's files in .theodore{os.sep}workspaces, run without asking each time; to turn that off:", out)
         self.assertIn("hosts settings --remove", out)
         applied = json.loads((self.box.user_home / ".claude" / "settings.json").read_text())
         self.assertTrue(applied["extraKnownMarketplaces"]["theodore"]["autoUpdate"], "the settings come with the set-up")
@@ -250,6 +250,65 @@ class Installer(unittest.TestCase):
         doctor = self.box.run_launcher("doctor", launcher=stable)
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
         self.assertTrue(status_lines(doctor.stdout)[0].startswith("THEODORE OK: Theodore is ready"), doctor.stdout)
+
+    def test_a_rate_limited_code_is_not_called_bad_and_the_last_status_says_when_to_run_again(self):
+        """W-16: the service's per-account sign-in limit (429 rate_limited) is not a wrong code: install.sh and
+        install.cmd say so, install everything else, and end with when to run the same line again."""
+        self.api.issue_activation_code("ABCD-1234")
+        self.api.activation_rate_limited = 1500
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertTrue(first.startswith("THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins"), first)
+        self.assertIn("25 minutes", first)
+        self.assertIn("run the same install line again in 25 minutes", nxt)
+        self.assertIn("your code was not used", tell)
+        self.assertNotIn("was not accepted", result.stdout, "the code is never reported as invalid")
+        self.assertIn("too many log-ins on this Theodore account in the last hour", result.stdout)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed")
+        self.api.activation_rate_limited = None
+        done = self.install("--code", "ABCD-1234")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.api.activations), 1, "the same code works once the limit has passed")
+        self.box.wait_jobs()
+
+    def test_a_code_refused_for_the_computer_limit_ends_with_the_limit_and_no_sign_in_link(self):
+        """W-17: the account already has its maximum number of computers logged in (409 conflict, computer_limit).
+        install.sh and install.cmd say so, install everything else, print no sign-in link (it would be refused the same
+        way) and end with the client's COMPUTER_LIMIT; the code was not used, so the same line works once a computer is
+        removed."""
+        self.api.issue_activation_code("ABCD-1234")
+        self.api.computer_limit = 10
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertTrue(first.startswith("THEODORE COMPUTER_LIMIT: Theodore is installed, but the Theodore service did not log this "
+                                         "computer in (computer_limit): This account already has 10 computers logged in, the most it can have."), first)
+        self.assertIn("The one-time code was not used", first)
+        self.assertIn("do not retry, do not offer a sign-in link", nxt)
+        self.assertIn("Your Theodore account already has its maximum number of computers logged in", tell)
+        self.assertIn("/app/settings#connected", tell)
+        self.assertIn("this account already has its maximum number of computers logged in (the one-time code was not used)", result.stdout)
+        self.assertNotIn("was not accepted", result.stdout, "the code is never reported as invalid")
+        self.assertNotIn("SIGN_IN_REQUIRED", result.stdout)
+        self.assertNotIn("/device?code=", result.stdout)
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed")
+        self.api.computer_limit = None
+        done = self.install("--code", "ABCD-1234")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(self.api.activations), 1, "the same code works once a computer is removed")
+        self.box.wait_jobs()
+
+    def test_a_failure_of_the_service_is_not_called_a_bad_code(self):
+        """W-17: a 5xx answer (and no answer at all) leaves the code unused and is never "not accepted"."""
+        self.api.issue_activation_code("ABCD-1234")
+        self.api.activation_failure = (503, "service_disabled")
+        result = self.install("--code", "ABCD-1234")
+        self.assertIn("the Theodore service answered HTTP 503, so the one-time code was not used", result.stdout)
+        self.assertNotIn("was not accepted", result.stdout)
+        self.assertEqual(status_lines(result.stdout)[0].split(":")[0], "THEODORE SIGN_IN_REQUIRED", result.stdout)
+        self.api.activation_failure = None
+        self.box.wait_jobs()
 
     def test_running_the_line_again_with_its_spent_code_keeps_the_sign_in_the_first_run_saved(self):
         # ACCEPT-RC8 D1: the first run redeemed the code and was stopped; the agent ran the same line again, whose step 1

@@ -32,7 +32,7 @@ import re
 import sys
 import time
 
-from . import __version__, account, api, chatbuild, commands, core, credentials, install, specimens
+from . import __version__, account, api, chatbuild, commands, core, credentials, install, specimens, withdraw
 from .contract import HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, SKILLS
 from .core import Status
 
@@ -66,9 +66,9 @@ FOR: str | None = None              # set by serve(): None for the plugin's serv
 # The plugin's own server (no --for) runs in the coding hosts and, when a Claude account has Theodore's plugin on, in the
 # Claude app's chat too. In a chat it must not be a second Theodore server: it serves the chat's one tool, or nothing at
 # all when the app already starts Theodore's own entry (desktop.py), so a person meets one tool and one approval.
-# A client named as the Claude app (its name has "claude" in it and is not Claude Code's "claude-code") is a chat;
-# every other client keeps the plugin's tools as before (Claude Code, Codex, tests, anything unknown).
-CODING_CLIENTS = ("claude-code",)
+# A client named as the Claude app (chatbuild.is_claude_app: its chat, a name with "claude" in it other than Claude
+# Code's "claude-code", or its agent mode, "local-agent-mode-...") is a chat; every other client keeps the plugin's
+# tools as before (Claude Code, Codex, tests, anything unknown).
 SILENT = False                      # the plugin's server in a chat whose app runs Theodore's entry: no tools
 DESKTOP_TOOL = chatbuild.TOOL          # `theodore`; THEODORE_CHAT_TOOL_NAME overrides it for testing (chatbuild.TOOL)
 DESKTOP_ACTIONS = ("begin", "guide", "specimen", "manual", "run", "read", "write", "edit", "list", "reveal", "report",
@@ -120,7 +120,8 @@ def desktop_tools(index: dict | None = None) -> list[dict]:
                      "description": 'run: the engine command without "pptx", one item per argument, e.g. ["apply", "<workspace>"].'},
             "stdin": {"type": "string", "description": "run: text the command reads on standard input (the design note for --storyline -)."},
             "folder": {"type": "string", "description": "The deck's folder: its full path on this computer (the folder the user "
-                                                        "named or attached). Left out: Documents/Theodore in the user's home."},
+                                                        "named or attached). Left out: Theodore's default folder (Theodore in the user's home "
+                                                        "on a Mac, Documents/Theodore elsewhere)."},
             "images": {"type": "boolean", "description": "run: return the render images the command produced (default true)."},
             "path": {"type": "string", "description": "read, write, edit, list, reveal: a path in the deck's folder (or, to read, its renders and the build manual's files)."},
             "content": {"type": "string", "description": "write: the file's whole text."},
@@ -408,10 +409,13 @@ def _fetch_whole(skill: str, section: str | None) -> str:
 
 def _pptx_manual() -> str:
     """The pptx manual as the launcher prints it, whole, in one document (it comes with the engine); a tool result
-    needs none of the opening lines a long command output gets."""
+    needs none of the opening lines a long command output gets. On the chat route it carries no update notice: those
+    say what changed since the last skill load, at any earlier time (an install's plugin update minutes before), and a
+    chat told it mid-build said "Theodore updated itself while building" when nothing had. Nothing is applied during a
+    build, so a chat says nothing about versions; the notice stays for the coding hosts' next skill load."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        commands._guide_pptx(1, whole=True, opening=False)
+        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP)
     return buffer.getvalue()
 
 
@@ -452,12 +456,12 @@ def _sheet(name: str, current: str | None) -> bytes:
     SHEETS.pop(name, None)
     if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
         raise core.internal(f"{what}: the answer is not a JPEG image; it was refused.")
-    digest = hashlib.sha256(raw).hexdigest()
-    if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != digest:
+    if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest() \
+            or not specimens.content_matches(raw, headers.get("ETag")):
         raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing).",
                      "call the same tool again once. If it fails again, continue without the sheet.",
                      "A design specimen arrived damaged. I am trying once more.")
-    _hold_sheet(name, (digest, raw, current))
+    _hold_sheet(name, (specimens.content_sha256(raw), raw, current))     # the published sheet's hash: If-None-Match
     return raw
 
 
@@ -550,9 +554,16 @@ def _desktop_preference(action: str, args: dict) -> dict:
 
 def _desktop_check(_args: dict) -> dict:
     account.require("deck-design")
-    return _status(Status("OK", "Theodore is set up on this computer and signed in; its design guidance reaches this chat.",
-                          f'to make or rework a presentation, call {DESKTOP_TOOL} with action "begin".',
-                          "Theodore is set up and ready for your presentations here."))
+    return _status(_check_status())
+
+
+def _check_status() -> Status:
+    """The check's answer once Theodore is set up and signed in."""
+    tell = "Theodore is set up and ready for your presentations here."
+    if chatbuild.APP_CLIENT:            # the Claude app: the sentence the person can say, never a request to keep it
+        tell += " " + chatbuild.USE_THEODORE_TIP
+    return Status("OK", "Theodore is set up on this computer and signed in; its design guidance reaches this chat.",
+                  f'to make or rework a presentation, call {DESKTOP_TOOL} with action "begin".', tell)
 
 
 def desktop_call(args: dict) -> dict:
@@ -589,6 +600,10 @@ def desktop_call(args: dict) -> dict:
         result = chatbuild.reveal(args.get("path"), args.get("folder"))
     else:
         raise core.usage(f"action is one of: {', '.join(DESKTOP_ACTIONS)}.")
+    if chatbuild.NOTICE and not result.get("isError") and isinstance(result.get("content"), list):
+        # The default folder could not be written and the deck went to ~/Theodore: said once, for the user.
+        result["content"].insert(0, {"type": "text", "text": "TELL THE USER: " + chatbuild.NOTICE.pop() + "\n"})
+        chatbuild.NOTICE.clear()
     if action in chatbuild.FILE_ACTIONS:         # the engine's output and the user's files are passed on as they are
         return result
     for block in result.get("content") or []:
@@ -629,6 +644,7 @@ def call_tool(name: str, args) -> dict:
     except Status as status:
         if core.refused() or status.name not in KEEP_HELD_ON:
             forget(refused=core.refused() or status.name in REFUSALS)
+        withdraw.resume()           # the service ended this computer's access: Theodore's files go (withdraw.py)
         return _status(status)
     except api.TooLarge as exc:
         return _status(core.internal(f"an answer from the Theodore service was longer than {exc.limit} bytes; it was refused."))
@@ -637,6 +653,7 @@ def call_tool(name: str, args) -> dict:
         return _status(core.internal(f"{exc.__class__.__name__}: {exc}"))
     if core.refused():
         forget(refused=True)
+        withdraw.resume()
     return result
 
 
@@ -646,8 +663,8 @@ def _adopt_client(info) -> None:
     global FOR, SILENT
     name = str((info or {}).get("name") or "") if isinstance(info, dict) else ""
     core.log(f"mcp initialize: client {name[:60] or 'unnamed'} (for {FOR or 'plugin'})")
-    lowered = name.lower()
-    if FOR is not None or "claude" not in lowered or lowered.startswith(CODING_CLIENTS):
+    chatbuild.APP_CLIENT = chatbuild.is_claude_app(name)
+    if FOR is not None or not chatbuild.APP_CLIENT:
         return
     from . import desktop
     FOR = DESKTOP

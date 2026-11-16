@@ -82,11 +82,22 @@ Outside that folder:
 - **Theodore's host settings**, applied by the installer (the person asked their assistant to set Theodore up):
   in Claude Code's `settings.json` (shared by the CLI, the desktop app's Code tab and the VS Code extension),
   automatic plugin updates for the Theodore marketplace and permission rules for Theodore's own commands only, by
-  their exact installed paths, so they run without a prompt; in Codex, the file `~/.codex/rules/theodore.rules`,
-  which allows Theodore's launcher by its exact paths. With the Codex rules, Theodore's commands run outside Codex's
+  their exact installed paths (on Windows for the PowerShell tool too), so they run without a prompt; the short
+  command `theodore` and its rule (below); and `Edit(//**/.theodore/workspaces/**)`, which lets the assistant write and
+  edit a deck's working files (`deck.js`, its notes) in the `.theodore/workspaces` folder Theodore's engine makes
+  inside the folders you work in (wherever they are), and nothing else; in Codex, the file `~/.codex/rules/theodore.rules`,
+  which allows Theodore's launcher by its exact paths (and `theodore`). With the Codex rules, Theodore's commands run outside Codex's
   sandbox without asking each time. Leave them out with the installer's `--no-settings`, take them back with
   `theodore hosts settings --remove`; an organisation's managed policy always wins. An installation that updates to
   0.3.10 gets them once, at its first Theodore command after the update, unless they were turned off.
+- **The short command `theodore`** (with the host settings, from 0.4.1): a two-line script that only runs the stable
+  launcher, written into the first of `~/.local/bin` (the folder Claude Code's own installer uses) or `~/bin` that is
+  on the PATH of the shell that ran the installer; on Windows `theodore.cmd` (and a `theodore` script for Git Bash) in
+  `%USERPROFILE%\.local\bin` or else `%LOCALAPPDATA%\Microsoft\WindowsApps`, which Windows puts on every user's PATH.
+  It is never written over a file that is not Theodore's or where another `theodore` comes first on PATH, and the
+  rules `Bash(theodore *)` (on Windows also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) exist only while it
+  does. Texts then name `theodore …` instead of the launcher's long path, which the assistant otherwise kept in a
+  variable that no permission rule can match. `theodore hosts settings --remove` and the uninstall delete it.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. There are no hooks.
@@ -175,6 +186,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | 68 | SETUP_FAILED | Cause NETWORK, TLS_INTERCEPT, PROXY_AUTH, DISK or HASH_MISMATCH |
 | 69 | UNSUPPORTED_PLATFORM | No engine build for this computer |
 | 70 | NO_ENTITLEMENT | The account's plan does not include this part of Theodore |
+| 70 | COMPUTER_LIMIT | The account already has its maximum number of computers logged in; one is removed in Settings first |
 | 71 | OFFLINE | The service cannot be reached and the offline period has ended, or the command needs the network |
 | 72 | UPDATE_REQUIRED | The engine or the plugin must update first |
 | 73 | BLOCKED_BY_POLICY | Paused by the publisher, blocked by the computer's policy, or automatic reports are off |

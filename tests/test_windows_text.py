@@ -5,6 +5,7 @@ would read from it (a batch file is read in the OEM code page)."""
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
@@ -69,7 +70,7 @@ class WindowsCleanup(unittest.TestCase):
         raw = script.read_bytes()
         self.assertTrue(raw.isascii(), "the batch file holds only ASCII")
         for piece in ("Théo", "测试", "&", "50%off", str(self.tmp)):
-            self.assertNotIn(piece.encode("utf-8"), raw.replace(b"& rmdir", b"").replace(b"2>&1", b""))
+            self.assertNotIn(piece.encode("utf-8"), raw.replace(b"& rmdir", b"").replace(b"& cd /d", b"").replace(b"2>&1", b""))
         probe, started = calls[0], calls[1]
         self.assertEqual(("run", "popen"), (probe[0], started[0]), "the probe runs first, synchronously, then the cleanup")
         env = started[2]["env"]
@@ -299,3 +300,181 @@ class ChildText(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanupLeavesNoFolder(unittest.TestCase):
+    def test_the_script_leaves_its_own_folder_before_removing_it(self):
+        """W-12: cmd cannot remove its own current folder, so every uninstall left an empty theodore-uninstall-<random>."""
+        lines = commands._cleanup_script(list(core.OWNED), keep_specimen_record=True).split("\r\n")
+        last = next(i for i, line in enumerate(lines) if 'rmdir /s /q "%THEODORE_CLEANUP_WORK%"' in line)
+        self.assertEqual(lines[last], '(goto) 2>nul & cd /d "%THEODORE_CLEANUP_WORK%\\.." & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
+                         "after (goto), on the same line: the script's setlocal would otherwise put this folder back as current")
+        self.assertIn("setlocal", lines[1])
+        self.assertLess(lines.index(":end"), last, "on every way out, a stopped cleanup included")
+
+
+class WindowsShortCommand(unittest.TestCase):
+    """Lane PROMPTS: `theodore` in a per-user folder on PATH, for the PowerShell tool and Git Bash alike."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.local = self.tmp / STRANGE / "AppData" / "Local"
+        (self.local / "Theodore" / "bin").mkdir(parents=True)
+        env = {"LOCALAPPDATA": str(self.local), "USERPROFILE": str(self.tmp / STRANGE), "HOME": str(self.tmp / STRANGE)}
+        patches = [mock.patch.dict(os.environ, env), mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core, "_HOME", None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop("THEODORE_HOME", None)
+
+    def test_the_batch_file_names_no_path_and_the_bash_script_runs_the_sh_launcher(self):
+        texts = core.shim_texts()
+        self.assertEqual(set(texts), {"theodore.cmd", "theodore"}, "PowerShell and cmd find the .cmd (PATHEXT), Git Bash the script")
+        batch = texts["theodore.cmd"]
+        self.assertTrue(batch.isascii(), "cmd reads a batch file in the OEM code page: no é in it")
+        self.assertIn('"%LOCALAPPDATA%\\Theodore\\bin\\theodore.cmd" %*', batch)
+        self.assertNotIn("call ", batch.lower(), "no CALL: it doubles carets and expands % again")
+        self.assertIn('exec sh "$b/theodore" "$@"', texts["theodore"], "Git Bash: the sh launcher, which carries every argument exactly")
+        self.assertTrue(texts["theodore"].startswith("#!/bin/sh\n"))
+
+    def test_the_written_batch_file_is_recognised_as_theodores(self):
+        """WINDOWS's recount: read as text, the batch file's CRLF became LF, so it never matched what Theodore writes:
+        no short-name rules, and every text kept the long path."""
+        texts = core.shim_texts()
+        folder = self.tmp / STRANGE / ".local" / "bin"
+        for name, text in texts.items():
+            core.write_atomic(folder / name, text, 0o755)
+        self.assertTrue(all(core.shim_matches(folder / n, t) for n, t in texts.items()))
+        with mock.patch.object(commands, "_host_record", lambda: {"shim": {"files": [str(folder / n) for n in texts]}}):
+            self.assertTrue(commands._shim_written(), "its rules are written")
+        for found in ("theodore.cmd", "theodore.CMD"):       # PATHEXT's spelling, as Windows' which() gives it
+            if not (folder / found).exists():                # a case-sensitive disk (Linux): Windows opens either spelling
+                core.write_atomic(folder / found, texts[found.lower()], 0o755)
+            with mock.patch.dict(os.environ, {"PATH": str(folder)}), mock.patch.object(core.shutil, "which", lambda n, f=found: str(folder / f)):
+                core.shim_reset()
+                self.assertEqual(core.quoted_launcher(), "theodore", f"and the texts name it ({found})")
+                core.shim_reset()
+
+    def test_a_home_elsewhere_gets_no_short_command_on_windows(self):
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "elsewhere")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNone(core.shim_texts(), "no path is written into a batch file")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.local / "Theodore")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNotNone(core.shim_texts(), "the launchers always set THEODORE_HOME: the default folder named so still gets it")
+
+    def test_the_folders_it_may_use_and_only_on_path(self):
+        candidates = core.shim_dir_candidates()
+        self.assertEqual(candidates, [self.tmp / STRANGE / ".local" / "bin", self.local / "Microsoft" / "WindowsApps"])
+        with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([str(self.local / "Microsoft" / "WindowsApps"), "/usr/bin"])}):
+            self.assertEqual(core.shim_dir(), self.local / "Microsoft" / "WindowsApps", "a stock Windows: WindowsApps is on PATH")
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
+            self.assertIsNone(core.shim_dir(), "never a folder that is not on PATH")
+
+    def test_powershell_rules_for_the_launcher_the_skill_launchers_and_the_short_command(self):
+        launcher = str(core.home().launcher())
+        script = self.tmp / "cache" / "skills" / "pptx" / "scripts" / "theodore.cmd"
+        with mock.patch.object(commands, "_claude_skill_launchers", lambda: [script]), \
+                mock.patch.object(commands, "_render_cache_dirs", lambda: []), \
+                mock.patch.object(commands.specimens, "cache_root", lambda: self.local / "Theodore" / "Cache" / "specimens"), \
+                mock.patch.object(commands, "_shim_written", lambda: True):
+            rules = commands._permission_rules()
+        for rule in (f"PowerShell({launcher} *)", f'PowerShell(& "{launcher}" *)', f'PowerShell(& "{script}" *)',
+                     "PowerShell(theodore *)", "PowerShell(& theodore *)", "Bash(theodore *)", "Edit(//**/.theodore/workspaces/**)"):
+            self.assertIn(rule, rules)
+        self.assertFalse([r for r in rules if r in ("PowerShell", "PowerShell(*)", "PowerShell(& *)", "Bash(*)")], "nothing broader")
+        with mock.patch.object(commands, "_claude_skill_launchers", lambda: []), mock.patch.object(commands, "_render_cache_dirs", lambda: []), \
+                mock.patch.object(commands.specimens, "cache_root", lambda: self.local / "Theodore" / "Cache" / "specimens"), \
+                mock.patch.object(commands, "_shim_written", lambda: False):
+            rules = commands._permission_rules()
+        self.assertFalse([r for r in rules if "(theodore " in r or "(& theodore " in r], "no rule for the name without the command")
+
+
+class CodexServerOnWindows(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(tempfile.mkdtemp()) / "mcp.json"
+
+    def test_the_sh_entry_becomes_the_batch_launcher(self):
+        published = json.loads((Path(support.PLUGIN) / "mcp.json").read_text())
+        self.path.write_text(json.dumps(published))
+        commands._codex_mcp_for_windows(self.path)
+        entry = json.loads(self.path.read_text())["mcpServers"]["theodore"]
+        self.assertEqual(entry["command"], "./skills/pptx/scripts/theodore.cmd", "the form lane WINDOWS saw Codex start")
+        self.assertEqual(entry["args"], ["mcp", "--for", "codex"])
+        self.assertEqual(entry["type"], "stdio")
+        self.assertTrue((Path(support.PLUGIN) / "skills" / "pptx" / "scripts" / "theodore.cmd").is_file())
+
+    def test_any_other_entry_is_left_as_it_is(self):
+        other = {"mcpServers": {"theodore": {"type": "stdio", "command": "node", "args": ["x"]}}}
+        self.path.write_text(json.dumps(other))
+        commands._codex_mcp_for_windows(self.path)
+        self.assertEqual(json.loads(self.path.read_text()), other)
+        self.path.write_text("not json")
+        commands._codex_mcp_for_windows(self.path)
+        self.assertEqual(self.path.read_text(), "not json")
+
+
+class GitBashBeingFetched(unittest.TestCase):
+    def test_a_running_portablegit_download_is_said_with_how_far(self):
+        """W-9: doctor told the person to install Git for Windows while Theodore's own PortableGit was downloading."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"THEODORE_HOME": tmp}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNone(commands._git_fetching())
+            job = commands.Job("git")
+            job.begin("git")
+            job.progress("downloading", 40)
+            self.assertEqual(commands._git_fetching(), "downloading, 40%")
+            job.finish()
+            self.assertIsNone(commands._git_fetching())
+
+
+class InstallCmdRateLimit(unittest.TestCase):
+    """W-16 in install.cmd (its run is on Windows CI): the 429 rate_limited answer is told apart from a wrong code, and
+    the wait is the 7th space-separated word of the service's body, as for /f "tokens=7" reads it."""
+
+    def test_the_branch_and_the_word_it_reads(self):
+        text = (Path(support.ROOT) / "install" / "install.cmd").read_text(encoding="ascii")
+        self.assertIn('if "%HTTP%"=="429" "%SYS32%\\findstr.exe" /c:"rate_limited"', text)
+        self.assertIn('for /f "usebackq tokens=7 delims= " %%S in ("%SAFE%\\activation.pending")', text)
+        self.assertIn("echo THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins", text)
+        body = json.dumps({"error": {"code": "rate_limited", "message": "Too many requests. Try again in 1500 seconds.",
+                                     "request_id": "r"}}, separators=(",", ":"))
+        self.assertEqual(body.split(" ")[6], "1500", "the service's JSON body, as the batch file splits it")
+
+
+class InstallCmdComputerLimit(unittest.TestCase):
+    """W-17 in install.cmd (its run is on Windows CI): the 409 computer_limit answer is kept for the client's last status
+    (no sign-in link), and no answer or a 5xx is never called a code that was not accepted. As install.sh."""
+
+    def test_the_branches(self):
+        text = (Path(support.ROOT) / "install" / "install.cmd").read_text(encoding="ascii")
+        self.assertIn('if "%HTTP%"=="409" "%SYS32%\\findstr.exe" /c:"computer_limit" "%SAFE%\\activation.pending" >nul 2>&1 && '
+                      'move /y "%SAFE%\\activation.pending" "%WORK%\\activation.refused"', text)
+        self.assertIn(":sign_in_last\nif defined LIMIT_REFUSED goto :limit_last\n", text)
+        self.assertIn('call "%%T%%" login --refused "%%LIMIT_REFUSED%%"', text)
+        self.assertIn('set "LIMIT_REFUSED="', text)
+        for http in ('"%HTTP%"=="000"', '"%HTTP:~0,1%"=="5"'):
+            self.assertIn(f"if {http} goto :stage1", text)
+        sh = (Path(support.ROOT) / "install" / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("theodore login --refused \"$LIMIT_REFUSED\"", sh)
+
+
+class OneLibreOfficeInstall(unittest.TestCase):
+    """W-15: a second LibreOffice install while one runs (the installer's background job plus `tools install
+    libreoffice`) raced over the same .part file and ended INTERNAL; it now reports the first one's progress."""
+
+    def test_a_second_install_reports_the_running_one_and_downloads_nothing(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"THEODORE_HOME": tmp}), \
+                mock.patch.object(core, "_HOME", None):
+            first = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            self.addCleanup(first.kill)
+            core.write_json(core.home().jobs / "libreoffice.json", {"pid": first.pid, "phase": "downloading", "percent": 40, "started": 1})
+            with mock.patch.object(commands.install, "system_libreoffice", lambda: None), \
+                    mock.patch.object(commands.install, "libreoffice_binary", lambda: None), \
+                    mock.patch.object(commands.install, "libreoffice_pin", lambda: {"version": "26.2.7", "size": 350_000_000}), \
+                    mock.patch.object(commands.install, "install_libreoffice", side_effect=AssertionError("a second download")):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = commands.tools("libreoffice", background=False, as_job=False)
+                self.assertEqual(code, 0)
+                self.assertIn("THEODORE OK: LibreOffice is already being installed in the background (downloading, 40%)", out.getvalue())
+                self.assertEqual(commands.tools("libreoffice", background=False, as_job=True), 0, "a second job just leaves")

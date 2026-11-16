@@ -48,8 +48,18 @@ uninstall removes it). Setting Theodore up also applies its host settings, witho
 asked their assistant to set Theodore up): in Claude Code (CLI, the desktop app's Code tab and the VS Code extension
 share `~/.claude/settings.json`), plugin auto-update for the Theodore marketplace and permission rules that allow only
 Theodore's own commands, by their exact installed paths (the stable launcher, the plugin's skill launchers and the
-plugin's own tool server), so they run without a prompt; in Codex, `~/.codex/rules/theodore.rules`, which allows
-Theodore's launcher by its exact paths. With the Codex rules, Theodore's commands, including the slide scripts it runs
+plugin's own tool server; on Windows also for Claude Code's PowerShell tool), so they run without a prompt; the
+short command `theodore`, a two-line script that only runs the stable launcher, in a per-user folder already on the
+shell's PATH (`~/.local/bin` or `~/bin`; on Windows `%USERPROFILE%\.local\bin` or `%LOCALAPPDATA%\Microsoft\WindowsApps`),
+never over another file and never where another `theodore` comes first, with the rule `Bash(theodore *)` (on Windows
+also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) only while it is there; reading Claude Code's own copy of
+Theodore's plugin (`~/.claude/plugins/cache/theodore`); and one file rule,
+`Edit(//**/.theodore/workspaces/**)`: Claude Code's file tools may create and edit, without asking, files inside a
+`.theodore/workspaces` folder, wherever it is on this computer, which is where Theodore's engine keeps each deck's
+working files (`deck.js`, notes). That deck script is code: Theodore's engine runs it when the assistant applies the
+deck, as it ran before; the rule takes away the question before the assistant writes it, not any check. It covers no
+other file, and Theodore's own folder has no such subfolder. In Codex, `~/.codex/rules/theodore.rules`, which allows
+Theodore's launcher by its exact paths (and `theodore`). With the Codex rules, Theodore's commands, including the slide scripts it runs
 for your decks, run outside Codex's sandbox without asking each time. To leave them out, install with
 `--no-settings`; to take them back later, run `theodore hosts settings --remove` (the uninstall also removes exactly
 what was added). An organisation's managed Claude Code policy always wins: when it allows only its own permission

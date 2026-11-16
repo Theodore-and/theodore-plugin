@@ -109,6 +109,30 @@ DEVICE_METADATA = {"device_name": _text(1, 80), "platform": lambda v: v in ("dar
                    "host": _slug, "client_version": _semver}
 
 
+def mark_like_the_service(data: bytes, token: bytes) -> bytes:
+    """The service's mark (apps/worker/src/services/specimen-mark.ts): a comment segment after the leading APPn
+    segments (in a file with none, after the first segment); a header it cannot walk is served unmarked."""
+    if data[:2] != b"\xff\xd8":
+        return data
+    offset, first = 2, True
+    while True:
+        if offset + 4 > len(data) or data[offset] != 0xFF:
+            return data
+        marker = data[offset + 1]
+        application = 0xE0 <= marker <= 0xEF
+        if not application and (not first or marker == 0xDA):
+            break
+        length = int.from_bytes(data[offset + 2:offset + 4], "big")
+        if length < 2 or offset + 2 + length > len(data):
+            return data
+        offset += 2 + length
+        if not application:
+            break
+        first = False
+    payload = b"theodore-mark/1 " + token
+    return data[:offset] + b"\xff\xfe" + (len(payload) + 2).to_bytes(2, "big") + payload + data[offset:]
+
+
 class FakeApi:
     MANIFEST_KID = "manifest-test-1"
     ENTITLEMENT_KID = "ent-test-1"
@@ -122,6 +146,7 @@ class FakeApi:
         self.down = False                 # True: every request gets a dropped connection
         self.drop_paths: set[str] = set()  # these paths get a dropped connection (one route offline, the rest up)
         self.fail_with = None             # (http status, error code) for every authenticated /v1 call
+        self.fail_raw = None              # (http status, body bytes): an answer outside the error envelope (a proxy's page)
         self.requests: list[dict] = []    # {method, path, auth} of every request, for assertions
         self.files: dict[str, bytes | Path] = {}      # /dl/<key> -> content
         self.dl_damaged: dict[str, int] = {}          # /dl/<key> -> how many next answers arrive with a flipped byte
@@ -162,6 +187,7 @@ class FakeApi:
         self.specimen_type = "image/jpeg"
         self.specimen_redirect: str | None = None     # Location of a 302
         self.specimen_etag = True                     # False: an older server (no ETag, ignores If-None-Match)
+        self.specimen_mark: bytes | None = None       # a token: each sheet goes out marked (a JPEG comment segment), as the service does
         self.served: collections.Counter = collections.Counter()   # (route, name, HTTP status) -> answers: "specimen", "index", "guide"
         self.guide_fetches = 0
         self.guide_queries: list[dict] = []
@@ -186,6 +212,11 @@ class FakeApi:
         self.usage_bodies: list[bytes] = []   # every POST /v1/usage body exactly as it arrived
         self.usage_events: dict[str, dict] = {}   # event_id -> event, as the server keeps one per id
         self.activations: list[dict] = []             # /v1/device/activate bodies, without the code
+        self.activation_rate_limited: int | None = None   # seconds: /v1/device/activate answers 429 rate_limited (W-16)
+        # W-17: the account's computer limit. /v1/device/activate (a right code) and an approved /v1/device/token answer
+        # 409 conflict with details {reason: computer_limit, limit}, as the service does; the code or approval stays unspent.
+        self.computer_limit: int | None = None
+        self.activation_failure: tuple[int, str] | None = None   # (HTTP status, error code) /v1/device/activate answers (W-17)
         self.refreshes = 0
         api = self
 
@@ -306,8 +337,19 @@ class FakeApi:
         if h.command != "HEAD":
             h.wfile.write(raw)
 
-    def _error(self, h, status: int, code: str, message: str = "", headers: dict | None = None):
-        self._send(h, status, {"error": {"code": code, "message": message or code, "request_id": uuid.uuid4().hex}}, headers)
+    def _error(self, h, status: int, code: str, message: str = "", headers: dict | None = None, details: dict | None = None):
+        error = {"code": code, "message": message or code, "request_id": uuid.uuid4().hex}
+        if details is not None:
+            error["details"] = details
+        # As the service serialises it (JSON.stringify: no space after ":" or ","). install.cmd reads the wait out of a
+        # 429's message by word position, so the spacing is part of what the fake must get right (windows-x64, 2026-11-15).
+        self._send(h, status, json.dumps({"error": error}, separators=(",", ":")).encode("utf-8"), headers)
+
+    def _computer_limit(self, h):
+        limit = self.computer_limit
+        return self._error(h, 409, "conflict", f"This account already has {limit} computers logged in, the most it can have. Remove one "
+                           "you no longer use in Settings, under Computers and assistants, then log in again.",
+                           details={"reason": "computer_limit", "limit": limit})
 
     def _device_error(self, h, code: str):
         self._send(h, 400, {"error": code, "error_description": code.replace("_", " ")})
@@ -359,6 +401,9 @@ class FakeApi:
                     return None
                 if self.account_state == "inactive":
                     self._error(h, 403, "entitlement_inactive")
+                    return None
+                if self.fail_raw:
+                    self._send(h, self.fail_raw[0], self.fail_raw[1], content_type="text/html")
                     return None
                 if self.fail_with:
                     self._error(h, self.fail_with[0], self.fail_with[1], headers={"Retry-After": "7"} if self.fail_with[0] == 429 else None)
@@ -461,12 +506,21 @@ class FakeApi:
                 return self._device_error(h, "access_denied")
             if device["status"] == "consumed":
                 return self._device_error(h, "expired_token")
+            if self.computer_limit is not None:
+                return self._computer_limit(h)
             device["status"] = "consumed"
             return self._send(h, 200, self._bundle(device["meta"]))
         if route == ["device", "activate"] and method == "POST":
+            if self.activation_rate_limited is not None:      # the service's per-account limit: the code is not spent
+                wait = self.activation_rate_limited
+                return self._error(h, 429, "rate_limited", f"Too many requests. Try again in {wait} seconds.", headers={"Retry-After": str(wait)})
+            if self.activation_failure is not None:           # a failure of the service: the code is not spent
+                return self._error(h, *self.activation_failure)
             entry = self.activation_codes.get(normalize_code(body.get("code")))
             if not entry or entry["used"]:
                 return self._device_error(h, "invalid_grant")
+            if self.computer_limit is not None:
+                return self._computer_limit(h)
             entry["used"] = True
             self.activations.append({k: v for k, v in body.items() if k != "code"})
             return self._send(h, 200, self._bundle(body))
@@ -544,6 +598,8 @@ class FakeApi:
             if self.specimen_delay:
                 time.sleep(self.specimen_delay)
             extra = {"ETag": etag} if self.specimen_etag else {}
+            if self.specimen_mark is not None:
+                data = mark_like_the_service(data, self.specimen_mark)
             return self._send(h, 200, data, {"X-Theodore-Sha256": self.specimen_sha or sha256_hex(data), **extra}, content_type=self.specimen_type)
         if route[:1] == ["guide"] and method == "GET" and len(route) in (2, 3):
             skill, section = route[1], route[2] if len(route) == 3 else ""

@@ -26,6 +26,10 @@ EXIT = {
     "RETRY": 75,
     "INTERNAL": 78,
 }
+# Statuses of this client that the backend's frozen list (LAUNCHER_EXIT_CODES) does not name yet, each with the exit
+# code of the frozen status it belongs with. COMPUTER_LIMIT (W-17): the account already has its maximum number of
+# computers logged in; like NO_ENTITLEMENT, a sign-in cannot help until the person changes something in their account.
+CLIENT_STATUSES = {"COMPUTER_LIMIT": EXIT["NO_ENTITLEMENT"]}
 SETUP_FAILED_CAUSES = ("NETWORK", "TLS_INTERCEPT", "PROXY_AUTH", "DISK", "HASH_MISMATCH")
 
 # --- routes on the API host (backend design section 5.4) ---------------------------------------------------------

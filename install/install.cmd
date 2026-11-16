@@ -61,8 +61,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.4.0"
-set "PIN_CLIENT=client/client-0.4.0.tar 5cd94f6eb403db6c5190ac4657b1246d2230109f6be408dac37b87b9c893acd8"
+set "PIN_CLIENT_VERSION=0.4.1"
+set "PIN_CLIENT=client/client-0.4.1.tar fac991cb1021ca2b631884899f7a53d54dce8b9f3646d56cafd4b9836f19be25"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -75,6 +75,8 @@ if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
 set "NO_SETTINGS="
+set "RATE_WAIT="
+set "LIMIT_REFUSED="
 set "WORK="
 set "RC=0"
 rem HTTPS only (plain HTTP only for a loopback test server); no -L, so no redirect is ever followed; 20 s to connect,
@@ -226,8 +228,24 @@ exit /b 68
 :code_refused
 rem The answer was written into the private folder only: a refused code (spent by an earlier run of the same line) never
 rem touches the sign-in that run saved in state\activation.pending.
+rem W-16: HTTP 429 rate_limited is the service's limit on sign-ins per account (or network) in an hour: the code was not
+rem used and is not wrong. Its message is "Too many requests. Try again in N seconds." (the 7th word, N).
+if "%HTTP%"=="429" "%SYS32%\findstr.exe" /c:"rate_limited" "%SAFE%\activation.pending" >nul 2>&1 && call :rate_wait
+rem W-17: HTTP 409 computer_limit: the account already has its maximum number of computers logged in. The code was not
+rem used (it works until it expires) and a browser sign-in would be refused the same way: no link. The answer holds no
+rem secret; the client turns it into the last status (login --refused), with the service's own message. As install.sh.
+if "%HTTP%"=="409" "%SYS32%\findstr.exe" /c:"computer_limit" "%SAFE%\activation.pending" >nul 2>&1 && move /y "%SAFE%\activation.pending" "%WORK%\activation.refused" >nul 2>&1 && set "LIMIT_REFUSED=%WORK%\activation.refused"
 rmdir /s /q "%SAFE%" >nul 2>&1
 set "CODE="
+if defined RATE_WAIT echo theodore-install: too many log-ins on this Theodore account in the last hour, so this computer is not signed in yet; the one-time code was not used (try again in %RATE_WAIT% minutes)
+if defined RATE_WAIT goto :stage1
+if defined LIMIT_REFUSED echo theodore-install: the Theodore service did not log this computer in: this account already has its maximum number of computers logged in (the one-time code was not used); what to do follows at the end
+if defined LIMIT_REFUSED goto :stage1
+rem No answer (the network) or a failure of the service (5xx): the code was not used, and it is never called wrong.
+if "%HTTP%"=="000" echo theodore-install: the Theodore service could not be reached, so the one-time code was not used; if this computer is not logged in already, a login link follows at the end
+if "%HTTP%"=="000" goto :stage1
+if "%HTTP:~0,1%"=="5" echo theodore-install: the Theodore service answered HTTP %HTTP%, so the one-time code was not used; if this computer is not logged in already, a login link follows at the end
+if "%HTTP:~0,1%"=="5" goto :stage1
 if not exist "%HOME_DIR%\state\activation.pending" goto :code_refused_new
 echo theodore-install: the one-time code was not accepted (it was used already, by an earlier run of this installer); the login that run saved is kept
 goto :stage1
@@ -361,7 +379,7 @@ rem The person asked their assistant to set Theodore up: its host settings come 
 if defined NO_SETTINGS call "%%T%%" hosts settings --remove >nul 2>&1
 if defined NO_SETTINGS echo theodore-install: Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command
 if not defined NO_SETTINGS call "%%T%%" hosts settings --apply
-if not defined NO_SETTINGS echo theodore-install: Theodore's own commands run without asking each time; to turn that off: "%T%" hosts settings --remove
+if not defined NO_SETTINGS echo theodore-install: Theodore's own commands, and the assistant's edits of a deck's files in .theodore\workspaces, run without asking each time; to turn that off: "%T%" hosts settings --remove
 if not defined SETUP_FAILED goto :background
 echo theodore-install: the stable launcher is "%T%"
 type "%WORK%\setup.txt"
@@ -430,12 +448,33 @@ set "RC=75"
 goto :finish
 
 :sign_in_last
+if defined LIMIT_REFUSED goto :limit_last
+if not defined RATE_WAIT goto :sign_in_link
+echo THEODORE RETRY: Theodore is installed, but this computer is not signed in: there have been too many log-ins on this Theodore account in the last hour, and the one-time code was not used. Try again in %RATE_WAIT% minutes.
+echo NEXT: do not retry now. Tell the user, and run the same install line again in %RATE_WAIT% minutes (with a fresh sentence from the Theodore site if the code has expired by then).
+echo TELL THE USER: There have been too many Theodore log-ins on your account in the last hour. Please try again in about %RATE_WAIT% minutes; your code was not used.
+set "RC=75"
+goto :finish
+:sign_in_link
 call "%%T%%" login --start
+set "RC=%ERRORLEVEL%"
+goto :finish
+:limit_last
+rem W-17: the computer limit, never a sign-in link (it would be refused the same way). As install.sh.
+call "%%T%%" login --refused "%%LIMIT_REFUSED%%"
 set "RC=%ERRORLEVEL%"
 goto :finish
 
 rem =====================================================================================================================
 rem Subroutines
+
+:rate_wait
+set "RW="
+for /f "usebackq tokens=7 delims= " %%S in ("%SAFE%\activation.pending") do if not defined RW set "RW=%%S"
+set /a RATE_WAIT=(RW+59)/60 >nul 2>&1
+if not defined RATE_WAIT set "RATE_WAIT=60"
+if %RATE_WAIT% LEQ 0 set "RATE_WAIT=60"
+exit /b 0
 rem =====================================================================================================================
 
 :remove_specimens

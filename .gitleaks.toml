@@ -1,0 +1,14 @@
+# gitleaks: the default rules, with one exception.
+[extend]
+useDefault = true
+
+# tests/fixtures/contract-v1.json records the sha256 of the service's openapi.json ("openapi_sha256"): a file hash, not a
+# key. generic-api-key flagged every commit that changed it, each needing its own line in .gitleaksignore (the squash
+# commit on main included, which no branch check had seen). Only that value in that file is excepted (shown on a planted
+# repository: another key in the same file, and the same line in another file, are still reported by `gitleaks git`).
+[[allowlists]]
+description = "the contract fixture's openapi_sha256 is a file hash"
+condition = "AND"
+paths = ['''(^|/)tests/fixtures/contract-v1\.json$''']
+regexTarget = "match"
+regexes = ['''api_sha256": "[0-9a-f]{64}"''']

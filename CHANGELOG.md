@@ -1,5 +1,89 @@
 # Changes
 
+## 0.4.1
+
+- Theodore's own short command (lane PROMPTS): with the host settings, the set-up writes `theodore`, a two-line script
+  that only runs the stable launcher, into the first per-user folder on the shell's PATH: `~/.local/bin` (where
+  Claude Code's own installer puts `claude`) or `~/bin`; on Windows `theodore.cmd` plus a `theodore` script for Git
+  Bash in `%USERPROFILE%\.local\bin` or else `%LOCALAPPDATA%\Microsoft\WindowsApps` (on every user's PATH on a stock
+  Windows). Never over a file that is not Theodore's, never where another `theodore` comes first on PATH, not written
+  again once the person deletes it; `hosts settings --remove`, `hosts unregister` and the uninstall delete it.
+- While that command is on PATH, every text the client writes for the assistant (statuses, the Bindings lines, the
+  guide's section links and specimen line, "the launcher you used") names `theodore …` instead of the quoted long path,
+  which the model kept in a variable (`T="…"; "$T" …`, `$t=…; & $t …`) that no permission rule can match. The routing
+  line in CLAUDE.md and AGENTS.md, which the model reads first, names it too (`run theodore uninstall`), and is brought
+  back to the full path when the short command goes. The Bindings block gains one line: Theodore's other commands
+  (guide, specimen, status, report, ...) -> `theodore <command>`.
+- Rules (Claude Code 2.1.292, measured headless in default mode): `Bash(theodore *)` matches `theodore …` alone, after
+  `cd`, in pipes, `for` loops, here-documents and `T=theodore; "$T"`; written only while the short command is there and
+  taken out when it goes. On Windows, for the PowerShell tool: `PowerShell(theodore *)` and `PowerShell(& theodore *)`
+  (both measured), and for the launcher and each skill launcher by path `PowerShell(<path> *)` and
+  `PowerShell(& "<path>" *)` (the `&` form of a path matched no rule in the macOS probe; lane WINDOWS checks it on
+  Windows). Codex: `prefix_rule(["theodore"])`. `Read(//<Claude Code's plugin cache>/theodore/**)`: Theodore's plugin
+  files, so `ls <skill folder>/scripts` outside the working folder does not ask.
+- `Edit(//**/.theodore/workspaces/**)`: the assistant writes and edits a deck's working files (`deck.js`, notes) in the
+  workspace folders Theodore's engine makes inside the user's folder without a file prompt. Nothing else; Theodore's
+  own folder has no `workspaces` subfolder. Anchored at the root (`//**`): a relative pattern is read against Claude
+  Code's current folder, which moves when the assistant `cd`s into the workspace (measured: the Edit then asked). Said in the installer's last lines, install.md, README and SECURITY.md.
+- Codex on Windows starts Theodore's tool server: Codex reads one `mcp.json` on every system and the published one
+  starts it with `sh`, which Windows lacks; on Windows Theodore's own copy of the plugin (Codex's marketplace) now
+  starts `./skills/pptx/scripts/theodore.cmd`, rewritten at every unpack so plugin updates keep it.
+- install.md: when the host holds the installer back (an automatic safety check), the assistant changes nothing and
+  tries no other route; it tells the user their assistant held Theodore's installer for their approval, where to give
+  it (Claude Code: /permissions, Recently blocked; the app's notice) or to reply "Yes, download and run Theodore's
+  installer", then runs the same line again. Measured with the line held 6 times: 6 stopped with no workaround, and
+  the reply let the same line run 6 of 6. The line itself is unchanged.
+- W-9: `doctor` on Windows says Theodore's own PortableGit is downloading (and how far), with nothing to install,
+  instead of telling the person to install Git for Windows meanwhile.
+- W-12: the Windows uninstall's cleanup leaves its own folder before removing it (after `(goto)`, on the same line,
+  since the script's `setlocal` puts the saved folder back when the batch ends), so no empty
+  `%TEMP%\theodore-uninstall-<random>` is left.
+- W-16: a sign-in the service refuses for its per-account (or per-network) hourly limit (HTTP 429 `rate_limited`) is no
+  longer reported as a bad code. install.sh, install.cmd and `login --code` say there have been too many log-ins on
+  this account in the last hour, that the code was not used, and to try again in N minutes (from the answer); the
+  installers install everything else and end with that status (RETRY, 75).
+- Skill stubs: "Theodore's command is `theodore`: write every Theodore command as `theodore …` in every shell", and the
+  skill folder's launcher by absolute path only "if the shell answers that `theodore` is not found" (lane WINDOWS's
+  recount: a model given "where that command is on PATH, else …" took the path).
+- `doctor` says whether `theodore` is on this shell's PATH, and plainly when it was written but is not found there.
+- W-17: a sign-in the service refuses because the account already has its maximum number of computers logged in
+  (HTTP 409 `conflict`, `details.reason` `computer_limit`) is no longer reported as an expired or used code followed by
+  a sign-in link that fails the same way. `login --code`, `login --finish` and both installers (install.sh,
+  install.cmd) end with `THEODORE COMPUTER_LIMIT` (exit 70, the code of NO_ENTITLEMENT; the backend's frozen list does
+  not name it yet) carrying the service's own message: no link, nothing to retry; the person removes a computer in
+  Settings, under Computers and assistants (`/app/settings#connected`), then pastes the same set-up sentence again (the
+  code was not used and works until its hour is up). The installers also no longer call a code "not accepted" when the
+  service could not be reached or answered 5xx. `login --code`'s wrong-code line says codes last an hour (it said 10
+  minutes).
+- The Claude app's chat (lane CHATASK): for a Claude app client only (its chat, `claude-ai`, or its agent mode,
+  `local-agent-mode-…`; never Claude Code, Codex or an unknown client), the `check` answer's TELL THE USER line adds
+  the sentence the person can say so the chat uses Theodore for every presentation without naming it ("From now on,
+  use Theodore for any presentation, deck or slide request. Please remember that."), and so does what the finish
+  answer tells the user, for the first two decks delivered on this computer, and only if the user had to name
+  Theodore to get the deck (`~/.theodore/state/chat-tip.json`; a missing or unreadable count is zero and never fails
+  a delivery). Installed from the Code tab, the person learns it at install: `hosts register`, when Theodore's entry
+  in the Claude app was written or already there, and `doctor`, while the app still has to be reopened, add "In the
+  Claude app's chat, after reopening the app, say once: "…" and it uses Theodore for every presentation." No answer asks the assistant to save or remember
+  anything, or to ask the user (the chat changes its memory only on the person's own word); a test reads every string
+  of the local server's answer code for it. The "is the Claude app" rule now includes `local-agent-mode-…`, so the
+  plugin's own server stays silent there too beside Theodore's entry.
+- The chat route's default folder (lane CHATFOLDER): on macOS a deck with no folder named goes to `~/Theodore`, not
+  `~/Documents/Theodore`: Documents is protected, and the first touch by Theodore's Python raised a system prompt naming
+  "python3.x" (Don't Allow then failed every start with exit 1). Decided once from Theodore's own state, never by looking
+  in Documents, and kept in `~/.theodore/state/chat-folder.json`: a Mac whose chat route ran before (0.4.0's
+  `state/chat` is there) keeps `~/Documents/Theodore`, where its decks are. Windows and Linux keep `Documents/Theodore`.
+  A default that cannot be written gives way to `~/Theodore` (same confinement checks), and the answer tells the user
+  in one sentence where the deck is going and why; a folder the chat named that cannot be written is a USAGE status
+  that names it, with NEXT: ask the user for another folder, or leave folder out.
+- The chat route's build manual carries no update notice ("THEODORE NOTICE: Theodore updated itself: ... Tell the user
+  once"): it said what changed since the last skill load at any earlier time (in the acceptance run, the install's
+  plugin update three minutes before), and the chat told the person "Theodore updated itself to a newer version while
+  building" when nothing had. Nothing is applied during a build, so a chat says nothing about versions; the notice
+  stays pending for Claude Code's next skill load. The Claude app entry's command is pinned as Theodore's stable
+  launcher (`~/.theodore/bin/theodore mcp --for claude-desktop`).
+- W-15: one LibreOffice install at a time: a second one, while one runs, reports the first one's progress instead of
+  racing it over the same file and ending INTERNAL.
+
 ## 0.4.0
 
 - A text is read whole (lane WHOLETEXT): under Claude Code (CLAUDECODE=1), `theodore guide <skill> [section]`

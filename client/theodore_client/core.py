@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import __version__
-from .contract import EXIT
+from .contract import CLIENT_STATUSES, EXIT
 
 IS_WINDOWS = os.name == "nt"
 
@@ -41,7 +41,7 @@ class Status(Exception):
 
     @property
     def code(self) -> int:
-        return EXIT[self.name]
+        return EXIT[self.name] if self.name in EXIT else CLIENT_STATUSES[self.name]
 
     def render(self) -> str:
         one = lambda text: " ".join(scrub_secrets(str(text)).split())
@@ -65,6 +65,9 @@ def emit(status: Status) -> int:
     if _REFUSAL and not getattr(status, "refusal", False):
         from . import account          # imported here: account imports this module
         status = account.refusal_status()
+    elif status.name == "SETUP_IN_PROGRESS":
+        from . import withdraw         # after access came back: says once why Theodore downloads again
+        status = withdraw.explain_setup(status)
     if _REFUSAL or status.name in SHEET_REFUSALS:
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
@@ -386,8 +389,113 @@ def home() -> Home:
     return _HOME
 
 
-def quoted_launcher() -> str:
+def full_launcher() -> str:
+    """The stable launcher by its absolute path, quoted as every shell the assistants use reads it."""
     return f'"{home().launcher()}"'
+
+
+def quoted_launcher() -> str:
+    """How texts for the assistant name Theodore's command: `theodore` when Theodore's own short command is what this
+    process's PATH finds for that name (the shell tool that ran us finds it the same way), else the stable launcher by
+    its quoted absolute path. A plain word is what the model writes as it is, so a permission rule for it matches."""
+    return SHIM_NAME if shim_active() else full_launcher()
+
+
+# --- the short command (lane PROMPTS) ---------------------------------------------------------------------------------
+# The model wraps the long, spaced launcher path in a variable (`T="…/theodore"; "$T" …`, `$t=…; & $t …`), which no
+# permission rule can match. `theodore`, a two-line script in a folder already on the PATH of the shells Claude Code
+# and Codex run, is a word every rule matches however it is combined. It only runs the stable launcher; it is written
+# by the host settings (hosts settings --apply) and taken back with them and by the uninstall.
+SHIM_NAME = "theodore"
+SHIM_MARK = "Theodore's own short command"
+
+
+def _path_entries() -> list[str]:
+    return [os.path.normcase(os.path.abspath(p)) for p in (os.environ.get("PATH") or "").split(os.pathsep) if p.strip()]
+
+
+def shim_dir_candidates() -> list[Path]:
+    """Per-user folders a shim may go in, in order: the folder Claude Code's own installer uses (~/.local/bin, on Windows
+    %USERPROFILE%\\.local\\bin, which that installer asks the person to put on PATH), ~/bin, and on Windows the per-user
+    WindowsApps folder, which a stock Windows puts on every user's PATH."""
+    found = [Path.home() / ".local" / "bin"]
+    if IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            found.append(Path(local) / "Microsoft" / "WindowsApps")
+    else:
+        found.append(Path.home() / "bin")
+    return found
+
+
+def shim_dir() -> Path | None:
+    """The first candidate folder that is on this process's PATH (the installer runs in the host's shell tool, so it is
+    that tool's PATH). None when none is."""
+    entries = _path_entries()
+    for folder in shim_dir_candidates():
+        if os.path.normcase(os.path.abspath(folder)) in entries:
+            return folder
+    return None
+
+
+def _sh_quote(text: str) -> str:
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def shim_texts() -> dict[str, str] | None:
+    """{file name: content} of the short command for this installation, or None when it cannot be written safely. On
+    Windows only for the default folder: the batch file names it as %LOCALAPPDATA%\\Theodore (no path baked in, so no
+    code page question), and the Git Bash script runs Theodore's sh launcher, which carries every argument exactly."""
+    head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
+    if IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA")
+        if not local or os.path.normcase(os.path.abspath(home().root)) != os.path.normcase(os.path.abspath(Path(local) / "Theodore")):
+            return None
+        return {
+            "theodore.cmd": f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
+                            '"%LOCALAPPDATA%\\Theodore\\bin\\theodore.cmd" %*\r\n',
+            "theodore": "#!/bin/sh\n" + head
+                        + 'b=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null)/Theodore/bin\n'
+                        + '[ -f "$b/theodore" ] && exec sh "$b/theodore" "$@"\n'
+                        + 'exec "$b/theodore.cmd" "$@"\n',
+        }
+    lines = "#!/bin/sh\n" + head
+    if os.path.abspath(home().root) != os.path.abspath(Path.home() / ".theodore"):     # the launchers set THEODORE_HOME always
+        lines += f"THEODORE_HOME={_sh_quote(str(home().root))}\nexport THEODORE_HOME\n"
+    return {"theodore": lines + f'exec {_sh_quote(str(home().launcher()))} "$@"\n'}
+
+
+_SHIM_ACTIVE: list[bool] = []
+
+
+def shim_active() -> bool:
+    """Whether `theodore` on this process's PATH is this installation's own short command, as written now."""
+    if _SHIM_ACTIVE:
+        return _SHIM_ACTIVE[0]
+    active = False
+    with contextlib.suppress(OSError, ValueError):
+        found = shutil.which(SHIM_NAME)
+        texts = shim_texts()
+        if found and texts:
+            path = Path(found)
+            # Windows names it as PATHEXT spells the extension (theodore.CMD): the file name is matched without case.
+            name = next((n for n in texts if n.lower() == path.name.lower()), None) if IS_WINDOWS else path.name
+            active = name in texts and shim_matches(path, texts[name])
+    _SHIM_ACTIVE[:] = [active]
+    return active
+
+
+def shim_matches(path: Path, text: str) -> bool:
+    """The file holds exactly this text, byte for byte (read as bytes: a text read turns the batch file's CRLF into LF,
+    and the Windows short command then never matched; WINDOWS's recount)."""
+    try:
+        return path.read_bytes() == text.encode("utf-8")
+    except OSError:
+        return False
+
+
+def shim_reset() -> None:
+    _SHIM_ACTIVE.clear()
 
 
 # --- configuration (launcher.json beside the stable launcher) ---------------------------------------------------------

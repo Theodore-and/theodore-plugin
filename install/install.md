@@ -15,8 +15,10 @@ decks there too, and that workspace is the computer this page means.
    background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
    no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and
    sets Claude Code's CLAUDE_CODE_GIT_BASH_PATH to it, so Theodore's skills can load; uninstalling takes both back.
-   It also lets Theodore's own commands run without asking each time (in Claude Code by their exact paths; in Codex
-   a rules file, so they run outside Codex's sandbox) and turns on the plugin's automatic updates; to leave that out,
+   It also lets Theodore's own commands run without asking each time (in Claude Code by their exact paths, and as
+   `theodore`, a short command it writes into a per-user folder already on PATH, such as ~/.local/bin; in Codex a
+   rules file, so they run outside Codex's sandbox), lets the assistant edit a deck's working files in the
+   .theodore/workspaces folder Theodore makes in the user's folder, and turns on the plugin's automatic updates; to leave that out,
    add --no-settings, and `theodore hosts settings --remove` takes it back later.
    Theodore then keeps itself up to date: its client, engine and assets, and the plugin's files in Claude Code and
    Codex through their own plugin command (used from their next session); uninstalling stops it. Run the
@@ -33,6 +35,11 @@ decks there too, and that workspace is the computer this page means.
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    The download step can take several minutes: give the command a timeout of at least 15 minutes, or run it in
    the background and wait for it.
+   If your host holds the line back (an automatic safety check, not an error of the command), do not change, split
+   or disguise it and try no other route: tell the user in one or two plain sentences that their assistant held
+   Theodore's installer for their approval, which they give where the app shows held commands (Claude Code:
+   /permissions, Recently blocked; the desktop app: its notice) or by replying "Yes, download and run Theodore's
+   installer"; then run the same line again.
 2. If the download is blocked, register the plugin directly instead:
    Claude Code: claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json
      (if that flag is not recognised: `claude plugin marketplace add https://theodoreand.ai/marketplace.json`,
