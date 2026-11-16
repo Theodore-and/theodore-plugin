@@ -197,11 +197,12 @@ run_windows() {
   # Retried: a connection can drop (this Mac may switch uplinks); the job itself runs detached on the machine.
   retry() { n=0; until "$@"; do n=$((n + 1)); [ $n -lt 5 ] || return 1; [ -z "${ADMIT:-}" ] || $ADMIT >/dev/null 2>&1; sleep 20; done; }
   # On a throwaway Azure machine the pinned CPython and the bundle cache live in C:\theodore-ci-cache, which outlives
-  # the run (a prepared image keeps it). The suites run one after another unless CI_WINDOWS_PARALLEL=1.
+  # the run (a prepared image keeps it).
   keep=; [ -z "$AZURE$STANDING" ] || keep='; New-Item -ItemType Directory -Force C:\theodore-ci-cache | Out-Null'
-  # The suites side by side (CI_WINDOWS_PARALLEL=1) failed the first-run tests' 60 s stage-2 wait twice under load on
-  # 8 vCPU (2026-11-13): one after another stays the default until that wait is fixed.
-  mode=serial; [ "${CI_WINDOWS_PARALLEL:-}" != 1 ] || mode=
+  # The suites side by side (each test once; windows-run.ps1), the default since the first-run tests wait for the
+  # background stage 2 as long as a machine running every suite at once needs (tests/support.py wait_jobs, 240 s; it was
+  # 60 s and failed twice under that load on 8 vCPU, 2026-11-13). CI_WINDOWS_SERIAL=1: one after another.
+  mode=; [ "${CI_WINDOWS_SERIAL:-}" != 1 ] || mode=serial
   # The poll's limit: the last run that passed here, plus half and 15 min (CI_WINDOWS_TIMEOUT overrides; 3 h without one).
   # The history is kept per kind of machine (a warm standing machine's time must never budget a cold throwaway run: the
   # engine's watchdog cut rc.17's Windows build that way), and the limit never goes under 5400 s (it is for a hang).

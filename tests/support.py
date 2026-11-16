@@ -404,9 +404,17 @@ class Sandbox:
         return subprocess.run(command, env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=timeout,
                               stdin=subprocess.DEVNULL, cwd=str(cwd or self.tmp))
 
-    def wait_jobs(self, timeout: float = 60.0) -> None:
-        """Wait for detached jobs of this home to end, so a test can assert on their result and clean up."""
+    def wait_jobs(self, timeout: float | None = None) -> None:
+        """Wait for detached jobs of this home to end, so a test can assert on their result and clean up.
+
+        The default is 240 s (THEODORE_TEST_JOB_WAIT overrides): a job that ends returns at once, so this costs a passing
+        test nothing, and only a machine running every suite at once needs the time (60 s ran out there twice, on 8
+        vCPU). A job that hangs is still caught: the wait ends at the deadline and the test's next assertion on the job's
+        result (stage 2's .ready file, an empty staging folder, no bootstrap pid) fails.
+        """
         import time
+        if timeout is None:
+            timeout = float(os.environ.get("THEODORE_TEST_JOB_WAIT") or 240)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             busy = False
