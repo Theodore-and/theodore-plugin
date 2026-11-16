@@ -203,10 +203,13 @@ run_windows() {
   # 8 vCPU (2026-11-13): one after another stays the default until that wait is fixed.
   mode=serial; [ "${CI_WINDOWS_PARALLEL:-}" != 1 ] || mode=
   # The poll's limit: the last run that passed here, plus half and 15 min (CI_WINDOWS_TIMEOUT overrides; 3 h without one).
+  # The history is kept per kind of machine (a warm standing machine's time must never budget a cold throwaway run: the
+  # engine's watchdog cut rc.17's Windows build that way), and the limit never goes under 5400 s (it is for a hang).
+  if [ -n "$STANDING" ]; then hist="-standing"; elif [ -n "$AZURE" ]; then hist="-azure"; else hist="-host"; fi
   limit=${CI_WINDOWS_TIMEOUT:-}
   if [ -z "$limit" ]; then
-    last=$(cat "$LOGS/history/plugin-windows.seconds" 2>/dev/null)
-    case "$last" in ''|*[!0-9]*) limit=10800 ;; *) limit=$(( last * 3 / 2 + 900 )); [ "$limit" -ge 1800 ] || limit=1800 ;; esac
+    last=$(cat "$LOGS/history/plugin-windows$hist.seconds" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) limit=10800 ;; *) limit=$(( last * 3 / 2 + 900 )); [ "$limit" -ge 5400 ] || limit=5400 ;; esac
   fi
   say "windows-x64: poll limit $limit s"
   if retry ssh $SSHO -o ConnectTimeout=20 "$HOST" "powershell -NoProfile -Command \"Remove-Item -Recurse -Force C:\\theodore-ci -ErrorAction SilentlyContinue; New-Item -ItemType Directory C:\\theodore-ci\\repo | Out-Null$keep\"" > "$dir/remote.log" 2>&1 &&
@@ -225,7 +228,7 @@ run_windows() {
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(tr -d '\r' < "$dir/$job.result")"; done
   [ -z "${wstart:-}" ] || echo "$(( $(date +%s) - wstart ))" > "$dir/job.seconds"
   if [ "$(tr -d '\r' < "$dir/shim.result")" = pass ] && [ "$(tr -d '\r' < "$dir/runtime.result")" = pass ] && [ -n "${wstart:-}" ]; then
-    mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows.seconds"
+    mkdir -p "$LOGS/history" && echo "$(( $(date +%s) - wstart ))" > "$LOGS/history/plugin-windows$hist.seconds"
   fi
   rm -f "$dir/repo.tar"
 }
