@@ -85,11 +85,12 @@ def whole_by_default() -> bool:
     return bool(os.environ.get("CLAUDECODE"))
 
 
-def _tool_arguments(skill: str, section: str | None) -> str:
-    return f'skill "{skill}"' + (f', section "{section}"' if section else "")
+def _tool_arguments(skill: str, section: str | None, role: str | None = None) -> str:
+    return f'skill "{skill}"' + (f', section "{section}"' if section else "") + (f', role "{role}"' if role else "")
 
 
-def _opening(skill: str, name: str, body: str, part: int, total: int, command: str, section: str | None) -> list[str]:
+def _opening(skill: str, name: str, body: str, part: int, total: int, command: str, section: str | None,
+             role: str | None = None) -> list[str]:
     """The first lines of the output, before any text: within the short preview a host shows of a long output."""
     if total == 1:
         first = (f"THIS IS THE WHOLE TEXT: {len(body)} characters, {body.count(chr(10))} lines, from here to the line "
@@ -101,7 +102,7 @@ def _opening(skill: str, name: str, body: str, part: int, total: int, command: s
             "If the shell shows only a preview or the path of a saved output, read that file in full, from the first "
             "line to the last, before designing anything: searching it is not reading it.",
             f"Where the Theodore tool {GUIDE_TOOL} is available, it returns this text whole in one step and is the "
-            f"better way to read it ({_tool_arguments(skill, section)})."]
+            f"better way to read it ({_tool_arguments(skill, section, role)})."]
     if total > 1:               # after the lines a preview must show: the command can be long
         lines.append(f"The parts: {command} --part N, for N from 1 to {total}"
                      + (f"; the next one is --part {part + 1}." if part < total else "."))
@@ -123,14 +124,15 @@ def _end_line(skill: str, name: str, body: str, part: int, total: int, next_comm
 
 def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
                     header_lines: list[str], command: str, section: str | None, opening: bool = True,
-                    notices: bool = True) -> None:
+                    notices: bool = True, role: str | None = None) -> None:
     """One document: the whole text (total 1) or one part of it. `command` prints this text (without --part);
-    `section` is how the guide tool names it; `opening` is False when the text is a tool's result."""
+    `section` is how the guide tool names it; `opening` is False when the text is a tool's result; `role` is the
+    reader's role when it is not the default (lead)."""
     if core.refused():          # a revoked device or a suspended account gets no instructions, whichever call learned it
         raise api.sign_in_required()
     out = [f"=== THEODORE {skill} {version} ({plan}), part {part}/{total} ==="]
     if opening:
-        out += _opening(skill, name, body, part, total, command, section)
+        out += _opening(skill, name, body, part, total, command, section, role)
     if part == 1 and notices:
         out += [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
     out += header_lines
@@ -141,8 +143,25 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
     sys.stdout.flush()
 
 
-def guide(skill: str, section: str | None, part: int | None, license_text: bool) -> int:
+# A reader's role (lane P042b, the combined release's F2): `lead`, the default, is the agent that received the request, a
+# reviewer or a single agent; `slide` is an agent given one slide, for which the service composes the text without the
+# parts meant for the lead. `lead` sends nothing; `slide` sends role=slide on every request for the text, and every
+# command the client writes for a further section or part of it carries `--role slide`.
+ROLES = ("lead", "slide")
+
+
+def _role(role: str | None) -> str | None:
+    """The role to send: None for the default."""
+    if role is None or role == "lead":
+        return None
+    if role not in ROLES:
+        raise core.usage(f"unknown role '{''.join(ch for ch in role if ch.isprintable())[:40]}'. The roles are: {', '.join(ROLES)}.")
+    return role
+
+
+def guide(skill: str, section: str | None, part: int | None, license_text: bool, role: str | None = None) -> int:
     """`part` None: the whole text where the host keeps a long output whole, else part 1 of the paged form."""
+    role = _role(role)
     ensure_hosts()
     ensure_instructions()
     resume_background()
@@ -156,12 +175,14 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool)
         if license_text:
             raise core.usage("guide pptx has no --license: the pptx manual and its notices are in the engine folder named in its header.")
         if not section:
-            return _guide_pptx(part, whole=whole)
+            return _guide_pptx(part, whole=whole, role=role)
         # A section of pptx is one the service serves to this account (lane STUDIO); the rest of the manual is on disk.
-    return _guide_remote(skill, "license" if license_text else section, part, whole=whole)
+    if license_text and role:
+        raise core.usage("--license takes no --role.")
+    return _guide_remote(skill, "license" if license_text else section, part, whole=whole, role=role)
 
 
-def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True) -> int:
+def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True, role: str | None = None) -> int:
     """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
     claims = account.require("pptx")
     install.require_runtime()
@@ -190,13 +211,13 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: b
                   f"          python3 ...  ->  {launcher} python ...",
                   f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
                   f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"]
-        directions = _directions("pptx")
+        directions = _directions("pptx", role)
         if directions.startswith("THEODORE OFFLINE: "):
             header.insert(0, directions)         # first thing read: the agent fetches it again before building
         elif directions:
             header += directions.rstrip("\n").split("\n")
     _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
-                    f"{launcher} guide pptx", None, opening, notices)
+                    f"{launcher} guide pptx{_role_option(role)}", None, opening, notices, role)
     return 0
 
 
@@ -226,7 +247,15 @@ DIRECTIONS_TIMEOUTS = (10.0, 5.0, 5.0)
 DIRECTIONS_PAUSE = 0.5
 
 
-def _directions(skill: str) -> str:
+def _role_option(role: str | None) -> str:
+    return f" --role {role}" if role else ""
+
+
+def _role_query(query: dict | None, role: str | None) -> dict | None:
+    return {**(query or {}), "role": role} if role else query
+
+
+def _directions(skill: str, role: str | None = None) -> str:
     """Server-composed entry for this account. Empty when the service has none for it; when the service cannot be
     reached after every attempt, one status line that says so and how to get it, so the agent fetches it again
     before building instead of going on without it."""
@@ -242,7 +271,8 @@ def _directions(skill: str) -> str:
         if attempt:
             time.sleep(DIRECTIONS_PAUSE)
         try:
-            _status, _headers, raw = api.call("guide", bearer=cred["installation_secret"], skill=skill, timeout=timeout)
+            _status, _headers, raw = api.call("guide", bearer=cred["installation_secret"], skill=skill, timeout=timeout,
+                                              query=_role_query(None, role))
             return raw.decode("utf-8", errors="replace")
         except api.ApiError as error:
             if error.code in DELETE_CREDENTIAL_ON:      # the device was revoked: no instructions, and the sign-in is already cleared
@@ -255,7 +285,7 @@ def _directions(skill: str) -> str:
         except api.NetworkError as error:
             failure = error.detail
     return (f"THEODORE OFFLINE: Theodore's online part for {skill} could not be reached ({failure}); "
-            f"run {quoted_launcher()} guide {skill} again before building.")
+            f"run {quoted_launcher()} guide {skill}{_role_option(role)} again before building.")
 
 
 REFERENCE_LINK = re.compile(r"\]\(references/([A-Za-z0-9_-]{1,64})\.md\)")
@@ -271,13 +301,13 @@ def _section_name(given: str) -> str:
     return name[:-3] if name.endswith(".md") else name
 
 
-def _no_such_section(skill: str, given: str) -> Status:
+def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
     """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
     only the answer: its manual is on disk, and a served section is named by the text that points to it."""
     launcher = quoted_launcher()
     shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if skill == "pptx":
-        return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx for the manual.")
+        return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx{_role_option(role)} for the manual.")
     names: list[str] = []
     try:
         _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill)
@@ -289,26 +319,27 @@ def _no_such_section(skill: str, given: str) -> Status:
             raise
     if names:
         return core.usage(f"guide {skill} has no section '{shown}'. Sections: {', '.join(names)}.",
-                          f"run {launcher} guide {skill} <section> with one of those names.")
-    return core.usage(f"guide {skill} has no section '{shown}'.", f"run {launcher} guide {skill}; its text names the sections it has.")
+                          f"run {launcher} guide {skill} <section>{_role_option(role)} with one of those names.")
+    return core.usage(f"guide {skill} has no section '{shown}'.",
+                      f"run {launcher} guide {skill}{_role_option(role)}; its text names the sections it has.")
 
 
-def _guide_remote(skill: str, section: str | None, part: int, whole: bool = False) -> int:
+def _guide_remote(skill: str, section: str | None, part: int, whole: bool = False, role: str | None = None) -> int:
     """A served text: part `part` of it, or with `whole` the whole text in one document (one answer with form=whole;
     an older service that still pages is asked for every part, in order, and nothing is printed unless all came)."""
     claims = account.require(skill)
-    query = {"form": "whole"} if whole else ({"part": part} if part > 1 else None)
+    query = _role_query({"form": "whole"} if whole else ({"part": part} if part > 1 else None), role)
     what = f"guide {skill}"
     if section and section != "license":
         given, section = section, _section_name(section)
         if not SECTION_NAME.fullmatch(section):
-            raise _no_such_section(skill, _section_name(given))
+            raise _no_such_section(skill, _section_name(given), role)
         try:
             _status, headers, raw = _api("guide_section", what, passing=("not_found",), skill=skill, section=section, query=query)
         except api.ApiError:
             if part > 1:
                 raise core.usage(f"{what} {section} has no part {part}.") from None
-            raise _no_such_section(skill, section) from None
+            raise _no_such_section(skill, section, role) from None
     elif section:
         _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query)
     else:
@@ -316,7 +347,7 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     label = headers.get(HEADER_GUIDE_VERSION) or "current"
     if whole and total > 1:
-        raw = _remaining_parts(skill, section, what, raw, total)
+        raw = _remaining_parts(skill, section, what, raw, total, role)
         total = 1
     body = raw.decode("utf-8", errors="replace")
     if whole:
@@ -333,24 +364,25 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     for line in _LAUNCHER_LINES:        # "the launcher you used": named as this client names it (the short command when on PATH)
         body = body.replace(line, f"Run {quoted_launcher()} with:")
     if section != "license" and skill != "pptx":   # a reference is a section of this guide, not a file: its link becomes the command that prints it (pptx references are files on disk)
-        body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)})", body)
+        body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)}{_role_option(role)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
-    command = f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}{' --license' if section == 'license' else ''}"
-    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], command, section)
+    command = (f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}"
+               f"{' --license' if section == 'license' else ''}{_role_option(role)}")
+    _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], command, section, role=role)
     return 0
 
 
-def _remaining_parts(skill: str, section: str | None, what: str, first: bytes, total: int) -> bytes:
+def _remaining_parts(skill: str, section: str | None, what: str, first: bytes, total: int, role: str | None = None) -> bytes:
     """Parts 2 to `total` after `first`, fetched one after the other and joined in order. A part that cannot be had
     fails the whole command: nothing of the text is printed, and the status says which part is missing."""
     chunks = [first]
     for number in range(2, total + 1):
         try:
             if section:
-                _s, _h, more = _api("guide_section", what, skill=skill, section=section, query={"part": number})
+                _s, _h, more = _api("guide_section", what, skill=skill, section=section, query=_role_query({"part": number}, role))
             else:
-                _s, _h, more = _api("guide", what, skill=skill, query={"part": number})
+                _s, _h, more = _api("guide", what, skill=skill, query=_role_query({"part": number}, role))
         except Status as status:
             missing = f"part {number} of {total}" + (f" (and the {total - number} after it)" if number < total else "")
             failed = Status(status.name, f"{what}{' ' + section if section else ''}: {missing} could not be fetched "
@@ -473,6 +505,7 @@ def specimen(files: list[str]) -> int:
     A refusal that signs the device out or refuses the account removes every specimen folder."""
     if not 1 <= len(files) <= specimens.MAX_FILES:
         raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
+    files = [specimens.file_name(name) for name in files]       # a bare code (HC3) is its close-up's file (HC3.jpg)
     if not all(specimens.valid_name(name) for name in files):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
     try:

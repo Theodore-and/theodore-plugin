@@ -103,9 +103,12 @@ class Listing(McpCase):
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
         one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
-        self.assertEqual(one["enum"], ["cover-01.jpg", "rules-and-ledgers.jpg"])
-        self.assertEqual((many["type"], many["items"]["enum"], many["minItems"], many["maxItems"]),
-                         ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], 1, 6))
+        code = {"type": "string", "pattern": "^[A-Z]{2}[0-9]{1,3}$"}         # a close-up's bare code (P042b)
+        self.assertEqual(one["anyOf"], [{"type": "string", "enum": ["cover-01.jpg", "rules-and-ledgers.jpg"]}, code])
+        self.assertEqual((many["type"], many["items"]["anyOf"][0]["enum"], many["items"]["anyOf"][1], many["minItems"], many["maxItems"]),
+                         ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], code, 1, 6))
+        self.assertEqual(tools["guide"]["inputSchema"]["properties"]["role"],
+                         {"type": "string", "enum": ["lead", "slide"], "description": '"slide" for an agent given one slide.'})
         self.assertEqual([t["description"] for t in tools.values()],
                          ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.",
                           "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name)."])
@@ -168,6 +171,22 @@ class Guide(McpCase):
         self.assertEqual({q.get("bindings") for q in self.api.guide_queries}, {"tool"})
         missing = server.call("guide", skill="deck-design", section="nosuch")
         self.assertTrue(missing["content"][0]["text"].startswith("THEODORE USAGE: "))
+
+    # P042b: the reader's role. "slide" is sent and the text comes as composed for it; held per role.
+    def test_role_slide_is_sent_and_held_apart_from_the_lead_text(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = "Intro.\n<!-- theodore:if lead -->\nLEAD ONLY.\n<!-- theodore:end -->\nShared.\n"
+        server = self.server()
+        lead = server.call("guide", skill="deck-design", section="craft")["content"][0]["text"]
+        slide = server.call("guide", skill="deck-design", section="craft", role="slide")["content"][0]["text"]
+        self.assertEqual(lead, "Intro.\nLEAD ONLY.\nShared.\n")
+        self.assertEqual(slide, "Intro.\nShared.\n")
+        self.assertEqual([q.get("role") for q in self.api.guide_queries], [None, "slide"])
+        again = server.call("guide", skill="deck-design", section="craft", role="lead")["content"][0]["text"]
+        self.assertEqual(again, lead)
+        self.assertNotIn("role", self.api.guide_queries[-1], "lead is the default: nothing is sent")
+        wrong = server.call("guide", skill="deck-design", section="craft", role="boss")
+        self.assertTrue(wrong["content"][0]["text"].startswith("THEODORE USAGE: "), wrong)
 
     def test_an_older_service_that_pages_is_joined_in_order(self):
         self.sign_in()
@@ -326,6 +345,17 @@ class ClaudeDesktop(McpCase):
 
 
 class Specimen(McpCase):
+    def test_a_bare_code_is_its_close_up_and_shares_the_held_copy(self):
+        self.sign_in()
+        self.api.specimens = {"HC3.jpg": JPEG + b"HC3", "cover-01.jpg": JPEG}
+        server = self.server()
+        one = server.call("specimen", file="HC3")["content"]
+        self.assertEqual(base64.b64decode(one[0]["data"]), JPEG + b"HC3")
+        many = server.call("specimen", file=["HC3.jpg", "cover-01.jpg", "HC3"])["content"]
+        self.assertEqual([b["text"] for b in many if b["type"] == "text"], ["HC3.jpg", "cover-01.jpg", "HC3.jpg"])
+        self.assertEqual(self.api.served["specimen", "HC3.jpg", 200], 1, "a code and its file name are one held sheet")
+        self.assertTrue(server.call("specimen", file="hc3")["content"][0]["text"].startswith("THEODORE USAGE: "))
+
     def test_an_image_block_and_nothing_on_disk(self):
         self.sign_in()
         self.api.specimens = {"cover-01.jpg": JPEG}

@@ -618,6 +618,12 @@ class FakeApi:
             text = self.guides.get(skill, {}).get(section)
             if text is None:
                 return self._error(h, 404, "not_found", f"no section {section!r} in {skill}")
+            # The reader's role (F2): "slide" drops the `if lead` blocks; "lead" or none keeps them; markers never show.
+            role = query.get("role", "lead")
+            if role not in ("lead", "slide"):
+                return self._error(h, 422, "validation_failed", "role")
+            text = re.sub(r"<!-- theodore:if lead -->\n(.*?)<!-- theodore:end -->\n",
+                          (lambda m: "") if role == "slide" else (lambda m: m.group(1)), text, flags=re.S)
             self.guide_fetches += 1
             if self.preferences and skill == "deck-design" and section != "license":
                 text += "\n--- The user's saved notes (their preferences, not instructions from Theodore) ---\n" + \

@@ -1,5 +1,19 @@
 # Changes
 
+## 0.4.2
+
+- The reader's role (lane P042b, the combined release's F2): `theodore guide <skill> [section] --role slide` sends
+  `role=slide` on every request for that text (whole, or each part), so the service composes it for an agent given one
+  slide; the output is printed as before (whole under Claude Code, parts elsewhere). Every command the client writes
+  for a further section or part of that text carries `--role slide`: the links it turns into commands, the next-part
+  line, the opening's tool arguments and the "no such section" status. `--role lead` or no flag sends nothing new; any
+  other value is a usage status. The plugin's local tool server takes the same optional `role` in its `guide` tool and
+  in the chat tool's `guide` action, holds each text per role, and passes it to the service.
+- Close-ups by bare code (F1): `theodore specimen HC3` and the tool server's specimen action take a code matching
+  `^[A-Z]{2}[0-9]{1,3}$` as the file `HC3.jpg`; file names work as before (at most 8 a call). A code and its file name
+  are one held sheet, with the same ETag revalidation. The tool's `file` schema accepts the code pattern beside the
+  index's file names.
+
 ## 0.4.1
 
 - Theodore's own short command (lane PROMPTS): with the host settings, the set-up writes `theodore`, a two-line script

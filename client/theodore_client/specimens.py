@@ -37,6 +37,7 @@ REUSE_SECONDS = 2700            # a held sheet is reused while at least 15 minut
 MAX_FILES = 8
 MAX_BYTES = 1 << 20
 NAME = re.compile(r"[A-Za-z0-9._-]{1,80}\.jpg")
+CODE = re.compile(r"[A-Z]{2}[0-9]{1,3}")          # a close-up's code, as the texts print it under a drawing: HC3 is HC3.jpg
 LINK = re.compile(r"\]\(specimens/([A-Za-z0-9._-]{1,80}\.jpg)\)")
 # Names Windows gives to devices, whatever follows the first dot: never a file name here, on any system.
 DEVICES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT{i}" for i in range(10))}
@@ -80,6 +81,11 @@ def content_matches(raw: bytes, etag: str | None) -> bool:
     """True unless the answer names its sheet (ETag) and these bytes, unmarked, are another one."""
     tag = str(etag or "").strip().removeprefix("W/").strip('"').lower()
     return not re.fullmatch(r"[0-9a-f]{64}", tag) or content_sha256(raw) == tag
+
+
+def file_name(name):
+    """A bare code names its close-up's file; any other name is left as it is (and checked by valid_name)."""
+    return f"{name}.jpg" if isinstance(name, str) and CODE.fullmatch(name) else name
 
 
 def valid_name(name: str) -> bool:

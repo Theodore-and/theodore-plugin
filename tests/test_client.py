@@ -257,6 +257,20 @@ class Specimen(ClientCase):
         self.assertEqual(self.api.served["specimen", "cover-01.jpg", 304], 1)
         self.assertEqual(self.folders(), [one.parent], "nothing new written")
 
+    def test_a_bare_code_names_its_close_up_and_shares_its_held_copy(self):
+        self.api.specimens["HC3.jpg"] = JPEG + b"HC3"
+        result = self.client("specimen", "HC3", "cover-01.jpg")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        code, cover = (Path(line) for line in result.stdout.splitlines())
+        self.assertEqual((code.name, code.read_bytes()), ("HC3.jpg", JPEG + b"HC3"))
+        again = self.client("specimen", "HC3.jpg")
+        self.assertEqual(Path(again.stdout.strip()), code, "the code and its file name are one held sheet")
+        self.assertEqual(self.api.served["specimen", "HC3.jpg", 200], 1)
+        self.assertEqual(self.api.served["specimen", "HC3.jpg", 304], 1)
+        self.assertEqual([r["path"] for r in self.specimen_requests()][:2], ["/v1/guide/specimens/HC3.jpg", "/v1/guide/specimens/cover-01.jpg"])
+        for wrong in ("hc3", "HC3456", "H3"):
+            self.assertStatus(self.client("specimen", wrong), "USAGE", 64)
+
     def test_reuse_one_fetch_per_distinct_sheet_across_calls(self):
         names = [f"s{i}.jpg" for i in range(10)]
         self.api.specimens = {name: JPEG + name.encode() for name in names}
@@ -568,6 +582,44 @@ class Guide(ClientCase):
         licence = self.client("guide", "deck-design", "--license")
         self.assertIn("Apache License", licence.stdout)
         self.assertStatus(self.client("guide", "deck-design", "nosuchsection"), "USAGE", 64)
+
+    # P042b: the reader's role. "slide" is sent on every request for the text, and every command the client writes for a
+    # further section or part carries it; "lead" or no flag sends nothing new.
+    ROLE_TEXT = ("Intro.\n<!-- theodore:if lead -->\nLEAD ONLY.\n<!-- theodore:end -->\n"
+                 "Read [the forms](references/forms.md) next.\n")
+
+    def test_role_slide_is_sent_and_links_carry_it(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = self.ROLE_TEXT
+        launcher = f'"{self.box.home / "bin" / "theodore"}"'
+        for env in ({}, self.CC):
+            self.api.guide_queries.clear()
+            slide = self.client("guide", "deck-design", "craft", "--role", "slide", env=env)
+            self.assertEqual(slide.returncode, 0, slide.stdout + slide.stderr)
+            self.assertNotIn("LEAD ONLY", slide.stdout)
+            self.assertIn(f"Read [the forms](run: {launcher} guide deck-design forms --role slide) next.", slide.stdout)
+            self.assertEqual([q.get("role") for q in self.api.guide_queries], ["slide"])
+            self.assertTrue(slide.stdout.splitlines()[-1].endswith(". THE TEXT IS COMPLETE. ==="))
+        self.assertIn('(skill "deck-design", section "craft", role "slide")', slide.stdout[:800])
+        for role in (("--role", "lead"), ()):
+            self.api.guide_queries.clear()
+            lead = self.client("guide", "deck-design", "craft", *role).stdout
+            self.assertIn("LEAD ONLY", lead)
+            self.assertIn(f"(run: {launcher} guide deck-design forms) next.", lead)
+            self.assertEqual([q.get("role") for q in self.api.guide_queries], [None])
+        self.assertStatus(self.client("guide", "deck-design", "craft", "--role", "boss"), "USAGE", 64)
+        self.api.guides["deck-design"][""] = self.ROLE_TEXT
+        main = self.client("guide", "deck-design", "--role", "slide").stdout
+        self.assertNotIn("LEAD ONLY", main)
+
+    def test_role_slide_in_parts_names_it_in_every_next_part(self):
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = "c" * 50000
+        one = self.client("guide", "deck-design", "craft", "--role", "slide")
+        self.assertIn("guide deck-design craft --role slide --part 2 ===", one.stdout.splitlines()[-1])
+        two = self.client("guide", "deck-design", "craft", "--role", "slide", "--part", "2")
+        self.assertIn("guide deck-design craft --role slide --part 3 ===", two.stdout.splitlines()[-1])
+        self.assertEqual([(q.get("role"), q.get("part")) for q in self.api.guide_queries], [("slide", None), ("slide", "2")])
 
     def test_deck_design_paging_from_the_server(self):
         self.sign_in()
