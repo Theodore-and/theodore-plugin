@@ -68,7 +68,11 @@ while [ $# -gt 0 ]; do
 done
 
 say() { printf 'ci: %s\n' "$*"; }
-# The shim job's suite: every test module once. CI_SHIM_PROCESSES (default 1, as before: unittest discover) above 1 runs
+# Lanes and suite processes: 4 each by default on a machine with 8 or more cores (measured 2026-11-17 on 10 cores:
+# the whole check in 16 min against about 60 one after another), 1 below that. A value given for either wins.
+CI_WIDE=1; [ "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)" -ge 8 ] 2>/dev/null && CI_WIDE=4
+: "${CI_LOCAL_LANES:=$CI_WIDE}" "${CI_SHIM_PROCESSES:=$CI_WIDE}"
+# The shim job's suite: every test module once. CI_SHIM_PROCESSES at 1 is unittest discover, as before; above 1 it runs
 # the modules in that many processes (ci/par_unittest.py: the same tests, each once; test_client, the longest, dealt
 # out test by test), which passes only when the units ran as many tests as discovery lists.
 # The runtime job's launcher and installer suites the same way (each test once, both dealt out test by test).
@@ -615,7 +619,7 @@ heavy() { # seconds label command...: wait for the load, then run it under its d
 }
 
 # The four platform jobs of `all` and `selected` (macos-arm64, macos-x64 under Rosetta, linux-x64 and linux-arm64 in
-# containers) in CI_LOCAL_LANES lanes side by side (default 1: one after another, each after its own load wait, as
+# containers) in CI_LOCAL_LANES lanes side by side (1: one after another, each after its own load wait, as
 # before). With more lanes the load is waited for once, before they start, and job k goes to lane k mod lanes in the
 # order macos-arm64 linux-arm64 macos-x64 linux-x64 (2 lanes: the Mac's two beside the containers' two). Every job keeps
 # its own folder, log, result and hard deadline; the containers have their own CPUs (the Docker VM's).
