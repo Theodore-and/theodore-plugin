@@ -81,7 +81,7 @@ admit() { # add this Mac's current /24 networks to the SSH rule (kept: earlier o
   say "SSH admitted from: $all"
 }
 ssh_ok() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" "echo ready" >/dev/null 2>&1; }
-remote_sh() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" "$1"; }
+remote_sh() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" "$1"; }
 power() { azr vm get-instance-view -g "$GROUP" -n "$VM" --query "instanceView.statuses[?starts_with(code,'PowerState/')].code | [0]" -o tsv 2>/dev/null | sed 's|PowerState/||'; }
 backstop() { # Azure deallocates it at this UTC time, whatever this Mac does
   local h=${BUILD_MACHINE_DEADLINE_HOURS:-3} at
@@ -99,7 +99,7 @@ live_leases() { # prints the pids of live leases; removes dead ones
 }
 remote_ps() {
   local enc; enc=$(printf '%s' "\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'; $1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
-  ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" \
+  ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" \
     "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
 }
 # The work folders the runners use (engine: run.sh's C:\theo-n; plugin: ci/run.sh's C:\theodore-ci). Never the caches.
@@ -110,6 +110,16 @@ BOOT_PS="cmd /d /c 'rd /s /q \\\\?\\C:\\theo-n'; cmd /d /c 'rd /s /q \\\\?\\C:\\
 # running; never ~/cache. The same at every boot (root's crontab).
 LINUX_CLEAN='sudo docker ps -q | xargs -r sudo docker kill >/dev/null 2>&1; rm -rf ~/n ~/in.tar ~/out.tar ~/jobs'
 LINUX_BOOT='@reboot rm -rf /home/theoci/n /home/theoci/in.tar /home/theoci/out.tar /home/theoci/jobs'
+bounded() { # seconds command...: the command, ended after that many seconds (exit 124); the machine's cleanup must never
+  # hold a run (a Windows cleanup over SSH hung for 21 min on 2026-11-17; the boot task clears the folders anyway)
+  local secs=$1 p i=0; shift
+  "$@" & p=$!
+  while kill -0 "$p" 2>/dev/null; do
+    [ "$i" -lt "$secs" ] || { kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; return 124; }
+    sleep 1; i=$((i + 1))
+  done
+  wait "$p"
+}
 clean_work() { # the work folders of the machine's kind
   if [ "$(os_of)" = windows ]; then remote_ps "$CLEAN_PS"; else remote_sh "$LINUX_CLEAN"; fi
 }
@@ -233,9 +243,9 @@ start() {
   # The only run on it: what an earlier run that died left in the work folders goes now (with its processes), and the
   # boot task's list is written again (it may predate a folder added here).
   if [ "$(live_leases | grep -vcx "$pid")" = 0 ] && [ "$(os_of)" != windows ]; then
-    remote_sh "$LINUX_CLEAN" >"$ST/clean.log" 2>&1 || say "the work folders could not be cleared now"
+    bounded 300 remote_sh "$LINUX_CLEAN" >"$ST/clean.log" 2>&1 || say "the work folders could not be cleared now"
   elif [ "$(live_leases | grep -vcx "$pid")" = 0 ]; then
-    remote_ps "$CLEAN_PS; New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null; Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value \"$BOOT_PS\"" >"$ST/clean.log" 2>&1 \
+    bounded 300 remote_ps "$CLEAN_PS; New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null; Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value \"$BOOT_PS\"" >"$ST/clean.log" 2>&1 \
       || say "the work folders could not be cleared now"
   fi
   say "$NAME ready after $((SECONDS - t0)) s"
@@ -250,7 +260,7 @@ stop() {
   if [ -n "${live// /}" ]; then state_unlock; say "$NAME still used by: $live; left running"; return 0; fi
   [ -z "${BUILD_MACHINE_KEEP:-}" ] || { state_unlock; say "BUILD_MACHINE_KEEP: $NAME left running"; return 0; }
   if [ "$(power)" = running ]; then
-    clean_work >/dev/null 2>&1 || say "the work folders could not be removed now; the boot task removes them at the next start"
+    bounded "${BUILD_MACHINE_CLEAN_SECONDS:-180}" clean_work >/dev/null 2>&1 || say "the work folders could not be removed now; the boot task removes them at the next start"
   fi
   # held through the deallocation: a start that comes now waits, then starts the machine again
   azr vm deallocate -g "$GROUP" -n "$VM" -o none && say "$NAME deallocated"

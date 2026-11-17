@@ -188,7 +188,8 @@ JOB
     ssh $RSSH "$rhost" 'bash -s' < "$dir/remote-job.sh" >>"$dir/standing.log" 2>&1
   scp -q $RSSH "$rhost:out.tar" "$dir/out.tar" >>"$dir/standing.log" 2>&1 && tar -xf "$dir/out.tar" -C "$dir"
   rm -f "$dir/in.tar" "$dir/out.tar"
-  bash "$ROOT/ci/build-machine.sh" stop "$m" >>"$dir/standing.log" 2>&1
+  # deallocated in the background: the results are here, and the deallocation (minutes) holds nothing of this run
+  ( bash "$ROOT/ci/build-machine.sh" stop "$m" >>"$dir/standing.log" 2>&1 & )
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
   echo "$(( $(date +%s) - t0 ))" > "$dir/job.seconds"
 }
@@ -318,8 +319,9 @@ run_windows_standing() {
     KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN=$(bash "$ROOT/ci/build-machine.sh" known-hosts "$m") STANDING=1
     say "windows-x64: standing machine $m ready after $(( $(date +%s) - started )) s"
     run_windows
-    bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
     trap - EXIT INT TERM HUP
+    # deallocated in the background: the results are here, and the deallocation (minutes) holds nothing of this run
+    ( bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1 & )
   else
     trap - EXIT INT TERM HUP
     bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
