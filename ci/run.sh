@@ -135,6 +135,64 @@ run_linux() { # name docker-platform platform-key
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
 }
 
+# --- one Linux platform on a standing Linux build machine --------------------------------------------------------------
+# CI_LINUX_MACHINE_X64 / CI_LINUX_MACHINE_ARM64 (default engine-linux-x64 / engine-linux-arm64; none: this Mac's
+# containers): ci/build-machine.sh's Linux machines (BUILD_MACHINE_OS=linux-*), started for the job with a lease and
+# deallocated after it when no other run holds them. The same container (the pinned ubuntu digest), the same commands, at
+# the machine's own architecture (no emulation); the suites in CI_REMOTE_PROCESSES (default 6) processes. What goes: the
+# tracked files of HEAD (as to Windows). What comes back: the job's folder (logs, results, the bundle). Its download and
+# bundle caches stay on the machine (~/cache/plugin). A machine that is missing, in use or does not start: this Mac's
+# container, as before.
+linux_machine() { # name: the standing machine for it, when it exists
+  case "$1" in linux-x64) m=${CI_LINUX_MACHINE_X64:-engine-linux-x64} ;; *) m=${CI_LINUX_MACHINE_ARM64:-engine-linux-arm64} ;; esac
+  [ "$m" != none ] && [ -f "${BUILD_MACHINE_HOME:-$HOME/.theodore-build}/$m/host" ] && echo "$m"
+}
+run_linux_standing() { # name docker-platform platform-key machine
+  name=$1 dplat=$2 key=$3 m=$4
+  dir="$OUT/$name"; mkdir -p "$dir"; rm -rf "${dir:?}/bundle"; rm -f "$dir/"*.result "$dir/"*.log
+  t0=$(date +%s)
+  export BUILD_MACHINE_LEASE_PID=$$
+  if ! rhost=$(bash "$ROOT/ci/build-machine.sh" start "$m" 2>>"$dir/standing.log"); then
+    bash "$ROOT/ci/build-machine.sh" stop "$m" >>"$dir/standing.log" 2>&1
+    say "$name: the standing machine $m is in use or did not start ($dir/standing.log): this Mac's container instead"
+    run_linux "$name" "$dplat" "$key"; return
+  fi
+  say "$name: standing machine $m ready after $(( $(date +%s) - t0 )) s"
+  rknown=$(bash "$ROOT/ci/build-machine.sh" known-hosts "$m")
+  RSSH="-i ${KEY:-$HOME/.ssh/theodore_ci} -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$rknown"
+  procs=${CI_REMOTE_PROCESSES:-6}
+  shim="ci/par_unittest.py $procs --split test_client"
+  rt="ci/par_unittest.py $procs --only test_launcher test_installer --split test_launcher test_installer"
+  [ "$procs" -gt 1 ] 2>/dev/null || { shim="-m unittest discover -s tests -v"; rt="-m unittest -v tests.test_launcher tests.test_installer"; }
+  only=; [ -z "${CI_SHIM_ONLY:-}" ] || only='exit 0;'
+  # The container's script: run_linux's, with this machine's folders
+  cat > "$dir/remote-job.sh" <<JOB
+set -u
+rm -rf ~/n; mkdir -p ~/n/repo ~/n/out/$name ~/cache/plugin && tar -xf ~/in.tar -C ~/n/repo && rm -f ~/in.tar || exit 1
+mkdir -p ~/n/repo/ci/out/$name ~/n/repo/ci/out/cache  # the mount points (ci/out is not tracked; the repository is mounted read-only)
+sudo docker run --rm --platform $dplat -v ~/n/repo:/repo:ro -v ~/n/out/$name:/repo/ci/out/$name -v ~/cache/plugin:/repo/ci/out/cache \\
+  -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 -e CI_NAME=$name -e PYTHONDONTWRITEBYTECODE=1 -w /repo $UBUNTU sh -c '$(printf '%s' "$SETUP" | sed "s/'/'\\\\''/g")
+    chown -R tester /repo/ci/out/$name /repo/ci/out/cache
+    su tester -c "cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
+      PY=\\\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
+      ( \\\$PY tools/sync_launchers.py --check && \\\$PY $shim ) > \\\$O/shim.log 2>&1 && echo pass > \\\$O/shim.result || echo fail > \\\$O/shim.result
+      $only
+      ( \\\$PY runtime/build/build_bundle.py --platform $key --out \\\$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
+        \\\$PY runtime/build/smoke_test.py --bundle \\\$O/bundle --platform $key &&
+        THEODORE_TEST_BUNDLE=/repo/\\\$O/bundle \\\$PY $rt ) > \\\$O/runtime.log 2>&1 && echo pass > \\\$O/runtime.result || echo fail > \\\$O/runtime.result"'
+sudo chown -R \$(id -u) ~/n/out
+tar -C ~/n/out/$name -cf ~/out.tar . && rm -rf ~/n
+JOB
+  ( cd "$ROOT" && git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar --no-mac-metadata --no-xattrs -cf "$dir/in.tar" ) &&
+    scp -q $RSSH "$dir/in.tar" "$rhost:in.tar" >>"$dir/standing.log" 2>&1 &&
+    ssh $RSSH "$rhost" 'bash -s' < "$dir/remote-job.sh" >>"$dir/standing.log" 2>&1
+  scp -q $RSSH "$rhost:out.tar" "$dir/out.tar" >>"$dir/standing.log" 2>&1 && tar -xf "$dir/out.tar" -C "$dir"
+  rm -f "$dir/in.tar" "$dir/out.tar"
+  bash "$ROOT/ci/build-machine.sh" stop "$m" >>"$dir/standing.log" 2>&1
+  for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
+  echo "$(( $(date +%s) - t0 ))" > "$dir/job.seconds"
+}
+
 # --- the corporate network: a trusted inspecting certificate and an authenticating proxy --------------------------------
 # In a linux/arm64 container: tinyproxy stops after its first request under x86-64 emulation on an Apple-silicon
 # host, and the job tests the launcher and the client, which are the same on every Linux.
@@ -564,8 +622,10 @@ platform_job() { # name [shim]: one platform job, under its deadline (the load i
   case "$1" in
     macos-arm64) limited 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
     macos-x64) limited 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
-    linux-x64) limited 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
-    linux-arm64) limited 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+    linux-x64|linux-arm64)
+      dp=linux/amd64; [ "$1" = linux-arm64 ] && dp=linux/arm64
+      if lm=$(linux_machine "$1"); then limited 5400 "$1" run_linux_standing "$1" "$dp" "$1" "$lm"
+      else limited 5400 "$1" run_linux "$1" "$dp" "$1"; fi ;;
   esac
 }
 platform_jobs() { # [shim] name...: the named jobs (shim: the shim job only), in lanes; returns when all have ended
@@ -603,8 +663,7 @@ esac
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
-  linux-x64) heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
-  linux-arm64) heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+  linux-x64|linux-arm64) wait_load; platform_job "$TARGET" ;;
   windows-x64) mkdir -p "$OUT/windows-x64"; commit > "$OUT/windows-x64/commit"
                if [ -n "$AZURE" ] && standing_name >/dev/null; then run_windows_standing
                elif [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;

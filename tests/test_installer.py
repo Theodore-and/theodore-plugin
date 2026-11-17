@@ -292,7 +292,7 @@ class Installer(unittest.TestCase):
         self.assertNotIn("was not accepted", result.stdout, "the code is never reported as invalid")
         self.assertNotIn("SIGN_IN_REQUIRED", result.stdout)
         self.assertNotIn("/device?code=", result.stdout)
-        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed")
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed\n" + result.stdout + result.stderr)
         self.api.computer_limit = None
         done = self.install("--code", "ABCD-1234")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)

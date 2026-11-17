@@ -87,12 +87,13 @@ def main() -> int:
             units.append((m, size, [f"{prefix}{m}"]))
     order = sorted(units, key=lambda u: -u[1])
     out: dict[str, tuple[int, str, float]] = {}
-    base = Path(tempfile.mkdtemp(prefix="par-unittest-"))
+    base = Path(tempfile.mkdtemp(prefix="par-"))
 
     def run(unit):
         name, _, names = unit
-        tmp = base / re.sub(r"[^A-Za-z0-9_]", "_", name)
-        tmp.mkdir()
+        # a neutral name: a test's own output contains its temporary paths, and one asserts that a word (its module's
+        # name, "usage") is absent from it
+        tmp = Path(tempfile.mkdtemp(prefix="u", dir=base))
         env = dict(os.environ, TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
         t0 = time.monotonic()
         p = subprocess.run([sys.executable, "-c", RUNNER, mode, *names], cwd=ROOT, env=env,

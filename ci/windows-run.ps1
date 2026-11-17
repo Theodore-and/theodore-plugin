@@ -83,10 +83,11 @@ print("\n".join(ids(unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]))))
         for ($i = 0; $i -lt $installerIds.Count; $i++) { $groups["installer-$($i % 2)"] += $installerIds[$i] }
     } else { $groups['installer-0'] = @('tests.test_installer') }  # could not list: the suite whole
     $slow = @('tests.test_launcher', 'tests.test_installer')
-    # The other suites in three groups, largest module first into the lightest group (by file size): one 'rest' group
-    # was itself the long pole once the launcher suite was split.
+    # The other suites in two groups, largest module first into the lightest group (by file size): one 'rest' group
+    # was itself the long pole once the launcher suite was split; with the installer suite in two groups, three 'rest'
+    # groups made 8 processes on 8 vCPU (they end within about 200 s; the launcher and installer groups take 400 to 600).
     $restFiles = @(Get-ChildItem "$repo\tests" -Filter 'test_*.py' | Where-Object { $slow -notcontains ('tests.' + $_.BaseName) } | Sort-Object Length -Descending)
-    $m = 3; $load = @(0) * $m
+    $m = 2; $load = @(0) * $m
     for ($i = 0; $i -lt $m; $i++) { $groups["rest-$i"] = @() }
     foreach ($f in $restFiles) {
         $k = 0; for ($i = 1; $i -lt $m; $i++) { if ($load[$i] -lt $load[$k]) { $k = $i } }
