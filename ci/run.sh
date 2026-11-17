@@ -71,8 +71,10 @@ say() { printf 'ci: %s\n' "$*"; }
 # The shim job's suite: every test module once. CI_SHIM_PROCESSES (default 1, as before: unittest discover) above 1 runs
 # the modules in that many processes (ci/par_unittest.py: the same tests, each once; test_client, the longest, dealt
 # out test by test), which passes only when the units ran as many tests as discovery lists.
+# The runtime job's launcher and installer suites the same way (each test once, both dealt out test by test).
 if [ "${CI_SHIM_PROCESSES:-1}" -gt 1 ] 2>/dev/null; then SHIM_SUITE="ci/par_unittest.py $CI_SHIM_PROCESSES --split test_client"
-else SHIM_SUITE="-m unittest discover -s tests -v"; fi
+  RUNTIME_SUITE="ci/par_unittest.py $CI_SHIM_PROCESSES --only test_launcher test_installer --split test_launcher test_installer"
+else SHIM_SUITE="-m unittest discover -s tests -v"; RUNTIME_SUITE="-m unittest -v tests.test_launcher tests.test_installer"; fi
 result() { # name job pass|fail|not-run
   mkdir -p "$OUT/$1"; printf '%s\n' "$3" > "$OUT/$1/$2.result"; say "$1 $2: $3"
 }
@@ -96,7 +98,7 @@ run_mac() { # name platform-key arch-prefix
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
     $prefix "$PY" runtime/build/build_bundle.py --platform "$key" --out "$dir/bundle" --work "$dir/work" --cache "$CACHE/bundle-$key" &&
     $prefix "$PY" runtime/build/smoke_test.py --bundle "$dir/bundle" --platform "$key" &&
-    THEODORE_TEST_BUNDLE="$dir/bundle" $prefix "$PY" -m unittest -v tests.test_launcher tests.test_installer ) > "$dir/runtime.log" 2>&1 \
+    THEODORE_TEST_BUNDLE="$dir/bundle" $prefix "$PY" $RUNTIME_SUITE ) > "$dir/runtime.log" 2>&1 \
     && result "$name" runtime pass || result "$name" runtime fail
   rm -rf "${dir:?}/work" "${dir:?}/tmp"
 }
@@ -128,7 +130,7 @@ run_linux() { # name docker-platform platform-key
       $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'exit 0;' )  # shim only: the runner records runtime as not-run
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
-        THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY -m unittest -v tests.test_launcher tests.test_installer ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
+        THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY $RUNTIME_SUITE ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
     || say "$name: the container did not finish"
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
 }
@@ -552,6 +554,43 @@ heavy() { # seconds label command...: wait for the load, then run it under its d
   wait_load; limited "$@"
 }
 
+# The four platform jobs of `all` and `selected` (macos-arm64, macos-x64 under Rosetta, linux-x64 and linux-arm64 in
+# containers) in CI_LOCAL_LANES lanes side by side (default 1: one after another, each after its own load wait, as
+# before). With more lanes the load is waited for once, before they start, and job k goes to lane k mod lanes in the
+# order macos-arm64 linux-arm64 macos-x64 linux-x64 (2 lanes: the Mac's two beside the containers' two). Every job keeps
+# its own folder, log, result and hard deadline; the containers have their own CPUs (the Docker VM's).
+LANE_ORDER="macos-arm64 linux-arm64 macos-x64 linux-x64"
+platform_job() { # name [shim]: one platform job, under its deadline (the load is waited for by the caller)
+  case "$1" in
+    macos-arm64) limited 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
+    macos-x64) limited 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
+    linux-x64) limited 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
+    linux-arm64) limited 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+  esac
+}
+platform_jobs() { # [shim] name...: the named jobs (shim: the shim job only), in lanes; returns when all have ended
+  shim=; [ "$1" = shim ] && { shim=1; shift; }
+  lanes=${CI_LOCAL_LANES:-1}; case "$lanes" in ''|*[!0-9]*|0) lanes=1 ;; esac
+  if [ "$lanes" -le 1 ]; then
+    for j in "$@"; do ( [ -z "$shim" ] || export CI_SHIM_ONLY=1; wait_load; platform_job "$j" ); done
+    return
+  fi
+  wait_load
+  say "the platform jobs in $lanes lanes side by side: $*"
+  lpids= k=0
+  while [ "$k" -lt "$lanes" ]; do
+    mine= i=0
+    for j in $LANE_ORDER; do
+      case " $* " in *" $j "*) [ $((i % lanes)) -eq "$k" ] && mine="$mine $j"; i=$((i + 1)) ;; esac
+    done
+    if [ -n "$mine" ]; then
+      ( [ -z "$shim" ] || export CI_SHIM_ONLY=1; for j in $mine; do t0=$(date +%s); platform_job "$j"; say "$j: $(( $(date +%s) - t0 )) s"; done ) & lpids="$lpids $!"
+    fi
+    k=$((k + 1))
+  done
+  for p in $lpids; do wait "$p"; done
+}
+
 mkdir -p "$OUT"
 cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; release_lock; }
 trap 'cleanup' EXIT
@@ -599,12 +638,11 @@ case "$TARGET" in
         secrets) limited 900 secrets run_secrets ;;
         archives) heavy 900 archives run_archives ;;
         network) heavy 900 network run_network ;;
-        macos-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
-        macos-x64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
-        linux-x64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
-        linux-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
       esac
     done
+    shims=; for t in $wanted; do case "$t" in *:shim) shims="$shims ${t%:shim}" ;; esac; done
+    # shellcheck disable=SC2086
+    [ -z "$shims" ] || platform_jobs shim $shims
     release_lock
     if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     summary
@@ -621,10 +659,7 @@ case "$TARGET" in
     fi
     acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)"
     limited 900 secrets run_secrets
-    heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 ""
-    heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64"
-    heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64
-    heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64
+    platform_jobs macos-arm64 macos-x64 linux-x64 linux-arm64
     heavy 900 network run_network
     heavy 900 archives run_archives
     # The local heavy jobs are done: the lock is released now, so the other repositories' runners do not wait on a

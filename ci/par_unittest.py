@@ -1,8 +1,10 @@
 """The shim job's test suite in several processes: what `python -m unittest discover -s tests -v` runs, each test once.
 
-    python ci/par_unittest.py <processes> [--split module ...]
+    python ci/par_unittest.py <processes> [--only module ...] [--split module ...]
 
-Every test module under tests/ (test_*.py) is one unit of work; a module named with --split is listed test by test and
+Every test module under tests/ (test_*.py) is one unit of work (with --only, only the modules named there: the runtime
+job's launcher and installer suites, what `python -m unittest -v tests.<module> ...` runs); a module named with --split
+is listed test by test and
 dealt round-robin into <processes> units of its own (a long module would otherwise be the tail). Units run in a pool of
 <processes> processes, longest first by their module's size, each process with its own TMPDIR, TEMP and TMP (the suites
 already point HOME and the Theodore folders into temporary folders: tests/support.py). The output of every unit is
@@ -38,14 +40,26 @@ def ids(suite):
 def main() -> int:
     args = sys.argv[1:]
     procs = max(1, int(args[0])) if args else 4
-    split = set(args[args.index("--split") + 1:]) if "--split" in args else set()
+    lists: dict[str, set[str]] = {"--only": set(), "--split": set()}
+    cur = None
+    for a in args[1:]:
+        if a in lists:
+            cur = a
+        elif cur:
+            lists[cur].add(a)
+    only, split = lists["--only"], lists["--split"]
     sys.path.insert(0, str(ROOT))
     os.chdir(ROOT)
-    discovered = list(ids(unittest.defaultTestLoader.discover("tests", top_level_dir=str(ROOT))))
+    if only:
+        loader = unittest.defaultTestLoader
+        discovered = list(ids(loader.loadTestsFromNames([f"tests.{m}" for m in sorted(only)])))
+    else:
+        discovered = list(ids(unittest.defaultTestLoader.discover("tests", top_level_dir=str(ROOT))))
     # a module that fails to import shows up as unittest.loader._FailedTest: run discovery itself then, serially
     if any(i.startswith("unittest.loader") for i in discovered):
         print("par_unittest: a module did not import: the suite runs whole, in one process", flush=True)
-        return subprocess.call([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
+        whole = [f"tests.{m}" for m in sorted(only)] if only else ["discover", "-s", "tests"]
+        return subprocess.call([sys.executable, "-m", "unittest", "-v", *whole])
     modules = sorted({i.split(".")[1] for i in discovered})  # tests.<module>.<class>.<test>
     units: list[tuple[str, int, list[str]]] = []
     for m in modules:
