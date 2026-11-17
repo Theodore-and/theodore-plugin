@@ -27,6 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# What a unit runs: `python -m unittest -v <names>`, with the tests folder first on the path as discover puts it there
+RUNNER = """import os, sys, unittest
+mode, names = sys.argv[1], sys.argv[2:]
+if mode == "discover":
+    sys.path.insert(0, os.path.abspath("tests"))
+unittest.main(module=None, argv=["python -m unittest", "-v", *names])
+"""
 
 
 def ids(suite):
@@ -48,30 +55,36 @@ def main() -> int:
         elif cur:
             lists[cur].add(a)
     only, split = lists["--only"], lists["--split"]
-    sys.path.insert(0, str(ROOT))
     os.chdir(ROOT)
+    # The names each way of running gives its tests: `unittest discover -s tests` imports the modules from tests/ as
+    # top-level modules (test_client.Class.test); `unittest tests.test_launcher` from the repository (tests.test_launcher.
+    # Class.test). A unit runs its names the same way (RUNNER), so every test sees what it sees in the serial run.
     if only:
-        loader = unittest.defaultTestLoader
-        discovered = list(ids(loader.loadTestsFromNames([f"tests.{m}" for m in sorted(only)])))
+        sys.path.insert(0, str(ROOT))
+        prefix, mode = "tests.", "names"
+        discovered = list(ids(unittest.defaultTestLoader.loadTestsFromNames([f"tests.{m}" for m in sorted(only)])))
     else:
-        discovered = list(ids(unittest.defaultTestLoader.discover("tests", top_level_dir=str(ROOT))))
-    # a module that fails to import shows up as unittest.loader._FailedTest: run discovery itself then, serially
+        prefix, mode = "", "discover"
+        discovered = list(ids(unittest.defaultTestLoader.discover("tests")))
+    # a module that fails to import shows up as unittest.loader._FailedTest: run the suite itself then, serially
     if any(i.startswith("unittest.loader") for i in discovered):
         print("par_unittest: a module did not import: the suite runs whole, in one process", flush=True)
         whole = [f"tests.{m}" for m in sorted(only)] if only else ["discover", "-s", "tests"]
         return subprocess.call([sys.executable, "-m", "unittest", "-v", *whole])
-    modules = sorted({i.split(".")[1] for i in discovered})  # tests.<module>.<class>.<test>
+    def module_of(test_id: str) -> str:
+        return test_id[len(prefix):].split(".")[0]
+    modules = sorted({module_of(i) for i in discovered})
     units: list[tuple[str, int, list[str]]] = []
     for m in modules:
         size = (ROOT / "tests" / f"{m}.py").stat().st_size
-        names = [i for i in discovered if i.split(".")[1] == m]
+        names = [i for i in discovered if module_of(i) == m]
         if m in split and len(names) > 1:
             for k in range(procs):
                 part = names[k::procs]
                 if part:
                     units.append((f"{m}#{k}", size // procs, part))
         else:
-            units.append((m, size, [f"tests.{m}"]))
+            units.append((m, size, [f"{prefix}{m}"]))
     order = sorted(units, key=lambda u: -u[1])
     out: dict[str, tuple[int, str, float]] = {}
     base = Path(tempfile.mkdtemp(prefix="par-unittest-"))
@@ -82,7 +95,7 @@ def main() -> int:
         tmp.mkdir()
         env = dict(os.environ, TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
         t0 = time.monotonic()
-        p = subprocess.run([sys.executable, "-m", "unittest", "-v", *names], cwd=ROOT, env=env,
+        p = subprocess.run([sys.executable, "-c", RUNNER, mode, *names], cwd=ROOT, env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out[name] = (p.returncode, p.stdout.decode("utf-8", "backslashreplace"), time.monotonic() - t0)
 
