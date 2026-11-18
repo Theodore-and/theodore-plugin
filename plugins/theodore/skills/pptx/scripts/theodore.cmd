@@ -23,6 +23,9 @@ if "%SELF_DIR:~-1%"=="\" set "SELF_DIR=%SELF_DIR:~0,-1%"
 set "SELF=%SELF_DIR%\theodore.cmd"
 set "HOME_DIR=%LOCALAPPDATA%\Theodore"
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
+rem `session-start` is the plugin's hook after Claude Code compacts or resumes a conversation (hooks\hooks.json runs
+rem the sh launcher; a call made here does the same): the client when Theodore is set up, else nothing at all.
+if /i "%~1"=="session-start" goto :session_start
 if "%HOME_DIR%"=="\Theodore" goto :no_home
 set "STABLE=%HOME_DIR%\bin\theodore.cmd"
 set "CONF=%SELF_DIR%\launcher.json"
@@ -325,6 +328,14 @@ exit /b 0
 if not exist "%HOME_DIR%\bin" mkdir "%HOME_DIR%\bin" 2>nul
 if not exist "%HOME_DIR%\bin" exit /b 0
 for %%F in (theodore theodore.cmd launcher.json) do if exist "%SELF_DIR%\%%F" copy /y "%SELF_DIR%\%%F" "%HOME_DIR%\bin\%%F" >nul 2>&1
+exit /b 0
+
+:session_start
+rem No status, no download, no set-up, exit 0: only what the client prints.
+call :check_ready
+if not defined READY exit /b 0
+set "THEODORE_HOME=%HOME_DIR%"
+"%PY%" -I "%HOME_DIR%\client\%CV%" session-start 2>nul
 exit /b 0
 
 :check_ready

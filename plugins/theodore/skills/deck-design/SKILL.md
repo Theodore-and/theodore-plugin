@@ -4,6 +4,8 @@ description: "Use before creating, restructuring, adapting or visually redesigni
 allowed-tools: mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodore__specimen, Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)
 ---
 
+If the instructions below are cut short or are no longer in your context (a compacted or resumed conversation, a subagent), load them again with `theodore guide deck-design` before you work from them.
+
 !`sh "${CLAUDE_SKILL_DIR}/scripts/theodore" skill deck-design`
 
 ---
@@ -18,9 +20,8 @@ absolute path instead, without `cd` (the skill folder is the folder that holds t
 the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide deck-design
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide deck-design
-   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide deck-design A first line
-starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
-its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
-context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same
+   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide deck-design
+A first line starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
+its TELL THE USER line says. Never substitute another slide tool silently. Give sub-agents the same
 command. If you cannot run commands, use the Theodore tool in this conversation (start with its begin action, or
 its guide with skill `deck-design`); if there is no Theodore tool, give the user this link to add it to their Claude account: https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore&connectorUrl=https%3A%2F%2Fmcp.theodoreand.ai%2Fmcp

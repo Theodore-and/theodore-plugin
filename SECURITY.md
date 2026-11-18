@@ -7,8 +7,10 @@ installer's are in `install/`.
 
 ## What runs, and when
 
-- Theodore runs only when your assistant (or you) calls the launcher. There are no hooks, no background
-  service and no scheduled task. Background downloads started during setup end by themselves.
+- Theodore runs only when your assistant (or you) calls the launcher, and in Claude Code through the plugin's one hook
+  (`hooks/hooks.json`), which runs the launcher's `session-start` when Claude Code compacts or resumes a conversation
+  (see "The session note" below). There is no background service and no scheduled task. Background downloads started
+  during setup end by themselves.
 - The engine process, which builds your decks, makes no network calls, except an image search you ask for
   explicitly. It never contacts Theodore.
 - The client is the only part that contacts Theodore.
@@ -26,6 +28,7 @@ installer's are in `install/`.
 | Update check | Asks which engine, client and asset-pack versions are current, and reads the signed `plugin/latest.json` (the current plugin version) | at the first Theodore command of each assistant session that loads the pptx instructions, then at most once per 6 hours |
 | Plugin update | When the published plugin is newer than an assistant's copy: Theodore's own copy of the plugin is downloaded (signed document, pinned sha256) and the assistant's own command updates its copy (`claude plugin marketplace update theodore` and `claude plugin update theodore@theodore`; `codex plugin add theodore@theodore`) | once per release and session, in the background |
 | Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
+| Resumed session | When Claude Code resumes a conversation that loaded Theodore's instructions: one request for the signed release manifest, to compare the version the conversation loaded with the current one (nothing about the conversation is sent; two seconds at most) | once per resume of such a conversation |
 | Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private folder in Theodore's own cache (the system's temporary folder only when the assistant works in a folder that contains the cache), removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
@@ -117,6 +120,15 @@ your command; nothing runs in the background. Sent lines are deleted once the se
 are on and how many lines are waiting. To switch usage counts off, write to support@theodoreand.ai: the service then
 refuses the next batch, the client deletes the file and writes nothing more until the switch is on again. Logging out
 of Theodore on this computer (`theodore logout`) and the uninstall also delete it.
+
+## The session note
+
+`state/sessions.json` in Theodore's folder records which of Theodore's instructions the client served to each Claude Code
+session: the session id Claude Code puts in the environment of the commands it runs (and gives the hook), the skill
+(`deck-design` or `pptx`), the version served, when, and which one-line reminders were already given. It holds no text
+from the conversation or the work, is readable only by you, keeps at most 200 sessions and nothing older than 30 days,
+and is never sent anywhere. Theodore never opens the conversation or any other file of Claude Code's sessions: the hook
+decides only from this note. Logging out does not delete it; the uninstall does, with the rest of `state/`.
 
 ## Bug reports (beta)
 

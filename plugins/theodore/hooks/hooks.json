@@ -1,0 +1,17 @@
+{
+  "description": "After Claude Code compacts or resumes a conversation that loaded Theodore's instructions, one paragraph saying to load them again. It reads only Theodore's own record of what it served.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore\" session-start; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

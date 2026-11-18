@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, desktop, install, routing, specimens, usage
+from . import __version__, account, api, core, credentials, desktop, install, routing, sessions, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -141,6 +141,8 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
     sys.stdout.write(_end_line(skill, name, body, part, total, f"{command} --part {part + 1}") + "\n")
     sys.stdout.flush()
+    if opening and section != "license":    # a command's output (the tool server's answers have no opening): noted for this session
+        sessions.record_loaded(skill, version if skill != "pptx" or section is None else None)
 
 
 # A reader's role (lane P042b, the combined release's F2): `lead`, the default, is the agent that received the request, a
@@ -465,7 +467,7 @@ def _bounded(text: str, rest: str) -> str:
     return text[:cut + 1 if cut > 0 else room] + pointer
 
 
-def _deck_design_body() -> str:
+def _deck_design_body() -> tuple[str, str]:
     account.require("deck-design")
     # Claude Code has the plugin's guide tool (its wording for the links), except on Windows, where the plugin cannot
     # register its server (sh is not on the path Claude Code spawns from): there the launcher's wording.
@@ -484,14 +486,14 @@ def _deck_design_body() -> str:
     # tool delivery) becomes this launcher's own path, which is true however the text arrived.
     for line in _LAUNCHER_LINES:
         body = body.replace(line, f"Run {quoted_launcher()} with:")
-    return _bounded(body, rest)
+    return _bounded(body, rest), str(headers.get(HEADER_GUIDE_VERSION) or "")
 
 
 _LAUNCHER_LINES = ("Run the Theodore launcher you used to get these instructions with:",
                    "Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd on Windows) with:")
 
 
-def _pptx_body() -> str:
+def _pptx_body() -> tuple[str, str]:
     claims = account.require("pptx")
     del claims
     install.require_runtime()
@@ -520,7 +522,7 @@ def _pptx_body() -> str:
     elif directions:
         header += directions.rstrip("\n").split("\n")
     body = "\n".join(header) + "\n\n" + _without_frontmatter(text)
-    return _bounded(body, f"run {launcher} guide pptx")
+    return _bounded(body, f"run {launcher} guide pptx"), version
 
 
 def skill(name: str) -> int:
@@ -532,7 +534,7 @@ def skill(name: str) -> int:
     try:
         if name not in SKILLS:
             raise core.usage(f"unknown skill '{name}'. The skills are: {', '.join(SKILLS)}.")
-        body = _deck_design_body() if name == "deck-design" else _pptx_body()
+        body, version_ = _deck_design_body() if name == "deck-design" else _pptx_body()
     except Status as status:
         core.emit(status)               # a revoked or suspended device gets that refusal instead, once
         return 0
@@ -541,6 +543,7 @@ def skill(name: str) -> int:
         body = "\n".join(notices) + "\n" + body
     sys.stdout.write(body if body.endswith("\n") else body + "\n")
     sys.stdout.flush()
+    sessions.record_loaded(name, version_)
     return 0
 
 
@@ -639,6 +642,7 @@ def run_pptx(args: list[str]) -> int:
     install.require_runtime()
     install.wait_for_packs(args)
     install.wait_for_renderer(args)
+    sessions.engine_notice(args[0] if args else "")
     code = install.run_engine(args)
     if args[:1] == ["finish"]:
         usage.flush(force=True)         # the usage counts go at the end of a deck (never raises, never prints)

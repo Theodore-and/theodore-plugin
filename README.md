@@ -43,7 +43,7 @@ with `THEODORE_HOME`, or uninstall the other first.
 | `packs/` | Icon, flag, map and background libraries | about 145 MB (about 95 MB to download) |
 | `tools/libreoffice/` | LibreOffice, only on a Mac or Windows PC that has none (it renders slide previews) | about 800 MB (about 300 MB to download) |
 | `plugin/` | A copy of this repository's plugin, which Codex adds as a local marketplace | under 100 KB |
-| `state/` | Sign-in state (see below), update state, locks | a few KB |
+| `state/` | Sign-in state (see below), update state, locks, the session note (`sessions.json`, below) | a few KB |
 | `logs/`, `staging/` | Client log; downloads in progress | small |
 
 In all, about 100 to 130 MB is downloaded before the first deck (the runtime, 84 to 111 MB, and the engine, 15 to
@@ -100,7 +100,18 @@ Outside that folder:
   variable that no permission rule can match. `theodore hosts settings --remove` and the uninstall delete it.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
-download or an update in the background, which ends when it is done. There are no hooks.
+download or an update in the background, which ends when it is done. The plugin has one hook (`hooks/hooks.json`):
+Claude Code runs it when it compacts a conversation or resumes one, and only then. It runs the launcher's
+`session-start`, which reads Theodore's own small record of the instructions it served to that session
+(`state/sessions.json`: the session id Claude Code gives, the skill, its version and when; never the conversation, which
+Theodore does not open) and prints one paragraph telling the assistant to load Theodore's instructions again: after a
+compaction, for a session that loaded them; after a resume, for a session that loaded them and only when a newer
+version of them is current. Otherwise it prints nothing. It contacts the Theodore service only on a resume of a session
+that loaded the instructions: one request for the current versions (the update check's signed release manifest),
+two seconds at most, which sends nothing about the conversation. Before Theodore is set up it does nothing at all, and
+it always ends with exit code 0. In a session that loaded the design instructions, `pptx start` and `pptx apply` also
+say once, in one line on standard error, when a newer version of them is current; `pptx start` in a session that did not
+load them says once how to load them.
 
 ## Updates
 

@@ -217,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
         rest = argv[1:]
         for_host = rest[rest.index("--for") + 1] if "--for" in rest[:-1] else None
         return mcp.serve(blocked=blocked, for_host=for_host)
+    if argv[:1] == ["session-start"]:   # the plugin's hook: reads Theodore's session note only; silent, exit 0, no network unless resumed
+        from . import sessions
+        return sessions.session_start()
     if argv[:1] == ["skill"]:       # injected into a skill by the host: whatever happens, exit 0 with something to act on
         code = _main(argv)
         return 0 if code != 130 else code

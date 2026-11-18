@@ -177,6 +177,7 @@ class FakeApi:
         self.prefs_rev = 0
         self.packs: list[dict] = []       # {id, version, sha256, size_bytes}
         self.pack_files: dict[tuple[str, str], bytes] = {}
+        self.manifest_delay = 0.0         # seconds the release manifest's answer waits (a slow link)
         self.pack_delay = 0.0             # seconds to stall each pack download (to test waiting)
         self.packs_manifest_override = None   # a list: what the unsigned GET /v1/packs/manifest answers instead
         self.guides = {"deck-design": {"": "# Deck design\n\nFake design guidance.\n", "license": "Apache License 2.0 (fake)\n"},
@@ -687,6 +688,8 @@ class FakeApi:
             self.prefs_rev += 1
             return self._error(h, 404, "not_found") if len(self.preferences) == before else self._send(h, 204)
         if route == ["releases", "manifest"] and method == "GET":
+            if self.manifest_delay:
+                time.sleep(self.manifest_delay)
             if not self.engine:
                 return self._error(h, 404, "not_found")
             if set(query) != {"platform", "arch"}:
