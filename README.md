@@ -118,8 +118,8 @@ load them says once how to load them.
 The installer's last words are a short welcome for your assistant to give you in the same conversation: what
 Theodore now does for you, a first thing to ask for, and, when it applies, that a new session is needed or a last
 download is still going on. When your account has Studio on, the welcome says so once and asks whether you want it
-off: with Studio on, slides get a deeper design pass, which takes longer and uses more of your AI plan; off is faster
-and lighter. `theodore studio` says whether it is on; `theodore studio off` and `theodore studio on` change it for your
+off: with Studio on, each slide gets a deeper design pass, which uses more of your AI plan; off, slides get a simpler
+design pass that uses less of it. `theodore studio` says whether it is on; `theodore studio off` and `theodore studio on` change it for your
 account (the same setting as the portal's Settings switch). Nothing asks again later.
 
 ## Updates

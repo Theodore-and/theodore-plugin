@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased (lane ONBOARD)
+## 0.4.6
 
 A short welcome after set-up, and Studio from the assistant.
 
@@ -15,6 +15,10 @@ A short welcome after set-up, and Studio from the assistant.
   account (`PUT /v1/studio`, the portal switch's own change). A plan without Studio changes nothing.
 - install.md: step 3 says to give the welcome and follow its NEXT; step 4 is gone (the welcome says when a new session
   is needed). Launcher pins re-synced; the launcher scripts are unchanged, so the generation does not rise.
+- Studio is described by what it means for the plan, with no claim about time or size: on, each slide gets a deeper
+  design pass, which uses more of the AI plan; off, slides get a simpler design pass that uses less of it.
+- The plugin has an icon (lane BRAND): `plugins/theodore/logo.png` (512 x 512), named by `"icon"` in both plugin.json
+  files (`claude plugin validate` accepts the field). tools/sync_launchers.py publishes images as they are.
 
 ## 0.4.5
 

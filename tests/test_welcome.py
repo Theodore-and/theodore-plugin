@@ -10,6 +10,9 @@ from support import ClientCase, status_lines
 
 # Nothing a user is told describes how Theodore works, says "skills" or shouts.
 MECHANISM = re.compile(r"designer|agent|\blead\b|parallel|sub-?agent|skills|!", re.IGNORECASE)
+# The design session's check (2026-11-18): Studio is not reliably slower for a whole deck, and "lighter" reads as fewer
+# slides: no claim about time, speed or size in any Studio text.
+NO_TIME_CLAIM = re.compile(r"longer|faster|lighter|quick|slow", re.IGNORECASE)
 
 
 class Studio(ClientCase):
@@ -19,24 +22,26 @@ class Studio(ClientCase):
 
     def test_reads_turns_off_and_on_for_the_account(self):
         _f, nxt, tell = self.assertStatus(self.client("studio"), "OK", 0)
-        self.assertIn("Studio is on: slides get a deeper design pass, which takes longer and uses more of your AI plan.", tell)
+        self.assertIn("Studio is on: each slide gets a deeper design pass, which uses more of your AI plan.", tell)
         self.assertIn("studio off changes it only if the user asks", nxt)
         self.assertEqual(self.api.studio_puts, [])
 
         _f, _n, tell = self.assertStatus(self.client("studio", "off"), "OK", 0)
         self.assertEqual(self.api.studio_puts, [{"studio_enabled": False}])
-        self.assertEqual(tell, "TELL THE USER: Studio is off for your account: from your next deck, decks are faster and lighter. "
+        self.assertEqual(tell, "TELL THE USER: Studio is off for your account: from your next deck, slides get a simpler design pass that uses less of your AI plan. "
                                "Say if you want it on again.")
         _f, _n, tell = self.assertStatus(self.client("studio"), "OK", 0)
-        self.assertIn("Studio is off: decks are faster and lighter.", tell)
+        self.assertIn("Studio is off: slides get a simpler design pass that uses less of your AI plan.", tell)
 
         self.assertStatus(self.client("studio", "off"), "OK", 0)          # already off: nothing sent
         self.assertEqual(len(self.api.studio_puts), 1)
         _f, _n, tell = self.assertStatus(self.client("studio", "on"), "OK", 0)
         self.assertEqual(self.api.studio_puts[-1], {"studio_enabled": True})
-        self.assertIn("Studio is on again for your account", tell)
+        self.assertEqual(tell, "TELL THE USER: Studio is on again for your account: from your next deck, each slide gets a deeper "
+                               "design pass, which uses more of your AI plan.")
         for out in (self.client("studio").stdout, self.client("studio", "off").stdout):
             self.assertNotRegex(status_lines(out)[2], MECHANISM)
+            self.assertNotRegex(status_lines(out)[2], NO_TIME_CLAIM)
 
     def test_a_plan_without_studio_changes_nothing(self):
         self.api.studio = {"studio_enabled": True, "included": False, "available": True}
@@ -65,10 +70,11 @@ class Welcome(ClientCase):
         text = tell.removeprefix("TELL THE USER: ")
         self.assertTrue(text.startswith("Welcome to Theodore. It is set up and signed in on this computer."), text)
         self.assertIn("From now on, when you ask me for a presentation, I build it as a PowerPoint file with Theodore.", text)
-        self.assertIn("Studio is on, so slides get a deeper design pass that takes longer and uses more of your AI plan. "
-                      "Would you like it off, for faster and lighter decks?", text)
+        self.assertIn("Studio is on, so each slide gets a deeper design pass, which uses more of your AI plan. "
+                      "Would you like it off, for simpler slides that use less of it?", text)
         self.assertNotIn("new session", text)                  # not run by an assistant that needs one
         self.assertNotRegex(text, MECHANISM)
+        self.assertNotRegex(text, NO_TIME_CLAIM)
         self.assertLessEqual(len(text), 520)
         self.assertIn("at most five short lines", nxt)
         self.assertIn("if they answer that they want Studio off, run", nxt)

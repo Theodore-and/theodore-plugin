@@ -17,8 +17,8 @@ from . import api, core
 from .core import Status, quoted_launcher
 
 FILE = "welcome.json"
-STUDIO_ON_MEANS = "slides get a deeper design pass, which takes longer and uses more of your AI plan"
-STUDIO_OFF_MEANS = "decks are faster and lighter"
+STUDIO_ON_MEANS = "each slide gets a deeper design pass, which uses more of your AI plan"
+STUDIO_OFF_MEANS = "slides get a simpler design pass that uses less of your AI plan"
 
 
 # --- Studio ------------------------------------------------------------------------------------------------------------
@@ -133,8 +133,8 @@ def welcome(engine_downloading: bool = False) -> int:
              "To start, share a document or your notes, say who the deck is for, and attach your template if you "
              "have one."]
     if ask_studio:
-        lines.append("Studio is on, so slides get a deeper design pass that takes longer and uses more of your AI plan. "
-                     "Would you like it off, for faster and lighter decks?")
+        lines.append("Studio is on, so each slide gets a deeper design pass, which uses more of your AI plan. "
+                     "Would you like it off, for simpler slides that use less of it?")
     last = []
     if engine_downloading or _downloading():
         last.append("A last download finishes by itself in the next few minutes.")

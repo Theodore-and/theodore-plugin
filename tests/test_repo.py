@@ -357,6 +357,9 @@ class HostLimits(unittest.TestCase):
         for path in files:
             data = path.read_bytes()
             self.assertLess(len(data), 256 * 1024, f"{path.relative_to(ROOT)} is {len(data)} bytes")
+            if path == PLUGIN / "logo.png":         # the one image: the plugin's icon (lane BRAND), named by plugin.json
+                self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+                continue
             self.assertNotIn(b"\x00", data, f"{path.relative_to(ROOT)} is not text")
             data.decode("utf-8")
 
@@ -646,7 +649,7 @@ class StampedSite(unittest.TestCase):
             self.assertIn(rel, tree)
         self.assertFalse([rel for rel in tree if rel.startswith(("tests/", "tools/", "runtime/", "ci/", "client/truststore/"))])
         for rel, data in sorted(tree.items()):
-            if rel.rsplit("/", 1)[-1] in ("LICENSE", "NOTICE"):        # licence text names the terms page as it is
+            if rel.rsplit("/", 1)[-1] in ("LICENSE", "NOTICE", "logo.png"):    # licence text names the terms page as it is; the icon is an image
                 continue
             text = data.decode("utf-8")
             hits = [line.strip()[:160] for line in text.splitlines() if self.PRODUCTION.search(line)]

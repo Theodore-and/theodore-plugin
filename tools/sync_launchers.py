@@ -167,6 +167,8 @@ def stamped_installer(kind: str, config: dict, text: str | None = None) -> str:
 
 PLUGIN = ROOT / "plugins" / "theodore"
 NOT_STAMPED = ("LICENSE", "NOTICE")      # licence text names the terms page as it is
+# Images are published as they are (the plugin's icon, lane BRAND): never read as text, never stamped.
+BINARY_SUFFIXES = (".png",)
 
 
 def published_files() -> list[Path]:
@@ -196,7 +198,7 @@ def stamped_tree(env: str | None = None, jwks: dict | None = None) -> dict[str, 
             data = launcher_json.encode("utf-8")
         else:
             data = source.read_bytes()
-            if ROOT / "client" not in source.parents and source.name not in NOT_STAMPED:
+            if ROOT / "client" not in source.parents and source.name not in NOT_STAMPED and source.suffix not in BINARY_SUFFIXES:
                 data = stamp_site(data.decode("utf-8"), env).encode("utf-8")
             if source in kinds:
                 data = stamped_installer(kinds[source], config, data.decode("utf-8")).encode("utf-8")
