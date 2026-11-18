@@ -418,7 +418,9 @@ def node_options(reads, writes) -> str:
     # The two flags below print a security warning in every process, which the engine would report as a finding of
     # the deck; the guard is what makes them safe here (addons from the runtime only; Node on the engine's own scripts).
     options = ["--permission", "--allow-addons", "--allow-child-process", "--disable-warning=SecurityWarning"]
-    for path in dict.fromkeys(str(p) for p in reads):
+    # The guard's own file is readable: Node started with inline code (`node -e`, as the engine resolves an icon named
+    # by words) loads a --require file only when it may read it; with a script file as main it loads it either way.
+    for path in dict.fromkeys(str(p) for p in [*reads, guard]):
         options.append(_node_option("--allow-fs-read", path))
     for path in dict.fromkeys(str(p) for p in writes):
         options.append(_node_option("--allow-fs-write", path))

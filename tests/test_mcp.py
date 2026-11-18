@@ -280,6 +280,39 @@ class ClaudeDesktop(McpCase):
                 self.assertIn('read by calling theodore with action "guide" and section "<name>"' + words + ", and a link", text)
                 self.assertIn('opened by calling theodore with action "specimen" and file "<file>"', text)
 
+    def test_guide_reaches_a_section_of_the_build_instructions(self):
+        """TR-G78T5N: the build manual sends the assistant to its own served section (slide-parts); a chat has neither a
+        launcher nor a skill to name, and the action answered for deck-design only. A name the design guidance does not
+        have is looked for in the build instructions; a name neither has still gets the answer that lists the sections."""
+        self.sign_in()
+        self.api.guides["deck-design"]["craft"] = "CRAFT TEXT\n"
+        self.api.guides.setdefault("pptx", {})["slide-parts"] = "SLIDE PARTS TEXT\n"
+        server = self.server(args=("--for", "claude-desktop"))
+        parts = server.call("theodore", action="guide", section="slide-parts")
+        self.assertFalse(parts.get("isError"), parts)
+        self.assertIn("SLIDE PARTS TEXT", parts["content"][0]["text"])
+        self.assertIn("CRAFT TEXT", server.call("theodore", action="guide", section="craft")["content"][0]["text"])
+        neither = server.call("theodore", action="guide", section="no-such-part")
+        self.assertTrue(neither.get("isError"))
+        self.assertIn("guide deck-design has no section 'no-such-part'", neither["content"][0]["text"])
+        server.close()
+
+    def test_the_build_manuals_launcher_sentences_are_said_for_this_tool(self):
+        """The build manual comes as the launcher prints it. From a chat, the two sentences that name a launcher or a
+        tool with a skill name this tool's guide action instead (the wording is the service's and the engine's)."""
+        from theodore_client import mcp
+        links = ("Links in this guidance are read through the same launcher: a link written references/<name>.md or <name>.md "
+                 "is the section printed by: guide pptx <name>{flag}, and a link written specimens/<file>.jpg is the sheet "
+                 "fetched by: specimen <file>.")
+        entry = ('Before you build any of these, call the Theodore guide tool with skill "pptx" and section "slide-parts" (or run '
+                 "the launcher: `guide pptx slide-parts`), read it whole and work as it says.")
+        text = mcp.desktop_text(entry + "\n\n# Manual\n\n" + links.format(flag="") + "\n")
+        self.assertIn('call theodore with action "guide" and section "slide-parts", read it whole', text)
+        self.assertIn(mcp.DESKTOP_BINDINGS, text)
+        self.assertNotIn("launcher", text)
+        self.assertNotIn("skill", text)
+        self.assertIn(mcp.DESKTOP_BINDINGS_SLIDE, mcp.desktop_text(links.format(flag=" --role slide")))
+
     def test_one_tool_named_theodore_serves_every_action(self):
         """The app asks for an approval per tool of a local server: exactly one tool, so "Always allow" is clicked once."""
         from theodore_client import mcp

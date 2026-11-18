@@ -490,6 +490,26 @@ class Specimens(unittest.TestCase):
                 self.assertEqual(raised.exception.name, status)
                 self.assertEqual(list(root.iterdir()), [])
 
+    def test_a_folder_removed_while_the_sheets_arrive_is_a_retry(self):
+        """The folder of a run can go under it (an uninstall, a sign-out in another window): the next sheet then has
+        nowhere to go. That is said as a retry, not as an internal error that sends the assistant to doctor."""
+        from theodore_client import commands
+        with client_home(), self.temp() as root:
+            core.home().ensure()
+            made = []
+
+            def fake(route, what, **kwargs):
+                if made:                # the second sheet: the folder has gone meanwhile
+                    core.remove_tree(made[0])
+                made.extend(root.glob("theodore-specimens-*"))
+                return self.answer(self.JPEG)
+            with mock.patch.object(account, "require", return_value={}), mock.patch.object(commands, "_api", side_effect=fake):
+                with self.assertRaises(core.Status) as raised:
+                    commands.specimen(["a.jpg", "b.jpg"])
+            self.assertEqual(raised.exception.name, "RETRY")
+            self.assertIn("specimen b.jpg", raised.exception.summary)
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_a_response_is_read_up_to_its_limit_and_no_further(self):
         import io
 
