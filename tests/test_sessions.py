@@ -134,6 +134,18 @@ class SessionStart(SessionCase):
         self.assertEqual(self.hook(self.event("other", "resume")).stdout, "")
         self.assertEqual(self.api.requests, [], "no request for a session without a note")
 
+    def test_resume_names_one_label_when_both_skills_moved_together(self):
+        """An engine release labels the engine and the design text alike: the line says each label once."""
+        self.note({"s1": {"deck-design": "1.0.0-rc.18", "pptx": "1.0.0-rc.18"}})
+        (self.box.home / "state" / "update.json").write_text(json.dumps({"guides": {"deck-design": "1.0.0-rc.19"}, "latest": "1.0.0-rc.19"}))
+        out = self.hook(self.event("s1", "resume")).stdout
+        self.assertIn("loaded Theodore's instructions as 1.0.0-rc.18; the current version is 1.0.0-rc.19.", out)
+        self.assertNotIn(" and 1.0.0-rc", out)
+        # Different labels are still each named, in order.
+        self.note({"s2": {"deck-design": "1.0.0-rc.18+text.1", "pptx": "1.0.0-rc.18"}})
+        out = self.hook(self.event("s2", "resume")).stdout
+        self.assertIn("as 1.0.0-rc.18+text.1 and 1.0.0-rc.18; the current versions are 1.0.0-rc.19 and 1.0.0-rc.19.", out)
+
     def test_resume_falls_back_to_what_the_last_check_learned(self):
         self.note({"s1": {"deck-design": "g1"}})          # not signed in: the request cannot be made
         (self.box.home / "state" / "update.json").write_text(json.dumps({"guides": {"deck-design": "g2"}}))

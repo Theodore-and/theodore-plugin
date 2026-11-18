@@ -160,9 +160,14 @@ def session_start() -> int:
             changed = [skill for skill in skills if _known(loaded[skill]) and _known(current[skill]) and loaded[skill] != current[skill]]
             if not changed:
                 return 0
-            text = RESUME_TEXT.format(old=" and ".join(loaded[skill] for skill in changed),
-                                      noun="versions are" if len(changed) > 1 else "version is",
-                                      new=" and ".join(current[skill] for skill in changed), run=_run(skills, launcher))
+            # One label each when the changed skills moved together (an engine release labels both alike): "as
+            # 1.0.0-rc.18; the current version is 1.0.0-rc.19", not the same label twice.
+            old = list(dict.fromkeys(loaded[skill] for skill in changed))
+            new = list(dict.fromkeys(current[skill] for skill in changed))
+            if len(old) > 1 or len(new) > 1:
+                old, new = [loaded[skill] for skill in changed], [current[skill] for skill in changed]
+            text = RESUME_TEXT.format(old=" and ".join(old), noun="versions are" if len(new) > 1 else "version is",
+                                      new=" and ".join(new), run=_run(skills, launcher))
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
     except BaseException:  # noqa: BLE001  a hook never fails and never shows a problem
