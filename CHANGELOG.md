@@ -17,6 +17,8 @@ A short welcome after set-up, and Studio from the assistant.
   is needed). Launcher pins re-synced; the launcher scripts are unchanged, so the generation does not rise.
 - Studio is described by what it means for the plan, with no claim about time or size: on, each slide gets a deeper
   design pass, which uses more of the AI plan; off, slides get a simpler design pass that uses less of it.
+- After a resume, the line that names the versions says each label once when the engine and the design text moved
+  together: "as 1.0.0-rc.18; the current version is 1.0.0-rc.19".
 - The plugin has an icon (lane BRAND): `plugins/theodore/logo.png` (512 x 512), named by `"icon"` in both plugin.json
   files (`claude plugin validate` accepts the field). tools/sync_launchers.py publishes images as they are.
 
