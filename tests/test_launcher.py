@@ -63,7 +63,9 @@ class FirstRun(LauncherCase):
         self.assertEqual((self.box.home / "runtime" / "current.txt").read_text().strip(), RUNTIME_ID)
         import build_client
         self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), build_client.client_version())
-        self.box.wait_jobs()
+        # 600 s as the hook's own first-run test: on the Windows machine, seven suites side by side, stage 2 was still
+        # unpacking after the default 240 s once (2026-11-18). A job that ends returns at once.
+        self.box.wait_jobs(600)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "stage 2 ran in the background")
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
         self.assertFalse((self.box.home / "state" / "bootstrap" / "pid").exists())
