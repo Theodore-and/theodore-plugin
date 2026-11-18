@@ -340,7 +340,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(pending.read_bytes(), saved, "a refused code leaves the saved sign-in as it was")
         done = self.install("--code", "ABCD-1234")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertTrue(status_lines(done.stdout)[0].startswith("THEODORE OK: Theodore is ready"), done.stdout)
+        self.assertTrue(status_lines(done.stdout)[0].startswith("THEODORE OK: Theodore is set up and signed in"), done.stdout)
         self.assertEqual(len(self.api.activations), 1, "one code, one installation")
         self.box.wait_jobs()
 
