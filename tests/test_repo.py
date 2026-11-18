@@ -371,7 +371,10 @@ class HostLimits(unittest.TestCase):
         self.assertIn('SETUP_WAIT_DEFAULT=180\n[ -n "${CODEX_THREAD_ID:-}" ] && SETUP_WAIT_DEFAULT=540\nSETUP_WAIT=${THEODORE_INSTALL_WAIT:-$SETUP_WAIT_DEFAULT}', sh)
         # Codex (lane CHATGPT): no 10-minute command limit, and every command of the install session asks first: it
         # waits up to 9 minutes and, still downloading, ends with nothing to poll.
-        self.assertIn("run nothing more now, neither doctor nor this installer", sh)
+        # Lane ONBOARD: in both installers the client's welcome is the last status when every assistant was registered;
+        # its Codex form says to run nothing more (tests/test_welcome.py).
+        self.assertIn('if [ "$HOSTS_RC" -eq 0 ] && welcome --downloading; then', sh)
+        self.assertIn('call "%%T%%" welcome %WELCOME_ARG% >"%WORK%\\welcome.txt"', cmd)
         self.assertIn('set "SETUP_WAIT_DEFAULT=180"', cmd)
         for text, setup, marker, register, doctor in (
                 (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),

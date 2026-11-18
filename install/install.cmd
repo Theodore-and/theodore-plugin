@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.4.5"
-set "PIN_CLIENT=client/client-0.4.5.tar c574879860fd772fc3f78d521ae2f43892854e5c772e36b092d139101c4e1f25"
+set "PIN_CLIENT=client/client-0.4.5.tar b55f619b1a8fb06eccdbcafad08f62013644d162e7e03ede28437b60d75ff03d"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -410,6 +410,11 @@ if not "%RC%"=="67" goto :doctor_shown
 rem Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
 rem "the same command", which here would be this installer).
 "%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
+rem The last status is the client's welcome (lane ONBOARD), as install.sh: a few short lines for the assistant to give
+rem in this conversation, the Studio question once, and what this host needs (a new session, the download going on).
+set "WELCOME_ARG=--downloading"
+call :welcome
+if not errorlevel 1 goto :finish
 rem In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the first
 rem deck request in a new session waits for it. As install.sh.
 if not defined CODEX_THREAD_ID goto :doctor_in_progress
@@ -433,6 +438,9 @@ goto :finish
 :doctor_shown
 type "%WORK%\doctor.txt"
 if not "%RC%"=="0" goto :finish
+set "WELCOME_ARG="
+call :welcome
+if not errorlevel 1 goto :finish
 if not "%HOSTS_RC%"=="0" goto :hosts_left
 if not defined CODEX_THREAD_ID goto :finish
 rem Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session. As install.sh.
@@ -743,6 +751,17 @@ exit /b 1
 :finish
 if defined WORK if exist "%WORK%" rmdir /s /q "%WORK%" >nul 2>&1
 exit /b %RC%
+
+:welcome
+rem The client's welcome as the last status (lane ONBOARD), only when every assistant was registered. Sets RC and
+rem returns 0 when it printed one; 1 leaves the ending to the caller.
+if not "%HOSTS_RC%"=="0" exit /b 1
+call "%%T%%" welcome %WELCOME_ARG% >"%WORK%\welcome.txt"
+set "WRC=%ERRORLEVEL%"
+if not "%WRC%"=="0" if not "%WRC%"=="67" exit /b 1
+type "%WORK%\welcome.txt"
+set "RC=%WRC%"
+exit /b 0
 
 rem =====================================================================================================================
 rem Statuses (three lines each, then the exit code)

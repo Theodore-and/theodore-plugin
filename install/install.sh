@@ -32,7 +32,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.4.5"
-PIN_CLIENT="client/client-0.4.5.tar c574879860fd772fc3f78d521ae2f43892854e5c772e36b092d139101c4e1f25"
+PIN_CLIENT="client/client-0.4.5.tar b55f619b1a8fb06eccdbcafad08f62013644d162e7e03ede28437b60d75ff03d"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -595,30 +595,29 @@ if ! theodore whoami >/dev/null 2>&1; then
 fi
 doctor_out=$(theodore doctor)
 rc=$?
+checks_only() { printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'; }
+# The last status is the client's welcome (lane ONBOARD): a few short lines for the assistant to give in this
+# conversation, the Studio question once, and what this host needs (a new session, the download still going on).
+welcome() {
+  welcome_out=$(theodore welcome "$@")
+  welcome_rc=$?
+  case "$welcome_rc" in 0|67) return 0 ;; esac
+  return 1
+}
 if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the same command again'; then
   # Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
-  # "the same command", which here would be this installer).
-  printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'
+  # "the same command", which here would be this installer). In Codex the welcome says to run nothing more: every
+  # command of this session asks first, the download finishes by itself, and a deck request in a new session waits.
+  checks_only
+  if [ "$HOSTS_RC" -eq 0 ] && welcome --downloading; then printf '%s\n' "$welcome_out"; exit "$welcome_rc"; fi
   where=$(printf '%s\n' "$doctor_out" | sed -n 's/^THEODORE SETUP_IN_PROGRESS: \(.*\)\.$/\1/p' | tail -n 1)
-  if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$HOSTS_RC" -eq 0 ]; then
-    # In Codex every command of this session asks first: nothing to poll. The download finishes by itself, and the
-    # first deck request in a new session waits for it.
-    status OK 0 "Theodore is installed and signed in; the rest of its runtime and its engine finish downloading by themselves in the background (${where:-downloading})." \
-      "run nothing more now, neither doctor nor this installer: the download needs no command. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval." \
-      "Theodore is installed. It finishes a download by itself in the background for a few minutes; start a new session and ask for a deck."
-  fi
   status SETUP_IN_PROGRESS 67 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
     "run \"$T\" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line." \
     "Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it."
 fi
 printf '%s\n' "$doctor_out"
 [ "$rc" -eq 0 ] || exit "$rc"
-if [ -n "${CODEX_THREAD_ID:-}" ] && [ "$HOSTS_RC" -eq 0 ]; then
-  # Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session.
-  status OK 0 "Theodore is ready (the check above)." \
-    "run nothing more now. Tell the user to start a new session and ask for a deck. If they ask for a deck in this session anyway, ask them to start a new session first: Codex loads Theodore's tool and permissions only when a session starts, so here each Theodore command would ask for approval." \
-    "Theodore is ready. Start a new session and ask for your deck there."
-fi
+if [ "$HOSTS_RC" -eq 0 ] && welcome; then printf '%s\n' "$welcome_out"; exit "$welcome_rc"; fi
 if [ "$HOSTS_RC" -ne 0 ]; then
   status RETRY 75 "Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above)." \
     "register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session." \

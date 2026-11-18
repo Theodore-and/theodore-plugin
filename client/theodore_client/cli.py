@@ -24,6 +24,7 @@ HELP = """Theodore client commands (run through the launcher):
   packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
   hosts register | unregister | settings [--apply | --remove]          activate --grant - | --grant-file F          uninstall
   usage [--show]                 where the usage counts stand; --show prints the next batch exactly as it would be sent
+  studio [on|off]                whether Studio is on for the account; on or off changes it (only when the user asks)
 """
 
 
@@ -117,6 +118,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("licence-check", add_help=False)        # the detached refresh an engine command starts: not for assistants
     us = sub.add_parser("usage", add_help=False)
     us.add_argument("--show", action="store_true")
+    so = sub.add_parser("studio", add_help=False)
+    so.add_argument("action", nargs="?", choices=("on", "off"))
+    we = sub.add_parser("welcome", add_help=False)              # the installers' last status: not for assistants
+    we.add_argument("--downloading", action="store_true")
     return parser
 
 
@@ -187,6 +192,12 @@ def _dispatch(argv: list[str]) -> int:
         return usage.show(args.show)
     if cmd == "licence-check":
         return account.licence_check_job()
+    if cmd == "studio":
+        from . import welcome
+        return welcome.studio(args.action)
+    if cmd == "welcome":
+        from . import welcome
+        return welcome.welcome(args.downloading)
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 

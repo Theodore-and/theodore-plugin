@@ -1,5 +1,21 @@
 # Changes
 
+## Unreleased (lane ONBOARD)
+
+A short welcome after set-up, and Studio from the assistant.
+
+- The installers end with the client's `welcome` (not for assistants): a status whose TELL THE USER is at most five
+  short lines (a welcome, what Theodore now does, a first thing to ask for, Studio once, and only when it applies a
+  new session or a last download), and whose NEXT tells the assistant to give it in the same conversation. Codex's
+  "run nothing more in this session" and the still-downloading `status --wait 100` are kept in its NEXT line. When
+  not every assistant was registered, or the welcome cannot be given, the ending is as before.
+- Studio is mentioned only when the account has it on, in its plan and honoured by its guidance (`GET /v1/studio`,
+  four seconds at most; any failure leaves it out), and only once per computer (`state/welcome.json`).
+- `theodore studio` says whether Studio is on; `theodore studio off` and `theodore studio on` change it for the
+  account (`PUT /v1/studio`, the portal switch's own change). A plan without Studio changes nothing.
+- install.md: step 3 says to give the welcome and follow its NEXT; step 4 is gone (the welcome says when a new session
+  is needed). Launcher pins re-synced; the launcher scripts are unchanged, so the generation does not rise.
+
 ## 0.4.5
 
 The assistant loads Theodore's instructions again after its conversation was compacted or resumed (lane P045).
