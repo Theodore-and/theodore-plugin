@@ -185,6 +185,21 @@ t("binding", () => process.binding("spawn_sync"));
         self.assertEqual(results["spawnSync of a missing program"], "ALLOWED null", "fc-match fails as a missing program would")
         self.assertFalse((self.tmp / "x.txt").exists())
 
+    def test_node_started_with_inline_code_loads_the_guard(self):
+        """The engine resolves an icon named by words with `node -e`. Under the options of a chat's engine processes
+        that Node starts (it reads the guard's file) and the guard holds in it (TR-X7W78H: it stopped with
+        ERR_ACCESS_DENIED before any code ran, so `assets show icons <words>` failed from a chat)."""
+        env = {**os.environ, "NODE_OPTIONS": chatbuild.node_options([self.work, self.engine], [self.work]),
+               "THEODORE_NODE_SCRIPT_ROOT": str(self.engine), "THEODORE_NODE_ADDON_ROOTS": str(self.engine)}
+        code = ("require(process.argv[1]); const out = ['helper loaded'];"
+                "try { require('https').get('https://example.com'); out.push('network open') } catch (e) { out.push(e.code) }"
+                "try { require('fs').readFileSync(process.argv[2]); out.push('read outside') } catch (e) { out.push(e.code) }"
+                "console.log(out.join(' | '))")
+        done = subprocess.run(["node", "-e", code, str(self.engine / "helper.js"), str(self.secret)], env=env, cwd=str(self.work),
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip().splitlines()[-1], "helper loaded | ERR_THEODORE_SANDBOX | ERR_ACCESS_DENIED")
+
     def test_import_reaches_only_the_stand_ins(self):
         results = self.run_script(self.PROBE + """
 (async () => {

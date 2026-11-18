@@ -101,7 +101,16 @@ DESKTOP_BINDINGS = (f'Links in this guidance are read with the Theodore tool {DE
                     f'title, details, and verb, code or origin when there are), and a lasting preference is saved with action '
                     f'"preference_add" (text).')
 DESKTOP_BINDINGS_SLIDE = DESKTOP_BINDINGS.format(role=SLIDE_ROLE_WORDS)
+# The same sentence in the service's launcher form (localLinkBindings, launcher form), as the build manual carries it.
+SERVICE_LAUNCHER_BINDINGS = re.compile(r'Links in this guidance are read through the same launcher: a link written '
+                                       r'references/<name>\.md or <name>\.md is the section printed by: guide [a-z-]+ <name>'
+                                       r'( --role slide)?, and a link written specimens/<file>\.jpg is the sheet fetched by: '
+                                       r'specimen <file>\.')
 DESKTOP_BINDINGS = DESKTOP_BINDINGS.format(role="")
+# How the build manual names one of its served sections (the engine's skills/pptx/served-entry.md): by a tool with a
+# skill, or the launcher. This tool's guide action finds the section by its name.
+SERVICE_SECTION_CALL = re.compile(r'call the Theodore guide tool with skill "[a-z-]+" and section "([A-Za-z0-9_-]{1,64})" '
+                                  r'\(or run the launcher: `guide [a-z-]+ [A-Za-z0-9_-]{1,64}`\)')
 SERVICE_LAUNCHER_LINES = ("Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd "
                           "on Windows) with:", "Run the Theodore launcher you used to get these instructions with:")
 DESKTOP_LAUNCHER_LINE = (f'Call the {DESKTOP_TOOL} tool with action "report" and, as its fields kind, title, details, verb, code '
@@ -118,7 +127,8 @@ def desktop_tools(index: dict | None = None) -> list[dict]:
         "name": DESKTOP_TOOL, "title": DESKTOP_TITLE, "description": DESKTOP_DESCRIPTION,
         "inputSchema": {"type": "object", "properties": {
             "action": {"type": "string", "enum": list(DESKTOP_ACTIONS),
-                       "description": 'begin: the design method for a deck; guide: one section the guidance links (section); '
+                       "description": 'begin: the design method for a deck; guide: one section the guidance or the build instructions '
+                                      'link (section); '
                                       'specimen: specimen sheets as images (file); report: a problem or feedback for Theodore '
                                       '(kind, title, details); preference_list, preference_add (text), preference_remove (id): '
                                       "the user's lasting preferences; check: whether Theodore is set up on this computer. "
@@ -153,6 +163,10 @@ def desktop_text(text: str, begin: bool = False) -> str:
     """A service text as this one tool's answer: its tool and launcher bindings name `theodore` and the action. The
     entry document always ends with the bindings, also from a service that sent none."""
     out = text.replace(SERVICE_TOOL_BINDINGS, DESKTOP_BINDINGS).replace(SERVICE_TOOL_BINDINGS_SLIDE, DESKTOP_BINDINGS_SLIDE)
+    # The build manual comes as the launcher prints it: its links sentence (the service's launcher form) names a
+    # launcher a chat does not have.
+    out = SERVICE_LAUNCHER_BINDINGS.sub(lambda m: DESKTOP_BINDINGS_SLIDE if m.group(1) else DESKTOP_BINDINGS, out)
+    out = SERVICE_SECTION_CALL.sub(lambda m: f'call {DESKTOP_TOOL} with action "guide" and section "{m.group(1)}"', out)
     for line in SERVICE_LAUNCHER_LINES:
         out = out.replace(line, DESKTOP_LAUNCHER_LINE)
     # The remote connector's own names stay where a text sends the assistant to that connector (CONNECTOR_REQUIRED).
@@ -581,6 +595,25 @@ def _check_status() -> Status:
                   f'to make or rework a presentation, call {DESKTOP_TOOL} with action "begin".', tell)
 
 
+def _desktop_guide(args: dict) -> dict:
+    """One section through the chat's one tool: of the design guidance and, when that has no such section, of the build
+    instructions. The build instructions send the assistant to their own sections (slide-parts), and a chat has no
+    launcher to read them with and this tool names no skill (TR-G78T5N: the action answered for deck-design only, so
+    that section could not be read from a chat)."""
+    asked = {"section": args["section"], "role": args.get("role")}
+    try:
+        return tool_guide({"skill": "deck-design", **asked})
+    except Status as refusal:
+        if refusal.name != "USAGE" or "has no section" not in refusal.summary:
+            raise
+        try:
+            return tool_guide({"skill": "pptx", **asked})
+        except Status as second:
+            if second.name == "USAGE" and "has no section" in second.summary:
+                raise refusal from None       # neither has it: the answer that lists the design sections
+            raise
+
+
 def desktop_call(args: dict) -> dict:
     action = args.get("action")
     verb = args.get("args")[0] if action == "run" and isinstance(args.get("args"), list) and args.get("args") else ""
@@ -590,7 +623,7 @@ def desktop_call(args: dict) -> dict:
     elif action == "guide":
         if not isinstance(args.get("section"), str) or not args["section"]:
             raise core.usage('action "guide" needs section, the name a link references/<name>.md gives.')
-        result = tool_guide({"skill": "deck-design", "section": args["section"], "role": args.get("role")})
+        result = _desktop_guide(args)
     elif action == "specimen":
         result = tool_specimen({"file": args.get("file")})
     elif action == "report":

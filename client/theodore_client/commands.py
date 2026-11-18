@@ -600,7 +600,12 @@ def _specimen_paths(files: list[str]) -> dict[str, Path]:
                              "A design specimen arrived damaged. I am trying once more.")
             if folder is None:          # a held copy went missing or was answered 200: this sheet needs a folder after all
                 folder = specimens.make_folder()
-            paths[name] = specimens.write(folder, name, raw)
+            try:
+                paths[name] = specimens.write(folder, name, raw)
+            except FileNotFoundError:   # the folder went while the sheets arrived (an uninstall, a sign-out elsewhere)
+                raise Status("RETRY", f"{what}: the folder for this run's sheets was removed while they arrived; nothing was kept.",
+                             "run the same command again once. If it fails again, continue without the sheet.",
+                             "A design specimen could not be opened just now; I am trying once more.") from None
     except BaseException:
         if folder is not None:
             core.remove_tree(folder)

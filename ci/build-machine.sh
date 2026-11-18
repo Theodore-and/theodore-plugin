@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# A standing Windows x64 build machine on Azure: made once, deallocated whenever no run uses it (then it costs its disk
-# only), started on demand by the runs that need it, with its tools, download caches and compile caches kept warm on
-# its own disk. Keep the copies identical: scripts/build-machine.sh in theodore-presentations, ci/build-machine.sh in
-# theodore-plugin.
+# A standing build machine on Azure, Windows x64 or Linux (x64 or Arm64): made once, deallocated whenever no run uses it
+# (then it costs its disk and its address only), started on demand by the runs that need it, with its tools, download
+# caches and compile caches kept warm on its own disk. Keep the copies identical: scripts/build-machine.sh in
+# theodore-presentations, ci/build-machine.sh in theodore-plugin.
 #
 #   build-machine.sh create <name>      make it: resource group theodore-build-<name> (tag purpose=theodore-build), one
 #                                       VM (Windows Server 2022 Datacenter gen2, the image the throwaway machines use;
 #                                       8 vCPU where scripts/azure-place.sh finds room), a static public IP, SSH only
-#                                       from this Mac's /24 networks, OpenSSH with the one public key; then deallocated
+#                                       from this Mac's /24 networks, OpenSSH with the one public key; then deallocated.
+#                                       BUILD_MACHINE_OS=linux-x64 or linux-arm64: Ubuntu 24.04 with Docker instead, a
+#                                       32 GB Standard SSD (about $2.40 a month) and the sizes of BUILD_MACHINE_SIZES
+#                                       (default Standard_D8as_v4 / Standard_D8ps_v6); its work folders are ~/n, ~/in.tar,
+#                                       ~/out.tar and ~/jobs, its caches ~/cache
 #   build-machine.sh start <name>       a lease for this process tree (BUILD_MACHINE_LEASE_PID, default the caller's
 #                                       parent shell), the machine started when it is not running, this Mac's address
 #                                       admitted, the backstop renewed; prints user@host when SSH answers. One run at a
@@ -38,6 +42,8 @@ KEY=${BUILD_MACHINE_KEY:-$HOME/.ssh/theodore_ci}
 USER_NAME=theoci
 VM=theo-build
 MARKETPLACE=MicrosoftWindowsServer:WindowsServer:2022-datacenter-g2:latest
+# windows (the machines made before this field existed), linux-x64 or linux-arm64: from <state>/os once made
+os_of() { cat "$ST/os" 2>/dev/null || echo windows; }
 case "$ACTION" in status) ;; create | start | stop | destroy | known-hosts)
   [[ "$NAME" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || die "a name is lowercase letters, digits and '-' (for example engine-win)" ;;
   *) sed -n '2,32p' "$0"; exit 64 ;; esac
@@ -75,6 +81,7 @@ admit() { # add this Mac's current /24 networks to the SSH rule (kept: earlier o
   say "SSH admitted from: $all"
 }
 ssh_ok() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" "echo ready" >/dev/null 2>&1; }
+remote_sh() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" "$1"; }
 power() { azr vm get-instance-view -g "$GROUP" -n "$VM" --query "instanceView.statuses[?starts_with(code,'PowerState/')].code | [0]" -o tsv 2>/dev/null | sed 's|PowerState/||'; }
 backstop() { # Azure deallocates it at this UTC time, whatever this Mac does
   local h=${BUILD_MACHINE_DEADLINE_HOURS:-3} at
@@ -92,14 +99,62 @@ live_leases() { # prints the pids of live leases; removes dead ones
 }
 remote_ps() {
   local enc; enc=$(printf '%s' "\$ErrorActionPreference='Stop'; \$ProgressPreference='SilentlyContinue'; $1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
-  ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" \
+  ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$ST/known_hosts" "$(cat "$ST/host")" \
     "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc"
 }
 # The work folders the runners use (engine: run.sh's C:\theo-n; plugin: ci/run.sh's C:\theodore-ci). Never the caches.
 WORK_FOLDERS="'C:\\theo-n','C:\\theodore-ci'"
 # What the boot task runs (rd through \\?\: parity leaves paths past 260 characters, which Remove-Item cannot delete)
 BOOT_PS="cmd /d /c 'rd /s /q \\\\?\\C:\\theo-n'; cmd /d /c 'rd /s /q \\\\?\\C:\\theodore-ci'"
+# Linux: the runners' work (engine native: ~/n, its in and out archives, cloud-linux.sh's ~/jobs) and any container left
+# running; never ~/cache. The same at every boot (root's crontab).
+LINUX_CLEAN='sudo docker ps -q | xargs -r sudo docker kill >/dev/null 2>&1; rm -rf ~/n ~/in.tar ~/out.tar ~/jobs'
+LINUX_BOOT='@reboot rm -rf /home/theoci/n /home/theoci/in.tar /home/theoci/out.tar /home/theoci/jobs'
+bounded() { # seconds command...: the command, ended after that many seconds (exit 124); the machine's cleanup must never
+  # hold a run (a Windows cleanup over SSH hung for 21 min on 2026-11-17; the boot task clears the folders anyway)
+  local secs=$1 p i=0; shift
+  "$@" & p=$!
+  while kill -0 "$p" 2>/dev/null; do
+    [ "$i" -lt "$secs" ] || { kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; return 124; }
+    sleep 1; i=$((i + 1))
+  done
+  wait "$p"
+}
+clean_work() { # the work folders of the machine's kind
+  if [ "$(os_of)" = windows ]; then remote_ps "$CLEAN_PS"; else remote_sh "$LINUX_CLEAN"; fi
+}
 CLEAN_PS="foreach (\$d in @($WORK_FOLDERS)) { Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -like \"*\$d\\*\" -and \$_.ProcessId -ne \$PID } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }; foreach (\$i in 1..6) { if (Test-Path \$d) { & { \$ErrorActionPreference = 'Continue'; & cmd.exe /d /c \"rd /s /q \\\\?\\\$d\" 2>&1 | Out-Null } }; if (-not (Test-Path \$d)) { break }; Start-Sleep 5 } }"
+
+create_linux() { # BUILD_MACHINE_OS=linux-x64 | linux-arm64
+  local os=$1 urn sizes nets placed
+  case "$os" in
+    linux-x64) urn=Canonical:ubuntu-24_04-lts:server:latest; sizes="Standard_D8as_v4 Standard_D8s_v3 Standard_D8ds_v4" ;;
+    linux-arm64) urn=Canonical:ubuntu-24_04-lts:server-arm64:latest; sizes="Standard_D8ps_v6 Standard_D8pds_v6 Standard_D8ps_v5" ;;
+    *) die "BUILD_MACHINE_OS is windows, linux-x64 or linux-arm64" ;;
+  esac
+  nets=$(my_nets); [ -n "${nets// /}" ] || die "cannot read this Mac's public address"
+  azr group create -n "$GROUP" -l "${BUILD_MACHINE_GROUP_LOCATION:-eastus}" --tags purpose=theodore-build machine="$NAME" -o none
+  echo "$GROUP" > "$ST/group"; echo "$os" > "$ST/os"
+  export AZ_PLACE_REGIONS=${BUILD_MACHINE_REGIONS:-centralus westeurope uksouth}
+  export AZ_PLACE_SIZES=${BUILD_MACHINE_SIZES:-$sizes}
+  placed=$(az_vm_create_placed "$GROUP" "$VM" "${BUILD_MACHINE_CORES:-8}" --image "$urn" --admin-username "$USER_NAME" \
+    --authentication-type ssh --ssh-key-values "$KEY.pub" --public-ip-sku Standard --public-ip-address-allocation static --nsg-rule NONE \
+    --os-disk-size-gb 32 --storage-sku StandardSSD_LRS --security-type Standard --tags purpose=theodore-build machine="$NAME" 2>"$ST/create.err") || {
+      grep -v '^WARNING' "$ST/create.err" | tail -n 4 >&2; die "no region had room; the group $GROUP is left empty (destroy $NAME)"; }
+  echo "${placed% *}" > "$ST/location"; echo "${placed#* }" > "$ST/size"
+  say "made ${placed#* } in ${placed% *}"
+  # shellcheck disable=SC2086
+  azr network nsg rule create -g "$GROUP" --nsg-name "${VM}NSG" -n ssh-from-release-mac --priority 100 --direction Inbound \
+    --access Allow --protocol Tcp --source-address-prefixes $nets --destination-port-ranges 22 -o none
+  echo "$USER_NAME@$(azr vm show -d -g "$GROUP" -n "$VM" --query publicIps -o tsv)" > "$ST/host"
+  : > "$ST/known_hosts"
+  local i; for i in $(seq 1 30); do ssh_ok && break; sleep 10; done
+  ssh_ok || die "no SSH answer from $(cat "$ST/host")"
+  remote_sh "set -e; sudo apt-get update -qq >/dev/null; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io >/dev/null
+    sudo systemctl enable --now docker >/dev/null 2>&1; mkdir -p ~/cache; echo '$LINUX_BOOT' | sudo crontab -; echo setup done" >&2
+  azr vm deallocate -g "$GROUP" -n "$VM" -o none
+  say "$NAME ready and deallocated: $(cat "$ST/host") ($(cat "$ST/size"), $(cat "$ST/location"))"
+}
 
 create() {
   command -v az >/dev/null || die "the Azure CLI (az) is not installed"
@@ -107,6 +162,7 @@ create() {
   [ -f "$KEY" ] && [ -f "$KEY.pub" ] || die "no SSH key pair at $KEY"
   [ ! -f "$ST/host" ] || die "$NAME exists already ($ST)"
   mkdir -p "$ST/leases"; chmod 700 "$ST"
+  case "${BUILD_MACHINE_OS:-windows}" in windows) ;; *) create_linux "$BUILD_MACHINE_OS"; return ;; esac
   local nets; nets=$(my_nets); [ -n "${nets// /}" ] || die "cannot read this Mac's public address"
   azr group create -n "$GROUP" -l "${BUILD_MACHINE_GROUP_LOCATION:-eastus}" --tags purpose=theodore-build machine="$NAME" -o none
   echo "$GROUP" > "$ST/group"
@@ -186,8 +242,10 @@ start() {
   ssh_ok || die "no SSH answer from $(cat "$ST/host")"
   # The only run on it: what an earlier run that died left in the work folders goes now (with its processes), and the
   # boot task's list is written again (it may predate a folder added here).
-  if [ "$(live_leases | grep -vcx "$pid")" = 0 ]; then
-    remote_ps "$CLEAN_PS; New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null; Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value \"$BOOT_PS\"" >"$ST/clean.log" 2>&1 \
+  if [ "$(live_leases | grep -vcx "$pid")" = 0 ] && [ "$(os_of)" != windows ]; then
+    bounded 300 remote_sh "$LINUX_CLEAN" >"$ST/clean.log" 2>&1 || say "the work folders could not be cleared now"
+  elif [ "$(live_leases | grep -vcx "$pid")" = 0 ]; then
+    bounded 300 remote_ps "$CLEAN_PS; New-Item -ItemType Directory -Force C:\\theo-boot | Out-Null; Set-Content -Path C:\\theo-boot\\clean.ps1 -Encoding ascii -Value \"$BOOT_PS\"" >"$ST/clean.log" 2>&1 \
       || say "the work folders could not be cleared now"
   fi
   say "$NAME ready after $((SECONDS - t0)) s"
@@ -202,7 +260,7 @@ stop() {
   if [ -n "${live// /}" ]; then state_unlock; say "$NAME still used by: $live; left running"; return 0; fi
   [ -z "${BUILD_MACHINE_KEEP:-}" ] || { state_unlock; say "BUILD_MACHINE_KEEP: $NAME left running"; return 0; }
   if [ "$(power)" = running ]; then
-    remote_ps "$CLEAN_PS" >/dev/null 2>&1 || say "the work folders could not be removed now; the boot task removes them at the next start"
+    bounded "${BUILD_MACHINE_CLEAN_SECONDS:-180}" clean_work >/dev/null 2>&1 || say "the work folders could not be removed now; the boot task removes them at the next start"
   fi
   # held through the deallocation: a start that comes now waits, then starts the machine again
   azr vm deallocate -g "$GROUP" -n "$VM" -o none && say "$NAME deallocated"

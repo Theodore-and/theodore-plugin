@@ -1,5 +1,33 @@
 # Changes
 
+## 0.4.4
+
+Three filed reports, all in the client.
+
+- From a chat, an icon named by words is found again (TR-X7W78H). Every Node process the engine starts for a chat runs
+  under Node's permission model with Theodore's guard loaded first. Node started with inline code (`node -e`, as the
+  engine resolves an icon named by words) loads a `--require` file only when it may read it, and the guard's own file
+  was not among the readable paths: the process stopped with ERR_ACCESS_DENIED before any code ran, so `assets show
+  icons <words>` failed while an exact id worked. The guard's file is now readable. Nothing else is: the network stays
+  closed and a deck script still cannot start `node -e`.
+- From a chat, the build manual's own sections can be read (TR-G78T5N). The manual sends the assistant to its served
+  section `slide-parts`; the chat tool's `guide` action answered for the design guidance only, a chat has no launcher,
+  and the section is not on disk, so it could not be read at all. The action now looks for a section in the design
+  guidance and, when that has none of that name, in the build instructions; a name neither has gets the same answer as
+  before. The two sentences of the manual that name a launcher (the links sentence of the service's launcher form,
+  and "call the Theodore guide tool with skill ... (or run the launcher: ...)") are said for the chat tool. The tool's
+  schema is unchanged apart from the words of the action's description.
+- A sheet folder another call is filling is no longer removed (TR-S9N9N8). Every call first removes sheet folders older
+  than an hour, with the time it read at its start, and treated any folder dated ahead of that time as not to be
+  trusted. A folder another Theodore call made, or put a sheet in, a moment later was therefore removed under that
+  call, whose next sheet failed with `INTERNAL FileNotFoundError` naming a sheet of the batch (seen on Windows with
+  several agents fetching sheets at once; possible on every system). A folder up to a minute ahead of the clock is now
+  kept, as the launchers' own sweep already did; one dated further ahead still goes. A folder that does go while the
+  sheets arrive (an uninstall, a sign-out in another window) is answered as a retry, not as an internal error.
+- The check runs its platform jobs in four lanes and its suites in four processes by default on a machine with 8 or
+  more cores (the whole check in about 16 minutes against about 60), the Linux jobs on the standing build machines when
+  they exist, and a standing machine's cleanup is bounded.
+
 ## 0.4.3
 
 - Windows launcher: the "is the home writable" probe can no longer collide between launchers (lane P043). cmd has no

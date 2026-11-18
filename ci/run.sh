@@ -68,6 +68,17 @@ while [ $# -gt 0 ]; do
 done
 
 say() { printf 'ci: %s\n' "$*"; }
+# Lanes and suite processes: 4 each by default on a machine with 8 or more cores (measured 2026-11-17 on 10 cores:
+# the whole check in 16 min against about 60 one after another), 1 below that. A value given for either wins.
+CI_WIDE=1; [ "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)" -ge 8 ] 2>/dev/null && CI_WIDE=4
+: "${CI_LOCAL_LANES:=$CI_WIDE}" "${CI_SHIM_PROCESSES:=$CI_WIDE}"
+# The shim job's suite: every test module once. CI_SHIM_PROCESSES at 1 is unittest discover, as before; above 1 it runs
+# the modules in that many processes (ci/par_unittest.py: the same tests, each once; test_client, the longest, dealt
+# out test by test), which passes only when the units ran as many tests as discovery lists.
+# The runtime job's launcher and installer suites the same way (each test once, both dealt out test by test).
+if [ "${CI_SHIM_PROCESSES:-1}" -gt 1 ] 2>/dev/null; then SHIM_SUITE="ci/par_unittest.py $CI_SHIM_PROCESSES --split test_client"
+  RUNTIME_SUITE="ci/par_unittest.py $CI_SHIM_PROCESSES --only test_launcher test_installer --split test_launcher test_installer"
+else SHIM_SUITE="-m unittest discover -s tests -v"; RUNTIME_SUITE="-m unittest -v tests.test_launcher tests.test_installer"; fi
 result() { # name job pass|fail|not-run
   mkdir -p "$OUT/$1"; printf '%s\n' "$3" > "$OUT/$1/$2.result"; say "$1 $2: $3"
 }
@@ -85,13 +96,13 @@ run_mac() { # name platform-key arch-prefix
     { result "$name" shim fail; result "$name" runtime fail; return; }
   say "$name: $($prefix "$PY" -c 'import platform,sys; print(sys.version.split()[0], platform.machine())')"
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
-    $prefix "$PY" tools/sync_launchers.py --check && $prefix "$PY" -m unittest discover -s tests -v ) > "$dir/shim.log" 2>&1 \
+    $prefix "$PY" tools/sync_launchers.py --check && $prefix "$PY" $SHIM_SUITE ) > "$dir/shim.log" 2>&1 \
     && result "$name" shim pass || result "$name" shim fail
   [ -n "${CI_SHIM_ONLY:-}" ] && { result "$name" runtime not-run; rm -rf "${dir:?}/work" "${dir:?}/tmp"; return; }
   ( cd "$ROOT" && export PYTHONDONTWRITEBYTECODE=1 TMPDIR="$dir/tmp" &&
     $prefix "$PY" runtime/build/build_bundle.py --platform "$key" --out "$dir/bundle" --work "$dir/work" --cache "$CACHE/bundle-$key" &&
     $prefix "$PY" runtime/build/smoke_test.py --bundle "$dir/bundle" --platform "$key" &&
-    THEODORE_TEST_BUNDLE="$dir/bundle" $prefix "$PY" -m unittest -v tests.test_launcher tests.test_installer ) > "$dir/runtime.log" 2>&1 \
+    THEODORE_TEST_BUNDLE="$dir/bundle" $prefix "$PY" $RUNTIME_SUITE ) > "$dir/runtime.log" 2>&1 \
     && result "$name" runtime pass || result "$name" runtime fail
   rm -rf "${dir:?}/work" "${dir:?}/tmp"
 }
@@ -119,13 +130,72 @@ run_linux() { # name docker-platform platform-key
     chown -R tester /repo/ci/out/$name /repo/ci/out/cache
     su tester -c 'cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
-      ( \$PY tools/sync_launchers.py --check && \$PY -m unittest discover -s tests -v ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
+      ( \$PY tools/sync_launchers.py --check && \$PY $SHIM_SUITE ) > \$O/shim.log 2>&1 && echo pass > \$O/shim.result || echo fail > \$O/shim.result
       $( [ -n "${CI_SHIM_ONLY:-}" ] && echo 'exit 0;' )  # shim only: the runner records runtime as not-run
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
-        THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY -m unittest -v tests.test_launcher tests.test_installer ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
+        THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY $RUNTIME_SUITE ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
     || say "$name: the container did not finish"
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
+}
+
+# --- one Linux platform on a standing Linux build machine --------------------------------------------------------------
+# CI_LINUX_MACHINE_X64 / CI_LINUX_MACHINE_ARM64 (default engine-linux-x64 / engine-linux-arm64; none: this Mac's
+# containers): ci/build-machine.sh's Linux machines (BUILD_MACHINE_OS=linux-*), started for the job with a lease and
+# deallocated after it when no other run holds them. The same container (the pinned ubuntu digest), the same commands, at
+# the machine's own architecture (no emulation); the suites in CI_REMOTE_PROCESSES (default 6) processes. What goes: the
+# tracked files of HEAD (as to Windows). What comes back: the job's folder (logs, results, the bundle). Its download and
+# bundle caches stay on the machine (~/cache/plugin). A machine that is missing, in use or does not start: this Mac's
+# container, as before.
+linux_machine() { # name: the standing machine for it, when it exists
+  case "$1" in linux-x64) m=${CI_LINUX_MACHINE_X64:-engine-linux-x64} ;; *) m=${CI_LINUX_MACHINE_ARM64:-engine-linux-arm64} ;; esac
+  [ "$m" != none ] && [ -f "${BUILD_MACHINE_HOME:-$HOME/.theodore-build}/$m/host" ] && echo "$m"
+}
+run_linux_standing() { # name docker-platform platform-key machine
+  name=$1 dplat=$2 key=$3 m=$4
+  dir="$OUT/$name"; mkdir -p "$dir"; rm -rf "${dir:?}/bundle"; rm -f "$dir/"*.result "$dir/"*.log
+  t0=$(date +%s)
+  export BUILD_MACHINE_LEASE_PID=$$
+  if ! rhost=$(bash "$ROOT/ci/build-machine.sh" start "$m" 2>>"$dir/standing.log"); then
+    bash "$ROOT/ci/build-machine.sh" stop "$m" >>"$dir/standing.log" 2>&1
+    say "$name: the standing machine $m is in use or did not start ($dir/standing.log): this Mac's container instead"
+    run_linux "$name" "$dplat" "$key"; return
+  fi
+  say "$name: standing machine $m ready after $(( $(date +%s) - t0 )) s"
+  rknown=$(bash "$ROOT/ci/build-machine.sh" known-hosts "$m")
+  RSSH="-i ${KEY:-$HOME/.ssh/theodore_ci} -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$rknown"
+  procs=${CI_REMOTE_PROCESSES:-6}
+  shim="ci/par_unittest.py $procs --split test_client"
+  rt="ci/par_unittest.py $procs --only test_launcher test_installer --split test_launcher test_installer"
+  [ "$procs" -gt 1 ] 2>/dev/null || { shim="-m unittest discover -s tests -v"; rt="-m unittest -v tests.test_launcher tests.test_installer"; }
+  only=; [ -z "${CI_SHIM_ONLY:-}" ] || only='exit 0;'
+  # The container's script: run_linux's, with this machine's folders
+  cat > "$dir/remote-job.sh" <<JOB
+set -u
+rm -rf ~/n; mkdir -p ~/n/repo ~/n/out/$name ~/cache/plugin && tar -xf ~/in.tar -C ~/n/repo && rm -f ~/in.tar || exit 1
+mkdir -p ~/n/repo/ci/out/$name ~/n/repo/ci/out/cache  # the mount points (ci/out is not tracked; the repository is mounted read-only)
+sudo docker run --rm --platform $dplat -v ~/n/repo:/repo:ro -v ~/n/out/$name:/repo/ci/out/$name -v ~/cache/plugin:/repo/ci/out/cache \\
+  -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 -e CI_NAME=$name -e PYTHONDONTWRITEBYTECODE=1 -w /repo $UBUNTU sh -c '$(printf '%s' "$SETUP" | sed "s/'/'\\\\''/g")
+    chown -R tester /repo/ci/out/$name /repo/ci/out/cache
+    su tester -c "cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
+      PY=\\\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
+      ( \\\$PY tools/sync_launchers.py --check && \\\$PY $shim ) > \\\$O/shim.log 2>&1 && echo pass > \\\$O/shim.result || echo fail > \\\$O/shim.result
+      $only
+      ( \\\$PY runtime/build/build_bundle.py --platform $key --out \\\$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
+        \\\$PY runtime/build/smoke_test.py --bundle \\\$O/bundle --platform $key &&
+        THEODORE_TEST_BUNDLE=/repo/\\\$O/bundle \\\$PY $rt ) > \\\$O/runtime.log 2>&1 && echo pass > \\\$O/runtime.result || echo fail > \\\$O/runtime.result"'
+sudo chown -R \$(id -u) ~/n/out
+tar -C ~/n/out/$name -cf ~/out.tar . && rm -rf ~/n
+JOB
+  ( cd "$ROOT" && git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar --no-mac-metadata --no-xattrs -cf "$dir/in.tar" ) &&
+    scp -q $RSSH "$dir/in.tar" "$rhost:in.tar" >>"$dir/standing.log" 2>&1 &&
+    ssh $RSSH "$rhost" 'bash -s' < "$dir/remote-job.sh" >>"$dir/standing.log" 2>&1
+  scp -q $RSSH "$rhost:out.tar" "$dir/out.tar" >>"$dir/standing.log" 2>&1 && tar -xf "$dir/out.tar" -C "$dir"
+  rm -f "$dir/in.tar" "$dir/out.tar"
+  # deallocated in the background: the results are here, and the deallocation (minutes) holds nothing of this run
+  ( bash "$ROOT/ci/build-machine.sh" stop "$m" >>"$dir/standing.log" 2>&1 & )
+  for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
+  echo "$(( $(date +%s) - t0 ))" > "$dir/job.seconds"
 }
 
 # --- the corporate network: a trusted inspecting certificate and an authenticating proxy --------------------------------
@@ -253,8 +323,9 @@ run_windows_standing() {
     KEY=${KEY:-$HOME/.ssh/theodore_ci} KNOWN=$(bash "$ROOT/ci/build-machine.sh" known-hosts "$m") STANDING=1
     say "windows-x64: standing machine $m ready after $(( $(date +%s) - started )) s"
     run_windows
-    bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
     trap - EXIT INT TERM HUP
+    # deallocated in the background: the results are here, and the deallocation (minutes) holds nothing of this run
+    ( bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1 & )
   else
     trap - EXIT INT TERM HUP
     bash "$ROOT/ci/build-machine.sh" stop "$m" >> "$dir/standing.log" 2>&1
@@ -547,6 +618,45 @@ heavy() { # seconds label command...: wait for the load, then run it under its d
   wait_load; limited "$@"
 }
 
+# The four platform jobs of `all` and `selected` (macos-arm64, macos-x64 under Rosetta, linux-x64 and linux-arm64 in
+# containers) in CI_LOCAL_LANES lanes side by side (1: one after another, each after its own load wait, as
+# before). With more lanes the load is waited for once, before they start, and job k goes to lane k mod lanes in the
+# order macos-arm64 linux-arm64 macos-x64 linux-x64 (2 lanes: the Mac's two beside the containers' two). Every job keeps
+# its own folder, log, result and hard deadline; the containers have their own CPUs (the Docker VM's).
+LANE_ORDER="macos-arm64 linux-arm64 macos-x64 linux-x64"
+platform_job() { # name [shim]: one platform job, under its deadline (the load is waited for by the caller)
+  case "$1" in
+    macos-arm64) limited 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
+    macos-x64) limited 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
+    linux-x64|linux-arm64)
+      dp=linux/amd64; [ "$1" = linux-arm64 ] && dp=linux/arm64
+      if lm=$(linux_machine "$1"); then limited 5400 "$1" run_linux_standing "$1" "$dp" "$1" "$lm"
+      else limited 5400 "$1" run_linux "$1" "$dp" "$1"; fi ;;
+  esac
+}
+platform_jobs() { # [shim] name...: the named jobs (shim: the shim job only), in lanes; returns when all have ended
+  shim=; [ "$1" = shim ] && { shim=1; shift; }
+  lanes=${CI_LOCAL_LANES:-1}; case "$lanes" in ''|*[!0-9]*|0) lanes=1 ;; esac
+  if [ "$lanes" -le 1 ]; then
+    for j in "$@"; do ( [ -z "$shim" ] || export CI_SHIM_ONLY=1; wait_load; platform_job "$j" ); done
+    return
+  fi
+  wait_load
+  say "the platform jobs in $lanes lanes side by side: $*"
+  lpids= k=0
+  while [ "$k" -lt "$lanes" ]; do
+    mine= i=0
+    for j in $LANE_ORDER; do
+      case " $* " in *" $j "*) [ $((i % lanes)) -eq "$k" ] && mine="$mine $j"; i=$((i + 1)) ;; esac
+    done
+    if [ -n "$mine" ]; then
+      ( [ -z "$shim" ] || export CI_SHIM_ONLY=1; for j in $mine; do t0=$(date +%s); platform_job "$j"; say "$j: $(( $(date +%s) - t0 )) s"; done ) & lpids="$lpids $!"
+    fi
+    k=$((k + 1))
+  done
+  for p in $lpids; do wait "$p"; done
+}
+
 mkdir -p "$OUT"
 cleanup() { [ -n "${wpid:-}" ] && kill "$wpid" 2>/dev/null; kill_containers; release_lock; }
 trap 'cleanup' EXIT
@@ -559,8 +669,7 @@ esac
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
-  linux-x64) heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
-  linux-arm64) heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
+  linux-x64|linux-arm64) wait_load; platform_job "$TARGET" ;;
   windows-x64) mkdir -p "$OUT/windows-x64"; commit > "$OUT/windows-x64/commit"
                if [ -n "$AZURE" ] && standing_name >/dev/null; then run_windows_standing
                elif [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
@@ -594,12 +703,11 @@ case "$TARGET" in
         secrets) limited 900 secrets run_secrets ;;
         archives) heavy 900 archives run_archives ;;
         network) heavy 900 network run_network ;;
-        macos-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
-        macos-x64:shim) CI_SHIM_ONLY=1 heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
-        linux-x64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64 ;;
-        linux-arm64:shim) CI_SHIM_ONLY=1 heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64 ;;
       esac
     done
+    shims=; for t in $wanted; do case "$t" in *:shim) shims="$shims ${t%:shim}" ;; esac; done
+    # shellcheck disable=SC2086
+    [ -z "$shims" ] || platform_jobs shim $shims
     release_lock
     if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     summary
@@ -616,10 +724,7 @@ case "$TARGET" in
     fi
     acquire_lock "plugin $TARGET at $(git -C "$ROOT" rev-parse --short HEAD)"
     limited 900 secrets run_secrets
-    heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 ""
-    heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64"
-    heavy 5400 linux-x64 run_linux linux-x64 linux/amd64 linux-x64
-    heavy 5400 linux-arm64 run_linux linux-arm64 linux/arm64 linux-arm64
+    platform_jobs macos-arm64 macos-x64 linux-x64 linux-arm64
     heavy 900 network run_network
     heavy 900 archives run_archives
     # The local heavy jobs are done: the lock is released now, so the other repositories' runners do not wait on a

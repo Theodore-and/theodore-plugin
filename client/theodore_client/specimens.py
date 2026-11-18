@@ -34,6 +34,7 @@ from .core import Status
 PREFIX = "theodore-specimens-"
 KEEP_SECONDS = 3600
 REUSE_SECONDS = 2700            # a held sheet is reused while at least 15 minutes of its folder's hour remain
+AHEAD_SECONDS = 60              # dated further ahead of the clock than this: not trusted to be recent (the launchers allow the same)
 MAX_FILES = 8
 MAX_BYTES = 1 << 20
 NAME = re.compile(r"[A-Za-z0-9._-]{1,80}\.jpg")
@@ -324,13 +325,17 @@ def _folders() -> list[tuple[Path, float]]:
 
 
 def sweep(everything: bool = False) -> list[Path]:
-    """Remove the specimen folders older than an hour (or dated ahead of the clock); with `everything`, all of them.
+    """Remove the specimen folders older than an hour (or dated more than a minute ahead of the clock); with `everything`,
+    all of them.
     Both what the registry records (wherever it is: a changed TMPDIR cannot strand one) and what is in the current
     roots. Returns the folders that should be gone and are still there. Never raises: it runs before every command."""
     left: list[Path] = []
     try:
         now = core.now()
-        expired = lambda made: everything or not 0 <= now - made <= KEEP_SECONDS
+        # A folder a moment ahead of `now` is one another Theodore call made, or put a sheet in, after this call read
+        # the time (it then waits for the record's lock and reads the folders): never expired. Removed as "dated ahead",
+        # it went from under that call's next sheet (TR-S9N9N8: INTERNAL FileNotFoundError naming a sheet of the batch).
+        expired = lambda made: everything or now - made > KEEP_SECONDS or made - now > AHEAD_SECONDS
         remove = []
         if registry().exists():
             with core.lock("specimens", timeout=10 if everything else 2):

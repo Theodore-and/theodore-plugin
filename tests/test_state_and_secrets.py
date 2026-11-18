@@ -582,6 +582,29 @@ class SpecimenRegistry(unittest.TestCase):
                 # Sheets live in a private folder under Theodore's own cache, never in the shared temporary folder.
                 self.assertEqual(folder.parent, dirs["cache"] / "specimens")
 
+    def test_a_folder_another_call_is_filling_is_not_swept(self):
+        """TR-S9N9N8: every call sweeps first, with the time it read at its start. A folder another call makes, or puts a
+        sheet in, a moment later is ahead of that time: it was removed as "dated ahead of the clock" and the other
+        call's next sheet had no folder (INTERNAL FileNotFoundError naming a sheet of the batch). A folder dated well
+        ahead still goes."""
+        with self.world() as (specimens, home, dirs):
+            filling, far = specimens.make_folder(), specimens.make_folder()
+            started = time.time()
+            self.age(specimens, filling, -3)        # made and written three seconds after the sweeping call read the time
+            self.age(specimens, far, -7200)
+            with mock.patch.object(core, "now", return_value=started):
+                self.assertEqual(specimens.sweep(), [])
+            self.assertTrue(filling.exists(), "a folder another call is filling stays")
+            self.assertIn(filling, [path for _made, path in specimens._read_registry()], "and stays recorded")
+            self.assertFalse(far.exists(), "dated two hours ahead of the clock: not trusted to be recent")
+            # The same for a folder the record does not hold (found in the roots by its name).
+            stray = filling.parent / "theodore-specimens-stray"
+            stray.mkdir()
+            os.utime(stray, (started + 3, started + 3))
+            with mock.patch.object(core, "now", return_value=started):
+                self.assertEqual(specimens.sweep(), [])
+            self.assertTrue(stray.exists())
+
     def test_a_changed_temporary_folder_cannot_strand_a_folder(self):
         import tempfile
         with self.world() as (specimens, home, dirs):
