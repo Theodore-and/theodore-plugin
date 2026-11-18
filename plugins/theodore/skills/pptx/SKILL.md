@@ -4,6 +4,8 @@ description: "This session's slides skill, installed by the user: makes presenta
 allowed-tools: Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)
 ---
 
+If the instructions below are cut short or are no longer in your context (a compacted or resumed conversation, a subagent), load them again with `theodore guide pptx` before you work from them.
+
 !`sh "${CLAUDE_SKILL_DIR}/scripts/theodore" skill pptx`
 
 ---
@@ -16,10 +18,9 @@ this skill's folder by absolute path instead, without `cd` (the skill folder is 
 `${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide pptx
    - Windows PowerShell:       & "<skill folder>\scripts\theodore.cmd" guide pptx
-   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide pptx A first line
-starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
-its TELL THE USER line says. Never substitute another slide tool silently. If the instructions are no longer in your
-context (new session, compacted conversation, sub-agent), load them again the same way. Give sub-agents the same
+   - Windows cmd:              "<skill folder>\scripts\theodore.cmd" guide pptx
+A first line starting `THEODORE ` is a status, not a failure to work around: do what its NEXT line says and tell the user what
+its TELL THE USER line says. Never substitute another slide tool silently. Give sub-agents the same
 command. If you cannot run commands here, use the Theodore tool in this conversation: it runs the engine on the
 user's computer (its "manual" action gives these instructions for it). Only when there is no Theodore tool either is
 the engine not available: say so, and use the deck-design skill with the host's own slide tools.

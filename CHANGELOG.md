@@ -1,5 +1,37 @@
 # Changes
 
+## 0.4.5
+
+The assistant loads Theodore's instructions again after its conversation was compacted or resumed (lane P045).
+
+- After a compaction, Claude Code keeps the start of each skill's text (its first 5,000 tokens) and none of the
+  commands' output. Theodore's skill text is a short stub whose first line brings in 20,000 to 33,000 characters of
+  instructions, and the stub's own sentence saying how to load them again came after them, so it was cut. A resumed
+  conversation holds the instructions as old as their first load (a real session ran five days on a version nine
+  releases old).
+- The session note: when `guide <skill>` (the entry text or a section) or `skill <skill>` prints instructions and the
+  command carries Claude Code's session id (`CLAUDE_CODE_SESSION_ID`, set for every command Claude Code runs), the
+  client notes the skill, the version it served and when, in `state/sessions.json` (written whole under a lock, at most
+  200 sessions, none older than 30 days). Without a session id nothing is noted. The tool server's answers are not
+  noted.
+- One hook, `hooks/hooks.json`: `SessionStart` for `compact` and `resume` runs the launcher's `session-start`. For a
+  session the note says loaded Theodore's instructions, it prints one paragraph saying to load them again (naming only
+  the skills that session loaded) and to read the deck's design note again: after a compaction always, after a resume
+  only when a newer version of what it loaded is current. A resume of such a session asks the service once for the
+  current versions (the release manifest, two seconds at most; on any failure the last update check's values stand); no
+  other case uses the network. Anything else, a bad input, no home or a missing client prints nothing; it always exits 0.
+  The command line is `sh "<plugin>/skills/pptx/scripts/theodore" session-start; exit 0`, so where Claude Code runs it in
+  PowerShell (Windows without Git Bash, where Theodore does not load anyway) it ends with exit code 0 and no output.
+  Theodore never opens the conversation: the hook decides from the note alone.
+- The launchers answer `session-start` before anything else: with Theodore not set up, nothing is created, downloaded
+  or printed, and the exit code is 0; once set up, what the client prints when it succeeds. Launcher generation 12.
+- `pptx start` and `pptx apply`, in a session that loaded the design instructions, say once per version, in one line on
+  standard error, when a newer version of them is current and how to load it; `pptx start` in a session that did not load
+  them says once how to load them. Standard output stays the engine's own (one JSON object when piped).
+- The stubs: one paragraph before the injected instructions says to load them again with `theodore guide <skill>` when
+  they are cut short or gone; the sentence that said so after them is removed. The Windows cmd line of the stubs ends at
+  its command again (since 0.4.1 the next sentence was joined to it).
+
 ## 0.4.4
 
 Three filed reports, all in the client.

@@ -22,6 +22,26 @@ if [ "${1:-}" = skill ] && [ -z "${THEODORE_SKILL_WRAPPED:-}" ]; then
   exit 0
 fi
 
+# `session-start` is the plugin's hook (hooks/hooks.json) after Claude Code compacts or resumes a conversation. It runs
+# the client only when Theodore is set up, prints only what the client prints when the client succeeds, and otherwise
+# nothing: no status, no download, no set-up. It always exits 0.
+if [ "${1:-}" = session-start ]; then
+  exec 2>/dev/null
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      S_HOME=$(cygpath -u "${THEODORE_HOME:-${LOCALAPPDATA:-}\\Theodore}") || exit 0
+      S_PY=python/python.exe ;;
+    *) S_HOME=${THEODORE_HOME:-${HOME:-/nonexistent}/.theodore} S_PY=python/bin/python3 ;;
+  esac
+  S_RT=$(tr -d '\r\n' < "$S_HOME/runtime/current.txt") && S_CV=$(tr -d '\r\n' < "$S_HOME/client/current.txt") &&
+    [ -n "$S_RT" ] && [ -n "$S_CV" ] && [ -f "$S_HOME/runtime/$S_RT/$S_PY" ] && [ -f "$S_HOME/client/$S_CV/__main__.py" ] || exit 0
+  S_EXE=$S_HOME/runtime/$S_RT/$S_PY S_CLIENT=$S_HOME/client/$S_CV
+  case "$S_PY" in *.exe) S_HOME=$(cygpath -w "$S_HOME") S_CLIENT=$(cygpath -w "$S_CLIENT") ;; esac
+  # The client names its command by the stable launcher in <home>/bin (or `theodore`): THEODORE_LAUNCHER is not set.
+  S_OUT=$(THEODORE_HOME=$S_HOME "$S_EXE" -I "$S_CLIENT" session-start) && [ -n "$S_OUT" ] && printf '%s\n' "$S_OUT"
+  exit 0
+fi
+
 status() { # name code summary next tell
   printf 'THEODORE %s: %s\nNEXT: %s\nTELL THE USER: %s\n' "$1" "$3" "$4" "$5"
   exit "$2"

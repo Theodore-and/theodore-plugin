@@ -928,6 +928,79 @@ class CorporateNetwork(unittest.TestCase):
         self.assertTrue((box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the client downloaded the rest through the proxy")
 
 
+class SessionStartHook(LauncherCase):
+    """The plugin's one hook (hooks/hooks.json): after a compaction or a resume, the launcher's `session-start`. Before
+    Theodore is set up it says nothing and starts nothing; once set up, it prints what the client prints."""
+
+    def hook_command(self) -> str:
+        hook = json.loads((self.box.plugin / "hooks" / "hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        return hook.replace("${CLAUDE_PLUGIN_ROOT}", str(self.box.plugin).replace("\\", "/"))     # as Claude Code fills it in
+
+    def feed(self, command, payload: dict):
+        import subprocess
+        return subprocess.run(command, input=json.dumps(payload), env=self.box.env, capture_output=True, text=True, timeout=120,
+                              cwd=str(self.box.tmp))
+
+    def note(self, sid: str) -> None:
+        import time
+        path = self.box.home / "state" / "sessions.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"sessions": {sid: {"at": int(time.time()), "loaded": {"pptx": {"version": "1.0.0-rc.3", "at": int(time.time())}}}}}))
+
+    def test_before_setup_it_exits_0_silently_and_starts_nothing(self):
+        for payload in ({"session_id": "s1", "source": "compact"}, {"session_id": "s1", "source": "resume"}):
+            result = self.feed(cmd_command(str(self.box.launcher), "session-start") if IS_WINDOWS else ["/bin/sh", str(self.box.launcher), "session-start"], payload)
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        self.assertFalse(self.box.home.exists(), "no folder, no download, no set-up")
+        self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/")], [])
+
+    def test_once_set_up_it_prints_the_clients_paragraph(self):
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs()
+        self.note("s1")
+        launcher = self.box.launcher.parent / ("theodore.cmd" if IS_WINDOWS else "theodore")
+        run = (lambda: cmd_command(str(launcher), "session-start")) if IS_WINDOWS else (lambda: ["/bin/sh", str(launcher), "session-start"])
+        result = self.feed(run(), {"session_id": "s1", "source": "compact"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("Theodore: this conversation loaded Theodore's instructions before it was compacted"), result.stdout)
+        self.assertIn("guide pptx` and read what it names", result.stdout)
+        self.assertNotIn("guide deck-design", result.stdout)
+        self.assertEqual(self.feed(run(), {"session_id": "other", "source": "compact"}).stdout, "")
+
+    @unittest.skipIf(IS_WINDOWS, "the hook's own command line in sh; Windows: test_the_hook_line_in_git_bash_and_powershell")
+    def test_the_hook_line_as_claude_code_runs_it(self):
+        empty = self.feed(["/bin/sh", "-c", self.hook_command()], {"session_id": "s1", "source": "compact"})
+        self.assertEqual((empty.returncode, empty.stdout, empty.stderr), (0, "", ""))
+        self.assertFalse(self.box.home.exists())
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs()
+        self.note("s1")
+        done = self.feed(["/bin/sh", "-c", self.hook_command()], {"session_id": "s1", "source": "compact"})
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("guide pptx` and read what it names", done.stdout)
+
+    @unittest.skipUnless(IS_WINDOWS, "Windows shells")
+    def test_the_hook_line_in_git_bash_and_powershell(self):
+        import shutil
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs(600)
+        self.note("s1")
+        payload = {"session_id": "s1", "source": "compact"}
+        bash = shutil.which("bash")
+        if bash:
+            done = self.feed([bash, "-c", self.hook_command()], payload)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("guide pptx` and read what it names", done.stdout)
+        # Without Git Bash, Claude Code runs the line in PowerShell: sh is not there, and the line still ends with exit 0
+        # and prints nothing on standard output (PowerShell's error goes to standard error, which is not shown).
+        env = {k: v for k, v in self.box.env.items()}
+        env["PATH"] = os.pathsep.join(p for p in env["PATH"].split(os.pathsep) if not (Path(p) / "sh.exe").exists())
+        import subprocess
+        done = subprocess.run(["powershell.exe", "-NoProfile", "-Command", self.hook_command()], input=json.dumps(payload), env=env,
+                              capture_output=True, text=True, timeout=120, cwd=str(self.box.tmp))
+        self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
+
+
 class Generations(LauncherCase):
     def _stable(self, generation: int, marker: str) -> None:
         stable = self.box.home / "bin"

@@ -1,5 +1,5 @@
 """What must stay true of the repository itself: the stubs, the generated copies, the pins, the contract, and
-the limits the hosts put on a plugin (no bin/, no lockfile at the plugin root, no hooks, text files only)."""
+the limits the hosts put on a plugin (no bin/, no lockfile at the plugin root, one hook, text files only)."""
 
 from __future__ import annotations
 
@@ -86,9 +86,15 @@ class Stubs(unittest.TestCase):
         flat = lambda text: " ".join(text.split())
         for skill in ("pptx", "deck-design"):
             body = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[1]
-            # The host injects the instructions as the skill's body (Claude Code's !`...`), first thing in the body.
-            self.assertTrue(body.startswith(f'\n!`sh "${{CLAUDE_SKILL_DIR}}/scripts/theodore" skill {skill}`\n'), body[:120])
+            # One short paragraph, then the injected instructions (Claude Code's !`...`). After a compaction the host keeps
+            # only the start of a skill's text: the paragraph that says how to load them again must come before them.
+            again = (f"If the instructions below are cut short or are no longer in your context (a compacted or resumed "
+                     f"conversation, a subagent), load them again with `theodore guide {skill}` before you work from them.")
+            self.assertTrue(body.startswith(f'\n{again}\n\n!`sh "${{CLAUDE_SKILL_DIR}}/scripts/theodore" skill {skill}`\n'), body[:400])
             self.assertEqual(body.count("!`"), 1)
+            self.assertNotIn("load them again the same way", body, "said once, before the instructions")
+            self.assertIn(f'"<skill folder>\\scripts\\theodore.cmd" guide {skill}\nA first line starting `THEODORE `', body,
+                          "the cmd line ends at the command; the next sentence starts its own line")
             self.assertIn(f'sh "<skill folder>/scripts/theodore" guide {skill}', body)
             self.assertIn(f'- Windows PowerShell:       & "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body)
             self.assertIn(f'- Windows cmd:              "<skill folder>\\scripts\\theodore.cmd" guide {skill}', body,
@@ -320,15 +326,29 @@ class Workflows(unittest.TestCase):
 
 
 class HostLimits(unittest.TestCase):
-    def test_no_bin_no_lockfile_no_hooks_at_the_plugin_root(self):
+    def test_no_bin_no_lockfile_at_the_plugin_root(self):
         names = {p.name for p in PLUGIN.iterdir()}
-        for banned in ("bin", "hooks", "package.json", "package-lock.json", "npm-shrinkwrap.json", "bun.lock", "requirements.txt"):
+        for banned in ("bin", "package.json", "package-lock.json", "npm-shrinkwrap.json", "bun.lock", "requirements.txt"):
             self.assertNotIn(banned, names)
         self.assertFalse((ROOT / "bin").exists(), "no top-level bin/ either")
         for manifest in (PLUGIN / ".claude-plugin" / "plugin.json", PLUGIN / "plugin.json"):
             data = json.loads(manifest.read_text())
-            self.assertNotIn("hooks", data)
+            self.assertNotIn("hooks", data, "the one hook is hooks/hooks.json, which Claude Code loads by itself")
             self.assertNotIn("userConfig", data)
+
+    def test_the_one_hook_runs_session_start_after_a_compaction_or_a_resume_only(self):
+        self.assertEqual(sorted(p.name for p in (PLUGIN / "hooks").iterdir()), ["hooks.json"])
+        hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())["hooks"]
+        self.assertEqual(list(hooks), ["SessionStart"])
+        self.assertEqual(len(hooks["SessionStart"]), 1)
+        entry = hooks["SessionStart"][0]
+        self.assertEqual(sorted(entry["matcher"].split("|")), ["compact", "resume"])
+        self.assertEqual(len(entry["hooks"]), 1)
+        hook = entry["hooks"][0]
+        self.assertEqual(hook["type"], "command")
+        self.assertEqual(hook["command"], 'sh "${CLAUDE_PLUGIN_ROOT}/skills/pptx/scripts/theodore" session-start; exit 0')
+        self.assertNotIn("args", hook)
+        self.assertNotIn("shell", hook)
 
     def test_every_file_is_text_and_under_256_kib_and_there_are_few(self):
         files = repo_files()
