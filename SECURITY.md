@@ -35,6 +35,7 @@ installer's are in `install/`.
 | `theodore report` | A bug report or feedback, see below | when filed |
 | Usage counts | What Theodore did, as counts and names from a fixed list, see below; only while your account's usage counts are on | at the end of a deck (`pptx finish`), otherwise at most when the oldest waiting count is 15 minutes old and you use Theodore |
 | `theodore prefs` | Saving, listing or removing a preference you asked to keep | when used |
+| Studio | Reads your account's Studio setting at the end of set-up (to ask about it once), and `theodore studio on` or `off` changes it, as the portal's Settings switch does | at set-up, and when used |
 
 Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand.ai` (installer and sign-in
 pages). Each of these names resolves to several addresses; the client races them (the next one starts a quarter of a

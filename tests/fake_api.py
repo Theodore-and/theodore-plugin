@@ -197,6 +197,9 @@ class FakeApi:
         self.guide_fail_parts: set[int] = set()         # parts answered 503 (a part that cannot be had mid-way)
         self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
         self.preferences: list[dict] = []
+        # Lane ONBOARD: GET/PUT /v1/studio. None: a server before it (404); else the account's answer.
+        self.studio: dict | None = {"studio_enabled": True, "included": True, "available": True}
+        self.studio_puts: list[dict] = []
         self.reports: list[dict] = []
         self.heartbeats: list[dict] = []
         self.usage_enabled = None         # what the licence refresh answers as usage_enabled; None: absent (an older server)
@@ -235,6 +238,9 @@ class FakeApi:
 
             def do_DELETE(self):
                 api._handle(self, "DELETE")
+
+            def do_PUT(self):
+                api._handle(self, "PUT")
 
             def do_HEAD(self):
                 api._handle(self, "HEAD")
@@ -666,6 +672,16 @@ class FakeApi:
             record = {**body, "id": str(uuid.uuid4()), "ref": "TR-" + f"{len(self.reports) + 1:06d}".translate(str.maketrans("", "")), "installation_id": installation_id}
             self.reports.append(record)
             return self._send(h, 201, {"id": record["id"], "ref": record["ref"], "status": "new"})
+        if route == ["studio"] and self.studio is None:
+            return self._error(h, 404, "not_found")
+        if route == ["studio"] and method == "GET":
+            return self._send(h, 200, self.studio)
+        if route == ["studio"] and method == "PUT":
+            if not isinstance(body, dict) or not isinstance(body.get("studio_enabled"), bool):
+                return self._error(h, 422, "validation_failed", "studio_enabled must be a boolean")
+            self.studio_puts.append(body)
+            self.studio = {**self.studio, "studio_enabled": body["studio_enabled"]}
+            return self._send(h, 200, self.studio)
         if route == ["preferences"] and method == "GET":
             return self._send(h, 200, {"preferences": self.preferences, "rev": self.prefs_rev})
         if route == ["preferences"] and method == "POST":

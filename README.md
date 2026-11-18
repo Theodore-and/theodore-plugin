@@ -113,6 +113,15 @@ it always ends with exit code 0. In a session that loaded the design instruction
 say once, in one line on standard error, when a newer version of them is current; `pptx start` in a session that did not
 load them says once how to load them.
 
+## After set-up
+
+The installer's last words are a short welcome for your assistant to give you in the same conversation: what
+Theodore now does for you, a first thing to ask for, and, when it applies, that a new session is needed or a last
+download is still going on. When your account has Studio on, the welcome says so once and asks whether you want it
+off: with Studio on, each slide gets a deeper design pass, which uses more of your AI plan; off, slides get a simpler
+design pass that uses less of it. `theodore studio` says whether it is on; `theodore studio off` and `theodore studio on` change it for your
+account (the same setting as the portal's Settings switch). Nothing asks again later.
+
 ## Updates
 
 Theodore keeps itself up to date with nothing for you to do. The first Theodore command of each assistant session

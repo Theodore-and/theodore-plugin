@@ -161,6 +161,14 @@ class BatchFiles(unittest.TestCase):
         ok = cmd.index("echo THEODORE OK: Theodore is installed and signed in; the rest of its runtime and its engine finish "
                        "downloading by themselves in the background")
         self.assertLess(cmd.index('if not "%HOSTS_RC%"=="0" goto :doctor_in_progress'), ok)
+        # Lane ONBOARD: first the client's welcome (only when every assistant was registered); the lines below are what
+        # is left when it cannot be given.
+        welcome = cmd.index('set "WELCOME_ARG=--downloading"\ncall :welcome\nif not errorlevel 1 goto :finish')
+        self.assertLess(welcome, ok)
+        self.assertLess(cmd.index('set "WELCOME_ARG="\ncall :welcome\nif not errorlevel 1 goto :finish'),
+                        cmd.index("echo THEODORE OK: Theodore is ready (the check above)."))
+        self.assertIn('\n:welcome\n', cmd)
+        self.assertIn('if not "%HOSTS_RC%"=="0" exit /b 1\ncall "%%T%%" welcome %WELCOME_ARG% >"%WORK%\\welcome.txt"', cmd)
         self.assertIn("echo NEXT: run nothing more now, neither doctor nor this installer: the download needs no command. "
                       "Tell the user to start a new session and ask for a deck.", cmd)
         self.assertLess(ok, cmd.index("echo THEODORE SETUP_IN_PROGRESS: Theodore is installed;"))

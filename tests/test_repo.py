@@ -357,6 +357,9 @@ class HostLimits(unittest.TestCase):
         for path in files:
             data = path.read_bytes()
             self.assertLess(len(data), 256 * 1024, f"{path.relative_to(ROOT)} is {len(data)} bytes")
+            if path == PLUGIN / "logo.png":         # the one image: the plugin's icon (lane BRAND), named by plugin.json
+                self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+                continue
             self.assertNotIn(b"\x00", data, f"{path.relative_to(ROOT)} is not text")
             data.decode("utf-8")
 
@@ -371,7 +374,19 @@ class HostLimits(unittest.TestCase):
         self.assertIn('SETUP_WAIT_DEFAULT=180\n[ -n "${CODEX_THREAD_ID:-}" ] && SETUP_WAIT_DEFAULT=540\nSETUP_WAIT=${THEODORE_INSTALL_WAIT:-$SETUP_WAIT_DEFAULT}', sh)
         # Codex (lane CHATGPT): no 10-minute command limit, and every command of the install session asks first: it
         # waits up to 9 minutes and, still downloading, ends with nothing to poll.
-        self.assertIn("run nothing more now, neither doctor nor this installer", sh)
+        # Lane ONBOARD: in both installers the client's welcome is the last status when every assistant was registered;
+        # its Codex form says to run nothing more (tests/test_welcome.py).
+        self.assertIn('if [ "$HOSTS_RC" -eq 0 ] && welcome --downloading; then', sh)
+        self.assertIn('call "%%T%%" welcome %WELCOME_ARG% >"%WORK%\\welcome.txt"', cmd)
+        # The welcome never changes the set-up's exit code (lead, 2026-11-19: a ready set-up on a loaded Windows machine
+        # ended 67): 0 when ready; 67 only from the still-downloading form, as before the welcome; any other answer,
+        # a launcher's 67 to the plain welcome included, leaves the old ending. Runtime cases: test_installer (the
+        # slow-link test pins 67 with the welcome on both installers; the install tests pin 0).
+        self.assertIn('  [ "$welcome_rc" -eq 0 ] && return 0\n  [ "$welcome_rc" -eq 67 ] && [ "${1:-}" = --downloading ] && return 0\n  return 1\n', sh)
+        self.assertNotIn("0|67)", sh)
+        self.assertIn('if "%WRC%"=="0" goto :welcome_given\nif not "%WRC%"=="67" exit /b 1\n'
+                      'if not "%WELCOME_ARG%"=="--downloading" exit /b 1\n:welcome_given\n', cmd)
+        self.assertNotIn('if not "%WRC%"=="0" if not "%WRC%"=="67" exit /b 1', cmd)
         self.assertIn('set "SETUP_WAIT_DEFAULT=180"', cmd)
         for text, setup, marker, register, doctor in (
                 (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
@@ -643,7 +658,7 @@ class StampedSite(unittest.TestCase):
             self.assertIn(rel, tree)
         self.assertFalse([rel for rel in tree if rel.startswith(("tests/", "tools/", "runtime/", "ci/", "client/truststore/"))])
         for rel, data in sorted(tree.items()):
-            if rel.rsplit("/", 1)[-1] in ("LICENSE", "NOTICE"):        # licence text names the terms page as it is
+            if rel.rsplit("/", 1)[-1] in ("LICENSE", "NOTICE", "logo.png"):    # licence text names the terms page as it is; the icon is an image
                 continue
             text = data.decode("utf-8")
             hits = [line.strip()[:160] for line in text.splitlines() if self.PRODUCTION.search(line)]

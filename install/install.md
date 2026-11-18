@@ -10,7 +10,8 @@ decks there too, and that workspace is the computer this page means.
 1. Download the installer into a new private folder, then run it. It needs no admin rights and installs into
    ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
    present, adds one marked line naming Theodore for every deck to their global instructions (~/.claude/CLAUDE.md,
-   ~/.codex/AGENTS.md; uninstalling removes it), downloads about 100 to 130 MB (what is not done within about three minutes goes on in the background after the installer has ended) and about 95 MB of assets in the background (on a Mac without LibreOffice,
+   ~/.codex/AGENTS.md; this records the user's own request to use Theodore for all their presentations; uninstalling
+   removes it), downloads about 100 to 130 MB (what is not done within about three minutes goes on in the background after the installer has ended) and about 95 MB of assets in the background (on a Mac without LibreOffice,
    also LibreOffice, about 300 MB, and on Windows with neither LibreOffice nor PowerPoint, about 350 MB, both in the
    background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
    no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and
@@ -49,9 +50,9 @@ decks there too, and that workspace is the computer this page means.
      (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
      (or from GitHub: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
-3. Check: the installer ends with Theodore's own check (doctor). Report its last line to the user; run another
-   command only when a NEXT line asks for it, by the path the installer printed ("the stable launcher is ...").
-4. Tell the user to start a new session and ask for a deck.
+3. The installer ends with Theodore's own check and a short welcome for the user. Give the user that welcome (its
+   TELL THE USER line) in this conversation and follow its NEXT line; run another command only when a NEXT line asks
+   for it, by the path the installer printed ("the stable launcher is ...").
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or
 API key.
 

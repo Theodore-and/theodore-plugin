@@ -57,11 +57,13 @@ ROUTES = {
     "usage": ("POST", "/v1/usage", True),
     "installation_bind": ("POST", "/v1/installation/bind", True),     # device binding (P039): the public key, once
     "licence_nonce": ("POST", "/v1/licence/nonce", True),             # a single-use nonce for the refresh's proof
+    "studio_get": ("GET", "/v1/studio", True),                        # the account's Studio setting (lane ONBOARD)
+    "studio_set": ("PUT", "/v1/studio", True),
 }
 
 # Routes the backend is adding and its published contract (openapi.json, snapshotted in tests/fixtures) does not list
 # yet. The contract test lets these through, and fails as soon as the snapshot has one of them: then remove it here.
-PENDING_ROUTES: tuple[str, ...] = ()
+PENDING_ROUTES: tuple[str, ...] = ("studio_get", "studio_set")
 
 # --- API error codes (backend design section 5) and the status each becomes -----------------------------------------
 # code: (HTTP status, launcher status name)
