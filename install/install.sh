@@ -598,10 +598,13 @@ rc=$?
 checks_only() { printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'; }
 # The last status is the client's welcome (lane ONBOARD): a few short lines for the assistant to give in this
 # conversation, the Studio question once, and what this host needs (a new session, the download still going on).
+# Its exit code is the set-up's: 0 when ready, and 67 only for the still-downloading form, as before the welcome. Any
+# other answer (a launcher that says 67 for a ready set-up included) leaves the ending as it was.
 welcome() {
   welcome_out=$(theodore welcome "$@")
   welcome_rc=$?
-  case "$welcome_rc" in 0|67) return 0 ;; esac
+  [ "$welcome_rc" -eq 0 ] && return 0
+  [ "$welcome_rc" -eq 67 ] && [ "${1:-}" = --downloading ] && return 0
   return 1
 }
 if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the same command again'; then

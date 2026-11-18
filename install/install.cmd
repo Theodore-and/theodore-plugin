@@ -754,11 +754,16 @@ exit /b %RC%
 
 :welcome
 rem The client's welcome as the last status (lane ONBOARD), only when every assistant was registered. Sets RC and
-rem returns 0 when it printed one; 1 leaves the ending to the caller.
+rem returns 0 when it printed one; 1 leaves the ending to the caller. Its exit code is the set-up's: 0 when ready, and
+rem 67 only for the still-downloading form, as before the welcome; any other answer (a launcher that says 67 for a ready
+rem set-up included) leaves the ending as it was.
 if not "%HOSTS_RC%"=="0" exit /b 1
 call "%%T%%" welcome %WELCOME_ARG% >"%WORK%\welcome.txt"
 set "WRC=%ERRORLEVEL%"
-if not "%WRC%"=="0" if not "%WRC%"=="67" exit /b 1
+if "%WRC%"=="0" goto :welcome_given
+if not "%WRC%"=="67" exit /b 1
+if not "%WELCOME_ARG%"=="--downloading" exit /b 1
+:welcome_given
 type "%WORK%\welcome.txt"
 set "RC=%WRC%"
 exit /b 0
