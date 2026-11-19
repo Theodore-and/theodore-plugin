@@ -201,6 +201,8 @@ class FakeApi:
         self.studio: dict | None = {"studio_enabled": True, "included": True, "available": True}
         self.studio_puts: list[dict] = []
         self.reports: list[dict] = []
+        self.report_delay = 0.0           # seconds each POST /v1/reports waits before it is answered (a slow link)
+        self.path_errors: dict[str, tuple[int, str]] = {}    # path -> (HTTP status, error code) answered instead (an error the client does not know)
         self.heartbeats: list[dict] = []
         self.usage_enabled = None         # what the licence refresh answers as usage_enabled; None: absent (an older server)
         self.bundle_usage = None          # what a log-in answer says as usage_enabled; None: absent (a server before 2026-11-15)
@@ -454,7 +456,11 @@ class FakeApi:
             except OSError:
                 pass
             return
+        if path == "/v1/reports" and self.report_delay:
+            time.sleep(self.report_delay)
         with self.lock:
+            if path in self.path_errors:
+                return self._error(h, *self.path_errors[path])
             self._route(h, method, path, query, body)
 
     def _route(self, h, method: str, path: str, query: dict, body: dict) -> None:

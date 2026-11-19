@@ -172,13 +172,6 @@ call :check_ready
 if defined READY goto :run_client
 goto :progress_status
 
-:run_client
-set "THEODORE_HOME=%HOME_DIR%"
-set "THEODORE_LAUNCHER=%LAUNCHER%"
-rem One line, because this file may be replaced while the client runs. An error level of 131 or more, or below 0, is
-rem not the client's (its codes end at 130) but Windows refusing to start the interpreter: a policy such as AppLocker.
-"%PY%" -I "%HOME_DIR%\client\%CV%" %* & if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else if errorlevel 131 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else call exit /b %%ERRORLEVEL%%
-
 rem The MCP server's standard output carries only the protocol: setup reports to standard error, then the server starts
 rem once the client is there.
 :mcp_not_ready
@@ -186,6 +179,17 @@ call "%%SELF%%" setup --wait 20 1>&2
 call :check_ready
 if defined READY goto :run_client
 exit /b 1
+
+:run_client
+set "THEODORE_HOME=%HOME_DIR%"
+set "THEODORE_LAUNCHER=%LAUNCHER%"
+rem One line, because this file may be replaced while the client runs. An error level of 131 or more, or below 0, is
+rem not the client's (its codes end at 130) but Windows refusing to start the interpreter: a policy such as AppLocker.
+rem cmd ends a command line at its first line feed: an argument of several lines then leaves a quote open, which takes
+rem the rest of the run line, its exit included, into the client's last argument (the client sees that text and answers
+rem USAGE). So the very next line ends the batch: nothing after the client runs it again or reaches another label.
+"%PY%" -I "%HOME_DIR%\client\%CV%" %* & if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else if errorlevel 131 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else call exit /b %%ERRORLEVEL%%
+call exit /b %%ERRORLEVEL%%
 
 :handover
 "%STABLE%" %*

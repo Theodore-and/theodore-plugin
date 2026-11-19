@@ -4,7 +4,8 @@
 #
 #   ci/run.sh macos-arm64              natively
 #   ci/run.sh macos-x64                under Rosetta (arch -x86_64), with the x64 CPython and Node
-#   ci/run.sh linux-x64 | linux-arm64  in an ubuntu 22.04 container (pinned by digest; Docker, for example colima)
+#   ci/run.sh linux-x64 | linux-arm64  in an ubuntu 22.04 container (pinned by digest; Docker, for example colima), in a
+#                                      prepared image with the packages, built once per recipe (linux_recipe)
 #   ci/run.sh windows-x64 --azure      the same on a throwaway Azure VM made for this run and deleted after it, pass,
 #                                      fail or interrupted (ci/azure-windows.sh; `ci/azure-windows.sh sweep` deletes leftovers)
 #   ci/run.sh windows-x64 --host user@host [--key file]   over SSH on a Windows machine (stock Windows with OpenSSH
@@ -27,7 +28,10 @@
 #                                      a green record at this commit (a target that failed for an outside reason is
 #                                      rerun alone; a test failure needs a new commit)
 #   ci/run.sh plan                     what HEAD needs, from what changed since the nearest stamped ancestor, by the table
-#                                      CHANGE_TABLE below (inherit, text, windows, client, runtime), and the targets
+#                                      CHANGE_TABLE below (inherit, text, windows, client, runtime), and the targets; a
+#                                      release's version bump counts as text when it is nothing else (ci/textcheck.py)
+#   ci/run.sh shipped                  the text class's proof: the archives built at HEAD differ from a build of the
+#                                      stamped ancestor only in the files the plan allowed (after `archives`)
 #   ci/run.sh selected [--azure]       run only those targets, then a stamp that names the ancestor the other rows are
 #                                      inherited from (a runtime change runs `all`)
 #   ci/run.sh lock-status              the shared lock's holder and its queue in order (lock-waits: today's waits and holds)
@@ -108,19 +112,36 @@ run_mac() { # name platform-key arch-prefix
 }
 
 # --- one platform in a container -------------------------------------------------------------------------------------
-in_container() { # docker-platform name script
+# The prepared image every Linux job runs in: the pinned ubuntu digest with what the old runners had and the jobs use (a
+# Python to bootstrap the pinned one, curl, openssl, xz, git, one font with fontconfig: skia-canvas measures text with
+# the system's fonts, a desktop Linux always has some; tinyproxy for the network job) and the user tester. It is named
+# after its recipe and platform, built once where the job runs (this Mac's Docker or the standing machine's) and reused:
+# no apt at run time, so no mirror can hold a job; a changed recipe is a new name, so a new image by itself.
+linux_recipe() {
+  cat <<DOCKER
+FROM $UBUNTU
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries && export DEBIAN_FRONTEND=noninteractive && apt-get update -qq >/dev/null \\
+  && apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git fontconfig fonts-dejavu-core tinyproxy >/dev/null \\
+  && rm -rf /var/lib/apt/lists/* && useradd -m tester
+DOCKER
+}
+linux_image_tag() { echo "theodore-plugin-ci:$(printf '%s %s' "$(linux_recipe)" "$1" | shasum -a 256 | cut -c1-12)"; }
+linux_image() { # docker-platform log: the prepared image's tag, built when this Docker does not have it (its output in log)
+  tag=$(linux_image_tag "$1")
+  docker image inspect "$tag" >/dev/null 2>&1 && { echo "$tag"; return 0; }
+  say "building the prepared image $tag for $1 (once)" >&2
+  if linux_recipe | docker build --platform "$1" -t "$tag" - > "$2" 2>&1; then echo "$tag"; return 0; fi
+  say "the prepared image $tag did not build (docker build of linux_recipe in ci/run.sh; $2)" >&2; return 1
+}
+in_container() { # docker-platform name script; returns 3 when the prepared image did not build
   dplat=$1 name=$2 script=$3
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { say "docker is not running"; return 1; }
   mkdir -p "$OUT/$name" "$CACHE"
+  image=$(linux_image "$dplat" "$OUT/$name/image.log") || return 3
   docker run --rm --label "theodore-ci=$$" --platform "$dplat" -v "$ROOT:/repo:ro" -v "$OUT/$name:/repo/ci/out/$name" -v "$CACHE:/repo/ci/out/cache" -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 \
-    -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$UBUNTU" sh -c "$script"
+    -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$image" sh -c "$script"
 }
-
-# What the old runners had and the jobs use: a Python to bootstrap the pinned one, curl, openssl, xz, git, and one
-# font with fontconfig (skia-canvas measures text with the system's fonts; a desktop Linux always has some).
-SETUP='set -e; export DEBIAN_FRONTEND=noninteractive; echo "Acquire::Retries \"5\";" > /etc/apt/apt.conf.d/80retries; apt-get update -qq >/dev/null
-  apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git fontconfig fonts-dejavu-core >/dev/null
-  useradd -m tester'
+SETUP='set -e'
 
 run_linux() { # name docker-platform platform-key
   name=$1 dplat=$2 key=$3
@@ -135,7 +156,7 @@ run_linux() { # name docker-platform platform-key
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
         THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY $RUNTIME_SUITE ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
-    || say "$name: the container did not finish"
+    || { [ $? -eq 3 ] && { echo fail > "$dir/shim.result"; echo fail > "$dir/runtime.result"; }; say "$name: the container did not finish"; }
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
 }
 
@@ -169,13 +190,22 @@ run_linux_standing() { # name docker-platform platform-key machine
   rt="ci/par_unittest.py $procs --only test_launcher test_installer --split test_launcher test_installer"
   [ "$procs" -gt 1 ] 2>/dev/null || { shim="-m unittest discover -s tests -v"; rt="-m unittest -v tests.test_launcher tests.test_installer"; }
   only=; [ -z "${CI_SHIM_ONLY:-}" ] || only='exit 0;'
-  # The container's script: run_linux's, with this machine's folders
+  # The container's script: run_linux's, with this machine's folders, in the same prepared image built on the machine
+  # (kept on its disk between runs)
+  img=$(linux_image_tag "$dplat")
   cat > "$dir/remote-job.sh" <<JOB
 set -u
 rm -rf ~/n; mkdir -p ~/n/repo ~/n/out/$name ~/cache/plugin && tar -xf ~/in.tar -C ~/n/repo && rm -f ~/in.tar || exit 1
 mkdir -p ~/n/repo/ci/out/$name ~/n/repo/ci/out/cache  # the mount points (ci/out is not tracked; the repository is mounted read-only)
+if ! sudo docker image inspect $img >/dev/null 2>&1; then
+  echo "building the prepared image $img for $dplat (once on this machine)"
+  sudo docker build --platform $dplat -t $img - <<'RECIPE' || { echo "ci: the prepared image $img did not build (docker build of linux_recipe in ci/run.sh, on $m)"; echo fail > ~/n/out/$name/shim.result; echo fail > ~/n/out/$name/runtime.result; }
+$(linux_recipe)
+RECIPE
+fi
+sudo docker image inspect $img >/dev/null 2>&1 &&
 sudo docker run --rm --platform $dplat -v ~/n/repo:/repo:ro -v ~/n/out/$name:/repo/ci/out/$name -v ~/cache/plugin:/repo/ci/out/cache \\
-  -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 -e CI_NAME=$name -e PYTHONDONTWRITEBYTECODE=1 -w /repo $UBUNTU sh -c '$(printf '%s' "$SETUP" | sed "s/'/'\\\\''/g")
+  -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 -e CI_NAME=$name -e PYTHONDONTWRITEBYTECODE=1 -w /repo $img sh -c '$(printf '%s' "$SETUP" | sed "s/'/'\\\\''/g")
     chown -R tester /repo/ci/out/$name /repo/ci/out/cache
     su tester -c "cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\\\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
@@ -204,7 +234,6 @@ JOB
 run_network() {
   dir="$OUT/network"; mkdir -p "$dir"; rm -f "$dir/"*.result "$dir/"*.log
   in_container linux/arm64 network "$SETUP
-    apt-get install -y -qq --no-install-recommends tinyproxy >/dev/null
     openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/trusted-key.pem -out /tmp/trusted-cert.pem -days 2 -subj /CN=127.0.0.1 \
       -addext subjectAltName=IP:127.0.0.1,DNS:localhost -addext basicConstraints=critical,CA:TRUE 2>/dev/null
     chmod 644 /tmp/trusted-key.pem
@@ -395,6 +424,31 @@ run_archives() {
   tail -n 3 "$dir/archives.log"
 }
 
+# --- the text class's proof: what ships changed only where the plan allowed ---------------------------------------------
+# The archives of the stamped ancestor are built from its tracked files (git archive, the same build tools at that
+# commit) and compared with ci/out/archives member by member: the client tar, both plugin archives and the install
+# files may differ only in the files the plan counted as text or as the version bump (PLAN_ALLOWED). It closes the gap
+# between the diff and the bytes (an untracked file in the tree ships; a build tool could read anything).
+run_shipped() {
+  dir="$OUT/shipped"; fresh "$dir"; commit > "$dir/commit"
+  { [ "$(cat "$OUT/archives/commit" 2>/dev/null)" = "$(commit)" ] && [ "$(cat "$OUT/archives/build.result" 2>/dev/null)" = pass ]; } ||
+    { say "shipped: no passing archives build at this commit (ci/run.sh archives first)"; result shipped check fail; return; }
+  [ -n "$PLAN_FROM" ] || { say "shipped: no stamped ancestor"; result shipped check fail; return; }
+  case "$(uname -m)" in arm64) key=darwin-arm64 ;; *) key=darwin-x64 ;; esac
+  PY=$("$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") || { result shipped check fail; return; }
+  # shellcheck disable=SC2086
+  ( set -e; mkdir -p "$dir/tree" "$dir/base/install"; git -C "$ROOT" archive "$PLAN_FROM" | tar -xf - -C "$dir/tree"
+    cd "$dir/tree"; export PYTHONDONTWRITEBYTECODE=1
+    "$PY" tools/build_plugin_archives.py --out "$dir/base/plugin" --root "$dir/tree" >/dev/null
+    "$PY" runtime/build/build_client.py --out "$dir/base/client" >/dev/null
+    cp install/install.md install/install.sh install/install.cmd "$dir/base/install/"
+    echo "the ancestor $PLAN_FROM built; allowed: $PLAN_ALLOWED"
+    "$(host_python)" "$ROOT/ci/textcheck.py" shipped "$dir/base" "$OUT/archives" $PLAN_ALLOWED ) > "$dir/check.log" 2>&1 \
+    && result shipped check pass || result shipped check fail
+  rm -rf "${dir:?}/tree" "${dir:?}/base"
+  tail -n 1 "$dir/check.log"
+}
+
 summary() {
   {
     printf '%-12s %-8s %-8s %-62s %s\n' platform shim runtime "bundle manifest" sha256
@@ -437,6 +491,17 @@ record() {
 # pass at that commit counts: a test failure needs its fix and a new commit. The stamp is written when every
 # required job has a green record and none is marked.
 REQUIRED_PARTS="secrets-scan macos-arm64-shim macos-arm64-runtime macos-x64-shim macos-x64-runtime windows-x64-shim windows-x64-runtime linux-x64-shim linux-x64-runtime linux-arm64-shim linux-arm64-runtime network-job archives-build"
+# This Mac asleep while a job ran (a lid closed on battery: no assertion prevents that sleep) is an outside failure too:
+# tests that wait on a clock, and every connection to a build machine, fail then. True when the power log holds a
+# Sleep entry between the birth of the job's log and the time of its result.
+slept_during() { # <job log> <job result>
+  command -v pmset >/dev/null 2>&1 || return 1
+  from=$(stat -f %B "$1" 2>/dev/null) && to=$(stat -f %m "$2" 2>/dev/null) || return 1
+  pmset -g log 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8} [+-][0-9]{4} Sleep ' | while read -r day clock zone _rest; do
+    at=$(date -j -f '%Y-%m-%d %H:%M:%S %z' "$day $clock $zone" +%s 2>/dev/null) || continue
+    if [ "$at" -ge "$from" ] && [ "$at" -le "$to" ]; then echo slept; break; fi
+  done | grep -q slept
+}
 note_parts() { # record this run's results as per-target records for the commit
   sha=$(commit); dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
   [ -z "$dirty" ] || { say "parts: the tree has uncommitted changes; no records"; return 0; }
@@ -451,7 +516,9 @@ note_parts() { # record this run's results as per-target records for the commit
             { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; cat "$OUT/$name/"*.log 2>/dev/null; true; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
       # Test modules that could not import only because the job's runtime bundle was not built (support.py finds no
       # bundle manifest) are an outside failure, not a test failure.
-      fail) if [ -f "$log" ] && grep -E '^(FAIL|ERROR): test' "$log" | { if grep -q 'REAL_BUNDLE).glob' "$log"; then grep -v '_FailedTest'; else cat; fi; } | grep -q .; then
+      fail) if [ -f "$log" ] && slept_during "$log" "$OUT/$name/$job.result"; then
+              say "parts: $part failed while this Mac was asleep during the job: an outside failure, rerun it (ci/run.sh $name)"
+            elif [ -f "$log" ] && grep -E '^(FAIL|ERROR): test' "$log" | { if grep -q 'REAL_BUNDLE).glob' "$log"; then grep -v '_FailedTest'; else cat; fi; } | grep -q .; then
               { printf 'test failure at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; grep -E '^(FAIL|ERROR): ' "$log"; } > "$parts/$part.testfail"
             fi ;;
     esac
@@ -478,7 +545,11 @@ require() {
 # --- which checks a commit needs: one table ---------------------------------------------------------------------------
 # Each changed file takes the class of the first row its path matches; the commit needs the highest class of its files.
 #   inherit  nothing that ships or that a test reads: secrets only
-#   text     the skill stubs' and the plugin's text: secrets, archives, macos-arm64 shim (the stub-versus-engine test)
+#   text     the skill stubs', the agents' and the plugin's text, and a release's version bump when that is all a
+#            version-carrying file changed (ci/textcheck.py version-only: the version literal from the ancestor's to
+#            HEAD's, the client tar's sha256 and size pins): secrets, archives, shipped (the archives differ from the
+#            ancestor's only in those files) and the macos-arm64 shim job (every test module once; sync_launchers --check
+#            proves the pins)
 #   windows  Windows-only files: secrets, archives, windows-x64
 #   client   the client, the launchers, the install files, the build tools or the tests: secrets, archives, network and
 #            the shim job on every platform (bundles untouched, so no runtime job; windows-x64 runs whole)
@@ -494,6 +565,7 @@ ci/lock.sh|inherit
 .gitleaksignore|inherit
 .gitleaks.toml|inherit
 plugins/*/skills/*/SKILL.md|text
+plugins/*/agents/*.md|text
 plugins/*/README.md|text
 ci/windows-*.ps1|windows
 ci/azure-*.sh|windows
@@ -509,6 +581,7 @@ tests/*|client
 tools/sync_launchers.py|client
 tools/build_plugin_archives.py|client
 tools/snapshot_*|client
+ci/textcheck.py|client
 *|runtime
 '
 CLASS_RANK="inherit text windows client runtime"
@@ -530,23 +603,30 @@ stamped_ancestor() {
 targets_of() { # class
   case "$1" in
     inherit) echo "secrets" ;;
-    text) echo "secrets archives macos-arm64:shim" ;;
+    text) echo "secrets archives shipped macos-arm64:shim" ;;
     windows) echo "secrets archives windows-x64" ;;
     client) echo "secrets archives network macos-arm64:shim macos-x64:shim linux-x64:shim linux-arm64:shim windows-x64" ;;
     *) echo "all" ;;
   esac
 }
-plan() { # sets PLAN_CLASS PLAN_FROM PLAN_FILE; prints the verdict
-  PLAN_CLASS=runtime PLAN_FROM= PLAN_FILE=
+plan() { # sets PLAN_CLASS PLAN_FROM PLAN_FILE PLAN_ALLOWED; prints the verdict
+  PLAN_CLASS=runtime PLAN_FROM= PLAN_FILE= PLAN_ALLOWED=
   PLAN_FROM=$(stamped_ancestor) || { echo "runtime: no stamped ancestor within 300 commits: all"; return 0; }
   if [ "$PLAN_FROM" = "$(commit)" ]; then PLAN_CLASS=green; echo "green: HEAD is stamped"; return 0; fi
-  best=inherit bestfile= n=0
-  for f in $(git -C "$ROOT" diff --name-only --no-renames "$PLAN_FROM" HEAD); do
-    n=$((n + 1)); c=$(class_of "$f")
+  files=$(git -C "$ROOT" diff --name-only --no-renames "$PLAN_FROM" HEAD)
+  # The version-carrying files whose whole change is the release's version bump take the class text (nothing printed,
+  # or a helper that fails: each file keeps its row's class)
+  # shellcheck disable=SC2086
+  bumped=" $(cd "$ROOT" && "$(host_python)" ci/textcheck.py version-only "$PLAN_FROM" $files 2>/dev/null | tr '\n' ' ') "
+  best=inherit bestfile= n=0 nb=0
+  for f in $files; do
+    n=$((n + 1))
+    case "$bumped" in *" $f "*) c=text nb=$((nb + 1)) ;; *) c=$(class_of "$f") ;; esac
+    [ "$c" = text ] && PLAN_ALLOWED="$PLAN_ALLOWED $f"
     if [ "$(rank_of "$c")" -gt "$(rank_of "$best")" ]; then best=$c bestfile=$f; fi
   done
   PLAN_CLASS=$best PLAN_FILE=$bestfile
-  echo "$best: ${bestfile:-only files no check reads} ($n files changed since the stamped $(printf %.12s "$PLAN_FROM")): $(targets_of "$best")"
+  echo "$best: ${bestfile:-only files no check reads} ($n files changed since the stamped $(printf %.12s "$PLAN_FROM"), $nb of them the version bump only): $(targets_of "$best")"
 }
 record_selected() { # after `selected`: the targets it ran must pass; the stamp names the ancestor for the rest
   sha=$(commit); short=$(printf %.12s "$sha")
@@ -560,6 +640,7 @@ record_selected() { # after `selected`: the targets it ran must pass; the stamp 
       network) r=$(cat "$OUT/network/job.result" 2>/dev/null) ;;
       secrets) r=$(cat "$OUT/secrets/scan.result" 2>/dev/null) ;;
       archives) r=$(cat "$OUT/archives/build.result" 2>/dev/null) ;;
+      shipped) r=$(cat "$OUT/shipped/check.result" 2>/dev/null); cp "$OUT/shipped/check.log" "$dest/shipped.log" 2>/dev/null ;;
     esac
     [ "$r" = pass ] || bad="$bad$t "
   done
@@ -684,6 +765,7 @@ case "$TARGET" in
   summary) summary ;;
   stamp) note_parts; stamp_from_parts ;;
   plan) plan ;;
+  shipped) plan; limited 900 shipped run_shipped ;;
   selected)
     plan
     case "$PLAN_CLASS" in
@@ -702,6 +784,7 @@ case "$TARGET" in
       case "$t" in
         secrets) limited 900 secrets run_secrets ;;
         archives) heavy 900 archives run_archives ;;
+        shipped) limited 900 shipped run_shipped ;;
         network) heavy 900 network run_network ;;
       esac
     done

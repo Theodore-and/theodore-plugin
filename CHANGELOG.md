@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.14
+
+- Windows, installed from inside the Claude desktop app: the engine installs. The app keeps what its commands write in a folder of its own, and Theodore's link from the engine to its runtime pointed outside it, so the set-up ended with "lacks the Node module acorn".
+- Windows: a command whose text holds a line break no longer runs again and again. `report` takes long details from a file (`--details-file`) or from standard input (`--details -`).
+- An internal error is reported to Theodore by Theodore itself, once, with technical content only. The assistant is no longer told to send a report or to ask about one.
+- The set-up page an assistant reads is shorter and offers no choice to make.
+- When an engine cannot be linked to its runtime, the message says so, with both folders.
+
 ## 0.4.13
 
 - On Windows with PowerPoint and no LibreOffice, doctor and the installer's answer say PowerPoint turns decks into slide images, and no longer say LibreOffice is needed or offer to install it.

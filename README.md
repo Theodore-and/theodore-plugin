@@ -213,7 +213,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | 73 | BLOCKED_BY_POLICY | Paused by the publisher, blocked by the computer's policy, or automatic reports are off |
 | 74 | CONNECTOR_REQUIRED | A cloud sandbox that cannot reach Theodore: the user allows its sites (Claude) or uses the connector |
 | 75 | RETRY | Busy or rate-limited; try again shortly |
-| 78 | INTERNAL | A bug; `theodore doctor` and `theodore report` help us fix it |
+| 78 | INTERNAL | A bug; the client reports it to Theodore automatically, and `theodore doctor` shows the installation's state |
 
 Commands: `theodore help`.
 
@@ -245,7 +245,8 @@ ci/run.sh require [commit]   exit 0 only when `all` passed at that commit on a c
 ci/azure-windows.sh sweep    delete any throwaway Windows VM a stopped run left behind (tag purpose=theodore-plugin-ci)
 ```
 
-macOS x64 runs under Rosetta, Linux in ubuntu 22.04 containers pinned by digest (Docker), Windows over SSH on a
+macOS x64 runs under Rosetta, Linux in ubuntu 22.04 containers pinned by digest (Docker; the packages are baked
+into a prepared image named after its recipe, built once and reused, so no run waits on an apt mirror), Windows over SSH on a
 stock Windows Server 2022 that `ci/windows-prepare.ps1` prepares (it adds Git for Windows, for the Git Bash tests).
 Working files and the runtime bundles to publish are in `ci/out/`. `all` ends with `ci/run.sh record`: the table and
 logs go to `$THEODORE_CI_LOGS/<date>/plugin-<commit>-<time>/` (default `~/theodore-ci`), and when every row passed on

@@ -68,6 +68,9 @@ def emit(status: Status) -> int:
     elif status.name == "SETUP_IN_PROGRESS":
         from . import withdraw         # after access came back: says once why Theodore downloads again
         status = withdraw.explain_setup(status)
+    elif getattr(status, "auto_report", False):
+        from . import commands         # imported here: commands imports this module
+        status = commands.report_internal(status)      # sent before the status is printed; never raises
     if _REFUSAL or status.name in SHEET_REFUSALS:
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
@@ -148,9 +151,12 @@ def usage(summary: str, next_step: str = "") -> Status:
 
 
 def internal(summary: str) -> Status:
-    return Status("INTERNAL", summary,
-                  f"run {quoted_launcher()} doctor and report its output with: {quoted_launcher()} report --kind bug",
-                  "Theodore hit an internal error. I am collecting the details.")
+    """An internal error. Printed (emit, and the MCP server's answer), it is first reported to Theodore by the client
+    itself (commands.report_internal), and its NEXT and TELL THE USER lines say so: nobody is asked to send a report."""
+    status = Status("INTERNAL", summary, f"run {quoted_launcher()} doctor to check this installation, then run the same command again later.",
+                    "Theodore hit an internal error.")
+    status.auto_report = True
+    return status
 
 
 # --- platform ------------------------------------------------------------------------------------------------------------
@@ -801,18 +807,34 @@ def remove_tree(path: Path) -> None:
         shutil.rmtree(path, onerror=onerror)
 
 
+class LinkError(OSError):
+    """A directory link was made but does not lead to an existing directory from this process."""
+
+
 def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
-    """A directory link: symlink on POSIX, a junction (no admin rights needed) on Windows."""
+    """A directory link: symlink on POSIX, a junction (no admin rights needed) on Windows. On Windows the link is
+    checked once made: one that does not lead to a directory raises LinkError, naming both paths."""
     if link.is_symlink() or link.exists():
         remove_tree(link)
     link.parent.mkdir(parents=True, exist_ok=True)
     if IS_WINDOWS:
+        # The junction stores the target's final real path, not the path as given: inside an MSIX-packaged app (the
+        # Claude desktop app) Windows silently redirects this process's files under %LOCALAPPDATA% to
+        # %LOCALAPPDATA%\Packages\<package>\LocalCache\Local\..., but follows a junction without that redirect, so a
+        # junction to the plain path leads nowhere. realpath names the redirected folder.
+        real = os.path.realpath(target)
         # The paths reach cmd only through variables, expanded inside quotes: on its command line a path with &, ^, % or
         # a parenthesis (C:\\Users\\Tom & Jerry) would be cmd syntax, not a name.
         cmd = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "cmd.exe")
-        subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
-                       env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": str(target)},
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        try:
+            subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
+                           env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": real},
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            code = getattr(exc, "returncode", None)
+            raise LinkError(f"the link {link} to {real} could not be made (mklink {'exit ' + str(code) if code is not None else exc.__class__.__name__})") from None
+        if not os.path.isdir(link):
+            raise LinkError(f"the link {link} was made, but its target {real} is not reachable from here")
     else:
         os.symlink(relative or str(target), link, target_is_directory=True)
 

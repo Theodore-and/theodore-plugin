@@ -135,7 +135,10 @@ decides only from this note. Logging out does not delete it; the uninstall does,
 
 During the beta, your assistant may file a technical bug report when a command fails. A report holds: a title
 and description written by the assistant, the command and error code, and the versions and operating system
-listed above. Before anything is sent, the client applies the same redaction rules as the service
+listed above. When Theodore itself hits an internal error, the client files the report on its own, without asking:
+the command's name, the error as the client prints it, and the same versions and operating system; at most once a day
+for the same error and five a day in all, only while this computer is signed in, and never while automatic reports
+are off for your account. Before anything is sent, the client applies the same redaction rules as the service
 (`client/theodore_client/redact.py`, a port of the service's redactor that shares its test cases): absolute
 paths are removed whole, including folder names with spaces; a document or media file name is removed together
 with the words before it, unless they are generic diagnostic words; credentials in URLs and in name=value pairs,

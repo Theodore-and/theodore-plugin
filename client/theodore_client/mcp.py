@@ -380,6 +380,8 @@ def _text(text: str, error: bool = False) -> dict:
 def _status(status: Status) -> dict:
     if core.refused() and not getattr(status, "refusal", False):
         status = account.refusal_status()
+    elif getattr(status, "auto_report", False):
+        status = commands.report_internal(status)      # reported by the client itself, as on the command line
     text = status.render()
     return _text(desktop_text(text) if FOR == DESKTOP else text, error=status.name != "OK")
 
