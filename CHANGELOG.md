@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.12
+
+- The Studio agent says where it applies, so an account with Studio off is not handed it.
+
 ## 0.4.11
 
 - Theodore's Studio agent and its instructions no longer ask for an effort level: effort is the session's own

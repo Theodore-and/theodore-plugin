@@ -3,6 +3,7 @@ Linux and `theodore.cmd` on Windows against the fake API; the home and plugin pa
 
 from __future__ import annotations
 
+import time
 import json
 import os
 import socket
@@ -77,9 +78,15 @@ class FirstRun(LauncherCase):
         self.assertEqual((self.box.home / "client" / "current.txt").read_text().strip(), build_client.client_version())
         # 600 s as the hook's own first-run test: on the Windows machine, seven suites side by side, stage 2 was still
         # unpacking after the default 240 s once (2026-11-18). A job that ends returns at once.
+        # The background stage may not have begun when the launcher returns: on the loaded Windows machine wait_jobs
+        # then saw no job, returned at once, and the .ready file was not there yet (2026-11-18, twice on 2026-11-19;
+        # the log it left was empty). So wait for the file itself first, then for the job to end.
+        ready = self.box.home / "runtime" / RUNTIME_ID / ".ready"
+        deadline = time.monotonic() + 600
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(1)
         self.box.wait_jobs(600)
-        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(),
-                        "stage 2 ran in the background\n" + self.what_the_jobs_left())
+        self.assertTrue(ready.exists(), "stage 2 ran in the background\n" + self.what_the_jobs_left())
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
         self.assertFalse((self.box.home / "state" / "bootstrap" / "pid").exists())
 

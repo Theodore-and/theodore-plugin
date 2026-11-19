@@ -1,6 +1,6 @@
 ---
 name: studio
-description: "Theodore Studio: works in one part that `pptx prepare` made, from the message the pptx skill's slide-parts text gives (the part's WORKSPACE, NOTE and SPINE). Start one per part."
+description: "Theodore Studio: works in one part that `pptx prepare` made, from the message the pptx skill's slide-parts text gives (the part's WORKSPACE, NOTE and SPINE). Start one per part, only where that text names this agent."
 model: inherit
 ---
 
