@@ -279,7 +279,7 @@ class Specimen(ClientCase):
         self.api.specimens = {name: JPEG + name.encode() for name in names}
         calls = [names[0:6], names[3:9], names[5:10] + names[0:2], names[1:7], names[::2], names[4:10]]
         printed = {}
-        for asked in calls:          # a lead and five designers, each in a process of its own
+        for asked in calls:          # six callers, each in a process of its own
             result = self.client("specimen", *asked[:8])
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             for name, line in zip(asked, result.stdout.splitlines()):
@@ -2862,6 +2862,20 @@ class AutoUpdate(ClientCase):
         self.assertIn("claude plugin update theodore@theodore", first)
         self.assertNotIn("THEODORE NOTICE", self.client("skill", "deck-design", env=env).stdout, "once per release")
         self.assertIn("plugin files: Theodore's plugin files", self.client("doctor", env=env).stdout)
+
+    def test_a_plugin_update_brings_theodores_copy_every_file_of_the_new_plugin(self):
+        """A computer whose copy predates the plugin's agents folder gets it with the next plugin update."""
+        self.ready()
+        copy = self.box.home / "plugin"
+        shutil.copytree(self.box.tree, copy)
+        shutil.rmtree(copy / "plugins" / "theodore" / "agents")
+        manifest = copy / "plugins" / "theodore" / ".claude-plugin" / "plugin.json"
+        manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "version": "0.4.9"}))
+        self.box.serve_plugin_archive()
+        self.assertEqual(self.client("update", "--plugin-job").returncode, 0)
+        self.assertEqual(self.state("state/update.json")["plugin_update"]["hosts"]["theodore"], "updated")
+        self.assertEqual((copy / "plugins" / "theodore" / "agents" / "studio.md").read_bytes(),
+                         (self.box.plugin / "agents" / "studio.md").read_bytes())
 
     def test_claude_ai_is_never_touched_and_hears_its_update_path_once(self):
         log = self.fake_claude()

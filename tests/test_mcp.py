@@ -497,7 +497,7 @@ class Reuse(McpCase):
     def sheet_answers(self, status: int) -> int:
         return sum(v for (route, _n, code), v in self.api.served.items() if route == "specimen" and code == status)
 
-    def test_a_lead_and_five_designers_fetch_each_sheet_once(self):
+    def test_several_callers_fetch_each_sheet_once(self):
         server = self.server()
         server.send("tools/list")
         calls = [SHEETS[0:6], SHEETS[3:9], SHEETS[6:12], SHEETS[8:14], SHEETS[0:3] + SHEETS[10:13], SHEETS[1:7], [SHEETS[5]]]
