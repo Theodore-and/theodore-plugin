@@ -172,17 +172,35 @@ def welcome(engine_downloading: bool = False) -> int:
     welcome owed, and the first `status` that says OK gives it (`owed`). Codex runs nothing more in the set-up session,
     so there the installer gives it at once."""
     if engine_downloading and _host() != "codex":
-        _remember({"owed": True})
-        return core.emit(Status("SETUP_IN_PROGRESS",
-                                "Theodore is installed and signed in; the rest of its runtime and its engine are still "
-                                "downloading in the background, which goes on after this installer has ended.",
-                                f"run {quoted_launcher()} status --wait 100 (it returns as soon as the download is done), again "
-                                "while it says SETUP_IN_PROGRESS; when it says OK, its answer holds a short welcome for the "
-                                "user. Meanwhile, tell the user only the line below.",
-                                "Theodore is installed and is finishing a download in the background; this takes a few minutes."))
+        return core.emit(_owe())
     return core.emit(_welcome_status("OK", "Theodore is set up and signed in" + (
         "; the rest of its runtime and its engine finish downloading by themselves in the background."
         if engine_downloading else " (the check above)."), engine_downloading))
+
+
+def _owe() -> Status:
+    """The welcome left owed while the runtime or engine downloads: the first `status` that says OK gives it."""
+    _remember({"owed": True})
+    return Status("SETUP_IN_PROGRESS",
+                  "Theodore is installed and signed in; the rest of its runtime and its engine are still "
+                  "downloading in the background, which goes on after this installer has ended.",
+                  f"run {quoted_launcher()} status --wait 100 (it returns as soon as the download is done), again "
+                  "while it says SETUP_IN_PROGRESS; when it says OK, its answer holds a short welcome for the "
+                  "user. Meanwhile, tell the user only the line below.",
+                  "Theodore is installed and is finishing a download in the background; this takes a few minutes.")
+
+
+def after_sign_in(signed: Status) -> Status:
+    """`login --finish`'s answer. A set-up whose one-time code was old or missing ends with a sign-in link instead of
+    the welcome: on a computer that never had it, the sign-in that link completes gives it, by the installer's rules.
+    A computer that had its welcome gets `signed` unchanged."""
+    if _remembered().get("given"):
+        return signed
+    from .core import Job
+    engine_downloading = Job("setup").alive()
+    if engine_downloading and _host() != "codex":
+        return _owe()
+    return _welcome_status("OK", signed.summary, engine_downloading)
 
 
 def owed(summary: str) -> Status | None:

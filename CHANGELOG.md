@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.8
+
+- When set-up ends with a sign-in link (the one-time code was more than an hour old, or missing), finishing that
+  sign-in now gives the same short welcome the installer gives, once per computer: if the download is still going on,
+  the welcome comes with the first `status` that says Theodore is ready (in Codex, at once). A computer that already
+  had its welcome, signing in again later, is told only that it is signed in, as before.
+
 ## 0.4.7
 
 - The welcome is the last thing the assistant is given (a staging run: an assistant finishes its tool work before it
