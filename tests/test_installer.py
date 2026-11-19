@@ -138,6 +138,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(json.loads((home / "engines" / "current.json").read_text())["version"], "1.0.0-rc.3")
         self.assertTrue((home / "plugin" / ".agents" / "plugins" / "marketplace.json").exists())
         self.assertTrue((home / "plugin" / "plugins" / "theodore" / "skills" / "deck-design" / "SKILL.md").exists())
+        self.assertTrue((home / "plugin" / "plugins" / "theodore" / "agents" / "studio.md").exists(), "the whole plugin, its agent too")
         calls = self.host_calls()
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
         self.assertIn(f"codex plugin marketplace add {home / 'plugin'}", calls)

@@ -71,7 +71,11 @@ class Stubs(unittest.TestCase):
             source = frontmatter((FIXTURES / "frontmatter" / f"{skill}.txt").read_text(encoding="utf-8"))
             self.assertEqual(stub["name"].encode(), source["name"].encode(), skill)
             self.assertEqual(stub["description"].encode(), source["description"].encode(), skill)
-            self.assertEqual(sorted(stub), ["allowed-tools", "description", "name"])
+            self.assertEqual(sorted(stub), ["allowed-tools", "description", "effort", "name"])
+            # High effort when the instructions load, whatever the session's own effort, directly after the description.
+            self.assertEqual(stub["effort"], "effort: high", skill)
+            lines = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[[i for i, line in enumerate(lines) if line.startswith("description: ")][0] + 1], "effort: high", skill)
 
     def test_fixtures_match_the_engine_repository_when_it_is_checked_out(self):
         source_root = Path(os.environ.get("THEODORE_PRESENTATIONS") or ROOT.parent / "theodore-presentations")
@@ -125,6 +129,13 @@ class Stubs(unittest.TestCase):
     def test_no_instruction_text_or_engine_code_is_in_the_repository(self):
         for path in repo_files(PLUGIN):
             self.assertNotIn(path.suffix, (".py", ".js", ".mjs", ".ps1"), f"{path}: the plugin carries no program but the launcher")
+        self.assertEqual(sorted(p.name for p in PLUGIN.iterdir()),
+                         [".claude-plugin", ".mcp.json", "LICENSE", "README.md", "agents", "hooks", "logo.png", "mcp.json", "plugin.json", "skills"])
+        # The one agent, Studio (theodore:studio in the engine's texts); its words belong to the design text, not to this repository.
+        self.assertEqual(sorted(p.name for p in (PLUGIN / "agents").iterdir()), ["studio.md"])
+        agent = frontmatter((PLUGIN / "agents" / "studio.md").read_text(encoding="utf-8"))
+        self.assertEqual((agent["name"], agent["effort"]), ("name: studio", "effort: high"))
+        self.assertNotIn(b"\r", (PLUGIN / "agents" / "studio.md").read_bytes())
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills").iterdir()), ["deck-design", "pptx"])
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills" / "deck-design").iterdir()), ["LICENSE", "NOTICE", "SKILL.md", "scripts"])
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills" / "pptx").iterdir()), ["SKILL.md", "scripts"])
@@ -209,6 +220,11 @@ class GeneratedFiles(unittest.TestCase):
                 self.assertIn("skills/pptx/scripts/theodore", names)
                 self.assertEqual((bundle.getinfo("skills/pptx/scripts/theodore").external_attr >> 16) & 0o777, 0o755)
                 self.assertIn(b"\r\n", bundle.read("skills/pptx/scripts/theodore.cmd"))
+                self.assertEqual(bundle.read("agents/studio.md"), (PLUGIN / "agents" / "studio.md").read_bytes())
+            import tarfile
+            with tarfile.open(Path(one) / first["tar"]["file"]) as tar:
+                self.assertEqual(tar.extractfile("plugins/theodore/agents/studio.md").read(),
+                                 (PLUGIN / "agents" / "studio.md").read_bytes())
             latest = (Path(one) / "latest.manifest.json").read_text()
             self.assertEqual(json.loads(latest), {"schema": "theodore-plugin-latest@1", "version": first["version"], "archive": first["tar"]["file"],
                                                   "sha256": first["tar"]["sha256"], "size": first["tar"]["size"]})

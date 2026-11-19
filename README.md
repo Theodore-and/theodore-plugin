@@ -222,7 +222,7 @@ Commands: `theodore help`.
 ```
 .claude-plugin/marketplace.json     marketplace for Claude Code
 .agents/plugins/marketplace.json    marketplace for Codex
-plugins/theodore/                   the plugin: manifests, two small loaders, the launcher beside each
+plugins/theodore/                   the plugin: manifests, two small loaders, the launcher beside each, the Studio agent
 install/                            install.sh, install.cmd, install.md (the page an assistant reads)
 client/                             the client (theodore_client) and the vendored truststore module
 runtime/locks/                      the open-source dependency locks and the Python and Node pins

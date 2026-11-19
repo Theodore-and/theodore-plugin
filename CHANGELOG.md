@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.10
+
+- Theodore brings its own Studio agent and asks for high effort when its instructions load, so Studio's design pass
+  runs whatever effort the session is set to.
+
 ## 0.4.9
 
 - After a set-up that ended with a sign-in link, finishing that sign-in now also starts the download of the
