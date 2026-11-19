@@ -803,6 +803,68 @@ class WindowsRenderer(unittest.TestCase):
                 self.assertFalse(install.needs_libreoffice())
                 install.wait_for_renderer(["apply", "/deck/ws"])
 
+    def test_doctor_and_the_installer_answer_name_powerpoint_where_it_turns_decks_into_images(self):
+        # WINPPT: Windows 11 with PowerPoint and no LibreOffice built and checked every slide through PowerPoint, yet
+        # doctor (and so the installer's answer, which is doctor's) said previews needed LibreOffice and offered it.
+        from theodore_client import commands, install
+        offer = "tools install libreoffice"
+        office = r"C:\Program Files\LibreOffice\program\soffice.exe"
+
+        def answer(mac=False, **case):
+            """doctor's renderer line, its still-missing parts and its last status, on this machine's answers."""
+            with self.windows(**case) as win:
+                with mock.patch.object(install, "IS_WINDOWS", False) if mac else contextlib.nullcontext():
+                    snap = {"engine": "1.0.0", "plan": "beta", "runtime_ready": True, "signed_in": True,
+                            "packs": {}, "renderer": {"libreoffice": win.system_libreoffice() or (str(win.libreoffice_binary()) if win.libreoffice_binary() else None),
+                                                      "powerpoint": win.powerpoint_registered(), "pdftoppm": None}}
+                    check = commands._renderer_check(snap)
+                    with mock.patch.object(install, "published_packs", return_value=[]):
+                        missing = commands._still_missing(snap)
+                    verdict = commands._doctor_verdict([check], snap, core.home())
+                    return check, missing, verdict
+
+        with client_home(), mock.patch.object(commands, "needs_git_bash", return_value=False):
+            check, missing, verdict = answer(powerpoint=True)
+            self.assertEqual(check, ("ok", "renderer", "Microsoft PowerPoint, installed on this computer, turns decks into slide images; LibreOffice is not needed"))
+            self.assertEqual(missing, [], "nothing missing: LibreOffice is not listed")
+            self.assertEqual(verdict.name, "OK")
+            self.assertEqual(verdict.tell_user, "Theodore is ready (engine 1.0.0). Start a new session and ask for a deck.")
+            rendered = verdict.render()
+            self.assertEqual(len(rendered.splitlines()), 3)
+            for text in (check[2], rendered):
+                self.assertNotIn(offer, text)
+            self.assertNotIn("LibreOffice", rendered)
+
+            # every other case word for word as before
+            unchanged = "no LibreOffice found: slide previews are unavailable until it is installed; "
+            check, missing, verdict = answer(office=office, powerpoint=True)
+            self.assertEqual(check, ("ok", "renderer", f"LibreOffice at {office}"), "LibreOffice found wins")
+            self.assertNotIn("LibreOffice", verdict.tell_user)
+            check, missing, verdict = answer(office=office)
+            self.assertEqual(check, ("ok", "renderer", f"LibreOffice at {office}"))
+            check, missing, verdict = answer()                          # Windows with neither: the fetch
+            self.assertEqual(check[:2], ("warn", "renderer"))
+            self.assertEqual(check[2], unchanged + f"`{install.quoted_launcher()} tools install libreoffice` fetches it into Theodore's folder")
+            self.assertEqual(len(missing), 1)
+            self.assertTrue(missing[0].startswith("LibreOffice (slide previews): the next guide, doctor or rendering call starts its download again"), missing)
+            self.assertIn("Slide previews need LibreOffice, which is not installed.", verdict.tell_user)
+            check, missing, verdict = answer(pin=None, mac=True)        # macOS or Linux without one
+            self.assertEqual(check[:2], ("warn", "renderer"))
+            self.assertTrue(check[2].startswith(unchanged) and offer not in check[2], check)
+            self.assertEqual(missing, [])
+            self.assertIn("Slide previews need LibreOffice, which is not installed.", verdict.tell_user)
+
+    def test_the_tools_answer_names_powerpoint_when_libreoffice_is_not_needed_for_it(self):
+        from theodore_client import commands
+        with client_home(), mock.patch.object(commands.install.Job, "spawn", side_effect=AssertionError("nothing to fetch")):
+            for case, summary in (({"powerpoint": True}, "LibreOffice is not needed here: Microsoft PowerPoint, installed on this computer, turns decks into slide images."),
+                                  ({"pin": None}, "LibreOffice is not needed here: a converter is available or none is fetched on this system.")):
+                with self.windows(**case), mock.patch("builtins.print") as shown:
+                    self.assertEqual(commands.tools("libreoffice", True, False, if_needed=True), 0)
+                    text = "\n".join(str(c.args[0]) for c in shown.call_args_list)
+                    self.assertIn(summary, text, case)
+                    self.assertIn("TELL THE USER: Nothing to install.", text)
+
     def test_the_installer_asks_for_libreoffice_only_through_if_needed(self):
         text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
         self.assertIn('call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1', text)

@@ -844,6 +844,7 @@ def _snapshot() -> dict:
         "packs": {p: {"status": packs_state.get(p, {}).get("status", "missing"), "version": packs_state.get(p, {}).get("version"),
                       "percent": packs_state.get(p, {}).get("percent", 0)} for p in PACK_ORDER},
         "renderer": {"libreoffice": install.system_libreoffice() or (str(install.libreoffice_binary()) if install.libreoffice_binary() else None),
+                     "powerpoint": install.powerpoint_registered(),
                      "pdftoppm": shutil.which("pdftoppm")},
     }
 
@@ -937,9 +938,7 @@ def doctor(as_json: bool) -> int:
         add("warn", "service", f"{core.config().get('api_base')} not reachable ({error.cause}: {error.detail})")
     except api.ApiError as error:
         add("warn", "service", f"{core.config().get('api_base')} answered HTTP {error.http_status}")
-    office = snap["renderer"]["libreoffice"]
-    add("ok" if office else "warn", "renderer", f"LibreOffice at {office}" if office else
-        f"no LibreOffice found: slide previews are unavailable until it is installed; {install.libreoffice_install_action()}")
+    add(*_renderer_check(snap))
     try:
         import importlib.util
         pdfium = importlib.util.find_spec("pypdfium2") is not None
@@ -1026,6 +1025,21 @@ def doctor(as_json: bool) -> int:
     return core.emit(final)
 
 
+# On Windows the engine turns decks into slide images with an installed PowerPoint when no LibreOffice is found
+# (install.powerpoint_registered); LibreOffice is then not needed, so nothing offers it or says it is missing.
+POWERPOINT_RENDERER = "Microsoft PowerPoint, installed on this computer, turns decks into slide images"
+
+
+def _renderer_check(snap: dict) -> tuple[str, str, str]:
+    """doctor's renderer line: LibreOffice when found, else PowerPoint on Windows when registered, else what installs one."""
+    office = snap["renderer"]["libreoffice"]
+    if office:
+        return "ok", "renderer", f"LibreOffice at {office}"
+    if snap["renderer"].get("powerpoint"):
+        return "ok", "renderer", f"{POWERPOINT_RENDERER}; LibreOffice is not needed"
+    return "warn", "renderer", f"no LibreOffice found: slide previews are unavailable until it is installed; {install.libreoffice_install_action()}"
+
+
 def _still_missing(snap: dict) -> list[str]:
     """Each part Theodore still lacks on this computer, in plain words, with what will fetch it."""
     launcher = quoted_launcher()
@@ -1045,7 +1059,8 @@ def _still_missing(snap: dict) -> list[str]:
                        else "the next guide or catalogue call starts their download again"))
     lo = Job("libreoffice")
     lo_state = lo.read()
-    if install.needs_libreoffice() or (lo_state and not lo_state.get("done") and not (install.system_libreoffice() or install.libreoffice_binary())):
+    if not snap["renderer"].get("powerpoint") and (install.needs_libreoffice() or (
+            lo_state and not lo_state.get("done") and not (install.system_libreoffice() or install.libreoffice_binary()))):
         if lo.alive():
             missing.append("LibreOffice (slide previews): downloading in the background now")
         elif lo_state.get("failed") and not install.resumable_failure(lo_state):
@@ -1401,7 +1416,9 @@ def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) ->
     if name != "libreoffice":
         raise core.usage(f"unknown tool '{name}'. The tools are: libreoffice, git.")
     if if_needed and not install.needs_libreoffice():      # the Windows installer's call: only when nothing can render
-        return core.emit(Status("OK", "LibreOffice is not needed here: a converter is available or none is fetched on this system.",
+        return core.emit(Status("OK", f"LibreOffice is not needed here: {POWERPOINT_RENDERER}." if install.powerpoint_registered()
+                                and not (install.system_libreoffice() or install.libreoffice_binary()) else
+                                "LibreOffice is not needed here: a converter is available or none is fetched on this system.",
                                 "nothing to do.", "Nothing to install."))
     existing = install.system_libreoffice() or install.libreoffice_binary()
     if existing and not as_job:

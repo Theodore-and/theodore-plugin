@@ -71,11 +71,8 @@ class Stubs(unittest.TestCase):
             source = frontmatter((FIXTURES / "frontmatter" / f"{skill}.txt").read_text(encoding="utf-8"))
             self.assertEqual(stub["name"].encode(), source["name"].encode(), skill)
             self.assertEqual(stub["description"].encode(), source["description"].encode(), skill)
-            self.assertEqual(sorted(stub), ["allowed-tools", "description", "effort", "name"])
-            # High effort when the instructions load, whatever the session's own effort, directly after the description.
-            self.assertEqual(stub["effort"], "effort: high", skill)
-            lines = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(lines[[i for i, line in enumerate(lines) if line.startswith("description: ")][0] + 1], "effort: high", skill)
+            # Effort is the user's own setting (the owner's rule, again on 2026-11-19): a stub names none.
+            self.assertEqual(sorted(stub), ["allowed-tools", "description", "name"])
 
     def test_fixtures_match_the_engine_repository_when_it_is_checked_out(self):
         source_root = Path(os.environ.get("THEODORE_PRESENTATIONS") or ROOT.parent / "theodore-presentations")
@@ -134,7 +131,8 @@ class Stubs(unittest.TestCase):
         # The one agent, Studio (theodore:studio in the engine's texts); its words belong to the design text, not to this repository.
         self.assertEqual(sorted(p.name for p in (PLUGIN / "agents").iterdir()), ["studio.md"])
         agent = frontmatter((PLUGIN / "agents" / "studio.md").read_text(encoding="utf-8"))
-        self.assertEqual((agent["name"], agent["effort"]), ("name: studio", "effort: high"))
+        self.assertEqual(sorted(agent), ["description", "model", "name"])      # no effort: it is the user's own setting
+        self.assertEqual((agent["name"], agent["model"]), ("name: studio", "model: inherit"))
         self.assertNotIn(b"\r", (PLUGIN / "agents" / "studio.md").read_bytes())
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills").iterdir()), ["deck-design", "pptx"])
         self.assertEqual(sorted(p.name for p in (PLUGIN / "skills" / "deck-design").iterdir()), ["LICENSE", "NOTICE", "SKILL.md", "scripts"])
