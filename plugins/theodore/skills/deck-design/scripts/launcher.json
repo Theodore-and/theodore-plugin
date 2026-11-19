@@ -1,5 +1,5 @@
 {
-  "launcher_generation": 12,
+  "launcher_generation": 13,
   "shim_version": "0.4.13",
   "api_base": "https://api.theodoreand.ai",
   "dl_base": "https://dl.theodoreand.ai",
@@ -10,8 +10,8 @@
   "stage1_runtime_id": "b77f7d4ca2d43955",
   "stage1_client_version": "0.4.13",
   "stage1_client_url": "https://dl.theodoreand.ai/client/client-0.4.13.tar",
-  "stage1_client_sha256": "08f549dad4de26977c0aeb00dc486d552779c638217c59ec78acf2c97cc36dab",
-  "stage1_client_size": 798720,
+  "stage1_client_sha256": "a9eda41d86c1f07a5c840210f5362e2279e9ad0e9c662ac16bc65a86646e55b1",
+  "stage1_client_size": 808960,
   "stage1_python_darwin_arm64_url": "https://dl.theodoreand.ai/runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
   "stage1_python_darwin_arm64_sha256": "353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e",
   "stage1_python_darwin_arm64_size": 25035343,

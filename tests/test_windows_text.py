@@ -124,18 +124,106 @@ class WindowsCleanup(unittest.TestCase):
             commands._cleanup_script(["bin&x"], False)
 
 
+def fake_mklink(seen: list):
+    """subprocess.run as mklink /J would act, with a symlink in place of the junction (POSIX can run it too)."""
+    def run(command, **kw):
+        if "mklink" not in str(command):        # another program (the engine's venv): it succeeds
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        seen.append((command, kw["env"]))
+        if os.path.isdir(kw["env"]["THEODORE_LINK_TARGET"]):
+            os.symlink(kw["env"]["THEODORE_LINK_TARGET"], kw["env"]["THEODORE_LINK"], target_is_directory=True)
+    return run
+
+
 class Junction(unittest.TestCase):
     def test_a_junction_takes_its_paths_through_variables(self):
         tmp = Path(tempfile.mkdtemp()) / STRANGE
+        (tmp / "target").mkdir(parents=True)
         seen = []
-        with mock.patch.object(core, "IS_WINDOWS", True), \
-                mock.patch.object(core.subprocess, "run", lambda command, **kw: seen.append((command, kw["env"]))):
+        with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core.subprocess, "run", fake_mklink(seen)):
             core.link_dir(tmp / "link", tmp / "target")
         command, env = seen[0]
         self.assertTrue(command.isascii(), command)
         self.assertTrue(command.endswith('/d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""'))
         self.assertEqual(str(tmp / "link"), env["THEODORE_LINK"])
-        self.assertEqual(str(tmp / "target"), env["THEODORE_LINK_TARGET"])
+        self.assertEqual(os.path.realpath(tmp / "target"), env["THEODORE_LINK_TARGET"])
+
+    def test_the_junction_stores_the_real_path_of_a_target_reached_through_a_link(self):
+        """The first Windows user (the Claude desktop app, an MSIX package): the runtime's folder was reached through a
+        redirect, a junction to the plain path led nowhere. The junction is given the target's final real path."""
+        tmp = Path(tempfile.mkdtemp()) / STRANGE
+        (tmp / "real" / "runtime" / "node_modules").mkdir(parents=True)
+        os.symlink(tmp / "real", tmp / "seen", target_is_directory=True)
+        seen = []
+        with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core.subprocess, "run", fake_mklink(seen)):
+            core.link_dir(tmp / "engine" / "node_modules", tmp / "seen" / "runtime" / "node_modules")
+        stored = seen[0][1]["THEODORE_LINK_TARGET"]
+        self.assertEqual(os.path.realpath(tmp / "real" / "runtime" / "node_modules"), stored)
+        self.assertNotIn(os.sep + "seen" + os.sep, stored)
+
+    def test_a_link_whose_target_is_not_reachable_says_so_with_both_paths(self):
+        tmp = Path(tempfile.mkdtemp()) / STRANGE
+        tmp.mkdir(parents=True)
+        with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core.subprocess, "run", fake_mklink([])):
+            with self.assertRaises(core.LinkError) as raised:
+                core.link_dir(tmp / "link", tmp / "nowhere")
+        message = str(raised.exception)
+        self.assertIn(str(tmp / "link"), message)
+        self.assertIn(os.path.realpath(tmp / "nowhere"), message)
+        self.assertIn("not reachable from here", message)
+
+    def test_an_engine_link_that_leads_nowhere_is_an_engine_error(self):
+        """stage_engine records and cleans up an EngineError; the link's error must arrive as one, not as a crash."""
+        from theodore_client import install
+        tmp = Path(tempfile.mkdtemp())
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(tmp / "home")}), mock.patch.object(core, "_HOME", None), \
+                mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core.subprocess, "run", fake_mklink([])):
+            with self.assertRaises(install.EngineError) as raised:
+                install._prepare_engine(tmp / "engine.partial", "rt")
+        self.assertIn("not reachable from here", str(raised.exception))
+
+    @unittest.skipUnless(os.name == "nt", "a real junction")
+    def test_a_real_junction_through_a_junction_stores_the_real_path(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "real" / "node_modules" / "acorn").mkdir(parents=True)
+        (tmp / "real" / "node_modules" / "acorn" / "package.json").write_text("{}")
+        core.link_dir(tmp / "seen", tmp / "real")
+        core.link_dir(tmp / "engine" / "node_modules", tmp / "seen" / "node_modules")
+        stored = os.readlink(tmp / "engine" / "node_modules")
+        self.assertEqual(os.path.normcase(os.path.realpath(tmp / "real" / "node_modules")),
+                         os.path.normcase(stored.removeprefix("\\\\?\\")))
+        self.assertTrue((tmp / "engine" / "node_modules" / "acorn" / "package.json").is_file())
+        with self.assertRaises(core.LinkError):
+            core.link_dir(tmp / "broken", tmp / "missing")
+
+
+class SelfTestModules(unittest.TestCase):
+    def run_self_test(self, in_runtime: bool) -> str:
+        from theodore_client import install
+        tmp = Path(tempfile.mkdtemp())
+        directory, runtime = tmp / "engine", tmp / "home" / "runtime" / "rt"
+        (directory / "skills" / "pptx" / "scripts").mkdir(parents=True)
+        (directory / "skills" / "pptx" / "scripts" / "pptx.py").write_text("")
+        (directory / "package.json").write_text(json.dumps({"dependencies": {"acorn": "1"}}))
+        (directory / "node_modules").mkdir()
+        if in_runtime:
+            (runtime / "node_modules" / "acorn").mkdir(parents=True)
+            (runtime / "node_modules" / "acorn" / "package.json").write_text("{}")
+        ok = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(tmp / "home")}), mock.patch.object(core, "_HOME", None), \
+                mock.patch.object(install.subprocess, "run", lambda *a, **k: ok), \
+                mock.patch.object(install, "engine_env", lambda d: {}), mock.patch.object(install, "engine_python", lambda d: "py"):
+            with self.assertRaises(install.EngineError) as raised:
+                install._self_test(directory, "rt")
+        return str(raised.exception)
+
+    def test_a_module_the_runtime_lacks(self):
+        self.assertEqual("the runtime rt lacks the Node module acorn", self.run_self_test(in_runtime=False))
+
+    def test_a_module_the_runtime_has_but_the_link_does_not_reach(self):
+        message = self.run_self_test(in_runtime=True)
+        self.assertIn("the engine's link to the runtime rt does not resolve", message)
+        self.assertNotIn("lacks", message)
 
 
 class BatchFiles(unittest.TestCase):
@@ -486,3 +574,30 @@ class OneLibreOfficeInstall(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertIn("THEODORE OK: LibreOffice is already being installed in the background (downloading, 40%)", out.getvalue())
                 self.assertEqual(commands.tools("libreoffice", background=False, as_job=True), 0, "a second job just leaves")
+
+
+class CutCommandLine(unittest.TestCase):
+    """cmd ends a command line at its first line feed: an argument of several lines leaves a quote open, and the rest of
+    theodore.cmd's run line arrives inside the client's last argument. The client knows that text and runs nothing."""
+
+    def test_the_marker_is_the_text_after_the_arguments_on_the_launchers_run_line(self):
+        from theodore_client import cli
+        for folder in ("pptx", "deck-design"):
+            text = (support.PLUGIN / "skills" / folder / "scripts" / "theodore.cmd").read_text(encoding="ascii")
+            runs = [line for line in text.splitlines() if line.startswith('"%PY%" -I "%HOME_DIR%\\client\\%CV%" %* ')]
+            self.assertEqual(1, len(runs), folder)
+            self.assertTrue(runs[0].split(" %* ", 1)[1].startswith(cli.LAUNCHER_TAIL), runs[0][:160])
+
+    def test_the_run_line_is_followed_by_the_end_of_the_batch(self):
+        lines = (support.LAUNCHER_DIR / "theodore.cmd").read_text(encoding="ascii").splitlines()
+        run = next(i for i, line in enumerate(lines) if line.startswith('"%PY%" -I "%HOME_DIR%\\client\\%CV%" %* '))
+        self.assertEqual("call exit /b %%ERRORLEVEL%%", lines[run + 1], "a cut run line falls through only to the end of the batch")
+        self.assertLess(lines.index(":mcp_not_ready"), run, "no label follows the run line where a fall-through would reach it")
+
+    def test_an_argument_holding_the_marker_is_refused_on_every_platform(self):
+        from theodore_client import cli
+        argv = ["report", "--kind", "bug", "--title", "t t t", "--details", "first line " + cli.LAUNCHER_TAIL + ": Theodore's Python"]
+        status = cli.cut_command_line(argv)
+        self.assertEqual("USAGE", status.name)
+        self.assertIn("--details-file", status.next_step)
+        self.assertIsNone(cli.cut_command_line(["report", "--details", "an ordinary & line (with brackets)"]))

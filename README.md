@@ -213,7 +213,7 @@ TELL THE USER: Theodore is finishing its first-time setup. This takes a few minu
 | 73 | BLOCKED_BY_POLICY | Paused by the publisher, blocked by the computer's policy, or automatic reports are off |
 | 74 | CONNECTOR_REQUIRED | A cloud sandbox that cannot reach Theodore: the user allows its sites (Claude) or uses the connector |
 | 75 | RETRY | Busy or rate-limited; try again shortly |
-| 78 | INTERNAL | A bug; `theodore doctor` and `theodore report` help us fix it |
+| 78 | INTERNAL | A bug; the client reports it to Theodore automatically, and `theodore doctor` shows the installation's state |
 
 Commands: `theodore help`.
 

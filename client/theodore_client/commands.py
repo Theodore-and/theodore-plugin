@@ -682,8 +682,9 @@ def _os_name() -> str:
     return f"{platform.system()} {platform.release()}"
 
 
-def report(kind: str, title: str, details: str, verb: str | None, code: str | None, workspace: str | None,
-           origin: str, dry_run: bool) -> int:
+def _report_payload(kind: str, title: str, details: str, verb: str | None, code: str | None, workspace: str | None,
+                    origin: str) -> dict:
+    """A report as it leaves this computer: every text scrubbed, versions and platform, nothing else."""
     _system, arch = core.platform_arch()
     detail_block = {"message": scrub(details)[:REPORT_MESSAGE_MAX]}
     if verb:
@@ -711,6 +712,12 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
     }
     if len(json.dumps(payload).encode("utf-8")) > REPORT_MAX_BYTES:
         raise core.usage("the report is larger than 64 KB.", "shorten --details and run the command again.")
+    return payload
+
+
+def report(kind: str, title: str, details: str, verb: str | None, code: str | None, workspace: str | None,
+           origin: str, dry_run: bool) -> int:
+    payload = _report_payload(kind, title, details, verb, code, workspace, origin)
     if dry_run:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -743,6 +750,97 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
     return core.emit(Status("OK", f"report filed as {reference}.", "continue with the user's task.",
                             f"I sent Theodore a technical bug report (no deck content). You can see it at {core.site_name('/app/reports')}."
                             if kind == "bug" else "I sent your feedback to Theodore."))
+
+
+# --- the report the client files itself on an internal error (the beta terms: technical content only, no question) ----------
+
+AUTO_REPORT_WAIT_S = 5.0          # the answer never waits longer for the report than this
+AUTO_REPORTS_PER_DAY = 5          # from one installation, whatever the errors
+AUTO_REPORTS = "auto-reports.json"   # in state/: {"day", "count", "sent": {fingerprint: reference}}
+
+
+def _auto_report(summary: str, verb: str) -> tuple[str, str | None]:
+    """Send one automatic bug report for an internal error: ("sent", reference), ("already", reference) when the same
+    error was sent today, ("failed", None) when it could not be sent, ("none", None) when no report goes (signed out,
+    reports off for the account or not in its plan, the day's limit reached). Never raises; never prints."""
+    text = scrub(summary)
+    fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]     # the error, not the command that met it
+    try:
+        cred = credentials.load()
+        if not cred:
+            return "none", None
+        path = core.home().state / AUTO_REPORTS
+        day = time.strftime("%Y-%m-%d", time.gmtime(core.now()))
+        with core.lock("auto-reports", timeout=2.0):
+            record = core.read_json(path)
+            if record.get("day") != day or not isinstance(record.get("sent"), dict):
+                record = {"day": day, "count": 0, "sent": {}}
+            if fingerprint in record["sent"]:
+                return "already", record["sent"][fingerprint]
+            if int(record.get("count") or 0) >= AUTO_REPORTS_PER_DAY:
+                return "none", None
+            record["count"] = int(record.get("count") or 0) + 1      # an attempt counts, sent or not
+            core.write_json(path, record, 0o600)
+        allowed, why = account.automatic_reports()
+        if why == "unknown":        # learn the account's switch first, as `report` does; never guess "on"
+            with contextlib.suppress(Exception):
+                account.refresh(timeout=3.0, nudge_updates=False)
+            allowed, why = account.automatic_reports()
+        if not allowed:
+            core.log(f"internal error not reported: automatic reports {why}")
+            return "none", None
+        payload = _report_payload("bug", f"internal error in {verb}", f"THEODORE INTERNAL: {text}", verb, "INTERNAL", None, "automatic")
+        try:
+            _status, _headers, raw = api.call("reports", bearer=cred["installation_secret"], body=payload, timeout=AUTO_REPORT_WAIT_S,
+                                              exact_timeout=True, learn_refusals=False)
+        except api.ApiError as error:
+            if error.code == "auto_reports_disabled":
+                account.remember_automatic_reports_off()
+                return "none", None
+            raise
+        answer = json.loads(raw.decode("utf-8") or "{}")
+        reference = str(answer.get("ref") or answer.get("id") or "received")[:64]
+        with core.lock("auto-reports", timeout=2.0):
+            record = core.read_json(path)
+            if record.get("day") == day and isinstance(record.get("sent"), dict):
+                record["sent"][fingerprint] = reference
+                core.write_json(path, record, 0o600)
+        core.log(f"internal error reported automatically as {reference}")
+        return "sent", reference
+    except Exception as exc:  # noqa: BLE001  a report never makes the error worse
+        core.log(f"internal error not reported: {exc.__class__.__name__}: {exc}")
+        return "failed", None
+
+
+def file_internal_report(summary: str, verb: str | None = None) -> tuple[str, str | None]:
+    """_auto_report within AUTO_REPORT_WAIT_S: a send still running then is left to finish while the process lives, and
+    counts as not sent. The verb is the command's first word (`setup`, `guide`), when it is one."""
+    import threading
+    word = verb if verb is not None else (sys.argv[1] if len(sys.argv) > 1 else "")
+    word = word if re.fullmatch(r"[a-z][a-z-]{0,31}", word or "") else "command"
+    result: list = []
+    worker = threading.Thread(target=lambda: result.append(_auto_report(summary, word)), daemon=True)
+    worker.start()
+    worker.join(AUTO_REPORT_WAIT_S)
+    return result[0] if result else ("failed", None)
+
+
+def report_internal(status: Status) -> Status:
+    """The INTERNAL status as printed: reported first, then lines that say so. Never raises."""
+    try:
+        outcome, reference = file_internal_report(status.summary)
+    except Exception:  # noqa: BLE001
+        outcome, reference = "failed", None
+    check = f"run {quoted_launcher()} doctor to check this installation, then run the same command again later."
+    said = {"sent": f" The error was reported to Theodore automatically ({reference}); there is nothing to send or to ask.",
+            "already": f" The same error was already reported to Theodore automatically today ({reference}); there is nothing to send or to ask.",
+            "failed": " The automatic report to Theodore could not be sent just now; it will be sent when this error happens again.",
+            "none": ""}[outcome]
+    tell = "Theodore hit an internal error and has reported it to Theodore automatically." if outcome in ("sent", "already") \
+        else "Theodore hit an internal error."
+    reported = Status("INTERNAL", status.summary, check + said, tell)
+    reported.cause = status.cause
+    return reported
 
 
 _REPORTS_OFF_NEXT = ("do not retry and do not ask the user about it; continue with the user's task. Send a report only when the "
@@ -801,6 +899,8 @@ def setup_job() -> int:
                 install.start_packs_job(manifest.get("packs") or [])
             except (Status, api.ApiError, api.NetworkError, install.EngineError, install.StaleDocument, KeyError) as exc:
                 core.log(f"setup: engine not installed yet: {getattr(exc, 'summary', None) or getattr(exc, 'message', exc)}")
+                if isinstance(exc, install.EngineError):        # the engine failed on this computer: reported as the guide would print it
+                    file_internal_report(f"the engine could not be installed: {core.scrub_secrets(str(exc))[:300]}", "setup")
         job.finish()
         return 0
     except Status as status:
@@ -809,6 +909,7 @@ def setup_job() -> int:
         return status.code
     except Exception as exc:  # the job has no terminal: record anything
         job.fail("INTERNAL", f"{exc.__class__.__name__}: {exc}")
+        file_internal_report(f"setup failed: {core.scrub_secrets(f'{exc.__class__.__name__}: {exc}')[:300]}", "setup")
         return 78
 
 
@@ -1117,7 +1218,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
         what = "; ".join(f"{n} ({d})" for n, d in failed)
         return (Status("INTERNAL", f"Theodore is installed but not ready: {what}.",
                                 f"tell the user what failed; run {quoted_launcher()} doctor again after fixing it, or report it with: "
-                                f"{quoted_launcher()} report --kind bug --origin user_requested",
+                                f"{quoted_launcher()} report --kind bug --origin user_requested --title T --details-file F (details "
+                                f"of more than one line go in a UTF-8 file, passed with --details-file)",
                                 f"Theodore is installed but not working yet: {', '.join(n for n, _d in failed)} failed its check. I can report this to Theodore."))
     warned = {n for l, n, _d in checks if l == "warn"}
     notes = []
@@ -1316,12 +1418,14 @@ def engine_update_job() -> int:
         return 0
     except install.EngineError as exc:
         job.fail("SELF_TEST", str(exc))
+        file_internal_report(f"the engine could not be installed: {core.scrub_secrets(str(exc))[:300]}", "update")
         return 1
     except Status as status:
         job.fail(status.name, status.summary)
         return status.code
     except Exception as exc:
         job.fail("INTERNAL", f"{exc.__class__.__name__}: {exc}")
+        file_internal_report(f"the engine could not be installed: {core.scrub_secrets(f'{exc.__class__.__name__}: {exc}')[:300]}", "update")
         return 78
 
 

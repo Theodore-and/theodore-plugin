@@ -235,6 +235,41 @@ class WindowsShells(LauncherCase):
             self.assertIsNotNone(shutil.which(tool), tool)
 
 
+class SeveralLines(LauncherCase):
+    """Text of more than one line in an argument. cmd ends a command line at its first line feed, which left a quote open
+    in theodore.cmd's run line: its exit went into the argument and the launcher fell into the next label and ran the
+    command again every two seconds (the first Windows user's report arrived ten times). sh passes "$@" intact."""
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.box.wait_jobs()
+
+    @unittest.skipUnless(IS_WINDOWS, "cmd cuts a command line at a line feed")
+    def test_a_cut_command_line_is_refused_once_and_the_launcher_returns(self):
+        started = time.monotonic()
+        result = self.run_launcher("report", "--dry-run", "--kind", "bug", "--title", "render failed", "--details",
+                                   "first line\nsecond line", timeout=90)
+        self.assertLess(time.monotonic() - started, 30, "the launcher returns at once")
+        first, nxt, _t = self.assertStatus(result, "USAGE", 64)          # exactly three lines: the client ran once
+        self.assertIn("first line break", first)
+        self.assertIn("--details-file", nxt)
+        self.assertNotIn("runtime is installed", result.stdout + result.stderr)
+
+    @unittest.skipIf(IS_WINDOWS, "the sh launcher")
+    def test_sh_passes_an_argument_of_several_lines_intact(self):
+        result = self.run_launcher("report", "--dry-run", "--kind", "bug", "--title", "render failed", "--details", "first line\nsecond line")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual("first line second line", json.loads(result.stdout)["details"]["message"])
+
+    def test_details_of_several_lines_from_a_file_through_the_launcher(self):
+        path = self.box.tmp / "details.txt"
+        path.write_bytes("first line\r\nsecond line & (third) 50% \u00e9\r\n".encode("utf-8"))
+        result = self.run_launcher("report", "--dry-run", "--kind", "bug", "--title", "render failed", "--details-file", str(path))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual("first line second line & (third) 50% \u00e9", json.loads(result.stdout)["details"]["message"])
+
+
 class Failures(LauncherCase):
     def test_wrong_checksum_is_hash_mismatch_and_clears_for_a_retry(self):
         self.box.write_launcher_json(**{self.python_key() + "_sha256": "0" * 64})

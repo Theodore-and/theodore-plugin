@@ -69,8 +69,9 @@ if [ "${1:-}" != uninstall ] && ! real_keys; then
 fi
 
 # Git Bash, MSYS and Cygwin: Windows has its own launcher beside this one, but cmd cannot carry an argument with a
-# double quote or a shell metacharacter intact (theodore.cmd re-reads %* in its own lines). So once Theodore is set
-# up, this shell starts the client's python.exe itself, and the MSYS runtime quotes every argument for it exactly.
+# double quote, a shell metacharacter or a line feed intact (theodore.cmd re-reads %* in its own lines, and cmd ends a
+# command line at its first line feed). So once Theodore is set up, this shell starts the client's python.exe itself,
+# and the MSYS runtime quotes every argument for it exactly.
 # Before that, the batch launcher bootstraps: given the arguments when they are plain, or `setup` when they are
 # not (the arguments then go to the client directly once setup has finished).
 case "$(uname -s 2>/dev/null)" in
@@ -97,7 +98,8 @@ case "$(uname -s 2>/dev/null)" in
     direct "$@"
     plain=1
     for arg in "$@"; do
-      case "$arg" in *[\"%!^\&\|\<\>]*) plain= ;; esac
+      case "$arg" in *[\"%!^\&\|\<\>]*|*"
+"*) plain= ;; esac
     done
     # The quoted line goes into a variable and cmd is given only its name: MSYS would otherwise write a cmd /c line
     # that starts with a quote, and cmd drops the first and last quote of it (a path with a space breaks).

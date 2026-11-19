@@ -19,7 +19,8 @@ HELP = """Theodore client commands (run through the launcher):
                                  (--open: also open the sign-in page in the browser; nothing else ever opens one)
   status [--json] [--wait S]     doctor [--json]         version
   update [--check | --apply | --rollback | --channel C | --pin V | --unpin | --reset-state]
-  report --kind bug|feedback --title T --details D [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
+  report --kind bug|feedback --title T --details D|--details-file F [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
+                                 (details of more than one line: put them in a UTF-8 file and pass --details-file; --details - reads standard input)
   prefs add "<text>" | list | remove <id>
   packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
   hosts register | unregister | settings [--apply | --remove]          activate --grant - | --grant-file F          uninstall
@@ -78,7 +79,9 @@ def _parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("report", add_help=False)
     rp.add_argument("--kind", choices=("bug", "feedback"), required=True)
     rp.add_argument("--title", required=True)
-    rp.add_argument("--details", required=True)
+    details = rp.add_mutually_exclusive_group(required=True)
+    details.add_argument("--details", help="'-': read the details from standard input")
+    details.add_argument("--details-file")
     rp.add_argument("--verb")
     rp.add_argument("--code")
     rp.add_argument("--workspace")
@@ -171,7 +174,8 @@ def _dispatch(argv: list[str]) -> int:
             else "channel" if args.channel else "apply"
         return commands.update(action, args.pin or args.channel)
     if cmd == "report":
-        return commands.report(args.kind, args.title, args.details, args.verb, args.code, args.workspace, args.origin, args.dry_run)
+        return commands.report(args.kind, args.title, _details(args.details, args.details_file), args.verb, args.code, args.workspace,
+                               args.origin, args.dry_run)
     if cmd == "prefs":
         return commands.prefs(args.action, args.value)
     if cmd == "packs":
@@ -201,6 +205,39 @@ def _dispatch(argv: list[str]) -> int:
     raise core.usage(f"unknown command '{argv[0]}'.")
 
 
+def _details(details: str | None, path: str | None) -> str:
+    """A report's details: the argument, standard input for "-", or a UTF-8 file read whole (text of several lines cannot
+    pass as an argument through cmd, which ends a command line at its first line feed)."""
+    try:
+        if path is not None:
+            with open(path, "rb") as handle:
+                return handle.read().decode("utf-8-sig")
+        if details == "-":
+            if sys.stdin is None:
+                raise core.usage("--details - reads standard input, and this command has none.")
+            return sys.stdin.buffer.read().decode("utf-8-sig")
+    except OSError as exc:
+        raise core.usage(f"--details-file: the file could not be read ({exc.strerror or exc.__class__.__name__}).") from None
+    except UnicodeDecodeError:
+        raise core.usage(f"the details ({'--details-file' if path is not None else 'standard input'}) are not UTF-8 text.") from None
+    return details or ""
+
+
+# The text that follows the arguments on the Windows launcher's run line (theodore.cmd, :run_client). cmd ends a command
+# line at its first line feed, so an argument of several lines leaves a quote open and the rest of that line arrives
+# inside the last argument; the command is then not run (test_launcher ties this text to the launcher's line).
+LAUNCHER_TAIL = "& if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY"
+
+
+def cut_command_line(argv: list[str]) -> Status | None:
+    if not any(LAUNCHER_TAIL in arg for arg in argv):
+        return None
+    return core.usage("the command line was cut at its first line break: on Windows, cmd ends a command at a line feed, so an "
+                      "argument of more than one line does not arrive whole. Nothing was run.",
+                      "pass text of more than one line in a UTF-8 file (report: --details-file <path>) or keep each argument on "
+                      "one line, then run the command again.")
+
+
 def _utf8_streams() -> None:
     """Text goes out as UTF-8 whatever the system's code page: on Windows a pipe or a file otherwise gets the ANSI code
     page (cp1252), and a guidance character outside it would end the command with UnicodeEncodeError."""
@@ -214,6 +251,9 @@ def _utf8_streams() -> None:
 def main(argv: list[str] | None = None) -> int:
     _utf8_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
+    cut = cut_command_line(argv)
+    if cut is not None:
+        return core.emit(cut)
     if argv[:1] == ["mcp"]:         # standard output carries only the protocol: statuses become tool answers
         from . import mcp
         blocked = None

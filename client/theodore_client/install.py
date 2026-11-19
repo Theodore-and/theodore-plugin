@@ -335,10 +335,13 @@ def _prepare_engine(directory: Path, runtime_id: str) -> None:
         raise EngineError("could not create the engine's Python environment: it did not finish within 300 s") from None
     if done.returncode != 0:
         raise EngineError(f"could not create the engine's Python environment: {core.child_text(done.stderr or done.stdout).strip()[:200]}")
-    core.link_dir(directory / "node_modules", runtime / "node_modules")
-    core.link_dir(directory / ".runtime" / "bin", runtime / "bin")
-    home.packs.mkdir(parents=True, exist_ok=True)
-    core.link_dir(directory / "skills" / "pptx-asset-packs", home.packs, relative="../../../packs")
+    try:        # a link that leads nowhere is the engine's failure: recorded and cleaned up as one (stage_engine)
+        core.link_dir(directory / "node_modules", runtime / "node_modules")
+        core.link_dir(directory / ".runtime" / "bin", runtime / "bin")
+        home.packs.mkdir(parents=True, exist_ok=True)
+        core.link_dir(directory / "skills" / "pptx-asset-packs", home.packs, relative="../../../packs")
+    except core.LinkError as exc:
+        raise EngineError(f"the engine could not be linked to its runtime: {exc}") from None
 
 
 class EngineError(Exception):
@@ -359,6 +362,10 @@ def _self_test(directory: Path, runtime_id: str) -> None:
     package = core.read_json(directory / "package.json")
     for name in (package.get("dependencies") or {}):
         if not (directory / "node_modules" / name / "package.json").is_file():
+            own = core.home().runtime / runtime_id / "node_modules"
+            if (own / name / "package.json").is_file():     # the runtime has it: the engine's link does not lead there
+                raise EngineError(f"the engine's link to the runtime {runtime_id} does not resolve: the Node module {name} is in "
+                                  f"{own} but not reachable through {directory / 'node_modules'}")
             raise EngineError(f"the runtime {runtime_id} lacks the Node module {name}")
     node = core.home().runtime / runtime_id / "bin" / ("node.exe" if IS_WINDOWS else "node")
     try:
