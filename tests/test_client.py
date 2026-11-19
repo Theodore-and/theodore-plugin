@@ -125,6 +125,9 @@ class SignIn(ClientCase):
         self.assertEqual(len(self.api.devices), 1)
         self.assertStatus(self.client("login", "--finish", "--wait", "0.5"), "SIGN_IN_PENDING", 66)
         self.api.approve_device()
+        # A computer that had its welcome: the plain answer. What a first sign-in by link gets is test_welcome's.
+        (self.box.home / "state").mkdir(parents=True, exist_ok=True)
+        (self.box.home / "state" / "welcome.json").write_text('{"given": true}', encoding="utf-8")
         self.assertStatus(self.client("login", "--finish", "--wait", "5"), "OK", 0)
         self.assertFalse((self.box.home / "state" / "device.json").exists())
 

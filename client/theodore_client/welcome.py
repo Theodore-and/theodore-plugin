@@ -193,10 +193,19 @@ def _owe() -> Status:
 def after_sign_in(signed: Status) -> Status:
     """`login --finish`'s answer. A set-up whose one-time code was old or missing ends with a sign-in link instead of
     the welcome: on a computer that never had it, the sign-in that link completes gives it, by the installer's rules.
-    A computer that had its welcome gets `signed` unchanged."""
+    A computer that had its welcome gets `signed` unchanged. No engine and no set-up job (it ended before this sign-in):
+    the job is started here, as the installer does after activation, and never waited for."""
     if _remembered().get("given"):
         return signed
     from .core import Job
+    try:
+        from . import install
+        if not install.current_engine() and not Job("setup").alive():
+            started = install.setup_status()        # starts the set-up job, which goes on to the engine when signed in
+            if not Job("setup").alive():
+                core.log(f"welcome: the set-up job did not start ({started.name}: {started.summary})")
+    except Exception as exc:  # noqa: BLE001  the sign-in and its welcome go on without it
+        core.log(f"welcome: the set-up job did not start ({exc.__class__.__name__})")
     engine_downloading = Job("setup").alive()
     if engine_downloading and _host() != "codex":
         return _owe()

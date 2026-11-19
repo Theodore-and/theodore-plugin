@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.9
+
+- After a set-up that ended with a sign-in link, finishing that sign-in now also starts the download of the
+  PowerPoint engine when it is not installed yet, in the background, as the installer does. The welcome then comes
+  with the first `status` that says Theodore is ready (in Codex, at once, with its line about the download), so the
+  first deck no longer waits for the engine. If the download cannot be started, the sign-in still succeeds and the
+  welcome is given as in 0.4.8. A computer that already had its welcome is not changed.
+
 ## 0.4.8
 
 - When set-up ends with a sign-in link (the one-time code was more than an hour old, or missing), finishing that

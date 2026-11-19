@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -193,7 +194,10 @@ class WelcomeAfterSignInByLink(ClientCase):
         return jobs / "setup.json"
 
     def test_the_first_sign_in_by_link_gives_the_welcome(self):
+        setup_record = (self.box.home / "state" / "jobs" / "setup.json").read_text()
         first, nxt, tell = self.assertStatus(self.sign_in_by_link(), "OK", 0)
+        self.assertEqual((self.box.home / "state" / "jobs" / "setup.json").read_text(), setup_record,
+                         "the engine is installed: no set-up job is started")
         self.assertIn("this computer is signed in to Theodore", first)
         self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
         self.assertIn("Studio is on, so each slide gets a deeper design pass", tell)
@@ -226,10 +230,47 @@ class WelcomeAfterSignInByLink(ClientCase):
         _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
         self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
 
+    def test_with_no_engine_the_sign_in_starts_the_set_up_job_and_leaves_the_welcome_owed(self):
+        """Staging run of 0.4.8: after a sign-in by link the engine was not installed and nothing was fetching it."""
+        shutil.rmtree(self.box.home / "engines")
+        _f, nxt, tell = self.assertStatus(self.sign_in_by_link(), "SETUP_IN_PROGRESS", 67)
+        self.assertIn("status --wait 100", nxt)
+        self.assertNotIn("Welcome", tell + nxt)
+        self.assertTrue(self.state("state/welcome.json")["owed"])
+        self.assertFalse(self.state("state/jobs/setup.json").get("done"), "a new set-up job was started")
+        self.box.wait_jobs()
+        first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5"), "OK", 0)
+        self.assertIn(f"engine {self.ENGINE_VERSION}", first)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertTrue(self.state("state/welcome.json")["given"])
+
+    def test_with_no_engine_in_codex_the_job_starts_and_the_welcome_comes_at_once(self):
+        shutil.rmtree(self.box.home / "engines")
+        _f, nxt, tell = self.assertStatus(self.sign_in_by_link(env={"CODEX_THREAD_ID": "t-1"}), "OK", 0)
+        self.assertIn("A last download finishes by itself in the next few minutes.", tell)
+        self.assertNotIn("status --wait", nxt)
+        self.assertFalse(self.state("state/jobs/setup.json").get("done"), "a new set-up job was started")
+        self.box.wait_jobs()
+
+    def test_when_the_set_up_job_cannot_start_the_sign_in_still_gives_the_welcome(self):
+        shutil.rmtree(self.box.home / "engines")
+        jobs = self.box.home / "state" / "jobs"
+        jobs.chmod(0o500)                       # no job record can be written
+        self.addCleanup(jobs.chmod, 0o700)
+        first, nxt, tell = self.assertStatus(self.sign_in_by_link(), "OK", 0)
+        self.assertIn("this computer is signed in to Theodore", first)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertNotIn("A last download", tell)
+        self.assertTrue(self.state("state/welcome.json")["given"])
+        self.assertIn("welcome: the set-up job did not start", (self.box.home / "logs" / "client.log").read_text())
+
     def test_a_second_sign_in_gives_no_welcome(self):
         self.assertStatus(self.sign_in_by_link(), "OK", 0)
         self.assertStatus(self.client("logout"), "OK", 0)
+        shutil.rmtree(self.box.home / "engines")
+        setup_record = (self.box.home / "state" / "jobs" / "setup.json").read_text()
         _f, nxt, tell = self.assertStatus(self.sign_in_by_link(), "OK", 0)
+        self.assertEqual((self.box.home / "state" / "jobs" / "setup.json").read_text(), setup_record, "nothing is started")
         self.assertEqual(tell, "TELL THE USER: Theodore is signed in on this computer.")
         self.assertEqual(nxt, "NEXT: run the command you were running before the sign-in.")
 
