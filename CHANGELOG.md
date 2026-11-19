@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.13
+
+- On Windows with PowerPoint and no LibreOffice, doctor and the installer's answer say PowerPoint turns decks into slide images, and no longer say LibreOffice is needed or offer to install it.
+
 ## 0.4.12
 
 - The Studio agent says where it applies, so an account with Studio off is not handed it.
