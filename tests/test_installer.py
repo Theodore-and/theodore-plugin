@@ -122,6 +122,9 @@ class Installer(unittest.TestCase):
         self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore."), tell)
         self.assertIn("Studio is on", tell)
         self.assertIn("studio off", nxt)
+        self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
+                                     "uninstalling unless the user asks."), nxt)
+        self.assertFalse(json.loads((self.box.home / "state" / "welcome.json").read_text())["owed"])
         self.assertEqual(out.strip().splitlines()[-1], tell)
         home = self.box.home
         self.assertIn(f'the stable launcher is "{home / "bin" / STABLE}"', out)    # quoted: a name with & or ( stays one path
@@ -250,14 +253,28 @@ class Installer(unittest.TestCase):
         self.assertTrue(first.startswith("THEODORE SETUP_IN_PROGRESS: Theodore is installed and signed in; the rest of its runtime"), first)
         stable = self.box.home / "bin" / STABLE
         self.assertIn("status --wait 100", nxt)
-        self.assertIn("A last download finishes by itself in the next few minutes.", tell)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore."), tell)
+        # Lane ONBOARD (lead's staging run, 2026-11-19): the welcome is not given here, where the assistant still has
+        # tool work to do; it is owed, and the first `status` that says OK gives it, once (both installers).
+        self.assertIn("when it says OK, its answer holds a short welcome for the user", nxt)
+        self.assertEqual(tell, "TELL THE USER: Theodore is installed and is finishing a download in the background; this "
+                               "takes a few minutes.")
+        self.assertTrue(json.loads((self.box.home / "state" / "welcome.json").read_text())["owed"])
         self.assertLess(took, 45, "the installer does not wait for the whole download")
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.host_calls(),
                       "the plugin is registered before the installer ends")
         self.assertFalse((self.box.home / "state" / "hosts.pending").exists())
         self.box.wait_jobs(timeout=180)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
+        given = self.box.run_launcher("status", "--wait", "100", launcher=stable)
+        self.assertEqual(given.returncode, 0, given.stdout + given.stderr)
+        first, nxt, tell = status_lines(given.stdout)
+        self.assertTrue(first.startswith("THEODORE OK: ") and "Set-up is finished." in first, first)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore."), tell)
+        self.assertNotIn("A last download", tell)
+        self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
+                                     "uninstalling unless the user asks."), nxt)
+        again = self.box.run_launcher("status", launcher=stable)
+        self.assertEqual(status_lines(again.stdout)[2], "TELL THE USER: Theodore is ready.", again.stdout)
         doctor = self.box.run_launcher("doctor", launcher=stable)
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
         self.assertTrue(status_lines(doctor.stdout)[0].startswith("THEODORE OK: Theodore is ready"), doctor.stdout)

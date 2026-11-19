@@ -19,6 +19,11 @@ A short welcome after set-up, and Studio from the assistant.
   design pass, which uses more of the AI plan; off, slides get a simpler design pass that uses less of it.
 - After a resume, the line that names the versions says each label once when the engine and the design text moved
   together: "as 1.0.0-rc.18; the current version is 1.0.0-rc.19".
+- The welcome is the last thing the assistant is given (a staging run: an assistant finishes its tool work before it
+  speaks, and built its own closing from the last answer). While the download is still going on, the installer only
+  sends it to `status --wait 100` and marks the welcome owed (`state/welcome.json`); the first `status` that says OK
+  gives the welcome, once. When nothing is downloading, and in Codex, the installer gives it as before. Its NEXT says
+  the welcome is the whole closing message. Exit codes unchanged.
 - The plugin has an icon (lane BRAND): `plugins/theodore/logo.png` (512 x 512), named by `"icon"` in both plugin.json
   files (`claude plugin validate` accepts the field). tools/sync_launchers.py publishes images as they are.
 
