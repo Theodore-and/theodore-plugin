@@ -4,7 +4,8 @@
 #
 #   ci/run.sh macos-arm64              natively
 #   ci/run.sh macos-x64                under Rosetta (arch -x86_64), with the x64 CPython and Node
-#   ci/run.sh linux-x64 | linux-arm64  in an ubuntu 22.04 container (pinned by digest; Docker, for example colima)
+#   ci/run.sh linux-x64 | linux-arm64  in an ubuntu 22.04 container (pinned by digest; Docker, for example colima), in a
+#                                      prepared image with the packages, built once per recipe (linux_recipe)
 #   ci/run.sh windows-x64 --azure      the same on a throwaway Azure VM made for this run and deleted after it, pass,
 #                                      fail or interrupted (ci/azure-windows.sh; `ci/azure-windows.sh sweep` deletes leftovers)
 #   ci/run.sh windows-x64 --host user@host [--key file]   over SSH on a Windows machine (stock Windows with OpenSSH
@@ -108,19 +109,36 @@ run_mac() { # name platform-key arch-prefix
 }
 
 # --- one platform in a container -------------------------------------------------------------------------------------
-in_container() { # docker-platform name script
+# The prepared image every Linux job runs in: the pinned ubuntu digest with what the old runners had and the jobs use (a
+# Python to bootstrap the pinned one, curl, openssl, xz, git, one font with fontconfig: skia-canvas measures text with
+# the system's fonts, a desktop Linux always has some; tinyproxy for the network job) and the user tester. It is named
+# after its recipe and platform, built once where the job runs (this Mac's Docker or the standing machine's) and reused:
+# no apt at run time, so no mirror can hold a job; a changed recipe is a new name, so a new image by itself.
+linux_recipe() {
+  cat <<DOCKER
+FROM $UBUNTU
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries && export DEBIAN_FRONTEND=noninteractive && apt-get update -qq >/dev/null \\
+  && apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git fontconfig fonts-dejavu-core tinyproxy >/dev/null \\
+  && rm -rf /var/lib/apt/lists/* && useradd -m tester
+DOCKER
+}
+linux_image_tag() { echo "theodore-plugin-ci:$(printf '%s %s' "$(linux_recipe)" "$1" | shasum -a 256 | cut -c1-12)"; }
+linux_image() { # docker-platform log: the prepared image's tag, built when this Docker does not have it (its output in log)
+  tag=$(linux_image_tag "$1")
+  docker image inspect "$tag" >/dev/null 2>&1 && { echo "$tag"; return 0; }
+  say "building the prepared image $tag for $1 (once)" >&2
+  if linux_recipe | docker build --platform "$1" -t "$tag" - > "$2" 2>&1; then echo "$tag"; return 0; fi
+  say "the prepared image $tag did not build (docker build of linux_recipe in ci/run.sh; $2)" >&2; return 1
+}
+in_container() { # docker-platform name script; returns 3 when the prepared image did not build
   dplat=$1 name=$2 script=$3
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { say "docker is not running"; return 1; }
   mkdir -p "$OUT/$name" "$CACHE"
+  image=$(linux_image "$dplat" "$OUT/$name/image.log") || return 3
   docker run --rm --label "theodore-ci=$$" --platform "$dplat" -v "$ROOT:/repo:ro" -v "$OUT/$name:/repo/ci/out/$name" -v "$CACHE:/repo/ci/out/cache" -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 \
-    -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$UBUNTU" sh -c "$script"
+    -e CI_NAME="$name" -e PYTHONDONTWRITEBYTECODE=1 -w /repo "$image" sh -c "$script"
 }
-
-# What the old runners had and the jobs use: a Python to bootstrap the pinned one, curl, openssl, xz, git, and one
-# font with fontconfig (skia-canvas measures text with the system's fonts; a desktop Linux always has some).
-SETUP='set -e; export DEBIAN_FRONTEND=noninteractive; echo "Acquire::Retries \"5\";" > /etc/apt/apt.conf.d/80retries; apt-get update -qq >/dev/null
-  apt-get install -y -qq --no-install-recommends python3 curl ca-certificates openssl xz-utils git fontconfig fonts-dejavu-core >/dev/null
-  useradd -m tester'
+SETUP='set -e'
 
 run_linux() { # name docker-platform platform-key
   name=$1 dplat=$2 key=$3
@@ -135,7 +153,7 @@ run_linux() { # name docker-platform platform-key
       ( \$PY runtime/build/build_bundle.py --platform $key --out \$O/bundle --work /tmp/work --cache ci/out/cache/bundle-$key &&
         \$PY runtime/build/smoke_test.py --bundle \$O/bundle --platform $key &&
         THEODORE_TEST_BUNDLE=/repo/\$O/bundle \$PY $RUNTIME_SUITE ) > \$O/runtime.log 2>&1 && echo pass > \$O/runtime.result || echo fail > \$O/runtime.result'" \
-    || say "$name: the container did not finish"
+    || { [ $? -eq 3 ] && { echo fail > "$dir/shim.result"; echo fail > "$dir/runtime.result"; }; say "$name: the container did not finish"; }
   for job in shim runtime; do [ -f "$dir/$job.result" ] || echo not-run > "$dir/$job.result"; say "$name $job: $(cat "$dir/$job.result")"; done
 }
 
@@ -169,13 +187,22 @@ run_linux_standing() { # name docker-platform platform-key machine
   rt="ci/par_unittest.py $procs --only test_launcher test_installer --split test_launcher test_installer"
   [ "$procs" -gt 1 ] 2>/dev/null || { shim="-m unittest discover -s tests -v"; rt="-m unittest -v tests.test_launcher tests.test_installer"; }
   only=; [ -z "${CI_SHIM_ONLY:-}" ] || only='exit 0;'
-  # The container's script: run_linux's, with this machine's folders
+  # The container's script: run_linux's, with this machine's folders, in the same prepared image built on the machine
+  # (kept on its disk between runs)
+  img=$(linux_image_tag "$dplat")
   cat > "$dir/remote-job.sh" <<JOB
 set -u
 rm -rf ~/n; mkdir -p ~/n/repo ~/n/out/$name ~/cache/plugin && tar -xf ~/in.tar -C ~/n/repo && rm -f ~/in.tar || exit 1
 mkdir -p ~/n/repo/ci/out/$name ~/n/repo/ci/out/cache  # the mount points (ci/out is not tracked; the repository is mounted read-only)
+if ! sudo docker image inspect $img >/dev/null 2>&1; then
+  echo "building the prepared image $img for $dplat (once on this machine)"
+  sudo docker build --platform $dplat -t $img - <<'RECIPE' || { echo "ci: the prepared image $img did not build (docker build of linux_recipe in ci/run.sh, on $m)"; echo fail > ~/n/out/$name/shim.result; echo fail > ~/n/out/$name/runtime.result; }
+$(linux_recipe)
+RECIPE
+fi
+sudo docker image inspect $img >/dev/null 2>&1 &&
 sudo docker run --rm --platform $dplat -v ~/n/repo:/repo:ro -v ~/n/out/$name:/repo/ci/out/$name -v ~/cache/plugin:/repo/ci/out/cache \\
-  -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 -e CI_NAME=$name -e PYTHONDONTWRITEBYTECODE=1 -w /repo $UBUNTU sh -c '$(printf '%s' "$SETUP" | sed "s/'/'\\\\''/g")
+  -e THEODORE_FETCH_STORE=/repo/ci/out/cache/by-sha256 -e CI_NAME=$name -e PYTHONDONTWRITEBYTECODE=1 -w /repo $img sh -c '$(printf '%s' "$SETUP" | sed "s/'/'\\\\''/g")
     chown -R tester /repo/ci/out/$name /repo/ci/out/cache
     su tester -c "cd /repo; O=ci/out/$name; export TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1
       PY=\\\$(python3 ci/bootstrap_python.py $key /home/tester/py ci/out/cache) || exit 1
@@ -204,7 +231,6 @@ JOB
 run_network() {
   dir="$OUT/network"; mkdir -p "$dir"; rm -f "$dir/"*.result "$dir/"*.log
   in_container linux/arm64 network "$SETUP
-    apt-get install -y -qq --no-install-recommends tinyproxy >/dev/null
     openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/trusted-key.pem -out /tmp/trusted-cert.pem -days 2 -subj /CN=127.0.0.1 \
       -addext subjectAltName=IP:127.0.0.1,DNS:localhost -addext basicConstraints=critical,CA:TRUE 2>/dev/null
     chmod 644 /tmp/trusted-key.pem
