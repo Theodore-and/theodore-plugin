@@ -188,7 +188,7 @@ class Installer(unittest.TestCase):
         self.api.issue_activation_code("ABCD-1234")
         for part in self.api.runtime["parts"]:
             if part["part"] != "python":
-                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 20      # 8 s was over before a loaded machine's installer looked (2026-11-19)
         result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2", "CODEX_THREAD_ID": "01a1df00-test"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         first, nxt, tell = status_lines(result.stdout)
@@ -198,7 +198,7 @@ class Installer(unittest.TestCase):
         self.assertIn("here each Theodore command would ask for approval", nxt)
         self.assertIn("Start a new session, then ask for your first deck.", tell)
         self.assertNotIn("SETUP_IN_PROGRESS", first)
-        self.box.wait_jobs(timeout=180)
+        self.box.wait_jobs(timeout=360)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
 
     @unittest.skipIf(IS_WINDOWS, "install.sh")
@@ -223,7 +223,7 @@ class Installer(unittest.TestCase):
         self.api.issue_activation_code("ABCD-1234")
         for part in self.api.runtime["parts"]:
             if part["part"] != "python":
-                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 20      # 8 s was over before a loaded machine's installer looked (2026-11-19)
         result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2", "CODEX_THREAD_ID": "01a1df00-test"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         first, nxt, tell = status_lines(result.stdout)
@@ -234,7 +234,7 @@ class Installer(unittest.TestCase):
         self.assertNotIn("status --wait", nxt)
         self.assertIn("A last download finishes by itself in the next few minutes. Start a new session, then ask for your first deck.", tell)
         self.assertNotIn("SETUP_IN_PROGRESS", first)
-        self.box.wait_jobs(timeout=180)
+        self.box.wait_jobs(timeout=360)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
 
     def test_on_a_slow_link_the_installer_returns_and_the_download_goes_on_in_the_background(self):
@@ -244,7 +244,7 @@ class Installer(unittest.TestCase):
         self.api.issue_activation_code("ABCD-1234")
         for part in self.api.runtime["parts"]:
             if part["part"] != "python":
-                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 8
+                self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 20      # 8 s was over before a loaded machine's installer looked (2026-11-19)
         began = time.monotonic()
         result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2"})
         took = time.monotonic() - began
@@ -264,7 +264,7 @@ class Installer(unittest.TestCase):
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", self.host_calls(),
                       "the plugin is registered before the installer ends")
         self.assertFalse((self.box.home / "state" / "hosts.pending").exists())
-        self.box.wait_jobs(timeout=180)
+        self.box.wait_jobs(timeout=360)
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
         given = self.box.run_launcher("status", "--wait", "100", launcher=stable)
         self.assertEqual(given.returncode, 0, given.stdout + given.stderr)

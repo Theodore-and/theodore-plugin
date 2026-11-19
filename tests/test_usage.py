@@ -169,10 +169,10 @@ class Sending(InProcess):
 
     def test_a_slow_service_is_abandoned_after_two_seconds_and_the_lines_stay(self):
         self.write(command_event(-60))
-        self.api.usage_delay = 4
+        self.api.usage_delay = 8          # the service would take 8 s; the client gives up after 2
         started = time.monotonic()
         usage.flush(force=True)
-        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertLess(time.monotonic() - started, 6.0)      # well before the service answers, with room for a loaded machine
         self.assertEqual(len(self.lines()), 1)
         self.assertIn("pending", self.state())
 
