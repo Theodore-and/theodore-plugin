@@ -28,7 +28,10 @@
 #                                      a green record at this commit (a target that failed for an outside reason is
 #                                      rerun alone; a test failure needs a new commit)
 #   ci/run.sh plan                     what HEAD needs, from what changed since the nearest stamped ancestor, by the table
-#                                      CHANGE_TABLE below (inherit, text, windows, client, runtime), and the targets
+#                                      CHANGE_TABLE below (inherit, text, windows, client, runtime), and the targets; a
+#                                      release's version bump counts as text when it is nothing else (ci/textcheck.py)
+#   ci/run.sh shipped                  the text class's proof: the archives built at HEAD differ from a build of the
+#                                      stamped ancestor only in the files the plan allowed (after `archives`)
 #   ci/run.sh selected [--azure]       run only those targets, then a stamp that names the ancestor the other rows are
 #                                      inherited from (a runtime change runs `all`)
 #   ci/run.sh lock-status              the shared lock's holder and its queue in order (lock-waits: today's waits and holds)
@@ -421,6 +424,31 @@ run_archives() {
   tail -n 3 "$dir/archives.log"
 }
 
+# --- the text class's proof: what ships changed only where the plan allowed ---------------------------------------------
+# The archives of the stamped ancestor are built from its tracked files (git archive, the same build tools at that
+# commit) and compared with ci/out/archives member by member: the client tar, both plugin archives and the install
+# files may differ only in the files the plan counted as text or as the version bump (PLAN_ALLOWED). It closes the gap
+# between the diff and the bytes (an untracked file in the tree ships; a build tool could read anything).
+run_shipped() {
+  dir="$OUT/shipped"; fresh "$dir"; commit > "$dir/commit"
+  { [ "$(cat "$OUT/archives/commit" 2>/dev/null)" = "$(commit)" ] && [ "$(cat "$OUT/archives/build.result" 2>/dev/null)" = pass ]; } ||
+    { say "shipped: no passing archives build at this commit (ci/run.sh archives first)"; result shipped check fail; return; }
+  [ -n "$PLAN_FROM" ] || { say "shipped: no stamped ancestor"; result shipped check fail; return; }
+  case "$(uname -m)" in arm64) key=darwin-arm64 ;; *) key=darwin-x64 ;; esac
+  PY=$("$(host_python)" "$ROOT/ci/bootstrap_python.py" "$key" "$OUT/python-$key" "$CACHE") || { result shipped check fail; return; }
+  # shellcheck disable=SC2086
+  ( set -e; mkdir -p "$dir/tree" "$dir/base/install"; git -C "$ROOT" archive "$PLAN_FROM" | tar -xf - -C "$dir/tree"
+    cd "$dir/tree"; export PYTHONDONTWRITEBYTECODE=1
+    "$PY" tools/build_plugin_archives.py --out "$dir/base/plugin" --root "$dir/tree" >/dev/null
+    "$PY" runtime/build/build_client.py --out "$dir/base/client" >/dev/null
+    cp install/install.md install/install.sh install/install.cmd "$dir/base/install/"
+    echo "the ancestor $PLAN_FROM built; allowed: $PLAN_ALLOWED"
+    "$(host_python)" "$ROOT/ci/textcheck.py" shipped "$dir/base" "$OUT/archives" $PLAN_ALLOWED ) > "$dir/check.log" 2>&1 \
+    && result shipped check pass || result shipped check fail
+  rm -rf "${dir:?}/tree" "${dir:?}/base"
+  tail -n 1 "$dir/check.log"
+}
+
 summary() {
   {
     printf '%-12s %-8s %-8s %-62s %s\n' platform shim runtime "bundle manifest" sha256
@@ -504,7 +532,11 @@ require() {
 # --- which checks a commit needs: one table ---------------------------------------------------------------------------
 # Each changed file takes the class of the first row its path matches; the commit needs the highest class of its files.
 #   inherit  nothing that ships or that a test reads: secrets only
-#   text     the skill stubs' and the plugin's text: secrets, archives, macos-arm64 shim (the stub-versus-engine test)
+#   text     the skill stubs', the agents' and the plugin's text, and a release's version bump when that is all a
+#            version-carrying file changed (ci/textcheck.py version-only: the version literal from the ancestor's to
+#            HEAD's, the client tar's sha256 and size pins): secrets, archives, shipped (the archives differ from the
+#            ancestor's only in those files) and the macos-arm64 shim job (every test module once; sync_launchers --check
+#            proves the pins)
 #   windows  Windows-only files: secrets, archives, windows-x64
 #   client   the client, the launchers, the install files, the build tools or the tests: secrets, archives, network and
 #            the shim job on every platform (bundles untouched, so no runtime job; windows-x64 runs whole)
@@ -520,6 +552,7 @@ ci/lock.sh|inherit
 .gitleaksignore|inherit
 .gitleaks.toml|inherit
 plugins/*/skills/*/SKILL.md|text
+plugins/*/agents/*.md|text
 plugins/*/README.md|text
 ci/windows-*.ps1|windows
 ci/azure-*.sh|windows
@@ -535,6 +568,7 @@ tests/*|client
 tools/sync_launchers.py|client
 tools/build_plugin_archives.py|client
 tools/snapshot_*|client
+ci/textcheck.py|client
 *|runtime
 '
 CLASS_RANK="inherit text windows client runtime"
@@ -556,23 +590,30 @@ stamped_ancestor() {
 targets_of() { # class
   case "$1" in
     inherit) echo "secrets" ;;
-    text) echo "secrets archives macos-arm64:shim" ;;
+    text) echo "secrets archives shipped macos-arm64:shim" ;;
     windows) echo "secrets archives windows-x64" ;;
     client) echo "secrets archives network macos-arm64:shim macos-x64:shim linux-x64:shim linux-arm64:shim windows-x64" ;;
     *) echo "all" ;;
   esac
 }
-plan() { # sets PLAN_CLASS PLAN_FROM PLAN_FILE; prints the verdict
-  PLAN_CLASS=runtime PLAN_FROM= PLAN_FILE=
+plan() { # sets PLAN_CLASS PLAN_FROM PLAN_FILE PLAN_ALLOWED; prints the verdict
+  PLAN_CLASS=runtime PLAN_FROM= PLAN_FILE= PLAN_ALLOWED=
   PLAN_FROM=$(stamped_ancestor) || { echo "runtime: no stamped ancestor within 300 commits: all"; return 0; }
   if [ "$PLAN_FROM" = "$(commit)" ]; then PLAN_CLASS=green; echo "green: HEAD is stamped"; return 0; fi
-  best=inherit bestfile= n=0
-  for f in $(git -C "$ROOT" diff --name-only --no-renames "$PLAN_FROM" HEAD); do
-    n=$((n + 1)); c=$(class_of "$f")
+  files=$(git -C "$ROOT" diff --name-only --no-renames "$PLAN_FROM" HEAD)
+  # The version-carrying files whose whole change is the release's version bump take the class text (nothing printed,
+  # or a helper that fails: each file keeps its row's class)
+  # shellcheck disable=SC2086
+  bumped=" $(cd "$ROOT" && "$(host_python)" ci/textcheck.py version-only "$PLAN_FROM" $files 2>/dev/null | tr '\n' ' ') "
+  best=inherit bestfile= n=0 nb=0
+  for f in $files; do
+    n=$((n + 1))
+    case "$bumped" in *" $f "*) c=text nb=$((nb + 1)) ;; *) c=$(class_of "$f") ;; esac
+    [ "$c" = text ] && PLAN_ALLOWED="$PLAN_ALLOWED $f"
     if [ "$(rank_of "$c")" -gt "$(rank_of "$best")" ]; then best=$c bestfile=$f; fi
   done
   PLAN_CLASS=$best PLAN_FILE=$bestfile
-  echo "$best: ${bestfile:-only files no check reads} ($n files changed since the stamped $(printf %.12s "$PLAN_FROM")): $(targets_of "$best")"
+  echo "$best: ${bestfile:-only files no check reads} ($n files changed since the stamped $(printf %.12s "$PLAN_FROM"), $nb of them the version bump only): $(targets_of "$best")"
 }
 record_selected() { # after `selected`: the targets it ran must pass; the stamp names the ancestor for the rest
   sha=$(commit); short=$(printf %.12s "$sha")
@@ -586,6 +627,7 @@ record_selected() { # after `selected`: the targets it ran must pass; the stamp 
       network) r=$(cat "$OUT/network/job.result" 2>/dev/null) ;;
       secrets) r=$(cat "$OUT/secrets/scan.result" 2>/dev/null) ;;
       archives) r=$(cat "$OUT/archives/build.result" 2>/dev/null) ;;
+      shipped) r=$(cat "$OUT/shipped/check.result" 2>/dev/null); cp "$OUT/shipped/check.log" "$dest/shipped.log" 2>/dev/null ;;
     esac
     [ "$r" = pass ] || bad="$bad$t "
   done
@@ -710,6 +752,7 @@ case "$TARGET" in
   summary) summary ;;
   stamp) note_parts; stamp_from_parts ;;
   plan) plan ;;
+  shipped) plan; limited 900 shipped run_shipped ;;
   selected)
     plan
     case "$PLAN_CLASS" in
@@ -728,6 +771,7 @@ case "$TARGET" in
       case "$t" in
         secrets) limited 900 secrets run_secrets ;;
         archives) heavy 900 archives run_archives ;;
+        shipped) limited 900 shipped run_shipped ;;
         network) heavy 900 network run_network ;;
       esac
     done
