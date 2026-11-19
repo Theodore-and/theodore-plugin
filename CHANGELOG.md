@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.11
+
+- Theodore's Studio agent and its instructions no longer ask for an effort level: effort is the session's own
+  setting, as before 0.4.10. The Studio agent stays.
+
 ## 0.4.10
 
 - Theodore brings its own Studio agent and asks for high effort when its instructions load, so Studio's design pass

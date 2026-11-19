@@ -1,7 +1,6 @@
 ---
 name: deck-design
 description: "Use before creating, restructuring, adapting or visually redesigning a deck, section or slide, and to critique its argument or design. Not for typos, translation, data or file mechanics."
-effort: high
 allowed-tools: mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodore__specimen, Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)
 ---
 
