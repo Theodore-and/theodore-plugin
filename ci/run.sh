@@ -491,6 +491,17 @@ record() {
 # pass at that commit counts: a test failure needs its fix and a new commit. The stamp is written when every
 # required job has a green record and none is marked.
 REQUIRED_PARTS="secrets-scan macos-arm64-shim macos-arm64-runtime macos-x64-shim macos-x64-runtime windows-x64-shim windows-x64-runtime linux-x64-shim linux-x64-runtime linux-arm64-shim linux-arm64-runtime network-job archives-build"
+# This Mac asleep while a job ran (a lid closed on battery: no assertion prevents that sleep) is an outside failure too:
+# tests that wait on a clock, and every connection to a build machine, fail then. True when the power log holds a
+# Sleep entry between the birth of the job's log and the time of its result.
+slept_during() { # <job log> <job result>
+  command -v pmset >/dev/null 2>&1 || return 1
+  from=$(stat -f %B "$1" 2>/dev/null) && to=$(stat -f %m "$2" 2>/dev/null) || return 1
+  pmset -g log 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8} [+-][0-9]{4} Sleep ' | while read -r day clock zone _rest; do
+    at=$(date -j -f '%Y-%m-%d %H:%M:%S %z' "$day $clock $zone" +%s 2>/dev/null) || continue
+    if [ "$at" -ge "$from" ] && [ "$at" -le "$to" ]; then echo slept; break; fi
+  done | grep -q slept
+}
 note_parts() { # record this run's results as per-target records for the commit
   sha=$(commit); dirty=$(git -C "$ROOT" status --porcelain --untracked-files=no)
   [ -z "$dirty" ] || { say "parts: the tree has uncommitted changes; no records"; return 0; }
@@ -505,7 +516,9 @@ note_parts() { # record this run's results as per-target records for the commit
             { printf 'green at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; cat "$OUT/$name/"*.log 2>/dev/null; true; } > "$parts/$part.tmp" && mv "$parts/$part.tmp" "$parts/$part" ;;
       # Test modules that could not import only because the job's runtime bundle was not built (support.py finds no
       # bundle manifest) are an outside failure, not a test failure.
-      fail) if [ -f "$log" ] && grep -E '^(FAIL|ERROR): test' "$log" | { if grep -q 'REAL_BUNDLE).glob' "$log"; then grep -v '_FailedTest'; else cat; fi; } | grep -q .; then
+      fail) if [ -f "$log" ] && slept_during "$log" "$OUT/$name/$job.result"; then
+              say "parts: $part failed while this Mac was asleep during the job: an outside failure, rerun it (ci/run.sh $name)"
+            elif [ -f "$log" ] && grep -E '^(FAIL|ERROR): test' "$log" | { if grep -q 'REAL_BUNDLE).glob' "$log"; then grep -v '_FailedTest'; else cat; fi; } | grep -q .; then
               { printf 'test failure at %s\n%s\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; grep -E '^(FAIL|ERROR): ' "$log"; } > "$parts/$part.testfail"
             fi ;;
     esac
