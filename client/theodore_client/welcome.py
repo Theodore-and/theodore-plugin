@@ -118,9 +118,13 @@ def _downloading() -> bool:
     return any(Job(name).alive() for name in ("setup", "packs", "libreoffice", "git"))
 
 
-def welcome(engine_downloading: bool = False) -> int:
-    """The installers' last status. `engine_downloading`: the runtime or engine is still downloading (the installer's
-    SETUP_IN_PROGRESS case)."""
+CLOSING = ("This welcome is your whole closing message: say nothing about permissions, settings or uninstalling unless "
+           "the user asks.")
+
+
+def _welcome_status(name: str, summary: str, engine_downloading: bool, download_done: bool = False) -> Status:
+    """The welcome as a status. `download_done`: given by the first `status` that says OK after the installer left it
+    owed, so no line says a download is still going on."""
     from . import desktop
     from .commands import _host_record
     host = _host()
@@ -136,7 +140,7 @@ def welcome(engine_downloading: bool = False) -> int:
         lines.append("Studio is on, so each slide gets a deeper design pass, which uses more of your AI plan. "
                      "Would you like it off, for simpler slides that use less of it?")
     last = []
-    if engine_downloading or _downloading():
+    if not download_done and (engine_downloading or _downloading()):
         last.append("A last download finishes by itself in the next few minutes.")
     if new_session:
         last.append("Start a new session, then ask for your first deck.")
@@ -152,24 +156,37 @@ def welcome(engine_downloading: bool = False) -> int:
             "own words without adding to it; ask nothing else")
     studio_next = (f"; if they answer that they want Studio off, run {launcher} studio off (and {launcher} studio on if "
                    "they later want it back); otherwise do nothing about it and do not ask again") if ask_studio else ""
-    if host == "codex":
-        after = (". Apart from that, run no Theodore command in this session: Codex loads Theodore's tool and permissions "
-                 "only when a session starts, so here each Theodore command would ask for approval; if they ask for a deck "
-                 "here, ask them to start a new session first")
-    elif engine_downloading:
-        after = (f". Then run {launcher} status --wait 100 (it returns as soon as the download is done), again while it "
-                 "says SETUP_IN_PROGRESS; when it says OK, tell the user in one short line that Theodore has finished "
-                 "downloading")
-    else:
-        after = ""
+    after = (". Apart from that, run no Theodore command in this session: Codex loads Theodore's tool and permissions "
+             "only when a session starts, so here each Theodore command would ask for approval; if they ask for a deck "
+             "here, ask them to start a new session first") if host == "codex" else ""
     if ask_studio:
         _remember({"studio_asked": True})
-    if engine_downloading and host != "codex":
+    _remember({"owed": False, "given": True})
+    return Status(name, summary, give + studio_next + after + ". " + CLOSING, " ".join(lines))
+
+
+def welcome(engine_downloading: bool = False) -> int:
+    """The installers' last status. `engine_downloading`: the runtime or engine is still downloading (the installer's
+    SETUP_IN_PROGRESS case). The welcome must be the last thing the assistant is given (an assistant finishes its tool
+    work before it speaks): while the download goes on, the installer only sends it to `status --wait`, marks the
+    welcome owed, and the first `status` that says OK gives it (`owed`). Codex runs nothing more in the set-up session,
+    so there the installer gives it at once."""
+    if engine_downloading and _host() != "codex":
+        _remember({"owed": True})
         return core.emit(Status("SETUP_IN_PROGRESS",
                                 "Theodore is installed and signed in; the rest of its runtime and its engine are still "
                                 "downloading in the background, which goes on after this installer has ended.",
-                                give + studio_next + after + ".", " ".join(lines)))
-    return core.emit(Status("OK", "Theodore is set up and signed in" + (
-                            "; the rest of its runtime and its engine finish downloading by themselves in the background."
-                            if engine_downloading else " (the check above)."),
-                            give + studio_next + after + ".", " ".join(lines)))
+                                f"run {quoted_launcher()} status --wait 100 (it returns as soon as the download is done), again "
+                                "while it says SETUP_IN_PROGRESS; when it says OK, its answer holds a short welcome for the "
+                                "user. Meanwhile, tell the user only the line below.",
+                                "Theodore is installed and is finishing a download in the background; this takes a few minutes."))
+    return core.emit(_welcome_status("OK", "Theodore is set up and signed in" + (
+        "; the rest of its runtime and its engine finish downloading by themselves in the background."
+        if engine_downloading else " (the check above)."), engine_downloading))
+
+
+def owed(summary: str) -> Status | None:
+    """The welcome, once, for the first `status` that says OK after the installer left it owed; else None."""
+    if not _remembered().get("owed"):
+        return None
+    return _welcome_status("OK", summary + " Set-up is finished.", engine_downloading=False, download_done=True)

@@ -80,6 +80,8 @@ class Welcome(ClientCase):
         self.assertIn("if they answer that they want Studio off, run", nxt)
         self.assertIn("studio off", nxt)
         self.assertIn("do not ask again", nxt)
+        self.assertTrue(nxt.endswith(". This welcome is your whole closing message: say nothing about permissions, settings or "
+                                     "uninstalling unless the user asks."), nxt)
         self.assertTrue(json.loads((self.box.home / "state" / "welcome.json").read_text())["studio_asked"])
 
         _f, nxt, tell = self.assertStatus(self.welcome(), "OK", 0)       # set up again: the question is not repeated
@@ -94,7 +96,7 @@ class Welcome(ClientCase):
             self.api.studio = answer
             _f, nxt, tell = self.assertStatus(self.welcome(), "OK", 0)
             self.assertNotIn("Studio", tell + nxt, answer)
-            self.assertFalse((self.box.home / "state" / "welcome.json").exists(), answer)
+            self.assertNotIn("studio_asked", self.state("state/welcome.json"), answer)
 
     def test_a_studio_answer_made_elsewhere_counts_as_asked(self):
         self.assertStatus(self.client("studio", "off"), "OK", 0)
@@ -118,16 +120,49 @@ class Welcome(ClientCase):
         _f, _n, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": "s-loaded"}), "OK", 0)
         self.assertNotIn("new session", tell)
 
-    def test_still_downloading(self):
+    def test_still_downloading_the_welcome_waits_for_the_first_status_that_says_ok(self):
+        """Lead's staging run (2026-11-19): an assistant finishes its tool work before it speaks, so a welcome given with
+        a NEXT that sends it to `status --wait` was lost. The installer now only sends it there and marks the welcome
+        owed; the first `status` that says OK gives it, once."""
         _f, nxt, tell = self.assertStatus(self.welcome("--downloading"), "SETUP_IN_PROGRESS", 67)
-        self.assertIn("Welcome to Theodore.", tell)
-        self.assertIn("A last download finishes by itself in the next few minutes.", tell)
-        self.assertIn("status --wait 100", nxt)
-        self.assertIn("tell the user in one short line that Theodore has finished downloading", nxt)
+        self.assertEqual(tell, "TELL THE USER: Theodore is installed and is finishing a download in the background; this "
+                               "takes a few minutes.")
+        self.assertIn("status --wait 100 (it returns as soon as the download is done), again while it says "
+                      "SETUP_IN_PROGRESS; when it says OK, its answer holds a short welcome for the user.", nxt)
+        self.assertNotIn("Welcome", tell + nxt)
+        self.assertTrue(self.state("state/welcome.json")["owed"])
+        self.assertNotIn("studio_asked", self.state("state/welcome.json"), "not asked yet")
+
+        first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5"), "OK", 0)
+        self.assertIn("Set-up is finished.", first)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertIn("Studio is on, so each slide gets a deeper design pass", tell)
+        self.assertNotIn("A last download", tell)
+        self.assertTrue(nxt.startswith("NEXT: give the user this welcome now, in this conversation, in at most five short lines"), nxt)
+        self.assertIn("studio off", nxt)
+        self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
+                                     "uninstalling unless the user asks."), nxt)
+        state = self.state("state/welcome.json")
+        self.assertFalse(state["owed"])
+        self.assertTrue(state["given"] and state["studio_asked"])
+
+        _f, nxt, tell = self.assertStatus(self.client("status"), "OK", 0)             # given: later statuses as before
+        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+        self.assertNotIn("welcome", nxt)
+
+    def test_a_status_with_no_welcome_owed_answers_as_before(self):
+        _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
+        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+        self.assertStatus(self.welcome(), "OK", 0)                                   # the ready form leaves nothing owed
+        self.assertFalse(self.state("state/welcome.json")["owed"])
+        _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
+        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+
+    def test_in_codex_still_downloading_the_installer_gives_it_at_once(self):
         _f, nxt, tell = self.assertStatus(self.welcome("--downloading", env={"CODEX_THREAD_ID": "t-1"}), "OK", 0)
         self.assertIn("A last download finishes by itself in the next few minutes. Start a new session, then ask for your first deck.", tell)
         self.assertNotIn("status --wait", nxt)
-
+        self.assertFalse(self.state("state/welcome.json")["owed"])
 
 if __name__ == "__main__":
     unittest.main()

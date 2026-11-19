@@ -887,8 +887,12 @@ def status(as_json: bool, wait: float) -> int:
     waiting = [p for p, s in snap["packs"].items() if s["status"] != "ready" and (published is None or p in published)]
     packs_note = install.NO_PACKS if published == [] else "all asset packs are installed" if not waiting else \
         f"asset packs {'still arriving' if Job('packs').alive() else 'not installed'}: {', '.join(waiting)}"
-    return core.emit(Status("OK", f"engine {snap['engine']} on runtime {snap['runtime_id']}, plan {snap['plan']}; {packs_note}.",
-                            f"run {quoted_launcher()} guide pptx for the instructions.", "Theodore is ready."))
+    summary = f"engine {snap['engine']} on runtime {snap['runtime_id']}, plan {snap['plan']}; {packs_note}."
+    from . import welcome           # lane ONBOARD: the welcome the installer left owed, once, as this answer
+    owed = welcome.owed(summary)
+    if owed is not None:
+        return core.emit(owed)
+    return core.emit(Status("OK", summary, f"run {quoted_launcher()} guide pptx for the instructions.", "Theodore is ready."))
 
 
 def doctor(as_json: bool) -> int:
