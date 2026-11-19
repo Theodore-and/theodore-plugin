@@ -1,6 +1,6 @@
 ---
 name: studio
-description: "Theodore Studio: carries out the Theodore work its message gives, in the folder the message names."
+description: "Theodore Studio: works in one part that `pptx prepare` made, from the message the pptx skill's slide-parts text gives (the part's WORKSPACE, NOTE and SPINE). Start one per part."
 effort: high
 model: inherit
 ---
