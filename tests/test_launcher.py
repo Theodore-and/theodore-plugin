@@ -50,6 +50,18 @@ class LauncherCase(unittest.TestCase):
 
 
 class FirstRun(LauncherCase):
+    def what_the_jobs_left(self) -> str:
+        """The job records and the end of the home's logs. On the Windows machine with seven suites side by side the
+        background stage ended without its .ready file twice (2026-11-18, 2026-11-19) and nothing said why."""
+        parts = []
+        jobs, logs = self.box.home / "state" / "jobs", self.box.home / "logs"
+        for path in sorted(jobs.glob("*.json")) if jobs.exists() else []:
+            parts.append(f"{path.name}: {path.read_text(encoding='utf-8', errors='replace')[:600]}")
+        for path in sorted(logs.rglob("*")) if logs.exists() else []:
+            if path.is_file():
+                parts.append(f"{path.name}: ...{path.read_text(encoding='utf-8', errors='replace')[-1500:]}")
+        return "\n".join(parts) or "(no job record and no log in this home)"
+
     def test_first_run_bootstraps_copies_itself_and_runs_the_client(self):
         result = self.run_launcher("version")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -66,7 +78,8 @@ class FirstRun(LauncherCase):
         # 600 s as the hook's own first-run test: on the Windows machine, seven suites side by side, stage 2 was still
         # unpacking after the default 240 s once (2026-11-18). A job that ends returns at once.
         self.box.wait_jobs(600)
-        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "stage 2 ran in the background")
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(),
+                        "stage 2 ran in the background\n" + self.what_the_jobs_left())
         self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
         self.assertFalse((self.box.home / "state" / "bootstrap" / "pid").exists())
 
