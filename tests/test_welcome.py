@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 import unittest
 
 from support import ClientCase, status_lines
@@ -163,6 +165,85 @@ class Welcome(ClientCase):
         self.assertIn("A last download finishes by itself in the next few minutes. Start a new session, then ask for your first deck.", tell)
         self.assertNotIn("status --wait", nxt)
         self.assertFalse(self.state("state/welcome.json")["owed"])
+
+
+class WelcomeAfterSignInByLink(ClientCase):
+    """A set-up whose one-time code was old or missing ends with a sign-in link instead of the welcome; the sign-in that
+    link completes gives it, once per computer, by the installer's rules."""
+
+    def setUp(self):
+        super().setUp()
+        self.ready()
+        self.assertStatus(self.client("logout"), "OK", 0)        # signed out, as a set-up that ended with the link
+        (self.box.home / "state" / "welcome.json").unlink(missing_ok=True)
+
+    def sign_in_by_link(self, env=None):
+        self.assertStatus(self.client("login", "--start"), "SIGN_IN_REQUIRED", 65)
+        self.api.approve_device()
+        return self.client("login", "--finish", "--wait", "5", env=env)
+
+    def setup_job_running(self):
+        """The setup job still fetching the engine: its record names a live process."""
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], stdin=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        jobs = self.box.home / "state" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "setup.json").write_text(json.dumps({"pid": proc.pid, "phase": "engine", "percent": 40}))
+        return jobs / "setup.json"
+
+    def test_the_first_sign_in_by_link_gives_the_welcome(self):
+        first, nxt, tell = self.assertStatus(self.sign_in_by_link(), "OK", 0)
+        self.assertIn("this computer is signed in to Theodore", first)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertIn("Studio is on, so each slide gets a deeper design pass", tell)
+        self.assertNotIn("A last download", tell)
+        self.assertTrue(nxt.startswith("NEXT: give the user this welcome now, in this conversation, in at most five short lines"), nxt)
+        self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
+                                     "uninstalling unless the user asks."), nxt)
+        state = self.state("state/welcome.json")
+        self.assertTrue(state["given"] and state["studio_asked"])
+        self.assertFalse(state["owed"])
+
+    def test_with_a_download_running_it_is_owed_and_the_first_status_that_says_ok_gives_it(self):
+        job = self.setup_job_running()
+        _f, nxt, tell = self.assertStatus(self.sign_in_by_link(), "SETUP_IN_PROGRESS", 67)
+        self.assertEqual(tell, "TELL THE USER: Theodore is installed and is finishing a download in the background; this "
+                               "takes a few minutes.")
+        self.assertIn("status --wait 100", nxt)
+        self.assertNotIn("Welcome", tell + nxt)
+        self.assertTrue(self.state("state/welcome.json")["owed"])
+
+        job.write_text(json.dumps({"pid": 0, "phase": "done", "percent": 100, "done": True}))
+        first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5"), "OK", 0)
+        self.assertIn("Set-up is finished.", first)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertNotIn("A last download", tell)
+        self.assertTrue(nxt.startswith("NEXT: give the user this welcome now"), nxt)
+        state = self.state("state/welcome.json")
+        self.assertTrue(state["given"])
+        self.assertFalse(state["owed"])
+        _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
+        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+
+    def test_a_second_sign_in_gives_no_welcome(self):
+        self.assertStatus(self.sign_in_by_link(), "OK", 0)
+        self.assertStatus(self.client("logout"), "OK", 0)
+        _f, nxt, tell = self.assertStatus(self.sign_in_by_link(), "OK", 0)
+        self.assertEqual(tell, "TELL THE USER: Theodore is signed in on this computer.")
+        self.assertEqual(nxt, "NEXT: run the command you were running before the sign-in.")
+
+    def test_in_codex_with_a_download_running_it_is_given_at_once(self):
+        self.setup_job_running()
+        _f, nxt, tell = self.assertStatus(self.sign_in_by_link(env={"CODEX_THREAD_ID": "t-1"}), "OK", 0)
+        self.assertIn("Welcome to Theodore.", tell)
+        self.assertIn("A last download finishes by itself in the next few minutes. Start a new session, then ask for your first deck.", tell)
+        self.assertIn("Apart from that, run no Theodore command in this session", nxt)
+        self.assertNotIn("status --wait", nxt)
+        state = self.state("state/welcome.json")
+        self.assertTrue(state["given"])
+        self.assertFalse(state["owed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -489,7 +489,8 @@ def login_finish(wait_seconds: float) -> Status:
         try:
             bundle = api.call_json("device_token", body={"device_code": pending["device_code"]})
             _adopt(bundle)
-            return signed_in_status(stored_token()[1])
+            from . import welcome       # a set-up that ended with this link: its welcome, once per computer
+            return welcome.after_sign_in(signed_in_status(stored_token()[1]))
         except api.NetworkError as error:
             return api.offline(error, "sign-in could not finish")
         except api.ApiError as error:
