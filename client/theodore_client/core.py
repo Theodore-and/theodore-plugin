@@ -826,9 +826,13 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
         # The paths reach cmd only through variables, expanded inside quotes: on its command line a path with &, ^, % or
         # a parenthesis (C:\\Users\\Tom & Jerry) would be cmd syntax, not a name.
         cmd = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "cmd.exe")
-        subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
-                       env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": real},
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        try:
+            subprocess.run(f'"{cmd}" /d /v:off /c "mklink /J "%THEODORE_LINK%" "%THEODORE_LINK_TARGET%""', check=True,
+                           env={**os.environ, "THEODORE_LINK": str(link), "THEODORE_LINK_TARGET": real},
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            code = getattr(exc, "returncode", None)
+            raise LinkError(f"the link {link} to {real} could not be made (mklink {'exit ' + str(code) if code is not None else exc.__class__.__name__})") from None
         if not os.path.isdir(link):
             raise LinkError(f"the link {link} was made, but its target {real} is not reachable from here")
     else:

@@ -7,23 +7,8 @@ commands below. Run nothing else from this page.
 This may run in a cloud sandbox session (a Claude chat's workspace, ChatGPT Work mode): Theodore installs and builds
 decks there too, and that workspace is the computer this page means.
 
-1. Download the installer into a new private folder, then run it. It needs no admin rights and installs into
-   ~/.theodore (Windows: %LOCALAPPDATA%\Theodore). It registers Theodore in Claude Code and Codex when they are
-   present, adds one marked line naming Theodore for every deck to their global instructions (~/.claude/CLAUDE.md,
-   ~/.codex/AGENTS.md; this records the user's own request to use Theodore for all their presentations; uninstalling
-   removes it), downloads about 100 to 130 MB (what is not done within about three minutes goes on in the background after the installer has ended) and about 95 MB of assets in the background (on a Mac without LibreOffice,
-   also LibreOffice, about 300 MB, and on Windows with neither LibreOffice nor PowerPoint, about 350 MB, both in the
-   background), and signs this computer in with the one-time code. On Windows, when Claude Code is present and finds
-   no Git Bash, it also fetches Git for Windows' PortableGit (about 60 MB, pinned and checked) into the same folder and
-   sets Claude Code's CLAUDE_CODE_GIT_BASH_PATH to it, so Theodore's skills can load; uninstalling takes both back.
-   It also lets Theodore's own commands run without asking each time (in Claude Code by their exact paths, and as
-   `theodore`, a short command it writes into a per-user folder already on PATH, such as ~/.local/bin; in Codex a
-   rules file, so they run outside Codex's sandbox), lets the assistant edit a deck's working files in the
-   .theodore/workspaces folder Theodore makes in the user's folder, and turns on the plugin's automatic updates; to leave that out,
-   add --no-settings, and `theodore hosts settings --remove` takes it back later.
-   Theodore then keeps itself up to date: its client, engine and assets, and the plugin's files in Claude Code and
-   Codex through their own plugin command (used from their next session); uninstalling stops it. Run the
-   line for the shell you have, exactly as written:
+1. Run the installer: the line for the shell you have, exactly as written. It needs no admin rights and puts
+   everything into the user's own Theodore folder (~/.theodore; Windows: %LOCALAPPDATA%\Theodore).
    macOS/Linux:        ( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
    Windows: two separate commands, the download and then the installer (run the second only when the first
    succeeded); the folder is %LOCALAPPDATA%\Theodore-install, which the installer removes when it ends.
@@ -31,17 +16,23 @@ decks there too, and that workspace is the computer this page means.
                   then: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "$env:LOCALAPPDATA\Theodore-install\install.cmd" --code {{ACTIVATION_CODE}}
    Windows cmd:        (if not exist "%LOCALAPPDATA%\Theodore-install" mkdir "%LOCALAPPDATA%\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\Theodore-install\install.cmd" https://theodoreand.ai/install.cmd
                   then: "%LOCALAPPDATA%\Theodore-install\install.cmd" --code {{ACTIVATION_CODE}}
-   Each download is tried up to three times (10 s each to connect): from some networks one of the service's
-   addresses does not answer, and a new attempt usually reaches another.
+   It takes a few minutes the first time (about 230 MB; more on a computer with neither PowerPoint nor
+   LibreOffice): give the command a timeout of at least 15 minutes, or run it in the background and wait for it.
+   Each download is tried up to three times.
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
-   The download step can take several minutes: give the command a timeout of at least 15 minutes, or run it in
-   the background and wait for it.
+   What it sets up: Theodore for the assistants on this computer (Claude Code, Codex and the Claude app where
+   present), with one marked line in their global instructions naming Theodore for the user's presentations;
+   this computer signed in with the one-time code; Theodore's own commands allowed to run without asking each
+   time; automatic updates. `theodore uninstall` takes all of it back.
    If your host holds the line back (an automatic safety check, not an error of the command), do not change, split
    or disguise it and try no other route: tell the user in one or two plain sentences that their assistant held
    Theodore's installer for their approval, which they give where the app shows held commands (Claude Code:
    /permissions, Recently blocked; the desktop app: its notice) or by replying "Yes, download and run Theodore's
    installer"; then run the same line again.
-2. If the download is blocked, register the plugin directly instead:
+2. The installer ends with Theodore's own check and a short welcome for the user. Give the user that welcome (its
+   TELL THE USER line) in this conversation and follow its NEXT line; run another command only when a NEXT line asks
+   for it, by the path the installer printed ("the stable launcher is ...").
+3. If the download in step 1 is blocked, register the plugin directly instead:
    Claude Code: claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json
      (if that flag is not recognised: `claude plugin marketplace add https://theodoreand.ai/marketplace.json`,
      then `claude plugin install theodore@theodore`)
@@ -50,9 +41,6 @@ decks there too, and that workspace is the computer this page means.
      (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
      (or from GitHub: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
-3. The installer ends with Theodore's own check and a short welcome for the user. Give the user that welcome (its
-   TELL THE USER line) in this conversation and follow its NEXT line; run another command only when a NEXT line asks
-   for it, by the path the installer printed ("the stable launcher is ...").
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or
 API key.
 

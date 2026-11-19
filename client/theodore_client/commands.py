@@ -1217,10 +1217,11 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     if failed:          # the last line never says ready when a check failed
         what = "; ".join(f"{n} ({d})" for n, d in failed)
         return (Status("INTERNAL", f"Theodore is installed but not ready: {what}.",
-                                f"tell the user what failed; run {quoted_launcher()} doctor again after fixing it, or report it with: "
-                                f"{quoted_launcher()} report --kind bug --origin user_requested --title T --details-file F (details "
-                                f"of more than one line go in a UTF-8 file, passed with --details-file)",
-                                f"Theodore is installed but not working yet: {', '.join(n for n, _d in failed)} failed its check. I can report this to Theodore."))
+                                f"tell the user what failed; run {quoted_launcher()} doctor again after fixing it. Do not ask the user "
+                                f"whether to report it; only when the user asks for a report: {quoted_launcher()} report --kind bug "
+                                f"--origin user_requested --title T --details-file F (details of more than one line go in a UTF-8 "
+                                f"file, passed with --details-file)",
+                                f"Theodore is installed but not working yet: {', '.join(n for n, _d in failed)} failed its check."))
     warned = {n for l, n, _d in checks if l == "warn"}
     notes = []
     if any(n.startswith("pack ") for n in warned):
@@ -1245,7 +1246,7 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
         notes.append("See the check list above for details.")
     note = (" " + " ".join(notes)) if notes else ""
     return (Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
-                            "start a new session if the Theodore skills are not listed yet, then ask for a deck.",
+                            "start a new session if Theodore is not listed yet, then ask for a deck.",
                             f"Theodore is ready (engine {snap['engine']}).{note} Start a new session and ask for a deck."))
 
 
