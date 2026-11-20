@@ -248,7 +248,9 @@ class Installer(unittest.TestCase):
         began = time.monotonic()
         result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2"})
         took = time.monotonic() - began
-        self.assertEqual(result.returncode, 67, result.stdout + result.stderr)
+        # WINHOME: every step of the installer succeeded and only the background download goes on, so the installer exits
+        # 0 (67 showed as "command failed with exit code 67"); the status still says what is arriving and waits for it.
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         first, nxt, tell = status_lines(result.stdout)
         self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
         self.assertTrue(first.startswith("THEODORE SETUP_IN_PROGRESS: Theodore is installed and signed in; the rest of its runtime"), first)
@@ -569,6 +571,87 @@ class Installer(unittest.TestCase):
         self.assertIn("uninstall", nxt)
         self.assertEqual([r for r in self.api.requests if r["path"].startswith("/dl/")], [], "nothing was downloaded")
         self.assertEqual(sorted(p.name for p in self.box.home.iterdir()), ["state"])
+
+    def test_a_failed_engine_set_up_ends_the_installer_with_the_failure_not_in_progress(self):
+        """The first real user's session: 4 min 45 s, exit 67 and "the engine is not installed yet... I am setting it up"
+        while the engine's set-up had failed. Now the closing status says it failed, why, that Theodore reported it by
+        itself and that the next guide tries again; the installer exits non-zero because something failed."""
+        self.api.publish_engine("1.0.0-rc.3", engine_zip("1.0.0-rc.3", broken=True))
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 68, result.stdout + result.stderr)
+        first, nxt, tell = status_lines(result.stdout)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        self.assertTrue(first.startswith("THEODORE SETUP_FAILED: the engine's set-up failed on this computer (engine 1.0.0-rc.3: "), first)
+        self.assertIn("by itself", first)
+        self.assertIn("guide pptx tries the set-up again", first)
+        self.assertIn("nothing to report and nothing to ask the user", nxt)
+        for line in (first, nxt, tell):
+            self.assertNotIn("still", line)
+            self.assertNotIn("setting it up", line)
+
+    def windows_profile_home(self, local: Path) -> Path:
+        """The sandbox without THEODORE_HOME: Theodore's folder by the Windows rule, %USERPROFILE%\\.theodore, with
+        %LOCALAPPDATA% in the sandbox too. The sandbox's home follows, so its jobs are waited for and removed."""
+        self.box.env.pop("THEODORE_HOME", None)
+        self.box.env["LOCALAPPDATA"] = str(local)
+        self.box.home = self.box.user_home / ".theodore"
+        return self.box.home
+
+    def earlier_windows_installation(self, local: Path, answer: int) -> tuple[Path, Path]:
+        """A stand-in for an installation by 0.4.14 or earlier in %LOCALAPPDATA%\\Theodore: its stable launcher records each
+        call (its arguments and the THEODORE_HOME it was given) and answers `answer`; answering 0 to uninstall, it takes its
+        launcher.json away, as the real uninstall takes the folder."""
+        old = local / "Theodore"
+        (old / "bin").mkdir(parents=True)
+        (old / "bin" / "launcher.json").write_text('{\n  "launcher_generation": 13\n}\n')
+        record = self.box.tmp / "earlier-launcher-calls.txt"
+        gone = 'if "%1"=="uninstall" del /q "%~dp0launcher.json"\r\n' if answer == 0 else ""
+        (old / "bin" / "theodore.cmd").write_text(f'@echo off\r\n>>"{record}" echo %*^|%THEODORE_HOME%\r\n{gone}exit /b {answer}\r\n')
+        return old, record
+
+    @unittest.skipUnless(IS_WINDOWS, "install.cmd: Theodore's folder on Windows")
+    def test_on_windows_an_earlier_installation_is_retired_and_theodore_goes_to_the_user_profile(self):
+        local = self.box.tmp / "localappdata"
+        new = self.windows_profile_home(local)
+        old, record = self.earlier_windows_installation(local, 0)
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(record.read_text().splitlines(), [f"uninstall|{old}"], "its own uninstall, told exactly which folder")
+        self.assertIn(f'theodore-install: an earlier Theodore in "{old}" was removed; Theodore now lives in "{new}"', result.stdout)
+        self.assertIn(f'the stable launcher is "{new / "bin" / STABLE}"', result.stdout)
+        self.assertTrue((new / "bin" / STABLE).is_file())
+        self.assertTrue((new / "runtime" / "current.txt").is_file())
+        settings = json.loads((self.box.user_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        allowed = settings["permissions"]["allow"]
+        self.assertIn(f'Bash("{new / "bin" / STABLE}" *)', allowed)
+        self.assertFalse([rule for rule in allowed if str(old) in rule], "nothing names the earlier folder")
+        again = self.install("--code", "ABCD-1234")       # the earlier one is not found again: nothing more is retired
+        self.assertEqual(len(record.read_text().splitlines()), 1, again.stdout)
+
+    @unittest.skipUnless(IS_WINDOWS, "install.cmd: Theodore's folder on Windows")
+    def test_on_windows_an_earlier_installation_that_cannot_be_removed_does_not_stop_the_install(self):
+        local = self.box.tmp / "localappdata"
+        new = self.windows_profile_home(local)
+        old, record = self.earlier_windows_installation(local, 75)
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'theodore-install: an earlier Theodore in "{old}" could not be removed completely (its uninstall answered 75); '
+                      f'Theodore now lives in "{new}", and "{old}\\bin\\theodore.cmd" uninstall removes what is left there', result.stdout)
+        self.assertTrue((new / "bin" / STABLE).is_file())
+
+    @unittest.skipUnless(IS_WINDOWS, "install.cmd: Theodore's folder on Windows")
+    def test_on_windows_a_chosen_folder_leaves_an_earlier_installation_alone(self):
+        local = self.box.tmp / "localappdata"
+        self.box.env["LOCALAPPDATA"] = str(local)          # THEODORE_HOME stays: the sandbox's own folder
+        _old, record = self.earlier_windows_installation(local, 0)
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(record.exists(), "THEODORE_HOME is a folder the person chose: nothing else is retired")
+        self.assertTrue((self.box.home / "bin" / STABLE).is_file())
 
     def test_uninstall_without_a_launcher_still_removes_recorded_specimen_folders(self):
         state = self.box.home / "state"

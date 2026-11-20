@@ -2,7 +2,7 @@
 rem Theodore launcher (Windows batch). The same file sits in every Theodore skill folder and in <home>\bin.
 rem
 rem What it does, in order:
-rem   1. finds Theodore's folder (THEODORE_HOME, default %LOCALAPPDATA%\Theodore);
+rem   1. finds Theodore's folder (THEODORE_HOME, default %USERPROFILE%\.theodore; see the rule below);
 rem   2. hands over to <home>\bin\theodore.cmd when that copy is newer, and keeps that copy current otherwise;
 rem   3. when Theodore's Python and client are there, runs the client with the same arguments;
 rem   4. otherwise downloads them in the background (stage 1: one Python archive and the client, each checked
@@ -21,12 +21,19 @@ set "SYS32=%SystemRoot%\System32"
 set "SELF_DIR=%~dp0"
 if "%SELF_DIR:~-1%"=="\" set "SELF_DIR=%SELF_DIR:~0,-1%"
 set "SELF=%SELF_DIR%\theodore.cmd"
-set "HOME_DIR=%LOCALAPPDATA%\Theodore"
+rem Theodore's folder, one rule wherever it is found (both launchers, install.cmd, the short command and the client, each
+rem with literally the same logic): THEODORE_HOME when set; else %USERPROFILE%\.theodore when it holds an installation
+rem (bin\launcher.json); else %LOCALAPPDATA%\Theodore when that holds one (made by client 0.4.14 or earlier: it keeps
+rem working, and updating, where it is); else %USERPROFILE%\.theodore (a new installation). Inside an MSIX-packaged app
+rem (the Claude desktop app) Windows redirects %LOCALAPPDATA% into the app's own folder, unseen by every other program,
+rem but not %USERPROFILE%\.theodore: an installation made there is the same folder for everyone.
+set "HOME_DIR=%USERPROFILE%\.theodore"
+if not exist "%USERPROFILE%\.theodore\bin\launcher.json" if exist "%LOCALAPPDATA%\Theodore\bin\launcher.json" set "HOME_DIR=%LOCALAPPDATA%\Theodore"
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 rem `session-start` is the plugin's hook after Claude Code compacts or resumes a conversation (hooks\hooks.json runs
 rem the sh launcher; a call made here does the same): the client when Theodore is set up, else nothing at all.
 if /i "%~1"=="session-start" goto :session_start
-if "%HOME_DIR%"=="\Theodore" goto :no_home
+if "%HOME_DIR%"=="\.theodore" goto :no_home
 set "STABLE=%HOME_DIR%\bin\theodore.cmd"
 set "CONF=%SELF_DIR%\launcher.json"
 set "B=%HOME_DIR%\state\bootstrap"
@@ -687,7 +694,7 @@ rem Statuses (three lines each, then the exit code)
 rem =====================================================================================================================
 
 :no_home
-echo THEODORE INTERNAL: neither THEODORE_HOME nor LOCALAPPDATA is set.
+echo THEODORE INTERNAL: neither THEODORE_HOME nor USERPROFILE is set.
 echo NEXT: set THEODORE_HOME to a folder the user can write to and run the same command again.
 echo TELL THE USER: Theodore could not find your user folder.
 exit /b 78

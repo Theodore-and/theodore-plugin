@@ -993,17 +993,63 @@ def _snapshot() -> dict:
     }
 
 
+def _engine_job_alive() -> Job | None:
+    """The background job fetching the engine now: the setup job's first engine, or an engine download (engine-update)."""
+    for name in ("setup", "engine-update"):
+        job = Job(name)
+        if job.alive():
+            return job
+    return None
+
+
+def _reported_today(summary: str) -> str | None:
+    """The reference of the automatic report filed today for this internal error (the record _auto_report keeps, read
+    only), or None when the record does not hold it (reports off, signed out, or filed on an earlier day)."""
+    fingerprint = hashlib.sha256(scrub(summary).encode("utf-8")).hexdigest()[:32]
+    record = core.read_json(core.home().state / AUTO_REPORTS)
+    if record.get("day") != time.strftime("%Y-%m-%d", time.gmtime(core.now())) or not isinstance(record.get("sent"), dict):
+        return None
+    reference = record["sent"].get(fingerprint)
+    return str(reference) if reference else None
+
+
+def _engine_setup_failed() -> Status | None:
+    """No engine, and its set-up failed with nothing trying again now: the failure recorded in the update state (an
+    engine that did not pass its checks on this computer), with no setup or engine job alive. Theodore filed that error
+    itself when it happened (setup_job, engine_update_job: file_internal_report), so nothing is sent again here and
+    nothing is asked; the next `guide pptx` tries the set-up again."""
+    failed = install.update_state().get("failed") or {}
+    if not failed.get("version") or _engine_job_alive():
+        return None
+    raw = str(failed.get("reason") or "unknown error")
+    reason = " ".join(core.scrub_secrets(raw).split())
+    reason = reason if len(reason) <= 200 else reason[:197] + "..."
+    reference = _reported_today(f"the engine could not be installed: {core.scrub_secrets(raw)[:300]}")
+    reported = f"Theodore has reported it by itself ({reference})" if reference else "Theodore reports such failures by itself"
+    launcher = quoted_launcher()
+    return Status("SETUP_FAILED", f"the engine's set-up failed on this computer (engine {failed['version']}: {reason}); {reported}, "
+                                  f"and the next {launcher} guide pptx tries the set-up again.",
+                  f"nothing to report and nothing to ask the user: {reported}. Tell the user in one sentence; when they ask "
+                  f"for a deck, run {launcher} guide pptx, which tries the engine's set-up again.",
+                  f"Theodore's PowerPoint engine could not be set up on this computer. {reported}, and it tries again the "
+                  f"next time you ask for a deck.")
+
+
 def _blocking_status(snap: dict) -> Status | None:
     if not snap["runtime_ready"]:
         return install.setup_status()
     if not snap["signed_in"]:
         return api.sign_in_required()
-    if not snap["engine"] and Job("setup").alive():          # the setup job is fetching it in the background
-        state = Job("setup").read()
+    fetching = _engine_job_alive()
+    if not snap["engine"] and fetching:          # the setup job (or an engine download) is fetching it in the background
+        state = fetching.read()
         return Status("SETUP_IN_PROGRESS", f"the engine is downloading in the background ({state.get('phase', 'starting')}, "
                                            f"{int(state.get('percent') or 0)}%).",
                       "run the same command again in 20 seconds. Do not use another slide tool meanwhile.",
                       "Theodore is downloading its PowerPoint engine. This takes a few minutes; I will continue when it is ready.")
+    failed = None if snap["engine"] else _engine_setup_failed()
+    if failed:
+        return failed
     if not snap["engine"]:
         return Status("SETUP_IN_PROGRESS", "the engine is not installed yet.",
                       f"run {quoted_launcher()} guide pptx; it installs the engine and prints the instructions.",
@@ -1015,9 +1061,9 @@ def status(as_json: bool, wait: float) -> int:
     account.import_pending_activation()
     deadline = time.monotonic() + max(0.0, wait)
     snap = _snapshot()
-    # --wait also waits for the engine while the setup job is still fetching it (the installer's NEXT uses it, so the
-    # assistant waits in one call instead of sleeping between checks).
-    while (not snap["runtime_ready"] or (not snap["engine"] and Job("setup").alive())) and time.monotonic() < deadline:
+    # --wait also waits for the engine while the setup job or an engine download is still fetching it (the installer's
+    # NEXT uses it, so the assistant waits in one call instead of sleeping between checks).
+    while (not snap["runtime_ready"] or (not snap["engine"] and _engine_job_alive())) and time.monotonic() < deadline:
         if not snap["runtime_ready"] and not Job("setup").alive():
             install.setup_status()
         time.sleep(1.0)
@@ -1198,7 +1244,11 @@ def _still_missing(snap: dict) -> list[str]:
             "the next Theodore command starts its download again (it had stopped before it finished)" if setup.read() else
             "the next Theodore command starts its download"))
     if not snap["engine"]:
-        missing.append(f"the engine: it comes with the runtime's setup once this computer is signed in, or `{launcher} guide pptx` installs it")
+        failed = install.update_state().get("failed") or {}
+        if failed.get("version") and not _engine_job_alive():
+            missing.append(f"the engine: its set-up failed on this computer (engine {failed['version']}); the next `{launcher} guide pptx` tries again")
+        else:
+            missing.append(f"the engine: it comes with the runtime's setup once this computer is signed in, or `{launcher} guide pptx` installs it")
     published = install.published_packs()
     waiting = [p for p, info in snap["packs"].items() if info["status"] != "ready" and (published is None or p in published)]
     if waiting and snap["runtime_ready"]:
@@ -1405,6 +1455,16 @@ def update(action: str, value: str | None) -> int:
                             f"Theodore is updated ({'; '.join(u.split(' (')[0] for u in updated)})." if updated else "Theodore is up to date."))
 
 
+def refresh_stable_launcher() -> str | None:
+    """The stable launcher brought up to the newest launcher among the plugin's copies on this computer (core.
+    refresh_stable_launcher): Theodore's own copy, the skill folder that called us, Claude Code's plugin folders."""
+    sources = [core.home().plugin / "plugins" / "theodore" / "skills" / "pptx" / "scripts"]
+    if os.environ.get("THEODORE_SKILL_DIR"):
+        sources.append(Path(os.environ["THEODORE_SKILL_DIR"]) / "scripts")
+    sources += [script.parent for script in _claude_skill_launchers()]
+    return core.refresh_stable_launcher(sources)
+
+
 def plugin_update_job() -> int:
     """Background: bring the plugin's files up to the published version in each assistant Theodore is registered in,
     through that assistant's own command (see install.py, "How a release reaches a user"). Records per assistant
@@ -1433,7 +1493,10 @@ def plugin_update_job() -> int:
             _run([codex, "plugin", "marketplace", "upgrade", "theodore"], timeout=300)
         code, out = _run([codex, "plugin", "add", "theodore@theodore"], timeout=300)
         results["codex"] = "updated" if code == 0 else f"codex plugin add failed: {(out.splitlines() or ['no output'])[-1]}"[:200]
-    hosts = {k: v for k, v in results.items() if k != "theodore"}
+    refreshed = refresh_stable_launcher()
+    if refreshed:
+        results["launcher"] = refreshed
+    hosts = {k: v for k, v in results.items() if k not in ("theodore", "launcher")}
     ok = bool(hosts) and all(v == "updated" for v in hosts.values())
     done = install.update_state().get("plugin_update") or {}
     install.save_update_state(plugin_update={**done, "version": latest, "ok": ok, "hosts": results, "finished": int(core.now())})
@@ -1481,6 +1544,7 @@ def client_update_job(version_: str, sha256: str, runtime_id: str | None = None,
     job.begin("client")
     try:
         install.update_client(version_, sha256, runtime_id or None, float(issued) if issued else None)
+        refresh_stable_launcher()       # the plugin that called may carry a newer launcher than <home>/bin's
         job.finish()
         return 0
     except Exception as exc:

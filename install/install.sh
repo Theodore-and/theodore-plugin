@@ -32,7 +32,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.4.14"
-PIN_CLIENT="client/client-0.4.14.tar 3fb1841d4cb921fb6ec92272f671227cce347ccc052b2ace14c7ef0f201c4283"
+PIN_CLIENT="client/client-0.4.14.tar 66e3e3e85f17cbf79861caef024dfa3c8d5b5e10e2f7270cce48e0f7c2e5756b"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -598,8 +598,10 @@ rc=$?
 checks_only() { printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'; }
 # The last status is the client's welcome (lane ONBOARD): a few short lines for the assistant to give in this
 # conversation, the Studio question once, and what this host needs (a new session, the download still going on).
-# Its exit code is the set-up's: 0 when ready, and 67 only for the still-downloading form, as before the welcome. Any
-# other answer (a launcher that says 67 for a ready set-up included) leaves the ending as it was.
+# Its answer is 0 when ready, and 67 only for the still-downloading form. Any other answer (a launcher that says 67 for a
+# ready set-up included) leaves the ending as it was. The installer itself exits 0 for both: a download still going on in
+# the background, after every step of the installer succeeded, is not a failure (a host shows any other exit code as a
+# failed command).
 welcome() {
   welcome_out=$(theodore welcome "$@")
   welcome_rc=$?
@@ -612,9 +614,9 @@ if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the sam
   # "the same command", which here would be this installer). In Codex the welcome says to run nothing more: every
   # command of this session asks first, the download finishes by itself, and a deck request in a new session waits.
   checks_only
-  if [ "$HOSTS_RC" -eq 0 ] && welcome --downloading; then printf '%s\n' "$welcome_out"; exit "$welcome_rc"; fi
+  if [ "$HOSTS_RC" -eq 0 ] && welcome --downloading; then printf '%s\n' "$welcome_out"; exit 0; fi
   where=$(printf '%s\n' "$doctor_out" | sed -n 's/^THEODORE SETUP_IN_PROGRESS: \(.*\)\.$/\1/p' | tail -n 1)
-  status SETUP_IN_PROGRESS 67 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
+  status SETUP_IN_PROGRESS 0 "Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended (${where:-downloading})." \
     "run \"$T\" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line." \
     "Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it."
 fi
