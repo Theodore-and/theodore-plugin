@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, desktop, install, routing, sessions, specimens, usage
+from . import __version__, account, api, core, credentials, desktop, install, outbox, routing, sessions, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -29,15 +29,17 @@ def _bearer() -> str:
     return cred["installation_secret"]
 
 
-def _api(route: str, what: str, *, passing: tuple[str, ...] = (), **kwargs):
-    """One authenticated call; every refusal becomes its status, except the error codes in `passing`, which the
-    caller answers itself."""
+def _api(route: str, what: str, *, passing: tuple[str, ...] = (), keep=None, **kwargs):
+    """One authenticated call; every refusal becomes its status, except the error codes in `passing`, and the errors
+    for which `keep(error)` is true (a network failure among them), which the caller answers itself."""
     try:
         return api.call(route, bearer=_bearer(), **kwargs)
     except api.NetworkError as error:
+        if keep is not None and keep(error):
+            raise
         raise api.offline(error, what) from None
     except api.ApiError as error:
-        if error.code in passing:
+        if error.code in passing or (keep is not None and keep(error)):
             raise
         if error.code in ("installation_revoked", "unauthenticated"):
             credentials.delete()
@@ -631,7 +633,8 @@ def _heartbeat(engine_version: str) -> None:
     try:
         api.call("heartbeat", bearer=cred["installation_secret"], body=body, timeout=2.0)
     except (api.ApiError, api.NetworkError):
-        pass
+        return
+    outbox.flush()          # the service answered: reports kept for later go now (a few seconds at most; never raises)
 
 
 # --- engine pass-through -----------------------------------------------------------------------------------------------------
@@ -646,6 +649,7 @@ def run_pptx(args: list[str]) -> int:
     code = install.run_engine(args)
     if args[:1] == ["finish"]:
         usage.flush(force=True)         # the usage counts go at the end of a deck (never raises, never prints)
+        outbox.flush()                  # and the reports kept for later (a few seconds at most; never raises, never prints)
     return code
 
 
@@ -734,8 +738,13 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
                        "plan": "automatic reports are not part of this account's plan; nothing was sent.",
                        "unknown": "whether automatic reports are on for this account is not known yet; nothing was sent."}[why]
             return core.emit(Status("BLOCKED_BY_POLICY", summary, _REPORTS_OFF_NEXT, None))
+    outbox.flush()                  # reports kept for later go first, oldest first (a few seconds at most; never raises)
     try:
-        _status, _headers, raw = _api("reports", "report", body=payload)
+        _status, _headers, raw = _api("reports", "report", body=payload, keep=outbox.later)
+    except (api.ApiError, api.NetworkError) as error:     # "later" (429, 503) or no answer: kept, and sent by Theodore itself
+        if not outbox.save(payload, error):
+            raise (api.offline(error, "report") if isinstance(error, api.NetworkError) else api.status_from(error, "report")) from None
+        return core.emit(_report_saved(kind, origin, error))
     except Status as status_:
         if status_.name == "BLOCKED_BY_POLICY":      # the server's backstop: the report reached it and was refused
             account.remember_automatic_reports_off()
@@ -752,6 +761,17 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
                             if kind == "bug" else "I sent your feedback to Theodore."))
 
 
+def _report_saved(kind: str, origin: str, error: Exception) -> Status:
+    why = "it could not be reached" if isinstance(error, api.NetworkError) else "it is not taking reports just now"
+    what = "feedback" if kind == "feedback" else "report"
+    summary = (f"{'automatic report' if origin != 'user_requested' else what} saved on this computer: the Theodore service did not take it "
+               f"now ({why}); Theodore sends it by itself when the service accepts it.")
+    nxt = ("nothing to do: do not run the command again and do not ask the user about it; continue with the user's task.")
+    if origin != "user_requested":
+        return Status("OK", summary, nxt + " Do not mention the report unless the user asks.", None)
+    return Status("OK", summary, nxt, f"I saved the {what}; Theodore sends it by itself.")
+
+
 # --- the report the client files itself on an internal error (the beta terms: technical content only, no question) ----------
 
 AUTO_REPORT_WAIT_S = 5.0          # the answer never waits longer for the report than this
@@ -761,8 +781,11 @@ AUTO_REPORTS = "auto-reports.json"   # in state/: {"day", "count", "sent": {fing
 
 def _auto_report(summary: str, verb: str) -> tuple[str, str | None]:
     """Send one automatic bug report for an internal error: ("sent", reference), ("already", reference) when the same
-    error was sent today, ("failed", None) when it could not be sent, ("none", None) when no report goes (signed out,
-    reports off for the account or not in its plan, the day's limit reached). Never raises; never prints."""
+    error was sent today, ("queued", None) when the service said "later" or could not be reached and the report waits
+    in the outbox (Theodore sends it by itself; it counts as sent today), ("failed", None) when it could not be sent,
+    ("none", None) when no report goes (signed out, reports off for the account or not in its plan, the day's limit
+    reached). Never raises; never prints."""
+    started = time.monotonic()
     text = scrub(summary)
     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]     # the error, not the command that met it
     try:
@@ -776,7 +799,11 @@ def _auto_report(summary: str, verb: str) -> tuple[str, str | None]:
             if record.get("day") != day or not isinstance(record.get("sent"), dict):
                 record = {"day": day, "count": 0, "sent": {}}
             if fingerprint in record["sent"]:
-                return "already", record["sent"][fingerprint]
+                reference = str(record["sent"][fingerprint])
+                if reference.startswith(_QUEUED):       # saved for later today: waiting still, or sent by Theodore since
+                    waiting = outbox.folder() / f"{reference.removeprefix(_QUEUED)}.json"
+                    return ("queued", None) if waiting.exists() else ("already", "sent later")
+                return "already", reference
             if int(record.get("count") or 0) >= AUTO_REPORTS_PER_DAY:
                 return "none", None
             record["count"] = int(record.get("count") or 0) + 1      # an attempt counts, sent or not
@@ -790,26 +817,39 @@ def _auto_report(summary: str, verb: str) -> tuple[str, str | None]:
             core.log(f"internal error not reported: automatic reports {why}")
             return "none", None
         payload = _report_payload("bug", f"internal error in {verb}", f"THEODORE INTERNAL: {text}", verb, "INTERNAL", None, "automatic")
+        # the answer arrives (or the report is saved) before file_internal_report stops waiting
+        wait = max(0.5, AUTO_REPORT_WAIT_S - 0.75 - (time.monotonic() - started))
         try:
-            _status, _headers, raw = api.call("reports", bearer=cred["installation_secret"], body=payload, timeout=AUTO_REPORT_WAIT_S,
+            _status, _headers, raw = api.call("reports", bearer=cred["installation_secret"], body=payload, timeout=wait,
                                               exact_timeout=True, learn_refusals=False)
-        except api.ApiError as error:
-            if error.code == "auto_reports_disabled":
+        except (api.ApiError, api.NetworkError) as error:
+            if isinstance(error, api.ApiError) and error.code == "auto_reports_disabled":
                 account.remember_automatic_reports_off()
                 return "none", None
+            if outbox.later(error) and outbox.save(payload, error):
+                _remember_auto_report(path, day, fingerprint, _QUEUED + payload["client_report_id"])
+                core.log("internal error saved for an automatic report; Theodore sends it by itself")
+                return "queued", None
             raise
         answer = json.loads(raw.decode("utf-8") or "{}")
         reference = str(answer.get("ref") or answer.get("id") or "received")[:64]
-        with core.lock("auto-reports", timeout=2.0):
-            record = core.read_json(path)
-            if record.get("day") == day and isinstance(record.get("sent"), dict):
-                record["sent"][fingerprint] = reference
-                core.write_json(path, record, 0o600)
+        _remember_auto_report(path, day, fingerprint, reference)
         core.log(f"internal error reported automatically as {reference}")
         return "sent", reference
     except Exception as exc:  # noqa: BLE001  a report never makes the error worse
         core.log(f"internal error not reported: {exc.__class__.__name__}: {exc}")
         return "failed", None
+
+
+_QUEUED = "queued:"        # in auto-reports.json "sent", before the report's id: saved in the outbox; counts as sent today
+
+
+def _remember_auto_report(path: Path, day: str, fingerprint: str, reference: str) -> None:
+    with core.lock("auto-reports", timeout=2.0):
+        record = core.read_json(path)
+        if record.get("day") == day and isinstance(record.get("sent"), dict):
+            record["sent"][fingerprint] = reference
+            core.write_json(path, record, 0o600)
 
 
 def file_internal_report(summary: str, verb: str | None = None) -> tuple[str, str | None]:
@@ -834,9 +874,12 @@ def report_internal(status: Status) -> Status:
     check = f"run {quoted_launcher()} doctor to check this installation, then run the same command again later."
     said = {"sent": f" The error was reported to Theodore automatically ({reference}); there is nothing to send or to ask.",
             "already": f" The same error was already reported to Theodore automatically today ({reference}); there is nothing to send or to ask.",
-            "failed": " The automatic report to Theodore could not be sent just now; it will be sent when this error happens again.",
+            "queued": " The automatic report could not reach Theodore just now; it is saved on this computer and Theodore sends it by "
+                      "itself; there is nothing to send or to ask.",
+            "failed": " The automatic report to Theodore could not be sent just now; there is nothing to send or to ask.",
             "none": ""}[outcome]
     tell = "Theodore hit an internal error and has reported it to Theodore automatically." if outcome in ("sent", "already") \
+        else "Theodore hit an internal error and has saved a report that it sends to Theodore by itself." if outcome == "queued" \
         else "Theodore hit an internal error."
     reported = Status("INTERNAL", status.summary, check + said, tell)
     reported.cause = status.cause
@@ -1116,6 +1159,9 @@ def doctor(as_json: bool) -> int:
     add("ok" if not missing else "warn", "still missing", "; ".join(missing) if missing else "nothing: every part Theodore needs here is installed")
     if resumed:
         add("ok", "restarted", f"downloads that had stopped before they finished were started again: {', '.join(resumed)}")
+    waiting = outbox.count()
+    if waiting:         # informational: Theodore sends them by itself; nothing for the assistant or the user to do
+        add("ok", "reports waiting", f"{waiting} report(s) the Theodore service could not take yet; Theodore sends them by itself")
     final = _doctor_verdict(checks, snap, home)
     if as_json:         # the same verdict, as the exit code and in the document
         print(json.dumps({"checks": [{"level": l, "name": n, "detail": d} for l, n, d in checks], "snapshot": snap,
