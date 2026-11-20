@@ -3012,6 +3012,18 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
 
 # --- uninstall -------------------------------------------------------------------------------------------------------------------
 
+def _drop_empty_cache_parent(cache: Path) -> None:
+    """On Windows the engine's cache is %LOCALAPPDATA%\\Theodore\\Cache. Up to 0.4.14 that Theodore folder was also
+    Theodore's home and went with it; since 0.4.15 the home is in the user's profile, and the cache's parent would stay
+    behind, empty, after an uninstall. It goes when nothing else is in it, and never when it is the home itself."""
+    parent = cache.parent
+    if not core.IS_WINDOWS or cache.name != "Cache" or parent.name != "Theodore":
+        return
+    with contextlib.suppress(OSError, core.Status):
+        if parent.resolve() != core.home().root.resolve():
+            parent.rmdir()                  # refused by the system, and so left, when anything is in it
+
+
 def _render_cache_dirs() -> list[Path]:
     """The engine's render caches: its current folder (Theodore) and the one engines before 1.0.0-rc.4 used."""
     if sys.platform == "darwin":
@@ -3364,6 +3376,8 @@ def _uninstall(keep_hosts: bool) -> int:
         core.remove_tree(cache)
         if cache.exists():
             left.append(f"the render cache {cache}")
+        else:
+            _drop_empty_cache_parent(cache)
     old_caches = _remove_old_engine_caches(left)
     if old_caches:
         edits.append(f"the engine's former caches were removed ({', '.join(old_caches)})")
