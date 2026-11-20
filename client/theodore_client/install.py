@@ -75,14 +75,28 @@ def _file_attrs(target: str, mode: int | None, mtime: float | None) -> None:
 
 
 def _inside(root: str, folder: str, checked: set[str]) -> None:
-    """Make the folder and confirm, once per folder, that it really is inside root (no link on the way out of it)."""
+    """Confirm that the folder is inside root, then make what is missing of it. The nearest part of the path that
+    exists already is resolved first: nothing is made beyond a link that leads out of root. `checked` holds the
+    folders known to be inside (root itself from the start)."""
     if folder in checked:
         return
-    os.makedirs(folder, exist_ok=True)
-    real = os.path.realpath(folder)
-    if real != root and not real.startswith(root + os.sep):
-        raise _NotPlain(folder)
-    checked.add(folder)
+    missing = []
+    current = folder
+    while current not in checked and not os.path.lexists(current):
+        missing.append(current)
+        current = os.path.dirname(current)
+    if current not in checked:
+        real = os.path.realpath(current)
+        if not os.path.isdir(current) or not (real == root or real.startswith(root + os.sep)):
+            raise _NotPlain(current)
+        checked.add(current)
+    for path in reversed(missing):
+        try:
+            os.mkdir(path)
+        except FileExistsError:             # another writer made it a moment ago
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise _NotPlain(path) from None
+        checked.add(path)
 
 
 def _plain_entry(root: str, target: str, data: bytes | None, mode: int | None, mtime: float | None, checked: set[str]) -> None:
@@ -141,7 +155,7 @@ def _plain_target(root: str, name: str) -> str:
 
 def _unpack_tar_plain(archive: Path, dest: Path) -> None:
     root = os.path.realpath(dest)
-    checked: set[str] = set()
+    checked: set[str] = {root}
     with tarfile.open(archive) as tar, _Writers(UNPACK_WRITERS) as writers:
         for member in tar:
             if not (member.isdir() or member.isreg()):
@@ -186,7 +200,7 @@ def extract_tar(archive: Path, dest: Path) -> None:
 
 def _unpack_zip_plain(archive: Path, dest: Path) -> None:
     root = os.path.realpath(dest)
-    checked: set[str] = set()
+    checked: set[str] = {root}
     with zipfile.ZipFile(archive) as bundle, _Writers(UNPACK_WRITERS) as writers:
         for info in bundle.infolist():
             target = _plain_target(root, info.filename)
