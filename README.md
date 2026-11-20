@@ -28,7 +28,10 @@ Windows 10 version 1803 or later (x64), Linux x64 and arm64 with glibc 2.28 or l
 ## What gets installed, and where
 
 Everything Theodore owns is in one folder per user: `~/.theodore` on macOS and Linux,
-`%LOCALAPPDATA%\Theodore` on Windows (`THEODORE_HOME` overrides it). All assistants on the computer share it.
+`%USERPROFILE%\.theodore` on Windows (`THEODORE_HOME` overrides it). All assistants on the computer share it, and so
+does the Claude desktop app on Windows: an installation made from inside the app is in the same folder. An installation
+by an earlier version in `%LOCALAPPDATA%\Theodore` keeps working, and updating, where it is; running the installer
+again removes it and installs into `%USERPROFILE%\.theodore`.
 Theodore creates and manages only the subfolders listed here. If the folder already exists and holds anything
 else, Theodore never reads, changes or deletes it. The folder belongs to the Theodore service it was set up for
 (`state/environment` names it): a build for another service refuses it and says so; give that build its own folder
@@ -142,8 +145,8 @@ and the reports and preferences you or your assistant file; never deck content, 
 ## Remove it
 
 ```
-~/.theodore/bin/theodore uninstall                    macOS, Linux
-"%LOCALAPPDATA%\Theodore\bin\theodore.cmd" uninstall  Windows
+~/.theodore/bin/theodore uninstall                      macOS, Linux
+"%USERPROFILE%\.theodore\bin\theodore.cmd" uninstall  Windows
 ```
 
 This removes the plugin from Claude Code and Codex, also when their `claude` or `codex` command is not on PATH (it

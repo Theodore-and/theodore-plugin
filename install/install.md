@@ -8,7 +8,7 @@ This may run in a cloud sandbox session (a Claude chat's workspace, ChatGPT Work
 decks there too, and that workspace is the computer this page means.
 
 1. Run the installer: the line for the shell you have, exactly as written. It needs no admin rights and puts
-   everything into the user's own Theodore folder (~/.theodore; Windows: %LOCALAPPDATA%\Theodore).
+   everything into the user's own Theodore folder (~/.theodore; Windows: %USERPROFILE%\.theodore).
    macOS/Linux:        ( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
    Windows: two separate commands, the download and then the installer (run the second only when the first
    succeeded); the folder is %LOCALAPPDATA%\Theodore-install, which the installer removes when it ends.
@@ -38,7 +38,7 @@ decks there too, and that workspace is the computer this page means.
      then `claude plugin install theodore@theodore`)
    Codex: there is no direct route yet; the installer of step 1 registers Codex from its own copy of the plugin.
      To do that by hand after step 1: codex plugin marketplace add ~/.theodore/plugin
-     (Windows: codex plugin marketplace add "%LOCALAPPDATA%\Theodore\plugin"), then codex plugin add theodore@theodore
+     (Windows: codex plugin marketplace add "%USERPROFILE%\.theodore\plugin"), then codex plugin add theodore@theodore
      (or from GitHub: codex plugin marketplace add Theodore-and/theodore-plugin, then the same second command)
    The first use then downloads the same files and prints a sign-in link: give it to the user to open and approve.
 If a command prints a line starting with THEODORE, follow its NEXT line. Never ask the user for a password or

@@ -91,7 +91,7 @@ While usage counts are on for your account (the licence refresh says so; they ar
 engine and the client write one line per command to a file in Theodore's folder:
 
 - macOS and Linux: `~/.theodore/state/usage-ledger.jsonl`
-- Windows: `%LOCALAPPDATA%\Theodore\state\usage-ledger.jsonl`
+- Windows: `%USERPROFILE%\.theodore\state\usage-ledger.jsonl`
 
 Next to it, `state/usage.json` holds whether the counts are on, how many lines were dropped and the batch being sent.
 
@@ -231,7 +231,7 @@ changed since the client last learned it, the service refuses the report, stores
 `theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
 plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). What it did is
 written beside Theodore's folder, never inside it (`~/.theodore-uninstall.log`; Windows:
-`%LOCALAPPDATA%\Theodore-uninstall.log`), so it can still be read once the folder is gone; it holds paths and
+`%USERPROFILE%\.theodore-uninstall.log`), so it can still be read once the folder is gone; it holds paths and
 outcomes, no credential, and can be deleted at any time. It first stops Theodore's own running
 processes (background downloads, the tool server), each found by the file Theodore wrote for it. On Windows the folders
 go after the client has exited: a cleanup removes them, retrying for up to two minutes while Windows releases the last

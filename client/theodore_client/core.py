@@ -333,6 +333,29 @@ def sandbox_network_tell() -> str:
 OWNED = ("bin", "client", "runtime", "engines", "packs", "tools", "state", "logs", "staging", "plugin", "plugin.partial")
 
 
+# Theodore's folder on Windows, one rule wherever it is found (both launchers, install.cmd, the short command and this
+# client, each with literally the same logic): THEODORE_HOME when set; else %USERPROFILE%\.theodore when it holds an
+# installation (bin\launcher.json); else %LOCALAPPDATA%\Theodore when that holds one (made by client 0.4.14 or earlier: it
+# keeps working, and updating, where it is); else %USERPROFILE%\.theodore (a new installation). Inside an MSIX-packaged
+# app (the Claude desktop app) Windows redirects %LOCALAPPDATA% into the app's own folder, unseen by every other program,
+# but not %USERPROFILE%\.theodore: an installation made there is the same folder for everyone.
+def windows_homes() -> tuple[Path, Path]:
+    """(the home, %USERPROFILE%\\.theodore; the earlier home, %LOCALAPPDATA%\\Theodore)."""
+    profile = os.environ.get("USERPROFILE")
+    local = os.environ.get("LOCALAPPDATA")
+    return (Path(profile) if profile else Path.home()) / ".theodore", \
+        (Path(local) if local else Path.home() / "AppData" / "Local") / "Theodore"
+
+
+def windows_default_home() -> Path:
+    new, old = windows_homes()
+    if (new / "bin" / "launcher.json").is_file():
+        return new
+    if (old / "bin" / "launcher.json").is_file():
+        return old
+    return new
+
+
 class Home:
     def __init__(self, root: Path | None = None):
         if root is None:
@@ -340,7 +363,7 @@ class Home:
             if env:
                 root = Path(env)
             elif IS_WINDOWS:
-                root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Theodore"
+                root = windows_default_home()
             else:
                 root = Path.home() / ".theodore"
         self.root = Path(root).absolute()
@@ -383,6 +406,50 @@ class Home:
         if base is None:
             return None
         return base / "python" / ("python.exe" if IS_WINDOWS else "bin/python3")
+
+
+LAUNCHER_FILES = ("theodore", "theodore.cmd", "launcher.json")      # the order the launcher copies them in (step 2)
+
+
+def launcher_generation(folder: Path) -> int:
+    """launcher_generation of the launcher.json in `folder`; -1 when there is none or it cannot be read."""
+    try:
+        return int(read_json(folder / "launcher.json").get("launcher_generation"))
+    except (TypeError, ValueError):
+        return -1
+
+
+def refresh_stable_launcher(sources: list[Path]) -> str | None:
+    """Bring the stable launcher in <home>/bin (its three files) up to the newest launcher generation among `sources`,
+    scripts folders of the plugin (Theodore's own copy, an assistant's plugin folder), when that is newer than its own:
+    what the launcher does for itself when a newer one runs (its step 2), done by an update, so a launcher fix reaches an
+    updated installation whose host only ever runs the stable launcher. Only a launcher stamped for this folder's
+    service. Each file is written whole beside its place and renamed into it, launcher.json last (a launcher that reads
+    the new generation finds the new scripts): a launcher running from bin keeps reading the file it opened (POSIX), and
+    the Windows launcher runs the client from one line, read whole, so it may be replaced while the client runs.
+    Returns a line saying what changed, or None when nothing did. Never raises."""
+    try:
+        bin_dir = home().bin
+        have = launcher_generation(bin_dir)
+        if have < 0:
+            return None                     # no stable launcher to refresh (the launcher makes the first one)
+        own = home_environment() or str(read_json(bin_dir / "launcher.json").get("api_base") or "").rstrip("/")
+        best, best_gen = None, have
+        for folder in sources:
+            folder = Path(folder)
+            gen = launcher_generation(folder)
+            api_base = str(read_json(folder / "launcher.json").get("api_base") or "").rstrip("/")
+            if gen > best_gen and (not own or api_base == own) and all((folder / name).is_file() for name in LAUNCHER_FILES):
+                best, best_gen = folder, gen
+        if best is None:
+            return None
+        for name in LAUNCHER_FILES:
+            write_atomic(bin_dir / name, (best / name).read_bytes(), 0o644 if name == "launcher.json" else 0o755)
+        log(f"stable launcher: generation {have} -> {best_gen}, from {best}")
+        return f"stable launcher: generation {have} -> {best_gen}"
+    except Exception as exc:  # noqa: BLE001  an update never fails over it: the launcher still refreshes itself when run
+        log(f"stable launcher: not refreshed ({exc.__class__.__name__}: {exc})")
+        return None
 
 
 _HOME: Home | None = None
@@ -450,18 +517,31 @@ def _sh_quote(text: str) -> str:
 
 def shim_texts() -> dict[str, str] | None:
     """{file name: content} of the short command for this installation, or None when it cannot be written safely. On
-    Windows only for the default folder: the batch file names it as %LOCALAPPDATA%\\Theodore (no path baked in, so no
-    code page question), and the Git Bash script runs Theodore's sh launcher, which carries every argument exactly."""
+    Windows only for a default folder (the one windows_default_home finds): the batch file finds it by the same rule,
+    from %USERPROFILE% and %LOCALAPPDATA% (no path baked in, so no code page question), and the Git Bash script runs
+    Theodore's sh launcher, which carries every argument exactly."""
     head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
     if IS_WINDOWS:
-        local = os.environ.get("LOCALAPPDATA")
-        if not local or os.path.normcase(os.path.abspath(home().root)) != os.path.normcase(os.path.abspath(Path(local) / "Theodore")):
+        new, old = windows_homes()
+        root = os.path.normcase(os.path.abspath(home().root))
+        same = lambda path: root == os.path.normcase(os.path.abspath(path))     # noqa: E731
+        if not (same(new) or (same(old) and same(windows_default_home()))):
             return None
+        # The rule of windows_default_home, as the batch file and the Git Bash script read it.
         return {
             "theodore.cmd": f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
-                            '"%LOCALAPPDATA%\\Theodore\\bin\\theodore.cmd" %*\r\n',
+                            "setlocal\r\n"
+                            'set "THEODORE_SHIM_HOME=%USERPROFILE%\\.theodore"\r\n'
+                            'if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" '
+                            'set "THEODORE_SHIM_HOME=%LOCALAPPDATA%\\Theodore"\r\n'
+                            'if defined THEODORE_HOME set "THEODORE_SHIM_HOME=%THEODORE_HOME%"\r\n'
+                            '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n',
             "theodore": "#!/bin/sh\n" + head
-                        + 'b=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null)/Theodore/bin\n'
+                        + 'h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n'
+                        + 'o=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null)/Theodore\n'
+                        + '[ ! -f "$h/bin/launcher.json" ] && [ -f "$o/bin/launcher.json" ] && h=$o\n'
+                        + '[ -n "${THEODORE_HOME:-}" ] && h=$(cygpath -u "$THEODORE_HOME" 2>/dev/null)\n'
+                        + 'b=$h/bin\n'
                         + '[ -f "$b/theodore" ] && exec sh "$b/theodore" "$@"\n'
                         + 'exec "$b/theodore.cmd" "$@"\n',
         }
@@ -1027,7 +1107,7 @@ _LOG_FILE: Path | None = None       # set by uninstall: its record goes outside 
 
 def uninstall_log() -> Path:
     """Where an uninstall keeps its record: beside Theodore's folder, never inside it (~/.theodore-uninstall.log,
-    %LOCALAPPDATA%\\Theodore-uninstall.log), so what it did can still be read once the folder is gone."""
+    %USERPROFILE%\\.theodore-uninstall.log), so what it did can still be read once the folder is gone."""
     root = home().root
     return root.parent / f"{root.name}-uninstall.log"
 

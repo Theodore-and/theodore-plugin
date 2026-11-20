@@ -1137,5 +1137,67 @@ class Environments(LauncherCase):
         self.assertNotIn("THEODORE USAGE", removed.stdout)
 
 
+@unittest.skipUnless(IS_WINDOWS, "theodore.cmd: Theodore's folder on Windows")
+class WindowsHome(LauncherCase):
+    """WINHOME: without THEODORE_HOME, Theodore's folder is %USERPROFILE%\\.theodore (not redirected inside the Claude desktop
+    app), or an installation by 0.4.14 or earlier in %LOCALAPPDATA%\\Theodore, which keeps working where it is."""
+
+    def setUp(self):
+        super().setUp()
+        self.local = self.box.tmp / "localappdata"
+        self.box.env.pop("THEODORE_HOME", None)
+        self.box.env["LOCALAPPDATA"] = str(self.local)
+        self.new, self.old = self.box.user_home / ".theodore", self.local / "Theodore"
+        self.box.home = self.new                    # where the sandbox waits for jobs
+
+    def claimed(self, home: Path, api: str) -> None:
+        (home / "state").mkdir(parents=True, exist_ok=True)
+        (home / "state" / "environment").write_text(api + "\n")
+
+    def found(self, env=None) -> str:
+        """Which folder the launcher took, told by its refusal of a folder claimed by another service (nothing runs)."""
+        first, _n, _t = self.assertStatus(self.run_launcher("version", env=env), "USAGE", 64)
+        return first
+
+    def test_the_rule_in_its_four_cases(self):
+        self.claimed(self.new, "https://api.new.example.test")
+        self.claimed(self.old, "https://api.old.example.test")
+        first = self.found()
+        self.assertIn(f'("{self.new}")', first, "neither holds an installation: %USERPROFILE%\\.theodore")
+        (self.old / "bin").mkdir()
+        (self.old / "bin" / "launcher.json").write_text('{\n  "launcher_generation": 13\n}\n')
+        first = self.found()
+        self.assertIn(f'("{self.old}")', first, "only the earlier folder holds one: it is used where it is")
+        self.assertIn("https://api.old.example.test", first)
+        (self.new / "bin").mkdir()
+        (self.new / "bin" / "launcher.json").write_text('{\n  "launcher_generation": 13\n}\n')
+        self.assertIn(f'("{self.new}")', self.found(), "the new folder holds one: it wins")
+        chosen = self.box.tmp / "chosen"
+        self.claimed(chosen, "https://api.chosen.example.test")
+        self.assertIn(f'("{chosen}")', self.found(env={"THEODORE_HOME": str(chosen)}), "THEODORE_HOME first")
+
+    def test_a_new_installation_goes_to_the_user_profile(self):
+        result = self.run_launcher("version")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.box.wait_jobs(600)
+        self.assertTrue((self.new / "bin" / "theodore.cmd").is_file())
+        self.assertTrue((self.new / "client" / "current.txt").is_file())
+        self.assertFalse(self.old.exists())
+
+    def test_an_earlier_installation_keeps_working_and_updating_where_it_is(self):
+        self.box.home = self.old
+        made = self.run_launcher("version", env={"THEODORE_HOME": str(self.old)})        # where 0.4.14 put it
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.box.wait_jobs(600)
+        stamp = self.old / "bin" / "launcher.json"
+        stamp.write_text(stamp.read_text().replace('"launcher_generation": 1,', '"launcher_generation": 0,'))     # an older launcher
+        result = self.run_launcher("version")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("theodore client", result.stdout)
+        self.assertEqual(json.loads(stamp.read_text())["launcher_generation"], 1, "its stable launcher was updated in place")
+        self.assertEqual((self.old / "bin" / "theodore.cmd").read_bytes(), self.box.launcher.read_bytes())
+        self.assertFalse(self.new.exists(), "nothing went to the new folder")
+
+
 if __name__ == "__main__":
     unittest.main()

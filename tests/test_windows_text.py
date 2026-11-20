@@ -428,7 +428,16 @@ class WindowsShortCommand(unittest.TestCase):
         self.assertEqual(set(texts), {"theodore.cmd", "theodore"}, "PowerShell and cmd find the .cmd (PATHEXT), Git Bash the script")
         batch = texts["theodore.cmd"]
         self.assertTrue(batch.isascii(), "cmd reads a batch file in the OEM code page: no é in it")
-        self.assertIn('"%LOCALAPPDATA%\\Theodore\\bin\\theodore.cmd" %*', batch)
+        # The home by the one rule, from the variables (WINHOME): %USERPROFILE%\.theodore, else an earlier installation in
+        # %LOCALAPPDATA%\Theodore, THEODORE_HOME first.
+        self.assertIn('set "THEODORE_SHIM_HOME=%USERPROFILE%\\.theodore"\r\n', batch)
+        self.assertIn('if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" '
+                      'set "THEODORE_SHIM_HOME=%LOCALAPPDATA%\\Theodore"\r\n', batch)
+        self.assertIn('if defined THEODORE_HOME set "THEODORE_SHIM_HOME=%THEODORE_HOME%"\r\n', batch)
+        self.assertTrue(batch.endswith('"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n'), batch)
+        self.assertNotIn(STRANGE, batch, "no path baked in")
+        self.assertIn('h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n', texts["theodore"])
+        self.assertIn('[ ! -f "$h/bin/launcher.json" ] && [ -f "$o/bin/launcher.json" ] && h=$o\n', texts["theodore"])
         self.assertNotIn("call ", batch.lower(), "no CALL: it doubles carets and expands % again")
         self.assertIn('exec sh "$b/theodore" "$@"', texts["theodore"], "Git Bash: the sh launcher, which carries every argument exactly")
         self.assertTrue(texts["theodore"].startswith("#!/bin/sh\n"))
@@ -454,8 +463,18 @@ class WindowsShortCommand(unittest.TestCase):
     def test_a_home_elsewhere_gets_no_short_command_on_windows(self):
         with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "elsewhere")}), mock.patch.object(core, "_HOME", None):
             self.assertIsNone(core.shim_texts(), "no path is written into a batch file")
-        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.local / "Theodore")}), mock.patch.object(core, "_HOME", None):
+        new = self.tmp / STRANGE / ".theodore"
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(new)}), mock.patch.object(core, "_HOME", None):
             self.assertIsNotNone(core.shim_texts(), "the launchers always set THEODORE_HOME: the default folder named so still gets it")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.local / "Theodore")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNone(core.shim_texts(), "the earlier folder without an installation: the short command would find another")
+        (self.local / "Theodore" / "bin" / "launcher.json").write_text("{}")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.local / "Theodore")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNotNone(core.shim_texts(), "an installation by 0.4.14 or earlier, which the rule finds: it gets it too")
+        (new / "bin").mkdir(parents=True)
+        (new / "bin" / "launcher.json").write_text("{}")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.local / "Theodore")}), mock.patch.object(core, "_HOME", None):
+            self.assertIsNone(core.shim_texts(), "both hold one: the short command finds the new one, so the old one gets none")
 
     def test_the_folders_it_may_use_and_only_on_path(self):
         candidates = core.shim_dir_candidates()
@@ -482,6 +501,137 @@ class WindowsShortCommand(unittest.TestCase):
                 mock.patch.object(commands, "_shim_written", lambda: False):
             rules = commands._permission_rules()
         self.assertFalse([r for r in rules if "(theodore " in r or "(& theodore " in r], "no rule for the name without the command")
+
+
+class WindowsHomeRule(unittest.TestCase):
+    """WINHOME: Theodore's folder on Windows is %USERPROFILE%\\.theodore, which an MSIX app (the Claude desktop app) does not
+    redirect; an installation by 0.4.14 or earlier in %LOCALAPPDATA%\\Theodore keeps working where it is."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.profile = self.tmp / STRANGE
+        self.local = self.profile / "AppData" / "Local"
+        self.new, self.old = self.profile / ".theodore", self.local / "Theodore"
+        env = {"LOCALAPPDATA": str(self.local), "USERPROFILE": str(self.profile), "HOME": str(self.profile)}
+        patches = [mock.patch.dict(os.environ, env), mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core, "_HOME", None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop("THEODORE_HOME", None)
+
+    def installed(self, home: Path) -> None:
+        (home / "bin").mkdir(parents=True, exist_ok=True)
+        (home / "bin" / "launcher.json").write_text('{\n  "launcher_generation": 13\n}\n')
+
+    def home(self) -> Path:
+        core._HOME = None
+        return core.home().root
+
+    def test_the_rule_in_its_four_cases(self):
+        self.assertEqual(self.home(), self.new, "neither holds an installation: a new one goes to %USERPROFILE%\\.theodore")
+        self.old.mkdir(parents=True)                # the engine's caches live under it (Theodore\\Cache): not an installation
+        (self.old / "Cache").mkdir()
+        self.assertEqual(self.home(), self.new)
+        self.installed(self.old)
+        self.assertEqual(self.home(), self.old, "only the earlier one holds an installation: it keeps working where it is")
+        self.installed(self.new)
+        self.assertEqual(self.home(), self.new, "the new one holds an installation: it wins")
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.tmp / "chosen")}):
+            self.assertEqual(self.home(), self.tmp / "chosen", "THEODORE_HOME first, always")
+
+    def test_what_is_written_for_others_names_the_resolved_home(self):
+        self.installed(self.new)
+        launcher = self.new / "bin" / "theodore.cmd"
+        self.assertEqual(core.home().launcher(), launcher)
+        self.assertEqual(core.full_launcher(), f'"{launcher}"')
+        with mock.patch.object(core, "shim_active", lambda: False):
+            self.assertEqual(core.quoted_launcher(), f'"{launcher}"')
+        with mock.patch.object(commands, "_claude_skill_launchers", lambda: []), mock.patch.object(commands, "_render_cache_dirs", lambda: []), \
+                mock.patch.object(commands.specimens, "cache_root", lambda: self.local / "Theodore" / "Cache" / "specimens"), \
+                mock.patch.object(commands, "_shim_written", lambda: True), \
+                mock.patch.object(commands, "_claude_read_rule", lambda folder: f"Read({folder})"):
+            rules = commands._permission_rules()
+        for rule in (f"Bash({launcher} *)", f'Bash("{launcher}" *)', f"PowerShell({launcher} *)", f'PowerShell(& "{launcher}" *)',
+                     f"Read({self.new})"):
+            self.assertIn(rule, rules)
+        self.assertFalse([r for r in rules if str(self.old / "bin") in r], "nothing names the earlier folder's launcher")
+        from theodore_client import routing
+        with mock.patch.object(core, "shim_active", lambda: False):
+            self.assertIn(f'run "{launcher}" uninstall', routing.sentence())
+        from theodore_client import desktop
+        self.assertEqual(desktop.entry()["env"]["THEODORE_DESKTOP_LAUNCHER"], f'"{launcher}"', "the Claude app's entry runs it")
+
+    def test_an_earlier_installation_keeps_its_folder_for_everything_it_writes(self):
+        self.installed(self.old)
+        launcher = self.old / "bin" / "theodore.cmd"
+        self.assertEqual(core.home().launcher(), launcher)
+        self.assertIsNotNone(core.shim_texts(), "its short command, which finds it by the same rule")
+        with mock.patch.object(core, "shim_active", lambda: False):
+            self.assertEqual(core.quoted_launcher(), f'"{launcher}"')
+        self.assertEqual(core.uninstall_log(), self.local / "Theodore-uninstall.log")
+
+    def test_the_rule_is_the_same_text_in_every_launcher_and_the_installer(self):
+        """The batch rule is three lines, literally the same in both skill launchers and install.cmd; the sh launcher's
+        Git Bash branch and the short command read the same two places in the same order."""
+        rule = ['set "HOME_DIR=%USERPROFILE%\\.theodore"',
+                'if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" set "HOME_DIR=%LOCALAPPDATA%\\Theodore"',
+                'if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"']
+        root = Path(support.PLUGIN).parents[1]
+        for path in (Path(support.PLUGIN) / "skills" / "pptx" / "scripts" / "theodore.cmd",
+                     Path(support.PLUGIN) / "skills" / "deck-design" / "scripts" / "theodore.cmd", root / "install" / "install.cmd"):
+            lines = path.read_bytes().decode("utf-8").split("\r\n")
+            start = lines.index(rule[0])
+            self.assertEqual(lines[start:start + 3], rule, path)
+            self.assertFalse([l for l in lines if l.startswith('set "HOME_DIR=%LOCALAPPDATA%')], path)
+        sh = (Path(support.PLUGIN) / "skills" / "pptx" / "scripts" / "theodore").read_text(encoding="utf-8")
+        self.assertIn('wh_new="${USERPROFILE:-}\\\\.theodore" wh_old="${LOCALAPPDATA:-}\\\\Theodore"', sh)
+        self.assertNotIn("${LOCALAPPDATA:-}\\\\Theodore}", sh, "no copy of the earlier default is left")
+        self.assertEqual(sh.count("$(win_home)"), 2, "the session-start hook and the Git Bash branch")
+
+
+class StableLauncherRefresh(unittest.TestCase):
+    """WINHOME: an update brings <home>\\bin's stable launcher up to a newer launcher of the plugin (Windows files)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.home = self.tmp / STRANGE / ".theodore"
+        patches = [mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.home)}), mock.patch.object(core, "IS_WINDOWS", True),
+                   mock.patch.object(core, "_HOME", None)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def launcher(self, folder: Path, generation: int, api: str = "https://api.example.test") -> dict:
+        folder.mkdir(parents=True, exist_ok=True)
+        files = {"theodore.cmd": f"@echo off\r\nrem generation {generation}\r\n".encode(), "theodore": f"#!/bin/sh\n# {generation}\n".encode(),
+                 "launcher.json": f'{{\r\n  "launcher_generation": {generation},\r\n  "api_base": "{api}"\r\n}}\r\n'.encode()}
+        for name, data in files.items():
+            (folder / name).write_bytes(data)
+        return files
+
+    def test_a_newer_generation_replaces_all_three_files_byte_for_byte(self):
+        self.launcher(self.home / "bin", 12)
+        plugin = self.tmp / "plugin" / "skills" / "pptx" / "scripts"
+        files = self.launcher(plugin, 13)
+        self.assertEqual(core.refresh_stable_launcher([plugin]), "stable launcher: generation 12 -> 13")
+        for name, data in files.items():
+            self.assertEqual((self.home / "bin" / name).read_bytes(), data, f"{name}: CRLF kept")
+        self.assertEqual([p.name for p in (self.home / "bin").iterdir() if p.name.endswith(".tmp")], [], "no half-written file left")
+
+    def test_an_equal_or_older_one_or_another_services_is_left_alone(self):
+        stable = self.launcher(self.home / "bin", 13)
+        for generation, api in ((13, "https://api.example.test"), (12, "https://api.example.test"), (14, "https://api.elsewhere.test")):
+            plugin = self.tmp / f"plugin-{generation}"
+            self.launcher(plugin, generation, api)
+            self.assertIsNone(core.refresh_stable_launcher([plugin]), generation)
+        for name, data in stable.items():
+            self.assertEqual((self.home / "bin" / name).read_bytes(), data)
+
+    def test_no_stable_launcher_yet_is_not_made_here(self):
+        plugin = self.tmp / "plugin"
+        self.launcher(plugin, 13)
+        self.assertIsNone(core.refresh_stable_launcher([plugin]))
+        self.assertFalse((self.home / "bin").exists(), "the launcher makes the first stable copy itself")
 
 
 class CodexServerOnWindows(unittest.TestCase):
