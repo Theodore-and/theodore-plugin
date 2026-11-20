@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.17
+
+- Windows: removing Theodore no longer leaves an empty `Theodore` folder under `%LOCALAPPDATA%`. The engine keeps its cache there; since Theodore's own folder moved to the user's profile, the cache's folder stayed behind after an uninstall.
+
 ## 0.4.16
 
 - A report's text is cleaned on the computer by the same rules as on Theodore's service: long hexadecimal values and base64 values are now removed before the report leaves, as the service already did on arrival.
