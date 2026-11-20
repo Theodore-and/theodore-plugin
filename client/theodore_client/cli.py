@@ -19,6 +19,7 @@ HELP = """Theodore client commands (run through the launcher):
                                  (--open: also open the sign-in page in the browser; nothing else ever opens one)
   status [--json] [--wait S]     doctor [--json]         version
   update [--check | --apply | --rollback | --channel C | --pin V | --unpin | --reset-state]
+  repin <workspace>              move a deck and all its slide parts to the current engine (its next build redraws every slide)
   report --kind bug|feedback --title T --details D|--details-file F [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
                                  (details of more than one line: put them in a UTF-8 file and pass --details-file; --details - reads standard input)
   prefs add "<text>" | list | remove <id>
@@ -76,6 +77,8 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--engine-job", action="store_true")
     mode.add_argument("--plugin-job", action="store_true")
     mode.add_argument("--client-job", nargs="+")         # version sha256 runtime-id [issued]
+    rn = sub.add_parser("repin", add_help=False)
+    rn.add_argument("workspace")
     rp = sub.add_parser("report", add_help=False)
     rp.add_argument("--kind", choices=("bug", "feedback"), required=True)
     rp.add_argument("--title", required=True)
@@ -173,6 +176,9 @@ def _dispatch(argv: list[str]) -> int:
             else "reset" if args.reset_state \
             else "channel" if args.channel else "apply"
         return commands.update(action, args.pin or args.channel)
+    if cmd == "repin":
+        from . import install
+        return core.emit(install.repin(args.workspace))
     if cmd == "report":
         return commands.report(args.kind, args.title, _details(args.details, args.details_file), args.verb, args.code, args.workspace,
                                args.origin, args.dry_run)
