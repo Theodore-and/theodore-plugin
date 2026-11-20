@@ -1160,7 +1160,8 @@ def doctor(as_json: bool) -> int:
                                                     "" if core.cloud_sandbox() else
                                                     "; whether Theodore's plugin is registered could not be checked (its command did not answer)"))
     written = _host_record().get(routing.RECORD_KEY) or {}
-    add("ok", "instructions", "; ".join(f"{n}: {e.get('path')}" for n, e in sorted(written.items())) or "none written")
+    add("ok", "instructions", "; ".join(f"{n}: {e.get('path')}" for n, e in sorted(written.items()))
+        or "none written (Theodore's set-up writes the line that names it for presentations; the plugin alone does not)")
     if core.IS_WINDOWS and core.host_executable("claude") and not claude_git_bash():
         fetching = _git_fetching()
         if fetching:        # Theodore's own PortableGit is on its way: nothing for the person to install (WINDOWS, W-9)
@@ -1183,7 +1184,8 @@ def doctor(as_json: bool) -> int:
         add("warn", "engine update", f"engine {engine_failed['version']} is pending: it failed its check ({engine_failed.get('reason', 'unknown')}); "
             f"engine {snap.get('engine')} keeps working and the update is tried again after six hours")
     if core.host_executable("claude") or core.host_executable("codex"):
-        off = _host_record().get("settings") == "off"
+        state = _host_record().get("settings")
+        off = state == "off" or (state is None and not _set_up_asked(_host_record()))    # the plugin alone: never applied
         add("ok", "host settings", f"off: Claude Code and Codex ask before each Theodore command (on: {quoted_launcher()} hosts settings --apply)"
             if off else f"on: Theodore's own commands run without asking each time (to turn that off: {quoted_launcher()} hosts settings --remove)")
         note = claude_policy_note() if core.host_executable("claude") else None
@@ -1931,18 +1933,26 @@ def _hosts_pending_path() -> Path:
 HOSTS_RETRY_S = 3600
 
 
+def _set_up_asked(record: dict) -> bool:
+    """The installer ran on this computer: the person asked for Theodore to be set up. Its two signs are its marker
+    (left before its downloads) and "set_up" in the record (written by `hosts register`, its registration step). A plugin
+    added from a marketplace alone has neither, and changes nothing in an assistant's settings or instructions by
+    itself (from 0.4.18)."""
+    return bool(record.get("set_up")) or _hosts_pending_path().exists()
+
+
 def ensure_settings() -> None:
-    """Theodore's host settings are on by default (`hosts settings --apply`, which the installer runs). An installation
-    from before they were (no "settings" in the record) gets them once, at its first command after the update; one
-    whose settings are on gets rules for launchers that are new since (a new plugin version's folder), never again a
-    rule the user took out; `hosts settings --remove` or the installer's --no-settings ("off") stops both. Never fails
-    or prints."""
+    """Theodore's host settings come with its set-up (`hosts settings --apply`, which the installer runs). A set-up that
+    had not applied them yet (no "settings" in the record: the installer was stopped, or found no assistant then) gets
+    them at its next command; one whose settings are on gets rules for launchers that are new since (a new plugin
+    version's folder), never again a rule the user took out; `hosts settings --remove` or the installer's
+    --no-settings ("off") stops both. Without a set-up (the plugin alone) nothing is applied. Never fails or prints."""
     try:
         if not core.home().launcher().exists():
             return
         record = _host_record()
         state = record.get("settings")
-        if state == "off":
+        if state == "off" or (state is None and not _set_up_asked(record)):
             return
         claude, codex = core.host_executable("claude"), core.host_executable("codex")
         if claude or codex:
@@ -2171,8 +2181,8 @@ def _register_hosts() -> list[str]:
     lines += desktop.register(record)                              # Claude Desktop's chat: the local server
     record, routed = routing.ensure(record, register=True)        # the lines naming Theodore for decks
     lines += routed
-    if record:
-        _save_host_record(record)
+    record["set_up"] = True                                        # see _set_up_asked
+    _save_host_record(record)
     marker = _hosts_pending_path()
     if not any("FAILED" in line for line in lines):
         core.remove_tree(marker)
@@ -2219,7 +2229,8 @@ def hosts(action: str, apply: bool, remove: bool = False) -> int:
             if codex:
                 what.append(f"Codex runs Theodore's commands without asking each time ({_codex_rules_path()}, Theodore's launcher by "
                             f"its exact paths; they run outside Codex's sandbox)")
-            state = "off (hosts settings --remove or --no-settings)" if record.get("settings") == "off" else "on"
+            state = "off (hosts settings --remove or --no-settings)" if record.get("settings") == "off" else \
+                "on" if record.get("settings") or _set_up_asked(record) else "off (Theodore's set-up did not run on this computer)"
             return core.emit(Status("OK", f"settings {state}: {'; '.join(what) or 'no assistant found'}.",
                                     f"to turn them off: {quoted_launcher()} hosts settings --remove; on again: "
                                     f"{quoted_launcher()} hosts settings --apply", None))
@@ -2629,8 +2640,8 @@ def resume_background() -> list[str]:
 
 
 def ensure_instructions() -> None:
-    """An install that never ran the installer (the plugin added from a marketplace) gets the routing block at its
-    first guide, skill or doctor run; later runs update its wording in place. Never fails the command it runs in."""
+    """Bring a routing block that is there up to the current wording (the short command came or went, a new client).
+    It never writes one where there is none: only `hosts register` does. Never fails the command it runs in."""
     try:
         record = _host_record()
         updated, lines = routing.ensure(record)

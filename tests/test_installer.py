@@ -53,6 +53,21 @@ class Installer(unittest.TestCase):
         lines = self.calls.read_text().splitlines()
         return [line.replace('"', "") for line in lines] if IS_WINDOWS else lines
 
+    def wait_ready(self, seconds: float = 360.0) -> tuple[bool, str]:
+        """Wait for the runtime's .ready file itself. Between two background steps (the launcher's bootstrap, then the
+        client's set-up job) no job is running for a moment; on a loaded Windows machine wait_jobs returned in that gap
+        and the file was not there yet (2026-11-21). A download that stopped still fails: the wait is bounded. Returns
+        whether the file is there and, for a failure's message, what the jobs' records say."""
+        import time
+        ready = self.box.home / "runtime" / RUNTIME_ID / ".ready"
+        deadline = time.monotonic() + seconds
+        while not ready.exists() and time.monotonic() < deadline:
+            self.box.wait_jobs(timeout=max(1.0, deadline - time.monotonic()))
+            time.sleep(0.5)
+        jobs = self.box.home / "state" / "jobs"
+        said = "; ".join(f"{j.name}: {j.read_text(errors='replace')[:300]}" for j in sorted(jobs.glob("*.json"))) if jobs.exists() else "no job record"
+        return ready.exists(), said
+
     def wait_gone(self, path: Path, seconds: float = 30.0, output: str = "") -> float:
         """Wait for the folder the uninstall's cleanup removes; on failure say what is left, what the cleanup wrote and
         what the client logged about the processes it stopped. Returns the seconds it took."""
@@ -198,8 +213,8 @@ class Installer(unittest.TestCase):
         self.assertIn("here each Theodore command would ask for approval", nxt)
         self.assertIn("Start a new session, then ask for your first deck.", tell)
         self.assertNotIn("SETUP_IN_PROGRESS", first)
-        self.box.wait_jobs(timeout=360)
-        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the download went on after the installer ended")
+        ready, jobs = self.wait_ready(360)
+        self.assertTrue(ready, "the download went on after the installer ended; the jobs say: " + jobs)
 
     @unittest.skipIf(IS_WINDOWS, "install.sh")
     def test_in_codex_a_ready_install_ends_by_sending_the_deck_to_a_new_session(self):

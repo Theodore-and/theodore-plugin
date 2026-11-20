@@ -11,8 +11,8 @@ installer's are in `install/`.
   (`hooks/hooks.json`), which runs the launcher's `session-start` when Claude Code compacts or resumes a conversation
   (see "The session note" below). There is no background service and no scheduled task. Background downloads started
   during setup end by themselves.
-- The engine process, which builds your decks, makes no network calls, except an image search you ask for
-  explicitly. It never contacts Theodore.
+- The engine process, which builds your decks, makes no network calls: it has no image search and no download
+  command, and a picture given by a web address is refused. It never contacts Theodore.
 - The client is the only part that contacts Theodore.
 
 - In Claude Desktop's chat, Theodore's tool lets the chat run only Theodore's own engine commands. It can read and
@@ -42,14 +42,28 @@ pages). Each of these names resolves to several addresses; the client races them
 second after the one before) and keeps the one that answered in `state/addresses.json` (the address and when, nothing
 else) for up to 7 days, so that a network where one address does not answer costs that delay once, not at every
 command. LibreOffice, when Theodore fetches it, comes unmodified from The Document Foundation
-(`download.documentfoundation.org`) and is checked against a pinned SHA-256.
+(`download.documentfoundation.org`) and is checked against a pinned SHA-256. On Windows, when Claude Code finds no Git
+Bash, the installer fetches Git for Windows' PortableGit, unmodified, from `dl.theodoreand.ai` and otherwise from the
+project's own release on `github.com`, checked against a pinned SHA-256; no credential goes with either.
 
 What the client changes on this computer by itself: its own folder (client, runtime, engines, packs, its copy of
 the plugin), and, through the assistants' own plugin commands, the Theodore plugin in Claude Code and Codex when a
-newer one is published (it takes effect at their next session), and, when Claude Desktop is on this computer, one
-entry named `theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the
-uninstall removes it). Setting Theodore up also applies its host settings, without a separate question (the person
-asked their assistant to set Theodore up): in Claude Code (CLI, the desktop app's Code tab and the VS Code extension
+newer one is published (it takes effect at their next session). Only Theodore's set-up changes anything else in an
+assistant's settings or instructions. A plugin added from a
+marketplace alone, without the installer, changes nothing there by itself (from 0.4.18): the assistant asks before
+each Theodore command, as it does for any plugin, and uses Theodore when you name it; `theodore hosts settings
+--apply` and `theodore hosts register` add by hand what the installer adds. The installer adds, when Claude Desktop is on this computer, one entry named
+`theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the uninstall
+removes it), and writes one line between
+`<!-- theodore:begin -->` and `<!-- theodore:end -->` in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`
+(`CLAUDE_CONFIG_DIR` and `CODEX_HOME` when set), for each of the two assistants found, because the sentence that
+starts it asks for that ("Set up Theodore and use it for all my presentations"): "The user chose Theodore for every
+presentation, deck or set of slides, in any format: use the Theodore skills (theodore:deck-design, theodore:pptx),
+unless the user names another tool for it; to uninstall Theodore, run theodore uninstall." It prints the line it
+wrote, changes nothing else in the file, and the uninstall takes back exactly that block; a line you deleted is written
+again only if the installer runs again. On Windows, when it fetched Git Bash for Claude Code (above), it names it in Claude Code's user settings
+(`env.CLAUDE_CODE_GIT_BASH_PATH`; a value you set is never replaced). Setting Theodore up also applies its host
+settings, without a separate question (the person asked their assistant to set Theodore up): in Claude Code (CLI, the desktop app's Code tab and the VS Code extension
 share `~/.claude/settings.json`), plugin auto-update for the Theodore marketplace and permission rules that allow only
 Theodore's own commands, by their exact installed paths (the stable launcher, the plugin's skill launchers and the
 plugin's own tool server; on Windows also for Claude Code's PowerShell tool), so they run without a prompt; the
@@ -68,8 +82,7 @@ for your decks, run outside Codex's sandbox without asking each time. To leave t
 `--no-settings`; to take them back later, run `theodore hosts settings --remove` (the uninstall also removes exactly
 what was added). An organisation's managed Claude Code policy always wins: when it allows only its own permission
 rules, or does not allow Theodore's marketplace, Theodore does not add that setting, and `theodore doctor` says so in
-one line. An installation from before these settings were on by default gets them once, at its first Theodore
-command after it updates to 0.3.10, unless they were turned off. A claude.ai account's plugin is never changed from a computer: the skill says
+one line. A claude.ai account's plugin is never changed from a computer: the skill says
 once per release how to update it there.
 
 ## What is sent
