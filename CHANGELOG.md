@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.16
+
+- When Theodore's service has taken as many requests of one kind as it allows for an account in an hour, the answer says so and says when the next one can go. Before, it said the service was busy and to try again in a moment.
+
 ## 0.4.15
 
 - Windows: Theodore now lives in your user folder (`%USERPROFILE%\.theodore`), so an install made from the Claude desktop app is found by every assistant on the computer. Before, the app kept it in a private folder of its own. An install made earlier keeps working where it is; setting Theodore up again moves it and removes the old copy.

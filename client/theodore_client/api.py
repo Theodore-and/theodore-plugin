@@ -692,6 +692,10 @@ def status_from(error: ApiError, what: str) -> Status:
     return status
 
 
+# A rate-limit answer that asks for more than this is an allowance used up, not a moment of load.
+LONG_WAIT_SECONDS = 120
+
+
 def _status_from(error: ApiError, what: str) -> Status:
     name = API_ERRORS.get(error.code, (0, None))[1]
     if name is None:
@@ -717,6 +721,16 @@ def _status_from(error: ApiError, what: str) -> Status:
                       "Theodore needs an update before it can continue. I am installing it.")
     if name == "RETRY":
         wait = error.retry_after or "60"
+        if error.code == "rate_limited" and wait.strip().isdigit() and int(wait) > LONG_WAIT_SECONDS:
+            # A limit per account and hour, not a busy service: waiting inside this command is pointless, and "busy,
+            # I will try again in a moment" would be untrue for most of an hour.
+            minutes = -(-int(wait) // 60)
+            return Status(name, detail, f"do not wait for it and do not run this command again now: this account has "
+                                        f"used what Theodore's service allows of this kind of request for about {minutes} "
+                                        f"minutes. Go on with whatever does not need it; run the same command again after "
+                                        f"that time if it is still needed.",
+                          f"Theodore's service has taken as many of these requests as it allows for now. This one can go "
+                          f"again in about {minutes} minutes.")
         return Status(name, detail, f"wait {wait} seconds, then run the same command again (at most three times).",
                       "Theodore's service is busy. I will try again in a moment.")
     if name == "USAGE":
