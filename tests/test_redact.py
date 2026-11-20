@@ -140,6 +140,14 @@ class Hits(unittest.TestCase):
 class AgainstTheServer(unittest.TestCase):
     def test_fixture_matches_the_server_test(self):
         backend = Path(os.environ.get("THEODORE_BACKEND") or ROOT.parent / "theodore")
+        if not backend.is_dir():
+            # In a worktree of this repository the backend is beside the main checkout, not beside the worktree. Without
+            # this the comparison was skipped by every release check run from a worktree, and the client's table fell
+            # three cases behind the server's for a week (found 2026-11-20).
+            common = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+            if common.returncode == 0 and common.stdout.strip():
+                backend = Path(common.stdout.strip()).parent.parent / "theodore"
         node = shutil.which("node")
         if not (backend / "apps" / "worker" / "test" / "integration" / "redact.test.ts").is_file():
             self.skipTest("backend repository not checked out at %s" % backend)

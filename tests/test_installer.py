@@ -296,7 +296,10 @@ class Installer(unittest.TestCase):
         self.assertIn("your code was not used", tell)
         self.assertNotIn("was not accepted", result.stdout, "the code is never reported as invalid")
         self.assertIn("too many log-ins on this Theodore account in the last hour", result.stdout)
-        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed")
+        # As in the next test: the runtime arrives by a background job that can still be running when the installer
+        # returns (this assertion lost that race once on the Windows machine under load, 2026-11-20).
+        self.box.wait_jobs()
+        self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed\n" + result.stdout + result.stderr)
         self.api.activation_rate_limited = None
         done = self.install("--code", "ABCD-1234")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -556,6 +559,7 @@ class Installer(unittest.TestCase):
         import time
         time.sleep(1)
         self.assertFalse(opened.exists(), "the installer opens no browser")
+        self.box.wait_jobs()            # the background job may still be unpacking when the installer returns
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "the runtime is installed while the user approves")
         self.assertNotIn("/v1/device/activate", [r["path"] for r in self.api.requests])
 

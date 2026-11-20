@@ -322,6 +322,30 @@
   "text": "token abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ end"
  },
  {
+  "expected": "host [token] end",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "a 32-character hex value",
+  "text": "host 0123456789abcdef0123456789abcdef end"
+ },
+ {
+  "expected": "id [token] end",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "a 20-character hex value",
+  "text": "id 9f86d081884c7d659a2f end"
+ },
+ {
+  "expected": "key [token] end",
+  "kinds": [
+   "long_token"
+  ],
+  "name": "standard base64 with slashes and padding",
+  "text": "key q3Rp/8Zx+Lm2Wv9Kt0Ys/Ab1Cd2Ef3Gh4Ij5Kl== end"
+ },
+ {
   "expected": "Authorization: Bearer [token]",
   "kinds": [
    "long_token"

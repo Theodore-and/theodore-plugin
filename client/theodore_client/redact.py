@@ -441,9 +441,35 @@ def _bearer_values(text: str) -> List[Replacement]:
     return out
 
 
+# Hex key material from this many characters (a 64-bit value is 16; a short commit id is 7 to 12).
+_HEX_MIN = 20
+_HEX_RUN = re.compile(r"[0-9a-f]+", re.IGNORECASE | re.ASCII)
+_HEX_LETTER = re.compile(r"[a-f]", re.IGNORECASE | re.ASCII)
+_ASCII_DIGIT = re.compile(r"[0-9]")
+# Standard base64 (with `+`, `/` or `=` padding), which the token-character runs below split apart.
+_BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{32,}={0,2}", re.ASCII)
+_ASCII_UPPER = re.compile(r"[A-Z]")
+_ASCII_LOWER = re.compile(r"[a-z]")
+
+
+def _base64_values(text: str) -> List[Replacement]:
+    """A run of base64 of 32 characters or more that is plainly encoded bytes: it has a `+`, ends with `=` padding, or
+    mixes digits, capitals and small letters with one or two `/` (so a URL path is kept). As the server's."""
+    out: List[Replacement] = []
+    for match in _BASE64_RUN.finditer(text):
+        run = match.group(0)
+        slashes = run.count("/")
+        encoded = ("+" in run or run.endswith("=")
+                   or bool(_ASCII_DIGIT.search(run) and _ASCII_UPPER.search(run) and _ASCII_LOWER.search(run) and 0 < slashes < 3))
+        if encoded and "[token]" not in run:
+            out.append((match.start(), match.end(), "[token]"))
+    return out
+
+
 def _long_tokens(text: str) -> List[Replacement]:
-    """A JWT, or 32 or more characters of key material, with or without digits. A UUID is kept (request ids help
-    triage, and an id is not a credential). One pass over runs of token characters, dots included for a JWT."""
+    """A JWT, 32 or more characters of key material with or without digits, or 20 or more hex characters with digits
+    and letters. A UUID is kept (request ids help triage, and an id is not a credential). One pass over runs of token
+    characters, dots included for a JWT."""
     n = len(text)
     out: List[Replacement] = []
     at = 0
@@ -463,7 +489,9 @@ def _long_tokens(text: str) -> List[Replacement]:
             # Without a JWT shape, each dot-separated piece stands alone.
             offset = at
             for part in parts:
-                if len(part) >= 32 and not _UUID.fullmatch(part) and part != "[token]":
+                key_like = len(part) >= 32 or (len(part) >= _HEX_MIN and _HEX_RUN.fullmatch(part) is not None
+                                               and _ASCII_DIGIT.search(part) is not None and _HEX_LETTER.search(part) is not None)
+                if key_like and not _UUID.fullmatch(part) and part != "[token]":
                     out.append((offset, offset + len(part), "[token]"))
                 offset += len(part) + 1
         at = end
@@ -481,6 +509,7 @@ _PASSES = (
     ("email", _emails),
     ("office_file_name", _file_names),
     ("long_token", _bearer_values),
+    ("long_token", _base64_values),
     ("long_token", _long_tokens),
 )
 

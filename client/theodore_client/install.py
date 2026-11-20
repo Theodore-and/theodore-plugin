@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import json
 import os
@@ -32,9 +33,158 @@ def _safe_target(dest: Path, name: str) -> Path:
     return target
 
 
+# Unpacking on Windows with several writers. A computer that scans every new file (Windows Defender, a company's
+# endpoint protection) spends a set-up's time on each entry's path check and on creating and closing each file: one
+# thread reads the archive in order, and these writers share that work. Only what is plainly safe goes this way: a
+# regular file or a directory whose name is relative with no "..", in a folder whose real location is inside the
+# target. Anything else (a link, a special file, an odd name, a link met on the way, any error) sends the whole archive
+# to tarfile's own "data" extraction with one writer, which decides as it did up to 0.4.15. macOS and Linux always use
+# that: their archives hold links, and creating a file costs them little.
+UNPACK_WRITERS = min(8, 2 * (os.cpu_count() or 2))
+UNPACK_INLINE_BYTES = 8 << 20       # a file this large is streamed by the reading thread, never held whole
+UNPACK_PENDING_BYTES = 64 << 20     # what may wait for its writer, in all
+_ODD_NAME = re.compile(r'[\\:*?"<>|]|(^|/)\.{1,2}($|/)|^/|//')
+
+
+class _NotPlain(Exception):
+    """An entry the several-writers path does not decide."""
+
+
+def _file_mode(mode: int | None) -> int | None:
+    """tarfile's "data" rule for a regular file: no set-id or sticky bit, group and others never write, nobody
+    executes what its owner cannot, and the owner reads and writes."""
+    if mode is None:
+        return None
+    mode &= 0o755
+    if not mode & 0o100:
+        mode &= ~0o111
+    return mode | 0o600
+
+
+def _write_file(target: str, data: bytes, mode: int | None, mtime: float | None) -> None:
+    with open(target, "wb") as out:
+        out.write(data)
+    _file_attrs(target, mode, mtime)
+
+
+def _file_attrs(target: str, mode: int | None, mtime: float | None) -> None:
+    if mode is not None and not IS_WINDOWS:
+        os.chmod(target, mode)
+    if mtime is not None:
+        os.utime(target, (mtime, mtime))
+
+
+def _inside(root: str, folder: str, checked: set[str]) -> None:
+    """Confirm that the folder is inside root, then make what is missing of it. The nearest part of the path that
+    exists already is resolved first: nothing is made beyond a link that leads out of root. `checked` holds the
+    folders known to be inside (root itself from the start)."""
+    if folder in checked:
+        return
+    missing = []
+    current = folder
+    while current not in checked and not os.path.lexists(current):
+        missing.append(current)
+        current = os.path.dirname(current)
+    if current not in checked:
+        real = os.path.realpath(current)
+        if not os.path.isdir(current) or not (real == root or real.startswith(root + os.sep)):
+            raise _NotPlain(current)
+        checked.add(current)
+    for path in reversed(missing):
+        try:
+            os.mkdir(path)
+        except FileExistsError:             # another writer made it a moment ago
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise _NotPlain(path) from None
+        checked.add(path)
+
+
+def _plain_entry(root: str, target: str, data: bytes | None, mode: int | None, mtime: float | None, checked: set[str]) -> None:
+    if data is None:
+        _inside(root, target, checked)
+        return
+    _inside(root, os.path.dirname(target), checked)
+    if os.path.islink(target):
+        raise _NotPlain(target)
+    _write_file(target, data, mode, mtime)
+
+
+class _Writers:
+    """The entries of one archive, each handled by one of several threads. The first failure of a writer is raised by
+    a later call, by drain or at the end of the with block."""
+
+    def __init__(self, workers: int):
+        self.pool = concurrent.futures.ThreadPoolExecutor(workers)
+        self.pending: list = []
+        self.names: set[str] = set()
+        self.bytes = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, _exc, _tb):
+        try:
+            if kind is None:
+                self.drain()
+        finally:
+            self.pool.shutdown(wait=True, cancel_futures=True)
+        return False
+
+    def run(self, name: str, size: int, work, *args) -> None:
+        if name in self.names:              # the same name twice in one archive: the later entry wins, as in order
+            self.drain()
+        self.names.add(name)
+        self.pending.append(self.pool.submit(work, *args))
+        self.bytes += size
+        if self.bytes > UNPACK_PENDING_BYTES or len(self.pending) >= 1024:
+            self.drain()
+
+    def drain(self) -> None:
+        pending, self.pending, self.bytes = self.pending, [], 0
+        self.names = set()
+        for future in pending:
+            future.result()
+
+
+def _plain_target(root: str, name: str) -> str:
+    name = name.rstrip("/")
+    if not name or _ODD_NAME.search(name):
+        raise _NotPlain(name)
+    return os.path.join(root, *name.split("/"))
+
+
+def _unpack_tar_plain(archive: Path, dest: Path) -> None:
+    root = os.path.realpath(dest)
+    checked: set[str] = {root}
+    with tarfile.open(archive) as tar, _Writers(UNPACK_WRITERS) as writers:
+        for member in tar:
+            if not (member.isdir() or member.isreg()):
+                raise _NotPlain(member.name)
+            target = _plain_target(root, member.name)
+            if member.isdir():
+                writers.run(target, 0, _plain_entry, root, target, None, None, None, checked)
+            elif member.size > UNPACK_INLINE_BYTES:
+                writers.drain()
+                _inside(root, os.path.dirname(target), checked)
+                if os.path.islink(target):
+                    raise _NotPlain(target)
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(tar.extractfile(member), out, 1 << 20)
+                _file_attrs(target, _file_mode(member.mode), member.mtime)
+            else:
+                writers.run(target, member.size, _plain_entry, root, target, tar.extractfile(member).read(),
+                            _file_mode(member.mode), member.mtime, checked)
+
+
 def extract_tar(archive: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     try:
+        if IS_WINDOWS and hasattr(tarfile, "data_filter"):
+            try:
+                _unpack_tar_plain(archive, dest)
+                return
+            except (_NotPlain, OSError, ValueError):
+                pass                                        # tarfile's own extraction decides, as up to 0.4.15
         with tarfile.open(archive) as tar:
             if hasattr(tarfile, "data_filter"):
                 tar.extractall(dest, filter="data")
@@ -48,9 +198,34 @@ def extract_tar(archive: Path, dest: Path) -> None:
         raise api.setup_failed("DISK", f"could not unpack {archive.name}: {exc}") from None
 
 
+def _unpack_zip_plain(archive: Path, dest: Path) -> None:
+    root = os.path.realpath(dest)
+    checked: set[str] = {root}
+    with zipfile.ZipFile(archive) as bundle, _Writers(UNPACK_WRITERS) as writers:
+        for info in bundle.infolist():
+            target = _plain_target(root, info.filename)
+            if info.is_dir():
+                writers.run(target, 0, _plain_entry, root, target, None, None, None, checked)
+            elif info.file_size > UNPACK_INLINE_BYTES:
+                writers.drain()
+                _inside(root, os.path.dirname(target), checked)
+                if os.path.islink(target):
+                    raise _NotPlain(target)
+                with bundle.open(info) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out, 1 << 20)
+            else:
+                writers.run(target, info.file_size, _plain_entry, root, target, bundle.read(info), None, None, checked)
+
+
 def extract_zip(archive: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     try:
+        if IS_WINDOWS:
+            try:
+                _unpack_zip_plain(archive, dest)
+                return
+            except (_NotPlain, OSError, ValueError):
+                pass                                        # one writer and the full check per entry, as up to 0.4.15
         with zipfile.ZipFile(archive) as bundle:
             for info in bundle.infolist():
                 target = _safe_target(dest, info.filename)
