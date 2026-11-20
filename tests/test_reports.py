@@ -96,16 +96,18 @@ class AutomaticInternalReports(ClientCase):
         self.assertIn(f"already reported to Theodore automatically today ({sent['ref']})", nxt)
         self.assertIn("has reported it", tell)
 
-    def test_a_report_that_cannot_be_sent_changes_only_the_words(self):
+    def test_a_report_that_cannot_be_sent_now_is_saved_and_said_so(self):
         self.ready()
         self.api.path_errors["/v1/preferences"] = (418, "teapot_brewing")
         self.api.drop_paths = {"/v1/reports"}
         result = self.client("prefs", "list")
         _f, nxt, tell = self.assertStatus(result, "INTERNAL", 78)
         self.assertNoAsking(result)
-        self.assertIn("could not be sent just now", nxt)
-        self.assertEqual("TELL THE USER: Theodore hit an internal error.", tell)
+        self.assertIn("saved on this computer and Theodore sends it by itself", nxt)
+        self.assertNotIn("happens again", nxt)
+        self.assertEqual("TELL THE USER: Theodore hit an internal error and has saved a report that it sends to Theodore by itself.", tell)
         self.api.drop_paths = set()
+        self.api.path_errors["/v1/preferences"] = (418, "kettle_boiling")      # another error: another report
         self.api.report_delay = 30.0
         self.addCleanup(setattr, self.api, "report_delay", 0.0)
         started = time.monotonic()
@@ -113,7 +115,7 @@ class AutomaticInternalReports(ClientCase):
         took = time.monotonic() - started
         self.assertStatus(result, "INTERNAL", 78)
         self.assertLess(took, 15, "the answer waits for the report at most a few seconds")
-        self.assertIn("could not be sent just now", status_lines(result.stdout)[1])
+        self.assertIn("Theodore sends it by itself", status_lines(result.stdout)[1])
 
     def test_signed_out_or_switched_off_nothing_is_sent(self):
         from unittest import mock
