@@ -93,8 +93,21 @@ Outside that folder:
   inside the folders you work in (wherever they are), and nothing else; in Codex, the file `~/.codex/rules/theodore.rules`,
   which allows Theodore's launcher by its exact paths (and `theodore`). With the Codex rules, Theodore's commands run outside Codex's
   sandbox without asking each time. Leave them out with the installer's `--no-settings`, take them back with
-  `theodore hosts settings --remove`; an organisation's managed policy always wins. An installation that updates to
-  0.3.10 gets them once, at its first Theodore command after the update, unless they were turned off.
+  `theodore hosts settings --remove`; an organisation's managed policy always wins.
+- **One line in your assistants' instructions**, written by the installer because the sentence asks for it ("Set up
+  Theodore and use it for all my presentations"): between `<!-- theodore:begin -->` and `<!-- theodore:end -->` in
+  `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` (`CLAUDE_CONFIG_DIR` and `CODEX_HOME` when set), for each of the two
+  assistants found on the computer: "The user chose Theodore for every presentation, deck or set of slides, in any
+  format: use the Theodore skills (theodore:deck-design, theodore:pptx), unless the user names another tool for it; to
+  uninstall Theodore, run theodore uninstall." Claude Code and Codex read these files at the start of every session;
+  without the line, Claude Code's own slide tool takes "make me a deck" before any plugin. Nothing else in the file
+  changes, the installer prints the line it wrote, a line you delete is written again only if the installer runs
+  again, and the uninstall takes back exactly that block (and the file, when Theodore created it and nothing else was
+  added to it).
+- **Git Bash for Claude Code on Windows**, only when Claude Code finds none: the installer fetches Git for Windows'
+  PortableGit, unmodified, into Theodore's folder (from Theodore's download host, otherwise from the project's own
+  release on github.com; pinned SHA-256) and names it in Claude Code's user settings (`env.CLAUDE_CODE_GIT_BASH_PATH`;
+  a value you set is never replaced, and the uninstall takes Theodore's back).
 - **The short command `theodore`** (with the host settings, from 0.4.1): a two-line script that only runs the stable
   launcher, written into the first of `~/.local/bin` (the folder Claude Code's own installer uses) or `~/bin` that is
   on the PATH of the shell that ran the installer; on Windows `theodore.cmd` (and a `theodore` script for Git Bash) in
@@ -103,6 +116,13 @@ Outside that folder:
   rules `Bash(theodore *)` (on Windows also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) exist only while it
   does. Texts then name `theodore …` instead of the launcher's long path, which the assistant otherwise kept in a
   variable that no permission rule can match. `theodore hosts settings --remove` and the uninstall delete it.
+
+**The plugin alone.** Added with the Claude Code or Codex command only, without the installer, Theodore changes
+nothing in an assistant's settings or instructions (from 0.4.18): no permission rule, no short command, no Codex rules
+file, no line in `CLAUDE.md` or `AGENTS.md`, no Claude Desktop entry. Nobody asked for them. The assistant then asks
+before each Theodore command, as it does for any plugin, and uses Theodore when you name it. The sentence on your
+Theodore page adds all of it later; by hand, `theodore hosts settings --apply` adds the host settings and
+`theodore hosts register` the rest.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. The plugin has one hook (`hooks/hooks.json`):

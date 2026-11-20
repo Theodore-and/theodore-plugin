@@ -1,5 +1,11 @@
 # Changes
 
+## 0.4.18
+
+- A plugin added with the Claude Code or Codex command alone, without Theodore's installer, no longer changes anything in an assistant's settings or instructions by itself. Before, its first use added the permission rules for Theodore's commands, the short command `theodore`, the Codex rules file and the line in `CLAUDE.md` and `AGENTS.md` that names Theodore for every presentation, although nobody had asked for them. They now come only with the set-up a person asks for (the sentence on their Theodore page, or the installer), which works as before. By hand, `theodore hosts settings --apply` adds the host settings and `theodore hosts register` the rest. An install that already has them keeps them.
+- The plugin's own README now lists everything the plugin runs, fetches, sends and changes. It was out of date: it said the plugin had no hook (it has one, for Claude Code) and that its tool-server files were empty.
+- `README.md` and `SECURITY.md` now describe two things the installer does that they did not mention: the line it writes into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, and, on Windows, the Git Bash it fetches for Claude Code (from Theodore's download host, otherwise from Git for Windows' release on github.com) with the Claude Code setting that names it. `SECURITY.md` no longer mentions an image search: the engine has none and makes no network calls.
+
 ## 0.4.17
 
 - Windows: removing Theodore no longer leaves an empty `Theodore` folder under `%LOCALAPPDATA%`. The engine keeps its cache there; since Theodore's own folder moved to the user's profile, the cache's folder stayed behind after an uninstall.

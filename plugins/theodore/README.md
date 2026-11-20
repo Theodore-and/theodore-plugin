@@ -1,20 +1,95 @@
 # Theodore
 
 Build, edit and translate PowerPoint decks in the assistant you already use, with a consultant's design
-method: `theodore:pptx` for PowerPoint files and `theodore:deck-design` for deck design.
+method: `theodore:pptx` for PowerPoint files and `theodore:deck-design` for deck design. Theodore is in beta and
+needs a Theodore account: https://theodoreand.ai
 
-This plugin is a loader. It holds two small loaders and a launcher; on first use the launcher sets up
-Theodore's runtime in your user folder (`~/.theodore`, or `%USERPROFILE%\.theodore` on Windows; about 100 to
-130 MB to download before the first deck, about 560 to 670 MB on disk with the asset packs, no admin rights), signs this computer in to your Theodore account, and prints the
-instructions. It has no hooks and installs nothing system-wide.
+This plugin is a loader. It holds no engine and no design method: two small loaders (`skills/`), a launcher beside
+each (`scripts/theodore`, and `theodore.cmd` for Windows), one agent definition (`agents/studio.md`), one hook and
+the definition of a local tool server. This page lists everything it runs, fetches, sends and changes. The same, in
+full and meant to be checked against the code, is in `SECURITY.md` and `README.md` of the plugin's repository.
 
-On Windows, Claude Code needs Git for Windows (it provides Git Bash) to load Theodore; install it from
-git-scm.com first.
+## What it runs
 
-- Accounts and the one-step installer: https://theodoreand.ai
-- What it sends: sign-in, licence refresh, update checks, design-guidance fetches and the reports and preferences you
-  or your assistant file; never deck content, file names or folder paths.
-- How to remove it: `~/.theodore/bin/theodore uninstall` (Windows: `"%USERPROFILE%\.theodore\bin\theodore.cmd" uninstall`)
-  removes its folders, its sign-in and its registrations, and takes back what it changed in your assistants' settings.
-- The connector for cloud assistants (`.mcp.json`, `mcp.json`) is not switched on yet; both files are empty
-  placeholders.
+- **The launcher**, when one of Theodore's two loaders is used or your assistant runs a Theodore command. On first
+  use it sets up Theodore's runtime in your user folder (`~/.theodore`, or `%USERPROFILE%\.theodore` on Windows; no
+  admin rights, nothing system-wide), asks for one login in the browser to sign this computer in to your Theodore
+  account, and prints the instructions.
+- **Theodore's engine**, on your computer, when a deck is built, edited, rendered, translated or checked. The engine
+  makes no network calls.
+- **One hook** (`hooks/hooks.json`, Claude Code only): after a conversation is compacted or resumed, it runs the
+  launcher's `session-start`, which reads Theodore's own record of the instructions it served to that session and
+  prints one paragraph saying to load them again. It reads nothing of the conversation and sends nothing about it.
+- **A local tool server** (`.mcp.json` for Claude Code, `mcp.json` for Codex): the launcher's `mcp` command, started
+  by the assistant, speaking over standard input and output only. It gives the assistant the same instructions and
+  specimen images as the launcher does, where a tool result is shown whole and a command's output is not. It opens no
+  network port.
+- Nothing in the background: no service, no scheduled task. Downloads started during set-up end by themselves.
+
+## What it fetches
+
+| From | What | How it is checked |
+| --- | --- | --- |
+| `dl.theodoreand.ai` | Theodore's Python (an unmodified python-build-standalone archive) and its client; then the rest of the runtime, the engine, the asset packs, and later versions of all of these and of this plugin. About 100 to 130 MB before the first deck, about 560 to 670 MB on disk with the asset packs | the first two against SHA-256 values pinned in `launcher.json`; everything else against manifests signed with Ed25519 keys pinned in the same file |
+| `api.theodoreand.ai` | the design instructions, each time they are loaded (never stored on disk), and the specimen images the assistant asks to look at (on disk for an hour at most) | sent only to a signed-in computer of an account with access |
+| `download.documentfoundation.org` | LibreOffice, unmodified, only when the computer has none: it renders the slides Theodore checks | pinned SHA-256 |
+| `dl.theodoreand.ai`, otherwise `github.com` | Git for Windows' PortableGit, unmodified, only on Windows when Claude Code finds no Git Bash and Theodore's set-up or you ask for it (`theodore tools install git`) | pinned SHA-256 |
+
+Nothing that was downloaded runs before it has been checked.
+
+## What it sends
+
+Everything goes to `api.theodoreand.ai` over HTTPS, with this installation's credential:
+
+- sign-in (once per computer) and the licence refresh (at most once every 12 hours, when you use Theodore);
+- update checks, and a short "in use" note at most once an hour (the versions and the assistant's name);
+- each request for instructions: the names of the instructions and of the section asked for;
+- usage counts, while they are on for your account: what Theodore did, as counts and names from a fixed list.
+  `theodore usage --show` prints the next batch exactly as it would be sent;
+- bug reports: the command, the error code, the versions and the operating system, with a title and a description
+  the assistant writes; when Theodore itself hits an internal error, the client files one on its own (at most five a
+  day). Reports are cleaned on the computer and again on the service, and `theodore report ... --dry-run` prints what
+  would be sent. To stop automatic reports, write to support@theodoreand.ai;
+- the preferences you ask it to keep, and your account's Studio setting when you change it.
+
+With each request: the installation id, the computer's name (shown to you in the portal), the operating system and
+processor type, the versions, the update channel and the assistant's name.
+
+Never sent: deck content, slide text, images, file names, folder paths, renders, or anything else from your work.
+
+## What it changes on your computer
+
+By itself, only Theodore's own places:
+
+- its folder in your user folder, and the engine's render cache (`~/Library/Caches/Theodore` on macOS,
+  `%LOCALAPPDATA%\Theodore\Cache` on Windows, `~/.cache/theodore` on Linux);
+- the sign-in credential: one item in the macOS keychain, a DPAPI-protected file on Windows, a file readable only by
+  you on Linux;
+- one small file in each deck's working folder, naming the engine version that started it;
+- its own copy of this plugin in Claude Code and Codex, through their own plugin commands, when a newer version is
+  published.
+
+By itself it changes **nothing in your assistants' settings or instructions**: no permission rule, no command on your
+PATH, no line in `CLAUDE.md` or `AGENTS.md`. Your assistant asks before each Theodore command, as it does for any
+plugin, and uses Theodore when you name it.
+
+Theodore's set-up is a separate thing you ask for: the sentence on your Theodore page ("Set up Theodore and use it for
+all my presentations"), or its installer. Because it was asked to, it registers the plugin in the assistants it finds,
+lets Theodore's own commands, and the assistant's edits of a deck's working files, run without a prompt (permission
+rules for exactly those in Claude Code's `settings.json`, a rules file in Codex with which Theodore's commands run
+outside Codex's sandbox, and the short command `theodore`), turns on automatic updates for Theodore's marketplace, adds
+one entry to Claude Desktop's configuration, on Windows names the Git Bash it fetched in Claude Code's settings, and
+writes one marked line into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` saying that you chose Theodore for
+presentations. It prints what it wrote. Its `--no-settings` leaves the rules out, `theodore hosts settings --remove` takes them back, and
+an organisation's managed policy always wins.
+
+## What it needs, and how to remove it
+
+- A Theodore account (beta): https://theodoreand.ai
+- On Windows, Claude Code needs Git Bash to load Theodore: install Git for Windows from git-scm.com first, or use the
+  sentence on your Theodore page, which brings its own.
+- To remove everything: `~/.theodore/bin/theodore uninstall` (Windows:
+  `"%USERPROFILE%\.theodore\bin\theodore.cmd" uninstall`). It removes Theodore's folders, its sign-in and its
+  registrations, takes back exactly what was changed in your assistants' settings and instructions, and names anything
+  it could not remove. Removing the plugin in the assistant alone leaves Theodore's folder in place.
+- Questions and security reports: support@theodoreand.ai
