@@ -2,6 +2,7 @@
 
 ## 0.4.16
 
+- Windows: Theodore's files are unpacked by several writers at once. On a computer that checks every new file, as Windows does, unpacking the runtime took a third less time in our test (28 seconds to 19); the files written are the same, one for one.
 - When Theodore's service has taken as many requests of one kind as it allows for an account in an hour, the answer says so and says when the next one can go. Before, it said the service was busy and to try again in a moment.
 
 ## 0.4.15
