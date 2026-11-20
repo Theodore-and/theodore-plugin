@@ -974,7 +974,8 @@ class Engine(ClientCase):
         (ws / ".pptx-state" / "engine-used.txt").write_text("untouched")
         first, nxt, tell = self.assertStatus(self.client("pptx", "apply", str(ws)), "UPDATE_REQUIRED", 72)
         self.assertIn(f"started with engine {self.ENGINE_VERSION}", first)
-        self.assertIn("theodore-engine.json", nxt)
+        self.assertIn("repin", nxt)
+        self.assertNotIn("theodore-engine.json", first + nxt + tell)
         self.assertIn("2.0.0", tell)
         self.assertEqual((ws / ".pptx-state" / "engine-used.txt").read_text(), "untouched", "never silently run on another engine")
         legacy = self.box.tmp / "older deck"                                       # a pin written before the pin carried its sha256
