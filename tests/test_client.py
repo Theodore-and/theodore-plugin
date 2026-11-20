@@ -974,7 +974,8 @@ class Engine(ClientCase):
         (ws / ".pptx-state" / "engine-used.txt").write_text("untouched")
         first, nxt, tell = self.assertStatus(self.client("pptx", "apply", str(ws)), "UPDATE_REQUIRED", 72)
         self.assertIn(f"started with engine {self.ENGINE_VERSION}", first)
-        self.assertIn("theodore-engine.json", nxt)
+        self.assertIn("repin", nxt)
+        self.assertNotIn("theodore-engine.json", first + nxt + tell)
         self.assertIn("2.0.0", tell)
         self.assertEqual((ws / ".pptx-state" / "engine-used.txt").read_text(), "untouched", "never silently run on another engine")
         legacy = self.box.tmp / "older deck"                                       # a pin written before the pin carried its sha256
@@ -1806,6 +1807,60 @@ class StatusDoctorUninstall(ClientCase):
         (codex / "plugin.json").write_text(json.dumps({"name": "theodore", "version": "0.3.2"}))
         self.assertEqual(self.client("guide", "pptx", env={"THEODORE_TEST_CLOCK_OFFSET": "14400"}).returncode, 0)
         self.assertEqual(self.api.heartbeats[-1]["plugin_version"], "0.3.2")
+
+    def test_doctor_says_a_failed_engine_set_up_failed_was_reported_and_is_tried_again(self):
+        """The first real user's session: the engine's set-up had failed, and doctor said it was still being set up."""
+        self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION, broken=True))
+        self.sign_in()
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        self.box.wait_jobs()
+        self.assertEqual(self.state("state/update.json")["failed"]["version"], self.ENGINE_VERSION)
+        filed = [r for r in self.api.reports if r.get("origin") == "automatic"]
+        before = len(self.api.reports)
+        result = self.client("doctor")
+        first, nxt, tell = self.assertStatus(result, "SETUP_FAILED", 68)
+        self.assertEqual(result.stdout.strip().splitlines()[-1], tell)
+        self.assertTrue(first.startswith(f"THEODORE SETUP_FAILED: the engine's set-up failed on this computer (engine {self.ENGINE_VERSION}: "), first)
+        self.assertIn("self-test", first, "the recorded reason, in one clause")
+        self.assertIn("guide pptx tries the set-up again", first)
+        if filed:
+            self.assertIn(f"Theodore has reported it by itself ({filed[-1]['ref']})", first)
+        else:
+            self.assertIn("Theodore reports such failures by itself", first)
+        self.assertIn("nothing to report and nothing to ask the user", nxt)
+        self.assertIn("could not be set up on this computer", tell)
+        self.assertIn("tries again the next time you ask for a deck", tell)
+        for line in (first, nxt, tell):
+            self.assertNotIn("still", line)
+            self.assertNotIn("setting it up", line)
+            self.assertNotIn("report --", line)
+        self.assertNotIn("?", tell, "no question to the user")
+        self.assertEqual(len(self.api.reports), before, "doctor sends no second report")
+        self.assertIn("still missing: the engine: its set-up failed on this computer", result.stdout)
+        status_first, _n, _t = self.assertStatus(self.client("status"), "SETUP_FAILED", 68)
+        self.assertEqual(status_first, first)
+        # What it says happens next: the next guide tries again, and with an engine that works, it is ready.
+        self.api.publish_engine(self.ENGINE_VERSION, engine_zip(self.ENGINE_VERSION))
+        self.assertEqual(self.client("guide", "pptx").returncode, 0)
+        self.assertStatus(self.client("doctor"), "OK", 0)
+
+    def test_doctor_says_downloading_while_an_engine_download_runs(self):
+        """No engine and the engine-update job alive (not the setup job): in progress, never 'run guide pptx'."""
+        self.sign_in()
+        self.assertEqual(self.client("setup", "--job").returncode, 0)
+        self.box.wait_jobs()
+        engines = self.box.home / "engines" / "current.json"
+        engines.unlink()
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(lambda: holder.poll() is None and holder.kill())
+        jobs = self.box.home / "state" / "jobs"
+        (jobs / "engine-update.json").write_text(json.dumps({"pid": holder.pid, "phase": "downloading engine 2.0.0", "percent": 40,
+                                                             "started": int(time.time())}))
+        first, nxt, _t = self.assertStatus(self.client("doctor"), "SETUP_IN_PROGRESS", 67)
+        self.assertIn("downloading engine 2.0.0, 40%", first)
+        self.assertTrue(nxt.startswith("NEXT: run the same command again"), nxt)
+        holder.kill()
+        holder.wait()
 
     def test_doctor_before_sign_in(self):
         self.client("setup", "--job")
@@ -2876,6 +2931,53 @@ class AutoUpdate(ClientCase):
         self.assertEqual(self.state("state/update.json")["plugin_update"]["hosts"]["theodore"], "updated")
         self.assertEqual((copy / "plugins" / "theodore" / "agents" / "studio.md").read_bytes(),
                          (self.box.plugin / "agents" / "studio.md").read_bytes())
+
+    def test_a_plugin_update_brings_the_stable_launcher_up_to_the_plugins_generation(self):
+        """Measured: generation 12 in <home>/bin after an update to a plugin whose launcher is generation 13, because only
+        running the plugin's own launcher replaced the stable one, and the hosts run the stable one."""
+        self.ready()
+        stable = self.box.home / "bin"
+        (stable / "theodore").write_text("#!/bin/sh\n# the old stable launcher\n")
+        self.box.write_launcher_json(generation=12, into=stable)
+        scripts = self.box.plugin / "skills" / "pptx" / "scripts"
+        self.box.write_launcher_json(generation=13)
+        self.box.serve_plugin_archive()
+        self.assertEqual(self.client("update", "--plugin-job").returncode, 0)
+        self.assertEqual(json.loads((stable / "launcher.json").read_text())["launcher_generation"], 13)
+        for name in ("theodore", "theodore.cmd", "launcher.json"):
+            self.assertEqual((stable / name).read_bytes(), (scripts / name).read_bytes(), name)
+        self.assertTrue(os.access(stable / "theodore", os.X_OK))
+        self.assertEqual(self.state("state/update.json")["plugin_update"]["hosts"]["launcher"], "stable launcher: generation 12 -> 13")
+
+    def test_a_plugin_update_leaves_a_stable_launcher_of_the_same_or_a_newer_generation_alone(self):
+        self.ready()
+        stable = self.box.home / "bin"
+        for generation in (13, 14):
+            with self.subTest(generation=generation):
+                marker = f"#!/bin/sh\n# the stable launcher, generation {generation}\n"
+                (stable / "theodore").write_text(marker)
+                self.box.write_launcher_json(generation=generation, into=stable)
+                self.box.write_launcher_json(generation=13)
+                self.box.serve_plugin_archive()
+                self.assertEqual(self.client("update", "--plugin-job").returncode, 0)
+                self.assertEqual((stable / "theodore").read_text(), marker)
+                self.assertEqual(json.loads((stable / "launcher.json").read_text())["launcher_generation"], generation)
+                self.assertNotIn("launcher", self.state("state/update.json")["plugin_update"]["hosts"])
+
+    def test_a_client_update_brings_the_stable_launcher_from_the_calling_plugin(self):
+        self.ready()
+        stable = self.box.home / "bin"
+        self.box.write_launcher_json(generation=12, into=stable)
+        self.box.write_launcher_json(generation=13)
+        skill = self.box.plugin / "skills" / "pptx"
+        unpacked = self.box.home / "client" / "9.9.9"          # already on disk: the switch needs no download
+        unpacked.mkdir(parents=True)
+        (unpacked / "__main__.py").write_text("")
+        result = self.client("update", "--client-job", "9.9.9", "0" * 64, RUNTIME_ID, str(time.time() + 3600), env={"THEODORE_SKILL_DIR": str(skill)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.box.home / "client" / "current.txt").read_text(), "9.9.9")
+        self.assertEqual(json.loads((stable / "launcher.json").read_text())["launcher_generation"], 13)
+        self.assertEqual((stable / "theodore").read_bytes(), (skill / "scripts" / "theodore").read_bytes())
 
     def test_claude_ai_is_never_touched_and_hears_its_update_path_once(self):
         log = self.fake_claude()

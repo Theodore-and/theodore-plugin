@@ -1,6 +1,6 @@
 @echo off
 rem Theodore installer for Windows. No admin rights, no package manager, no PowerShell script; everything goes
-rem into %LOCALAPPDATA%\Theodore (or THEODORE_HOME). Written to be run by an AI assistant or by a person:
+rem into %USERPROFILE%\.theodore (or THEODORE_HOME). Written to be run by an AI assistant or by a person:
 rem
 rem   install.cmd --code ABCD-1234        sign this computer in with a one-time code and set everything up
 rem   install.cmd                         the same, ending with a sign-in link instead of a code (no browser opens)
@@ -61,8 +61,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.4.14"
-set "PIN_CLIENT=client/client-0.4.14.tar 3fb1841d4cb921fb6ec92272f671227cce347ccc052b2ace14c7ef0f201c4283"
+set "PIN_CLIENT_VERSION=0.4.15"
+set "PIN_CLIENT=client/client-0.4.15.tar 7505253929b1dd9e1124367a27e3f7e56e39e82b38d1572f4104f9892f9570a3"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -70,7 +70,15 @@ set "API_BASE=%PIN_API_BASE%"
 set "DL_BASE=%PIN_DL_BASE%"
 rem Another mirror is safe: every file is checked against the pins.
 if defined THEODORE_DL_BASE set "DL_BASE=%THEODORE_DL_BASE%"
-set "HOME_DIR=%LOCALAPPDATA%\Theodore"
+rem Theodore's folder, one rule wherever it is found (both launchers, install.cmd, the short command and the client, each
+rem with literally the same logic): THEODORE_HOME when set; else %USERPROFILE%\.theodore when it holds an installation
+rem (bin\launcher.json); else %LOCALAPPDATA%\Theodore when that holds one (made by client 0.4.14 or earlier: it keeps
+rem working, and updating, where it is); else %USERPROFILE%\.theodore (a new installation). Inside an MSIX-packaged app
+rem (the Claude desktop app) Windows redirects %LOCALAPPDATA% into the app's own folder, unseen by every other program,
+rem but not %USERPROFILE%\.theodore: an installation made there is the same folder for everyone. An install always goes
+rem into %USERPROFILE%\.theodore (or THEODORE_HOME); see :env_check.
+set "HOME_DIR=%USERPROFILE%\.theodore"
+if not exist "%USERPROFILE%\.theodore\bin\launcher.json" if exist "%LOCALAPPDATA%\Theodore\bin\launcher.json" set "HOME_DIR=%LOCALAPPDATA%\Theodore"
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
@@ -148,6 +156,9 @@ echo TELL THE USER: Theodore was not installed on this computer.
 exit /b 0
 
 :env_check
+rem An install always goes into %USERPROFILE%\.theodore (or THEODORE_HOME); an earlier one elsewhere is retired below.
+if not defined THEODORE_HOME set "HOME_DIR=%USERPROFILE%\.theodore"
+if "%HOME_DIR%"=="\.theodore" goto :not_writable
 rem An uninstall's cleanup may still be running in this folder (an install right after an uninstall): its marker goes
 rem first, which stops it, then a pause lets a pass in progress end before anything is written.
 if exist "%HOME_DIR%\.theodore-uninstalling" (del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1 & ping -n 6 127.0.0.1 >nul)
@@ -178,6 +189,23 @@ rem Windows on ARM runs the x64 build through the system's emulation.
 if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ARCH=x64"
 if /i "%PROCESSOR_ARCHITEW6432%"=="ARM64" set "ARCH=x64"
 if not defined ARCH goto :no_curl
+rem An earlier Theodore in %LOCALAPPDATA%\Theodore (client 0.4.14 or earlier), as this process sees it, is retired first
+rem by its own uninstall, so that no second copy, stale registration or doubled disk use remains; then this one installs
+rem afresh. Nothing of the old folder is moved or reused: inside the Claude desktop app it is that app's redirected view.
+rem A failed retirement does not stop the install. Not with THEODORE_HOME, a folder the person chose.
+if defined THEODORE_HOME goto :retired
+if not defined LOCALAPPDATA goto :retired
+set "OLD_HOME=%LOCALAPPDATA%\Theodore"
+if not exist "%OLD_HOME%\bin\launcher.json" goto :retired
+if not exist "%OLD_HOME%\bin\theodore.cmd" goto :retired
+rem THEODORE_HOME names that folder for the old launcher, which then removes it and no other.
+set "THEODORE_HOME=%OLD_HOME%"
+call "%%OLD_HOME%%\bin\theodore.cmd" uninstall <nul >nul 2>&1
+set "RETIRE_RC=%ERRORLEVEL%"
+set "THEODORE_HOME="
+if "%RETIRE_RC%"=="0" echo theodore-install: an earlier Theodore in "%OLD_HOME%" was removed; Theodore now lives in "%HOME_DIR%"
+if not "%RETIRE_RC%"=="0" echo theodore-install: an earlier Theodore in "%OLD_HOME%" could not be removed completely (its uninstall answered %RETIRE_RC%); Theodore now lives in "%HOME_DIR%", and "%OLD_HOME%\bin\theodore.cmd" uninstall removes what is left there
+:retired
 if not exist "%HOME_DIR%\staging" mkdir "%HOME_DIR%\staging" 2>nul
 if not exist "%HOME_DIR%\state" mkdir "%HOME_DIR%\state" 2>nul
 if not exist "%HOME_DIR%\staging" goto :not_writable
@@ -434,6 +462,7 @@ goto :finish
 echo THEODORE SETUP_IN_PROGRESS: Theodore is installed; the rest of its runtime and its engine are still downloading in the background, which goes on after this installer has ended.
 echo NEXT: run "%T%" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line.
 echo TELL THE USER: Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it.
+set "RC=0"
 goto :finish
 :doctor_shown
 type "%WORK%\doctor.txt"
@@ -754,9 +783,10 @@ exit /b %RC%
 
 :welcome
 rem The client's welcome as the last status (lane ONBOARD), only when every assistant was registered. Sets RC and
-rem returns 0 when it printed one; 1 leaves the ending to the caller. Its exit code is the set-up's: 0 when ready, and
-rem 67 only for the still-downloading form, as before the welcome; any other answer (a launcher that says 67 for a ready
-rem set-up included) leaves the ending as it was.
+rem returns 0 when it printed one; 1 leaves the ending to the caller. Its answer is 0 when ready, and 67 only for the
+rem still-downloading form; any other answer (a launcher that says 67 for a ready set-up included) leaves the ending as
+rem it was. The installer itself exits 0 for both: a download still going on in the background, after every step of
+rem the installer succeeded, is not a failure (a host shows any other exit code as a failed command).
 if not "%HOSTS_RC%"=="0" exit /b 1
 call "%%T%%" welcome %WELCOME_ARG% >"%WORK%\welcome.txt"
 set "WRC=%ERRORLEVEL%"
@@ -765,7 +795,7 @@ if not "%WRC%"=="67" exit /b 1
 if not "%WELCOME_ARG%"=="--downloading" exit /b 1
 :welcome_given
 type "%WORK%\welcome.txt"
-set "RC=%WRC%"
+set "RC=0"
 exit /b 0
 
 rem =====================================================================================================================

@@ -649,6 +649,9 @@ def logout() -> Status:
     from . import usage
     with contextlib.suppress(Exception):
         usage.forget()          # a later sign-in may be another account: nothing recorded for this one stays
+    from . import outbox
+    with contextlib.suppress(Exception):
+        outbox.forget()         # reports kept for later belong to this account: they are not sent for the next one
     return Status("OK", "this computer is signed out of Theodore.",
                   f"to sign in again run {quoted_launcher()} login --start.",
                   "Theodore is signed out on this computer.")

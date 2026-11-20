@@ -499,13 +499,16 @@ SUPERSEDED_KEEP_S = DAY
 
 
 def collect_garbage() -> list[str]:
-    """Keep current, previous, engines used within 14 days or pinned within 30, at most four. A folder replaced by
-    another build of its version goes once unused for a day. Returns what was removed."""
+    """Keep current, previous, and every engine a workspace pinned to it used within the pin window (30 days): a deck
+    in progress never needs a download for its next command. Engines no such workspace needs are kept while used
+    within 14 days, up to four engines in all. A folder replaced by another build of its version goes once unused for
+    a day. Returns what was removed."""
     home, state, now = core.home(), engines_state(), core.now()
     keep_always = {v for v in (state.get("version"), state.get("previous"), pins().get("engine")) if v}
     pinned = {}
     for record in (pins().get("workspaces") or {}).values():
         pinned[record.get("version")] = max(pinned.get(record.get("version"), 0), float(record.get("at") or 0))
+    keep_always |= {v for v, at in pinned.items() if v and now - at < ENGINE_KEEP_PINNED_DAYS * DAY}
     candidates, removed = [], []
     for child in home.engines.iterdir() if home.engines.exists() else []:
         if not child.is_dir() or child.name.endswith(".partial") or not (child / ".theodore-engine.json").exists():
@@ -517,7 +520,7 @@ def collect_garbage() -> list[str]:
                 core.remove_tree(child)
                 removed.append(child.name)
             continue
-        recent = now - float(used) < ENGINE_KEEP_USED_DAYS * DAY or now - pinned.get(version, 0) < ENGINE_KEEP_PINNED_DAYS * DAY
+        recent = now - float(used) < ENGINE_KEEP_USED_DAYS * DAY
         candidates.append((version in keep_always, recent, float(used), child))
     candidates.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
     for index, (always, recent, _used, child) in enumerate(candidates):
@@ -1095,6 +1098,100 @@ def _workspaces(args: list[str]) -> list[Path]:
     return found
 
 
+# A slide's part, as the engine knows it (slide_parts.part_parent): `<deck>/parts/<id>/` holding a part.json of the
+# part schema whose id is the folder's name, under a deck that has a task.json and lists its parts in
+# .pptx-state/parts.json; the part folder and the parts folder are real folders, not links.
+PART_SCHEMA = "pptx-slide-part-v1"
+PARTS_DIR = "parts"
+_PART_ID = re.compile(r"^s\d{2,}$")
+PIN_FILE = "theodore-engine.json"
+
+
+def deck_of(workspace: Path) -> Path | None:
+    """The deck a workspace is a slide's part of, or None when it is not a part."""
+    try:
+        workspace = Path(workspace)
+        record = core.read_json(workspace / "part.json")
+        pid = record.get("id") if isinstance(record, dict) else None
+        if record.get("schema") != PART_SCHEMA or pid != workspace.name or not isinstance(pid, str) or not _PART_ID.match(pid):
+            return None
+        workspace = workspace.resolve()
+        deck = workspace.parent.parent
+        root = deck / PARTS_DIR
+        if workspace.parent.name != PARTS_DIR or not (deck / "task.json").is_file() or not (deck / ".pptx-state" / "parts.json").is_file():
+            return None
+        if os.path.islink(root) or not root.is_dir() or os.path.islink(root / pid) or (root / pid).resolve() != workspace:
+            return None
+        return deck
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def deck_parts(deck: Path) -> list[Path]:
+    """The slide parts of a deck that carry a workspace of their own (.pptx-state/), in folder order."""
+    deck = Path(deck).resolve()
+    root = deck / PARTS_DIR
+    try:
+        children = sorted(root.iterdir()) if root.is_dir() and not os.path.islink(root) else []
+    except OSError:
+        return []
+    return [c.resolve() for c in children if c.is_dir() and (c / ".pptx-state").is_dir() and deck_of(c) == deck]
+
+
+def _align_part(part: Path, deck: Path, record: dict) -> dict:
+    """The pin a part runs with: its deck's, written into the part when it has none or another (one deck, one engine).
+    A part of a deck that has no pin yet keeps its own record."""
+    wanted = core.read_json(deck / ".pptx-state" / PIN_FILE)
+    if not wanted.get("version"):
+        return record
+    if (record.get("version"), record.get("sha256")) != (wanted.get("version"), wanted.get("sha256")):
+        if record.get("version"):
+            core.log(f"a slide part was pinned to engine {record.get('version')}, its deck to {wanted.get('version')}: the deck's pin wins")
+        try:
+            core.write_json(part / ".pptx-state" / PIN_FILE, wanted)
+        except OSError:
+            pass                            # it still runs on the deck's engine
+    return wanted
+
+
+def repin(target: str) -> Status:
+    """Move one deck, and every slide part of it, to the engine new decks use on this computer. The previous pin of
+    each stays beside it as theodore-engine.json.previous, so it can be put back by hand."""
+    found = _workspaces([target]) if target and not target.startswith("-") else []
+    if not found:
+        raise core.usage(f"{target or '(none given)'} is not a deck workspace (a folder holding .pptx-state/); nothing was changed.",
+                         f"run {quoted_launcher()} repin with the deck's workspace folder, the one the build commands are given.")
+    deck = deck_of(found[0]) or found[0]
+    version = selected_engine()
+    if not version:
+        raise Status("SETUP_IN_PROGRESS", "the engine is not installed yet.",
+                     f"run {quoted_launcher()} guide pptx first; it installs the engine and prints the instructions.",
+                     "Theodore's engine is not installed yet. I am setting it up.")
+    parts = deck_parts(deck)
+    spaces = [deck, *parts]
+    olds = {space: core.read_json(space / ".pptx-state" / PIN_FILE) for space in spaces}
+    if olds[deck].get("version") == version and all(o.get("version") in (None, version) for o in olds.values()):
+        return Status("OK", f"this deck{f' and its {len(parts)} parts' if parts else ''} already use engine {version}, the current one; nothing was changed.",
+                      "run the same build command again.", f"This deck already uses Theodore {version}.")
+    new = _pin_record(version)
+    record = pins()
+    entries = record.setdefault("workspaces", {})
+    for space in spaces:
+        pin_file = space / ".pptx-state" / PIN_FILE
+        if olds[space].get("version"):
+            shutil.copyfile(pin_file, pin_file.with_name(PIN_FILE + ".previous"))
+        core.write_json(pin_file, new)
+        entries[_pin_key(space)] = {"version": version, "at": int(core.now())}
+    core.write_json(core.home().state / "pins.json", record)
+    before = sorted({str(o.get("version")) for o in olds.values() if o.get("version")}) or ["no engine"]
+    core.log(f"repin: a deck and {len(parts)} parts moved from engine {', '.join(before)} to {version}")
+    what = f"the deck and its {len(parts)} part{'s' if len(parts) != 1 else ''}" if parts else "the deck"
+    return Status("OK", f"moved {what} from engine {', '.join(before)} to {version}; each previous pin is kept beside it as "
+                        f"{PIN_FILE}.previous.",
+                  "run the same build command again.",
+                  f"This deck now uses Theodore {version}, so its next build redraws every slide once.")
+
+
 def selected_engine() -> str | None:
     """The engine a call without a workspace uses: the global pin (update --pin) when installed, else current."""
     forced = pins().get("engine")
@@ -1119,10 +1216,11 @@ def _restore_engine(workspace: Path, record: dict) -> str:
                 raise                       # another Theodore process is installing an engine: RETRY, nothing refused
             reason = status.summary
     other = selected_engine() or "the current version"
+    repin = f'{quoted_launcher()} repin "{workspace}"'
     raise Status("UPDATE_REQUIRED", f"this workspace was started with engine {version}, which is no longer on this computer and could not be "
-                                    f"fetched again ({reason}).",
-                 f"ask the user. To continue this deck with engine {other} (it may lay the deck out differently), delete "
-                 f"{workspace / '.pptx-state' / 'theodore-engine.json'} and run the same command again.",
+                                    f"fetched again ({reason}); {repin} moves the whole deck to engine {other} in one step.",
+                 f"ask the user. To continue this deck with engine {other} (it may lay the deck out differently), run {repin}, "
+                 f"then run the same command again.",
                  f"This deck was started with Theodore {version}, which is no longer installed and could not be downloaded again. "
                  f"I can continue it with version {other}, which may change its layout. Shall I?")
 
@@ -1130,10 +1228,13 @@ def _restore_engine(workspace: Path, record: dict) -> str:
 def engine_for(args: list[str]) -> str:
     """Workspace pin when an argument is a directory holding .pptx-state/, otherwise the global pin or current."""
     for workspace in _workspaces(args):
+        deck = deck_of(workspace)
         record = core.read_json(workspace / ".pptx-state" / "theodore-engine.json")
+        if deck is not None:                # a slide's part runs on its deck's engine, never on another
+            record = _align_part(workspace, deck, record)
         pinned = record.get("version")
         if pinned:
-            return pinned if engine_installed(pinned) else _restore_engine(workspace, record)
+            return pinned if engine_installed(pinned) else _restore_engine(deck or workspace, record)
     current = selected_engine()
     if not current:
         raise Status("SETUP_IN_PROGRESS", "the engine is not installed yet.",
@@ -1142,22 +1243,31 @@ def engine_for(args: list[str]) -> str:
     return current
 
 
-def _pin_workspaces(args: list[str], version: str) -> None:
+def _pin_record(version: str) -> dict:
+    """A workspace's pin to an installed engine, with the build's checksum, so a collected engine can be fetched back exactly."""
+    build = core.read_json(engine_dir(version) / ".theodore-engine.json")
+    return {"version": version, "pinned_at": int(core.now()), "sha256": build.get("sha256"), "kind": build.get("kind"),
+            "runtime_id": build.get("runtime_id")}
+
+
+def _pin_key(workspace: Path) -> str:
     import hashlib
+    return hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]     # a hash: no folder name is stored
+
+
+def _pin_workspaces(args: list[str], version: str) -> None:
     record = pins()
     spaces = record.setdefault("workspaces", {})
     changed = False
-    build = core.read_json(engine_dir(version) / ".theodore-engine.json")
     for workspace in _workspaces(args):
         pin_file = workspace / ".pptx-state" / "theodore-engine.json"
         if not pin_file.exists():
-            try:       # the build's checksum too, so a collected engine can be fetched back exactly
-                core.write_json(pin_file, {"version": version, "pinned_at": int(core.now()), "sha256": build.get("sha256"),
-                                           "kind": build.get("kind"), "runtime_id": build.get("runtime_id")})
+            try:
+                core.write_json(pin_file, _pin_record(version))
             except OSError:
                 continue
         pinned = core.read_json(pin_file).get("version") or version
-        key = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]  # a hash: no folder name is stored
+        key = _pin_key(workspace)
         if spaces.get(key, {}).get("version") != pinned or core.now() - float(spaces[key].get("at") or 0) > DAY:
             spaces[key] = {"version": pinned, "at": int(core.now())}
             changed = True

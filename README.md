@@ -28,7 +28,10 @@ Windows 10 version 1803 or later (x64), Linux x64 and arm64 with glibc 2.28 or l
 ## What gets installed, and where
 
 Everything Theodore owns is in one folder per user: `~/.theodore` on macOS and Linux,
-`%LOCALAPPDATA%\Theodore` on Windows (`THEODORE_HOME` overrides it). All assistants on the computer share it.
+`%USERPROFILE%\.theodore` on Windows (`THEODORE_HOME` overrides it). All assistants on the computer share it, and so
+does the Claude desktop app on Windows: an installation made from inside the app is in the same folder. An installation
+by an earlier version in `%LOCALAPPDATA%\Theodore` keeps working, and updating, where it is; running the installer
+again removes it and installs into `%USERPROFILE%\.theodore`.
 Theodore creates and manages only the subfolders listed here. If the folder already exists and holds anything
 else, Theodore never reads, changes or deletes it. The folder belongs to the Theodore service it was set up for
 (`state/environment` names it): a build for another service refuses it and says so; give that build its own folder
@@ -39,7 +42,7 @@ with `THEODORE_HOME`, or uninstall the other first.
 | `bin/theodore`, `bin/theodore.cmd`, `bin/launcher.json` | The launcher, at one stable path | under 100 KB |
 | `client/<version>/` | The client (Python source) | under 1 MB |
 | `runtime/<id>/` | Python 3.12, the engine's Python packages, Node 24 and its modules | about 358 to 466 MB (84 to 111 MB to download; table below) |
-| `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); up to four versions are kept | 43 to 58 MB each (15 to 21 MB to download) |
+| `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); the current and previous versions and every version a deck used in the last 30 days are kept, others up to four versions in all | 43 to 58 MB each (15 to 21 MB to download) |
 | `packs/` | Icon, flag, map and background libraries | about 145 MB (about 95 MB to download) |
 | `tools/libreoffice/` | LibreOffice, only on a Mac or Windows PC that has none (it renders slide previews) | about 800 MB (about 300 MB to download) |
 | `plugin/` | A copy of this repository's plugin, which Codex adds as a local marketplace | under 100 KB |
@@ -75,7 +78,9 @@ Outside that folder:
   images in `~/.cache/pptx-icons`, `~/.cache/pptx-flags` and the temporary folder's `pptx-icons` (on Windows under
   `%USERPROFILE%\.cache` and `%TEMP%`); the uninstall removes all of them (only files of the names the engine writes).
 - **Your deck workspaces** get one small file, `.pptx-state/theodore-engine.json`, naming the engine version
-  that started the workspace, so an update never changes a deck halfway through.
+  that started the workspace, so an update never changes a deck halfway through (a deck built slide by slide runs
+  every slide on its deck's version). `theodore repin <workspace>` moves one deck, with all its slides, to the
+  current version on purpose; the previous file stays beside it as `theodore-engine.json.previous`.
 - **Claude Desktop**, when the app is on the computer: one entry, `theodore`, in its `claude_desktop_config.json`,
   which starts `~/.theodore/bin/theodore mcp --for claude-desktop` so the app's chat can read Theodore's design
   guidance through one tool, `theodore` (it loads once the app is quit and opened again). Nothing else in that file changes.
@@ -142,8 +147,8 @@ and the reports and preferences you or your assistant file; never deck content, 
 ## Remove it
 
 ```
-~/.theodore/bin/theodore uninstall                    macOS, Linux
-"%LOCALAPPDATA%\Theodore\bin\theodore.cmd" uninstall  Windows
+~/.theodore/bin/theodore uninstall                      macOS, Linux
+"%USERPROFILE%\.theodore\bin\theodore.cmd" uninstall  Windows
 ```
 
 This removes the plugin from Claude Code and Codex, also when their `claude` or `codex` command is not on PATH (it

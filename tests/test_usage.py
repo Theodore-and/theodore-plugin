@@ -432,11 +432,11 @@ class Paths(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             saved = core._HOME
             try:
-                with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(Path(tmp) / "Local")}, clear=False):
+                with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(Path(tmp) / "Local"), "USERPROFILE": str(Path(tmp) / "Profile")}, clear=False):
                     os.environ.pop("THEODORE_HOME", None)
                     with mock.patch.object(core, "IS_WINDOWS", True):
                         core._HOME = None
-                        self.assertEqual(usage.ledger_path(), Path(tmp) / "Local" / "Theodore" / "state" / "usage-ledger.jsonl")
+                        self.assertEqual(usage.ledger_path(), Path(tmp) / "Profile" / ".theodore" / "state" / "usage-ledger.jsonl")
                     with mock.patch.object(core, "IS_WINDOWS", False), mock.patch.object(Path, "home", return_value=Path(tmp)):
                         core._HOME = None
                         self.assertEqual(usage.ledger_path(), Path(tmp) / ".theodore" / "state" / "usage-ledger.jsonl")
@@ -448,7 +448,7 @@ class Disclosure(unittest.TestCase):
     def test_security_names_the_ledger_its_place_every_field_and_the_off_switch(self):
         text = (Path(__file__).resolve().parents[1] / "SECURITY.md").read_text(encoding="utf-8")
         section = text[text.index("## Usage counts"):text.index("## Bug reports")]
-        for needle in ("~/.theodore/state/usage-ledger.jsonl", "%LOCALAPPDATA%\\Theodore\\state\\usage-ledger.jsonl",
+        for needle in ("~/.theodore/state/usage-ledger.jsonl", "%USERPROFILE%\\.theodore\\state\\usage-ledger.jsonl",
                        "theodore usage --show", "support@theodoreand.ai", "pptx finish", "15", "2,000", "1 MB", "30 days"):
             self.assertIn(needle, section)
         for field in [*usage._COMMAND_REQUIRED, *usage._COMMAND_OPTIONAL, *usage._STATUS_REQUIRED]:

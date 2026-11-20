@@ -14,6 +14,22 @@
 
 set -u
 
+# Theodore's folder on Windows (Git Bash, MSYS, Cygwin), as a Windows path: one rule wherever it is found (both launchers,
+# install.cmd, the short command and the client, each with literally the same logic): THEODORE_HOME when set; else
+# %USERPROFILE%\.theodore when it holds an installation (bin\launcher.json); else %LOCALAPPDATA%\Theodore when that holds
+# one (made by client 0.4.14 or earlier: it keeps working, and updating, where it is); else %USERPROFILE%\.theodore (a new
+# installation). Inside an MSIX-packaged app (the Claude desktop app) Windows redirects %LOCALAPPDATA% into the app's own
+# folder, unseen by every other program, but not %USERPROFILE%\.theodore.
+win_home() {
+  if [ -n "${THEODORE_HOME:-}" ]; then printf '%s' "$THEODORE_HOME"; return 0; fi
+  wh_new="${USERPROFILE:-}\\.theodore" wh_old="${LOCALAPPDATA:-}\\Theodore"
+  if [ ! -f "$(cygpath -u "$wh_new" 2>/dev/null)/bin/launcher.json" ] && [ -f "$(cygpath -u "$wh_old" 2>/dev/null)/bin/launcher.json" ]; then
+    printf '%s' "$wh_old"
+  else
+    printf '%s' "$wh_new"
+  fi
+}
+
 # `skill <name>` prints a skill's instructions as a skill file's body, for a host that injects a command's output into
 # the skill (Claude Code's !`...`). There a non-zero exit aborts the whole skill, so this mode always exits 0 and
 # whatever it says (the document, or a three-line status) goes to standard output.
@@ -29,7 +45,7 @@ if [ "${1:-}" = session-start ]; then
   exec 2>/dev/null
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
-      S_HOME=$(cygpath -u "${THEODORE_HOME:-${LOCALAPPDATA:-}\\Theodore}") || exit 0
+      S_HOME=$(cygpath -u "$(win_home)") || exit 0
       S_PY=python/python.exe ;;
     *) S_HOME=${THEODORE_HOME:-${HOME:-/nonexistent}/.theodore} S_PY=python/bin/python3 ;;
   esac
@@ -76,7 +92,7 @@ fi
 # not (the arguments then go to the client directly once setup has finished).
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*)
-    W_HOME=${THEODORE_HOME:-${LOCALAPPDATA:-}\\Theodore}
+    W_HOME=$(win_home)
     U_HOME=$(cygpath -u "$W_HOME" 2>/dev/null || printf '%s' "$W_HOME")
     W_SELF=$(cygpath -w "$SELF_DIR/theodore.cmd" 2>/dev/null || printf '%s' "$SELF_DIR/theodore.cmd")
     direct() {
