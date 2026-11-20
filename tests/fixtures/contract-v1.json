@@ -1,7 +1,7 @@
 {
   "codes": {
     "activation_max_live": 3,
-    "activation_ttl_seconds": 600,
+    "activation_ttl_seconds": 3600,
     "alphabet": "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
     "device_client_id": "theodore-client",
     "device_code_ttl_seconds": 900,
@@ -95,7 +95,8 @@
     "data_dir": {
       "envOverride": "THEODORE_HOME",
       "posix": "~/.theodore",
-      "windows": "%LOCALAPPDATA%\\Theodore"
+      "windows": "%USERPROFILE%\\.theodore",
+      "windowsBefore0415": "%LOCALAPPDATA%\\Theodore"
     },
     "engine_exit_code_max": 63,
     "exit_codes": {
@@ -136,7 +137,7 @@
     "channel": "theodore-channel-manifest@1",
     "runtime": "theodore-runtime-manifest@1"
   },
-  "openapi_sha256": "1762d1c5f680397dfae4549171c44457b2b65840044e4987066842672f05c2b9",
+  "openapi_sha256": "3441b1c3e37c75439799000a39a880ea6355e9f59aa1b2351cb37c3902ef53a1",
   "origins": {
     "production": {
       "api": "https://api.theodoreand.ai",
@@ -159,6 +160,8 @@
       "responses": [
         "200",
         "400",
+        "403",
+        "409",
         "429",
         "500",
         "503"
@@ -183,6 +186,7 @@
       "responses": [
         "200",
         "400",
+        "409",
         "429",
         "500",
         "503"
@@ -468,6 +472,34 @@
       "responses": [
         "200",
         "404",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.studio.get": {
+      "auth": "installation",
+      "method": "GET",
+      "path": "/v1/studio",
+      "responses": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.studio.set": {
+      "auth": "installation",
+      "method": "PUT",
+      "path": "/v1/studio",
+      "responses": [
+        "200",
+        "401",
+        "403",
         "422",
         "429",
         "500",

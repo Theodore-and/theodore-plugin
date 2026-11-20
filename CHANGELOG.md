@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.15
+
+- Windows: Theodore now lives in your user folder (`%USERPROFILE%\.theodore`), so an install made from the Claude desktop app is found by every assistant on the computer. Before, the app kept it in a private folder of its own. An install made earlier keeps working where it is; setting Theodore up again moves it and removes the old copy.
+- An update also brings Theodore's launcher up to date, so a launcher fix reaches a computer with the update that carries it.
+- The installer no longer ends with an error code when a download is only still running, and when the engine could not be set up it says so, with the reason, instead of "still being set up".
+- A deck built slide by slide stays on one engine: a slide's folder follows its deck. An engine that a deck used in the last 30 days is never removed. `theodore repin <deck folder>` moves a deck and all its slides to the current engine in one step.
+- A report the service cannot take at that moment is kept and sent later by Theodore itself; nobody is asked to try again.
+
 ## 0.4.14
 
 - Windows, installed from inside the Claude desktop app: the engine installs. The app keeps what its commands write in a folder of its own, and Theodore's link from the engine to its runtime pointed outside it, so the set-up ended with "lacks the Node module acorn".
