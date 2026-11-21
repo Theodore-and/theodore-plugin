@@ -6,10 +6,9 @@ deck" before any skill is loaded. Theodore writes only between its two markers, 
 which files it wrote and whether it created them, and the uninstall takes back exactly that block (and the file, when
 Theodore created it and nothing else was ever added to it).
 
-The block is written by `hosts register` only, which the installer runs: the person asked for Theodore to be set up and
-used for their presentations. A plugin added from a marketplace alone gets no block (from 0.4.18; before, its first
-`guide`, `skill` or `doctor` wrote one, which nobody had asked for). Any other command only brings a block that is
-there up to the current wording, so one the user deleted is not written again.
+The block is written by `hosts register` (the installer runs it) and, for an install that never ran the installer, by
+the first `guide`, `skill` or `doctor` run. It is updated in place when the wording changes. A block the user deleted
+is not written again: the record remembers that Theodore wrote it once.
 """
 
 from __future__ import annotations
@@ -164,9 +163,9 @@ def remove(path: Path, created: bool) -> str | None:
 
 
 def ensure(record: dict, register: bool = False) -> tuple[dict, list[str]]:
-    """Bring the block to the current wording in each assistant present. `register` (the installer's step) writes it,
-    also where the user once deleted it; any other caller only updates a block that is there. Returns the updated
-    record and one line per assistant changed."""
+    """Bring the block to the current wording in each assistant present. `register` (the installer's step) writes it
+    even where the user once deleted it; any other caller writes it only where Theodore never wrote it, and updates it
+    where it is. Returns the updated record and one line per assistant changed."""
     entries = dict(record.get(RECORD_KEY) or {})
     lines: list[str] = []
     for name, path, tool in targets():
@@ -178,9 +177,8 @@ def ensure(record: dict, register: bool = False) -> tuple[dict, list[str]]:
         if text is None or span is False:
             lines.append(f"{name} instructions: not changed ({path} could not be read, or has a Theodore marker without its pair)")
             continue
-        if span is None and not register:
-            continue                    # no block: only the set-up the person asked for writes one (and never again
-                                        # where the user took it out)
+        if entry and span is None and not register:
+            continue                    # Theodore wrote it once and it is gone: the user's choice
         if span is not None and text[span[0]:span[1]].rstrip("\r\n") == block().rstrip("\n").replace("\n", _newline(text)):
             if not entry:               # the current block, there before any record (another copy of Theodore wrote it)
                 entries[name] = {"path": str(path), "version": VERSION, "file_created": False}
