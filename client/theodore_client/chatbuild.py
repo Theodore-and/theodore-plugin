@@ -773,7 +773,7 @@ def next_step(args: list[str], output: str, code: int) -> str:
     if verb == "start" and code == 0:
         workspace = _field(output, "WORKSPACE") or workspace
         return (f'write each slide\'s block in {workspace}/deck.js as the design note and the build instructions say (action "read" '
-                f'it first, then "edit" or "write"; read pptxgenjs.md with action "read" when the manual points there), then '
+                f'it first, then "edit" or "write"; read the build API where the manual points to it), then '
                 f'{_run_call("apply", workspace or "<workspace>")}. The deck is built here, on this computer, never with another slide tool.')
     if verb == "apply":
         if code == 0:
@@ -947,7 +947,9 @@ def bindings(docs: Path | None) -> str:
         '                             no quotes, no shell); text the command reads on standard input (the design note for',
         '                             --storyline -) goes in stdin; folder is the deck\'s folder on this computer (the folder',
         "                             the user named, its full path; leave it out for Theodore's default folder). Renders come back as images.",
-        f'  <pptx-skill-dir> = {where}   (read pptxgenjs.md and references/ there with action "read", path)',
+        (f'  <pptx-skill-dir> = {where}   (read pptxgenjs.md and references/ there with action "read", path)'
+         if docs is None or (docs / "pptxgenjs.md").is_file() else       # an engine from 1.0.0-rc.29: the manual is served
+         f'  theodore guide pptx <name>  ->  {TOOL} with action "guide", section "<name>" (the build API is section "pptxgenjs")'),
         '  edit <wd>/deck.js, design.md or a part  ->  action "edit" (path, old, new) or "write" (path, content); "read" a file',
         '                             or an image path, "list" a folder. "reveal" shows a file in Finder, only when the user asks.',
         "  python3 ...  ->  not available here; every step the instructions give runs as an engine command.",
