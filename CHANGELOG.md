@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.19
+
+- Documents only, for engine 1.0.0-rc.27. `README.md`, `SECURITY.md` and the plugin's README now say that two helpers of the engine outlive the command that started them and stop by themselves (its own helper process, up to 30 idle minutes; from rc.27 on macOS and Linux the LibreOffice it started, up to 10 idle minutes), and that on a Mac the engine sets two of LibreOffice's own preferences, which an uninstall leaves behind, with the two commands that remove them. The first of those settings has been written since engine 1.0.0-rc.18 and was not mentioned anywhere.
+
 ## 0.4.18
 
 - A plugin added with the Claude Code or Codex command alone, without Theodore's installer, no longer changes anything in an assistant's settings or instructions by itself. Before, its first use added the permission rules for Theodore's commands, the short command `theodore`, the Codex rules file and the line in `CLAUDE.md` and `AGENTS.md` that names Theodore for every presentation, although nobody had asked for them. They now come only with the set-up a person asks for (the sentence on their Theodore page, or the installer), which works as before. By hand, `theodore hosts settings --apply` adds the host settings and `theodore hosts register` the rest. An install that already has them keeps them.

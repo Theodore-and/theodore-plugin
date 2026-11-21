@@ -117,6 +117,13 @@ Outside that folder:
   does. Texts then name `theodore …` instead of the launcher's long path, which the assistant otherwise kept in a
   variable that no permission rule can match. `theodore hosts settings --remove` and the uninstall delete it.
 
+- **Two settings of LibreOffice on a Mac**, in LibreOffice's own preferences (`org.libreoffice.script`), written by
+  the engine before it starts LibreOffice: `ApplePersistenceIgnoreState` (after a crash of LibreOffice, macOS asks at
+  the next start whether to restore its windows, and a LibreOffice without a window waits for an answer for ever) and,
+  from engine 1.0.0-rc.27, `NSAppSleepDisabled` (macOS slows an app that shows no window after about 30 seconds, and
+  every conversion then took three times as long). Both also hold for a LibreOffice you open yourself: its windows
+  are not restored after a crash, and it is not slowed while it is hidden.
+
 **The plugin alone.** Added with the Claude Code or Codex command only, without the installer, Theodore changes
 nothing in an assistant's settings or instructions (from 0.4.18): no permission rule, no short command, no Codex rules
 file, no line in `CLAUDE.md` or `AGENTS.md`, no Claude Desktop entry. Nobody asked for them. The assistant then asks
@@ -125,7 +132,11 @@ Theodore page adds all of it later; by hand, `theodore hosts settings --apply` a
 `theodore hosts register` the rest.
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
-download or an update in the background, which ends when it is done. The plugin has one hook (`hooks/hooks.json`):
+download or an update in the background, which ends when it is done. Two helpers of the engine outlive the command
+that started them, so that the next command finds them ready, and stop by themselves: the engine's own helper process
+(it speeds up `render` and project sync), for up to 30 idle minutes; and, from engine 1.0.0-rc.27 on macOS and Linux,
+the LibreOffice an engine command started, for up to 10 idle minutes (250 to 400 MB of memory in our runs, almost no CPU;
+Windows keeps none). Both also stop when Theodore is uninstalled or its cache is cleared. The plugin has one hook (`hooks/hooks.json`):
 Claude Code runs it when it compacts a conversation or resumes one, and only then. It runs the launcher's
 `session-start`, which reads Theodore's own small record of the instructions it served to that session
 (`state/sessions.json`: the session id Claude Code gives, the skill, its version and when; never the conversation, which
@@ -180,6 +191,9 @@ when nothing else is in it). What is left afterwards:
 
 - Anything in the folder that Theodore did not put there.
 - `.pptx-state/theodore-engine.json` inside your deck workspaces (harmless; delete it if you like).
+- On a Mac, the two LibreOffice settings named above. They are LibreOffice's own preferences and harmless;
+  `defaults delete org.libreoffice.script ApplePersistenceIgnoreState` and
+  `defaults delete org.libreoffice.script NSAppSleepDisabled` remove them.
 - Claude Code's cached copy of the plugin under `~/.claude/plugins/cache/theodore/` (about 60 KB of text).
   Claude Code marks it as orphaned and deletes it itself after 14 days.
 - Nothing of the installer: the install commands above download it into a new private folder (Windows:
