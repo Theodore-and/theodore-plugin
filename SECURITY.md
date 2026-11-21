@@ -10,7 +10,12 @@ installer's are in `install/`.
 - Theodore runs only when your assistant (or you) calls the launcher, and in Claude Code through the plugin's one hook
   (`hooks/hooks.json`), which runs the launcher's `session-start` when Claude Code compacts or resumes a conversation
   (see "The session note" below). There is no background service and no scheduled task. Background downloads started
-  during setup end by themselves.
+  during setup end by themselves. Two helpers of the engine outlive the command that started them and stop by
+  themselves: its own helper process (it speeds up `render` and project sync), after up to 30 idle minutes, and, from
+  engine 1.0.0-rc.27 on macOS and Linux, the LibreOffice an engine command started, after up to 10 idle minutes. Both
+  also stop when Theodore is uninstalled or its cache is cleared. On a Mac the engine sets two of LibreOffice's own preferences
+  before it starts it (`ApplePersistenceIgnoreState` and `NSAppSleepDisabled` in `org.libreoffice.script`; README.md
+  says what each is for); the uninstall leaves them.
 - The engine process, which builds your decks, makes no network calls: it has no image search and no download
   command, and a picture given by a web address is refused. It never contacts Theodore.
 - The client is the only part that contacts Theodore.

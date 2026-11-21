@@ -24,7 +24,9 @@ full and meant to be checked against the code, is in `SECURITY.md` and `README.m
   by the assistant, speaking over standard input and output only. It gives the assistant the same instructions and
   specimen images as the launcher does, where a tool result is shown whole and a command's output is not. It opens no
   network port.
-- Nothing in the background: no service, no scheduled task. Downloads started during set-up end by themselves.
+- No service and no scheduled task. Three things outlive the command that started them, and each ends by itself:
+  downloads started during set-up; the engine's own helper process, which stays ready for up to 30 idle minutes; and,
+  on macOS and Linux, the LibreOffice the engine started, which stays ready for up to 10 idle minutes.
 
 ## What it fetches
 
@@ -67,7 +69,10 @@ By itself, only Theodore's own places:
   you on Linux;
 - one small file in each deck's working folder, naming the engine version that started it;
 - its own copy of this plugin in Claude Code and Codex, through their own plugin commands, when a newer version is
-  published.
+  published;
+- on a Mac, two of LibreOffice's own preferences (`ApplePersistenceIgnoreState` and `NSAppSleepDisabled` in
+  `org.libreoffice.script`), which a LibreOffice without a window needs. They also hold for a LibreOffice you open
+  yourself, and they stay after an uninstall.
 
 By itself it changes **nothing in your assistants' settings or instructions**: no permission rule, no command on your
 PATH, no line in `CLAUDE.md` or `AGENTS.md`. Your assistant asks before each Theodore command, as it does for any
