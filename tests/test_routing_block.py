@@ -108,7 +108,7 @@ class BlockFile(unittest.TestCase):
         self.assertTrue(routing.write(self.path)[0].startswith("not changed"))
         self.assertEqual(self.path.read_bytes(), b"\xff\xfe binary")
 
-    def test_only_register_writes_a_block_and_ensure_skips_one_the_user_deleted(self):
+    def test_ensure_skips_a_block_the_user_deleted_but_register_writes_it_again(self):
         claude_dir = self.dir / ".claude"
         claude_dir.mkdir()
         # A home of its own: codex is also looked for where its installers put it (~/.nvm, ~/.local/bin, ...).
@@ -116,11 +116,9 @@ class BlockFile(unittest.TestCase):
                "HOME": str(self.dir), "USERPROFILE": str(self.dir), "THEODORE_HOME": str(self.dir / "theodore")}
         with mock.patch.dict(os.environ, env), mock.patch.object(core, "_HOME", None), \
                 mock.patch.object(core, "is_loopback_api", lambda: True):
-            target = claude_dir / "CLAUDE.md"
-            self.assertEqual(routing.ensure({}), ({}, []), "no set-up asked for: nothing is written")
-            self.assertFalse(target.exists())
-            record, lines = routing.ensure({}, register=True)
+            record, lines = routing.ensure({})
             self.assertEqual(len(lines), 1)
+            target = claude_dir / "CLAUDE.md"
             self.assertTrue(record["instructions"]["claude"]["file_created"])
             self.assertNotIn("codex", record["instructions"], "no Codex folder and no codex command: nothing written there")
             target.write_text("I removed Theodore's lines.\n")
@@ -133,8 +131,8 @@ class BlockFile(unittest.TestCase):
 
 
 class BlockThroughTheClient(ClientCase):
-    """The client's commands: register writes it, guide/doctor never do for a plugin added alone, uninstall takes it
-    back."""
+    """The client's commands: register writes it, guide/doctor write it for a marketplace-only install, uninstall
+    takes it back."""
 
     def _fake_tools(self) -> None:
         bin_dir = self.box.tmp / "fakebin"
@@ -199,17 +197,11 @@ class BlockThroughTheClient(ClientCase):
         self.assertFalse(agents_md.exists())
         self.assertNotIn("instructions", self.state("state/host-settings.json"))
 
-    def test_a_plugin_added_alone_writes_no_block_and_the_set_up_does(self):
-        # 0.4.18: nobody asked for Theodore to be used for every deck when only the plugin was added from a marketplace.
+    def test_a_marketplace_only_install_gets_it_at_the_first_doctor_or_guide(self):
         claude_md, agents_md = self._files()
         claude_md.parent.mkdir(parents=True)            # Claude Code's folder, no command on PATH (the desktop app)
         self.ready()
-        doctor = self.client("doctor")
-        self.client("guide", "pptx")
-        self.assertFalse(claude_md.exists(), "the plugin alone changes no instructions file")
-        self.assertIn("none written", doctor.stdout)
-        self.assertNotIn("instructions", self.state("state/host-settings.json") or {})
-        self.client("hosts", "register")                # the installer's step
+        self.client("doctor")
         self.assertIn(routing.TEXT[:-1], claude_md.read_text())
         self.assertFalse(agents_md.exists(), "no Codex on this computer")
         claude_md.write_text("")                        # the user removes it: not written again by later runs

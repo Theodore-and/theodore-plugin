@@ -2161,14 +2161,11 @@ class Hosts(ClientCase):
         with mock.patch.object(core, "IS_WINDOWS", False):
             self.assertEqual(commands._claude_read_rule(Path("/Users/ann/Library/Caches/Theodore")), "Read(//Users/ann/Library/Caches/Theodore/**)")
 
-    def test_settings_come_once_with_a_set_up_and_never_with_the_plugin_alone(self):
+    def test_an_installation_from_before_gets_the_settings_once_at_its_next_command(self):
         self._fake_tools()
         settings = self.box.user_home / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True)
         settings.write_text("{}")
-        self.client("doctor")
-        self.assertEqual(settings.read_text(), "{}", "the plugin alone (0.4.18)")
-        (self.box.home / "state" / "hosts.pending").write_text("")     # an installer stopped before its last step
         self.client("doctor")
         launcher = str(self.box.home / "bin" / "theodore")
         allow = json.loads(settings.read_text())["permissions"]["allow"]

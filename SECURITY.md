@@ -55,11 +55,13 @@ project's own release on `github.com`, checked against a pinned SHA-256; no cred
 
 What the client changes on this computer by itself: its own folder (client, runtime, engines, packs, its copy of
 the plugin), and, through the assistants' own plugin commands, the Theodore plugin in Claude Code and Codex when a
-newer one is published (it takes effect at their next session). Only Theodore's set-up changes anything else in an
-assistant's settings or instructions. A plugin added from a
-marketplace alone, without the installer, changes nothing there by itself (from 0.4.18): the assistant asks before
-each Theodore command, as it does for any plugin, and uses Theodore when you name it; `theodore hosts settings
---apply` and `theodore hosts register` add by hand what the installer adds. The installer adds, when Claude Desktop is on this computer, one entry named
+newer one is published (it takes effect at their next session). Setting Theodore up changes more, in the assistants' own
+settings and instructions; the rest of this paragraph lists it. The installer does all of it. A plugin added from a
+marketplace alone, without the installer, does the same at its first use for the host settings and the instruction
+line, so that it works as it does after the installer (not the Claude Desktop entry and not the registration in other
+assistants: `theodore hosts register` does those); `theodore hosts settings --remove` takes the settings back and
+keeps them off, and a line you deleted is not written again. Versions 0.4.18 to 0.4.20 left all of it to the
+installer. The installer adds, when Claude Desktop is on this computer, one entry named
 `theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the uninstall
 removes it), and writes one line between
 `<!-- theodore:begin -->` and `<!-- theodore:end -->` in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`

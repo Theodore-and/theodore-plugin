@@ -64,7 +64,7 @@ Never sent: deck content, slide text, images, file names, folder paths, renders,
 
 ## What it changes on your computer
 
-By itself, only Theodore's own places:
+In Theodore's own places:
 
 - its folder in your user folder, and the engine's render cache (`~/Library/Caches/Theodore` on macOS,
   `%LOCALAPPDATA%\Theodore\Cache` on Windows, `~/.cache/theodore` on Linux);
@@ -77,19 +77,22 @@ By itself, only Theodore's own places:
   `org.libreoffice.script`), which a LibreOffice without a window needs. They also hold for a LibreOffice you open
   yourself, and they stay after an uninstall.
 
-By itself it changes **nothing in your assistants' settings or instructions**: no permission rule, no command on your
-PATH, no line in `CLAUDE.md` or `AGENTS.md`. Your assistant asks before each Theodore command, as it does for any
-plugin, and uses Theodore when you name it.
+At its first use it also **sets Theodore up in your assistant**, so that it works without further steps:
 
-Theodore's set-up is a separate thing you ask for: the sentence on your Theodore page ("Set up Theodore and use it for
-all my presentations"), or its installer. Because it was asked to, it registers the plugin in the assistants it finds,
-lets Theodore's own commands, and the assistant's edits of a deck's working files, run without a prompt (permission
-rules for exactly those in Claude Code's `settings.json`, a rules file in Codex with which Theodore's commands run
-outside Codex's sandbox, and the short command `theodore`), turns on automatic updates for Theodore's marketplace, adds
-one entry to Claude Desktop's configuration, on Windows names the Git Bash it fetched in Claude Code's settings, and
-writes one marked line into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` saying that you chose Theodore for
-presentations. It prints what it wrote. Its `--no-settings` leaves the rules out, `theodore hosts settings --remove` takes them back, and
-an organisation's managed policy always wins.
+- Theodore's own commands, and the assistant's edits of a deck's working files, run without a prompt: permission
+  rules for exactly those in Claude Code's `settings.json`, a rules file in Codex with which Theodore's commands run
+  outside Codex's sandbox, and the short command `theodore` in a per-user folder on your PATH;
+- automatic updates are turned on for Theodore's marketplace;
+- one marked line is written into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` saying that you chose Theodore for
+  presentations, so that a request for a deck goes to Theodore.
+
+`theodore hosts settings --remove` takes the rules back and keeps them off, a line you delete is not written again,
+and an organisation's managed policy always wins.
+
+The sentence on your Theodore page ("Set up Theodore and use it for all my presentations"), or its installer, does the
+same and prints what it wrote. It also registers the plugin in every assistant it finds, adds one entry to Claude
+Desktop's configuration, and on Windows fetches Git Bash for Claude Code when it has none and names it in Claude
+Code's settings. Its `--no-settings` leaves the rules out.
 
 ## What it needs, and how to remove it
 
