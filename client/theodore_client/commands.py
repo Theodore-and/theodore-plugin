@@ -53,47 +53,30 @@ def _api(route: str, what: str, *, passing: tuple[str, ...] = (), keep=None, **k
 # --- guide -----------------------------------------------------------------------------------------------------------------
 
 def split_parts(text: str, limit: int = GUIDE_PART_CHARS) -> list[str]:
-    """Cut a document into parts of at most `limit` characters; the parts joined give the text back. A part ends where
-    a `## ` heading begins whenever the text has such headings, so that a part holds whole sections of its text; one
-    heading's own block longer than a part, and a text without headings, is cut on line ends."""
+    """Cut a document into the fewest parts of at most `limit` characters that hold it; the parts joined give the text
+    back. The parts are about even, and a part ends where a `## ` heading begins when one lies where a cut may fall,
+    otherwise at a line end. Never a short first part before a long section: a reader that acts on one part of a text
+    has only that part, so every part carries its share (a text of 43,000 characters is two parts, not an opening
+    paragraph and two more)."""
     if len(text) <= limit:
         return [text]
-    blocks = re.split(r"(?m)^(?=## )", text)
-    if len(blocks) < 2:
-        return _split_lines(text, limit)
-    parts, current = [], ""
-    for block in blocks:
-        if len(block) > limit:
-            if current:
-                parts.append(current)
-            pieces = _split_lines(block, limit)
-            parts.extend(pieces[:-1])
-            current = pieces[-1]
-        elif len(current) + len(block) > limit:
-            parts.append(current)
-            current = block
+    headings = [match.start() for match in re.finditer(r"(?m)^## ", text) if match.start() > 0]
+    parts, at = [], 0
+    while len(text) - at > limit:
+        remaining = len(text) - at
+        needed = -(-remaining // limit)                     # the fewest parts the rest still takes
+        low = at + max(1, remaining - (needed - 1) * limit)  # cut no earlier, or the rest needs one part more
+        high = at + limit
+        target = at + remaining / needed
+        fits = [start for start in headings if low <= start <= high]
+        if fits:
+            cut = min(fits, key=lambda start: abs(start - target))
         else:
-            current += block
-    if current:
-        parts.append(current)
-    return parts
-
-
-def _split_lines(text: str, limit: int) -> list[str]:
-    parts, current = [], ""
-    for line in text.splitlines(keepends=True):
-        while len(line) > limit:  # a single line longer than a part: cut it hard
-            room = limit - len(current)
-            current += line[:room]
-            line = line[room:]
-            parts.append(current)
-            current = ""
-        if len(current) + len(line) > limit:
-            parts.append(current)
-            current = ""
-        current += line
-    if current:
-        parts.append(current)
+            line_end = text.rfind("\n", at, high) + 1
+            cut = line_end if line_end >= low else high      # one line longer than a part: cut it hard
+        parts.append(text[at:cut])
+        at = cut
+    parts.append(text[at:])
     return parts
 
 

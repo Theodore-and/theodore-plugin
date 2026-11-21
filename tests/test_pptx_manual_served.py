@@ -30,6 +30,16 @@ class Paging(unittest.TestCase):
             self.assertTrue(part.startswith("## Section "), "every later part starts at a heading")
         self.assertTrue(all(len(part) <= 3000 for part in parts))
 
+    def test_a_long_first_section_gives_two_even_parts_not_a_short_opening_and_two_more(self):
+        """On a Mac the build API came as three parts, the first one its opening paragraph alone (1,463 characters with
+        the header): the first section was just over a part, so the opening was sent by itself."""
+        text = "intro\n" * 60 + "## Big\n" + ("a line of the big section\n" * 930) + "## Next\n" + ("next line\n" * 1800)
+        parts = commands.split_parts(text, limit=24000)
+        self.assertEqual("".join(parts), text)
+        self.assertEqual(len(parts), 2, "the fewest parts that hold the text")
+        self.assertTrue(all(8000 < len(part) <= 24000 for part in parts), [len(part) for part in parts])
+        self.assertEqual(commands.split_parts("x" * 5000, limit=2000), ["x" * 2000, "x" * 2000, "x" * 1000])
+
     def test_one_long_block_and_a_text_without_headings_are_cut_on_line_ends(self):
         long_block = "## Long\n" + "a line of the long block\n" * 400
         text = "## Short\nshort\n" + long_block + "## After\nafter\n"

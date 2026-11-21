@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.23
+
+- A text read in parts comes in the fewest parts that hold it, about even in size, cut where a `## ` heading begins when one lies where a cut may fall and otherwise at a line end. In 0.4.22 (staging only) the build API came as three parts on a Mac, the first one its opening paragraph alone, because its first section was just over one part; an assistant that reads a first part of a few lines may not read on. It is two parts now, on every system.
+
 ## 0.4.22
 
 - Every text of the engine's manual is read through Theodore's launcher, in parts that fit one answer of the assistant: `theodore guide pptx` for the main text and `theodore guide pptx <name>` for another, such as the build API (`pptxgenjs`). Before, the manual pointed at files in the engine's folder. An assistant that read the build API in one command was shown only its first 2 KB by Claude Code, because the file is longer than Claude Code shows of one answer, and then built slides without it; asking the launcher for it by name answered "no such section". Now the name works, the text comes in two parts that end at its headings, and the manual's pointers are the commands that print each text. A name the service does not serve is read from the installed engine's own file, also with no connection; a name that is no text lists the ones there are.
