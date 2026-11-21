@@ -11,9 +11,11 @@ installer's are in `install/`.
   (`hooks/hooks.json`), which runs the launcher's `session-start` when Claude Code compacts or resumes a conversation
   (see "The session note" below). There is no background service and no scheduled task. Background downloads started
   during setup end by themselves. Two helpers of the engine outlive the command that started them and stop by
-  themselves: its own helper process (it speeds up `render` and project sync), after up to 30 idle minutes, and, from
-  engine 1.0.0-rc.27 on macOS and Linux, the LibreOffice an engine command started, after up to 10 idle minutes. Both
-  also stop when Theodore is uninstalled or its cache is cleared. On a Mac the engine sets two of LibreOffice's own preferences
+  themselves: its own helper process (it speeds up `render` and project sync), after up to 30 idle minutes, and the
+  LibreOffice an engine command started, after up to 10 idle minutes (from engine 1.0.0-rc.27 on macOS and Linux,
+  from 1.0.0-rc.28 on Windows too). Both also stop when Theodore is uninstalled or its cache is cleared. On a Mac,
+  `pptx doctor --powerpoint`, when it is run, opens a copy of the deck in your own PowerPoint and deletes the copy
+  afterwards (README.md says where it goes and what it does with a repair prompt). On a Mac the engine sets two of LibreOffice's own preferences
   before it starts it (`ApplePersistenceIgnoreState` and `NSAppSleepDisabled` in `org.libreoffice.script`; README.md
   says what each is for); the uninstall leaves them.
 - The engine process, which builds your decks, makes no network calls: it has no image search and no download

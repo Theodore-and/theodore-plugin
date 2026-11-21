@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.20
+
+- Documents only, for engine 1.0.0-rc.28. On Windows, LibreOffice now also stays running for up to 10 idle minutes after a command, as on macOS and Linux; the documents said Windows kept none. They also describe the PowerPoint check on a Mac (`pptx doctor --powerpoint`), which no document mentioned: it opens a copy of the deck in your own PowerPoint, puts that copy in PowerPoint's temporary folder and deletes it afterwards, answers a repair prompt with Cancel, and quits PowerPoint only when it started it and no presentation is open.
+
 ## 0.4.19
 
 - Documents only, for engine 1.0.0-rc.27. `README.md`, `SECURITY.md` and the plugin's README now say that two helpers of the engine outlive the command that started them and stop by themselves (its own helper process, up to 30 idle minutes; from rc.27 on macOS and Linux the LibreOffice it started, up to 10 idle minutes), and that on a Mac the engine sets two of LibreOffice's own preferences, which an uninstall leaves behind, with the two commands that remove them. The first of those settings has been written since engine 1.0.0-rc.18 and was not mentioned anywhere.

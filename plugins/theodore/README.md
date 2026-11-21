@@ -25,8 +25,11 @@ full and meant to be checked against the code, is in `SECURITY.md` and `README.m
   specimen images as the launcher does, where a tool result is shown whole and a command's output is not. It opens no
   network port.
 - No service and no scheduled task. Three things outlive the command that started them, and each ends by itself:
-  downloads started during set-up; the engine's own helper process, which stays ready for up to 30 idle minutes; and,
-  on macOS and Linux, the LibreOffice the engine started, which stays ready for up to 10 idle minutes.
+  downloads started during set-up; the engine's own helper process, which stays ready for up to 30 idle minutes; and
+  the LibreOffice the engine started, which stays ready for up to 10 idle minutes.
+- On a Mac, and only when your assistant or you ask for it (`pptx doctor --powerpoint`): your own PowerPoint, to open
+  a copy of a deck and see whether PowerPoint would ask to repair it. The copy is deleted afterwards and a repair
+  prompt is answered with Cancel.
 
 ## What it fetches
 
