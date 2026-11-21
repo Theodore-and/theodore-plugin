@@ -124,6 +124,13 @@ Outside that folder:
   every conversion then took three times as long). Both also hold for a LibreOffice you open yourself: its windows
   are not restored after a crash, and it is not slowed while it is hidden.
 
+- **The PowerPoint check on a Mac** (`pptx doctor --powerpoint`), only when your assistant or you run it: it opens a
+  copy of the deck in your own PowerPoint to see whether PowerPoint would ask to repair it. The copy goes into
+  PowerPoint's own temporary folder (`~/Library/Containers/com.microsoft.Powerpoint/Data/tmp`) and is deleted after
+  the check. A repair prompt is answered with Cancel, never with Repair. PowerPoint is quit afterwards only when the
+  check started it and no presentation is open; a presentation you have open is not touched. macOS may ask you once
+  to allow it.
+
 **The plugin alone.** Added with the Claude Code or Codex command only, without the installer, Theodore changes
 nothing in an assistant's settings or instructions (from 0.4.18): no permission rule, no short command, no Codex rules
 file, no line in `CLAUDE.md` or `AGENTS.md`, no Claude Desktop entry. Nobody asked for them. The assistant then asks
@@ -134,9 +141,9 @@ Theodore page adds all of it later; by hand, `theodore hosts settings --apply` a
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. Two helpers of the engine outlive the command
 that started them, so that the next command finds them ready, and stop by themselves: the engine's own helper process
-(it speeds up `render` and project sync), for up to 30 idle minutes; and, from engine 1.0.0-rc.27 on macOS and Linux,
-the LibreOffice an engine command started, for up to 10 idle minutes (250 to 400 MB of memory in our runs, almost no CPU;
-Windows keeps none). Both also stop when Theodore is uninstalled or its cache is cleared. The plugin has one hook (`hooks/hooks.json`):
+(it speeds up `render` and project sync), for up to 30 idle minutes; and the LibreOffice an engine command started,
+for up to 10 idle minutes (from engine 1.0.0-rc.27 on macOS and Linux, from 1.0.0-rc.28 on Windows too; 250 to 400 MB
+of memory in our runs, almost no CPU). Both also stop when Theodore is uninstalled or its cache is cleared. The plugin has one hook (`hooks/hooks.json`):
 Claude Code runs it when it compacts a conversation or resumes one, and only then. It runs the launcher's
 `session-start`, which reads Theodore's own small record of the instructions it served to that session
 (`state/sessions.json`: the session id Claude Code gives, the skill, its version and when; never the conversation, which
