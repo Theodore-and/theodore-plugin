@@ -135,8 +135,8 @@ Nothing is installed system-wide. Nothing runs on its own: a Theodore command yo
 download or an update in the background, which ends when it is done. Two helpers of the engine outlive the command
 that started them, so that the next command finds them ready, and stop by themselves: the engine's own helper process
 (it speeds up `render` and project sync), for up to 30 idle minutes; and, from engine 1.0.0-rc.27 on macOS and Linux,
-the LibreOffice an engine command started, for up to 10 idle minutes (about 265 MB of memory, almost no CPU; Windows
-keeps none). Both also stop when Theodore is uninstalled or its cache is cleared. The plugin has one hook (`hooks/hooks.json`):
+the LibreOffice an engine command started, for up to 10 idle minutes (250 to 400 MB of memory in our runs, almost no CPU;
+Windows keeps none). Both also stop when Theodore is uninstalled or its cache is cleared. The plugin has one hook (`hooks/hooks.json`):
 Claude Code runs it when it compacts a conversation or resumes one, and only then. It runs the launcher's
 `session-start`, which reads Theodore's own small record of the instructions it served to that session
 (`state/sessions.json`: the session id Claude Code gives, the skill, its version and when; never the conversation, which
