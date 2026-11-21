@@ -36,7 +36,7 @@ full and meant to be checked against the code, is in `SECURITY.md` and `README.m
 | From | What | How it is checked |
 | --- | --- | --- |
 | `dl.theodoreand.ai` | Theodore's Python (an unmodified python-build-standalone archive) and its client; then the rest of the runtime, the engine, the asset packs, and later versions of all of these and of this plugin. About 100 to 130 MB before the first deck, about 560 to 670 MB on disk with the asset packs | the first two against SHA-256 values pinned in `launcher.json`; everything else against manifests signed with Ed25519 keys pinned in the same file |
-| `api.theodoreand.ai` | the design instructions, each time they are loaded (never stored on disk), and the specimen images the assistant asks to look at (on disk for an hour at most) | sent only to a signed-in computer of an account with access |
+| `api.theodoreand.ai` | the design instructions, each time they are loaded (never stored on disk); a text of the engine's manual the assistant reads by its name, when the service holds it for your account (otherwise the installed engine's own file is read); and the specimen images the assistant asks to look at (on disk for an hour at most) | sent only to a signed-in computer of an account with access |
 | `download.documentfoundation.org` | LibreOffice, unmodified, only when the computer has none: it renders the slides Theodore checks | pinned SHA-256 |
 | `dl.theodoreand.ai`, otherwise `github.com` | Git for Windows' PortableGit, unmodified, only on Windows when Claude Code finds no Git Bash and Theodore's set-up or you ask for it (`theodore tools install git`) | pinned SHA-256 |
 

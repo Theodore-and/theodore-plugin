@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.22
+
+- Every text of the engine's manual is read through Theodore's launcher, in parts that fit one answer of the assistant: `theodore guide pptx` for the main text and `theodore guide pptx <name>` for another, such as the build API (`pptxgenjs`). Before, the manual pointed at files in the engine's folder. An assistant that read the build API in one command was shown only its first 2 KB by Claude Code, because the file is longer than Claude Code shows of one answer, and then built slides without it; asking the launcher for it by name answered "no such section". Now the name works, the text comes in two parts that end at its headings, and the manual's pointers are the commands that print each text. A name the service does not serve is read from the installed engine's own file, also with no connection; a name that is no text lists the ones there are.
+- From engine 1.0.0-rc.29 the service serves the manual and the engine no longer brings it as files. The commands are the same.
+- Set-up no longer ends with `RETRY` when another assistant on the computer cannot take the plugin (an old Codex, for example) while the assistant you are using took it. It ends ready, says in one sentence which assistant was left out, and so shows its welcome and asks about Studio as every set-up does. A failure in the assistant you are using is still a failure.
+- A long text printed in parts is cut where a `## ` heading begins whenever it has such headings, so a part holds whole sections.
+
 ## 0.4.21
 
 - A plugin added with the Claude Code or Codex command alone sets itself up at its first use again, as it did up to 0.4.17: Theodore's own commands run without a prompt, and a request for a deck goes to Theodore without naming it. Versions 0.4.18 to 0.4.20 left this to the installer, so a person who added only the plugin was asked before every Theodore command and had to name Theodore. Every way of installing now ends the same. `theodore hosts settings --remove` still takes the settings back and keeps them off, and a line you delete from `CLAUDE.md` or `AGENTS.md` is still not written again.

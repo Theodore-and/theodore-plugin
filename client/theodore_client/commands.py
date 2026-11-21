@@ -233,34 +233,78 @@ def compose_manual(text: str, role: str | None, what: str = "pptx SKILL.md") -> 
 
 
 # The engine's manual. Up to engine 1.0.0-rc.28 it came with the engine as plain files (skills/pptx/SKILL.md,
-# pptxgenjs.md, references/), which an assistant read from disk: a file over the host's output limit was cut to a
-# preview there, and anyone could open the folder. From rc.29 the service serves it as sections of pptx, as it serves
-# slide-parts: the main text as the section `manual`, each other file under its own name. A deck pinned to an older
-# engine keeps reading that engine's files.
+# pptxgenjs.md, references/), which an assistant read from disk: a file over the host's output limit reached it as a
+# short preview, and anyone could open the folder. From rc.29 the service serves it as sections of pptx, as it serves
+# slide-parts: the main text as the section `manual`, each other file under its own name.
+# Whichever engine is selected, an assistant reaches every text of the manual the same way: `guide pptx` for the main
+# text and `guide pptx <name>` for another, in parts that fit one answer of any host. A name the service does not serve
+# is read from the selected engine's own files (an engine up to rc.28, and a deck pinned to one).
 MANUAL_SECTION = "manual"
-_PPTX_LINK = re.compile(r"\]\((?:\.\./)?(?:references/)?([A-Za-z0-9_-]{1,64})\.md\)")
-_PPTX_SPAN = re.compile(r"`(?:\.\./)?(?:references/)?((?:pptxgenjs|translate|orchestrate|slide-parts)[a-z-]*)\.md`")
+_NOT_A_SECTION = frozenset({MANUAL_SECTION, "skill", "served-entry", "vendor_manifest"})   # the main text (`guide pptx`), and files that are no text to read
+# A pointer to a text of the manual, as a link or a code span: `references/<name>.md` and `../<name>.md` whatever the
+# name, and by its bare name the build API, its references and the main text. A deck's own files (design.md,
+# template.md, <part>/design.md) are named without those folders and are left alone.
+_PPTX_TEXT = r"(?:(?:\.\./|references/)([A-Za-z0-9_-]{1,64})|(SKILL|pptxgenjs[a-z-]*))\.md"
+_PPTX_LINK = re.compile(r"\]\(" + _PPTX_TEXT + r"\)")
+_PPTX_SPAN = re.compile("`" + _PPTX_TEXT + "`")
+MANUAL_NAMES = frozenset({MANUAL_SECTION, "skill"})       # the main text asked for by a name: the same as `guide pptx`
 
 
-def _manual_served() -> bool:
-    """The selected engine did not bring its manual as files (an engine from 1.0.0-rc.29): the service serves it. With
-    no engine yet, a text is printed as it is."""
+def _pptx_disk_folders() -> tuple[str, list[Path]]:
+    """(the selected engine's version, the folders its manual's files are in); no folders when no engine is selected."""
     version = install.selected_engine()
-    return bool(version) and not (install.engine_dir(version) / "skills" / "pptx" / "pptxgenjs.md").is_file()
+    if not version:
+        return "", []
+    base = install.engine_dir(version) / "skills" / "pptx"
+    return version, [base, base / "references"]
+
+
+def _pptx_disk_section(name: str) -> tuple[str, str] | None:
+    """(the text, the engine's version) of a text of the manual that the selected engine brought as a file."""
+    if name.lower() in _NOT_A_SECTION:
+        return None
+    version, folders = _pptx_disk_folders()
+    for folder in folders:
+        try:
+            return (folder / f"{name}.md").read_text(encoding="utf-8"), version
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            raise core.internal(f"engine {version} has a {name}.md that cannot be read.") from None
+    return None
+
+
+def _pptx_disk_names() -> list[str]:
+    """The texts of the manual the selected engine brought as files, by the name `guide pptx <name>` takes."""
+    names: list[str] = []
+    for folder in _pptx_disk_folders()[1]:
+        try:
+            found = sorted(path.stem for path in folder.glob("*.md"))
+        except OSError:
+            found = []
+        names += [name for name in found if name == name.lower() and name not in _NOT_A_SECTION and name not in names]
+    return names
 
 
 def _pptx_pointers(text: str, role: str | None = None) -> str:
     """In a served pptx text, every pointer to a file of the manual becomes the command that prints that section."""
     launcher = quoted_launcher()
-    text = _PPTX_LINK.sub(lambda m: f"](run: {launcher} guide pptx {m.group(1)}{_role_option(role)})", text)
-    return _PPTX_SPAN.sub(lambda m: f"`{launcher} guide pptx {m.group(1)}{_role_option(role)}`", text)
+
+    def command(match: re.Match) -> str:
+        name = match.group(1) or match.group(2)
+        return f"{launcher} guide pptx {MANUAL_SECTION if name == 'SKILL' else name}{_role_option(role)}"
+    text = _PPTX_LINK.sub(lambda m: f"](run: {command(m)})", text)
+    return _PPTX_SPAN.sub(lambda m: f"`{command(m)}`", text)
 
 
-def _pptx_manual_text(directory: Path, version: str, role: str | None) -> tuple[str, bool]:
-    """(the manual's main text composed for the role, whether the engine brought it as a file)."""
+def _pptx_manual_text(directory: Path, version: str, role: str | None, pointers: bool = True) -> tuple[str, bool]:
+    """(the manual's main text composed for the role, whether the engine brought it as a file). Its pointers to the
+    manual's other texts are the commands that print them, for an engine's own file as for a served text; `pointers`
+    False leaves an engine's own file as it is (a chat, which has no launcher and reads those files with its own tool)."""
     path = directory / "skills" / "pptx" / "SKILL.md"
     try:
-        return compose_manual(path.read_text(encoding="utf-8"), role), True
+        text = compose_manual(path.read_text(encoding="utf-8"), role)
+        return (_pptx_pointers(text, role) if pointers else text), True
     except FileNotFoundError:
         pass
     except OSError:
@@ -278,10 +322,13 @@ def _pptx_manual_text(directory: Path, version: str, role: str | None) -> tuple[
 
 
 def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str) -> str:
+    """How the manual's other texts are read: through the launcher, which prints each in parts that fit one answer (a
+    file read with cat can be longer than a host shows, and the assistant then sees only its start)."""
+    texts = (f"          the build API and its references  ->  {launcher} guide pptx <name>   (pptxgenjs first; a name that "
+             "is not one lists them)")
     if on_disk:
-        return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}   (read pptxgenjs.md and references/ there)"
-    return (f"          the build API and its references  ->  {launcher} guide pptx <name>   (pptxgenjs first; a name that "
-            "is not one lists them)")
+        return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}\n{texts}"
+    return texts
 
 
 def guide(skill: str, section: str | None, part: int | None, license_text: bool, role: str | None = None) -> int:
@@ -299,15 +346,21 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool,
     if skill == "pptx":
         if license_text:
             raise core.usage("guide pptx has no --license: the pptx manual and its notices are in the engine folder named in its header.")
+        if section and _section_name(section).lower() in MANUAL_NAMES:
+            section = None                  # the main text by its name (an engine message names it so): `guide pptx`
         if not section:
             return _guide_pptx(part, whole=whole, role=role)
-        # A section of pptx is one the service serves to this account (lane STUDIO); the rest of the manual is on disk.
+        # A text of the manual by its name: one the service serves to this account, else the selected engine's own file.
+        # Never whole: a text longer than a host shows of one answer reaches the assistant as a short preview, and the
+        # build API is such a text. Its parts end at its headings.
+        whole = False
     if license_text and role:
         raise core.usage("--license takes no --role.")
     return _guide_remote(skill, "license" if license_text else section, part, whole=whole, role=role)
 
 
-def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True, role: str | None = None) -> int:
+def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True, role: str | None = None,
+                pointers: bool = True) -> int:
     """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
     claims = account.require("pptx")
     install.require_runtime()
@@ -320,7 +373,7 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: b
     if not version:
         raise _engine_downloading("run the same command again in 20 seconds. Do not use another slide tool meanwhile.")
     directory = install.engine_dir(version)
-    text, on_disk = _pptx_manual_text(directory, version, role)
+    text, on_disk = _pptx_manual_text(directory, version, role, pointers)
     install.touch_used(version)
     _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
     parts = [text] if whole else split_parts(text)
@@ -425,7 +478,7 @@ def _section_name(given: str) -> str:
 
 def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
     """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
-    only the answer: its manual is on disk, and a served section is named by the text that points to it."""
+    the ones the service serves to this account and the texts the selected engine brought as files."""
     launcher = quoted_launcher()
     shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if skill == "pptx":
@@ -437,6 +490,7 @@ def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
                       if isinstance(s, dict) and s.get("name") and s.get("name") != MANUAL_SECTION]
         except (Status, ValueError):
             served = []
+        served += [name for name in _pptx_disk_names() if name not in served]
         if served:
             return core.usage(f"guide pptx has no section '{shown}'. Sections: {', '.join(served)}.",
                               f"run {launcher} guide pptx <section>{_role_option(role)} with one of those names; "
@@ -475,7 +529,16 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
         except api.ApiError:
             if part > 1 and not paged_here:
                 raise core.usage(f"{what} {section} has no part {part}.") from None
-            raise _no_such_section(skill, section, role) from None
+            on_disk = _pptx_disk_section(section) if paged_here else None
+            if on_disk is None:
+                raise _no_such_section(skill, section, role) from None
+            headers, raw = _pptx_from_disk(on_disk)
+        except Status as status:
+            # no connection: a text the engine brought as a file is still there to read, as the engine still builds
+            on_disk = _pptx_disk_section(section) if paged_here and status.name == "OFFLINE" else None
+            if on_disk is None:
+                raise
+            headers, raw = _pptx_from_disk(on_disk)
     elif section:
         _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query)
     else:
@@ -486,7 +549,7 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
         raw = _remaining_parts(skill, section, what, raw, total, role)
         total = 1
     body = raw.decode("utf-8", errors="replace")
-    if paged_here and _manual_served():      # before its paging: a command must not be cut in two
+    if paged_here:                            # before its paging: a command must not be cut in two
         body = _pptx_pointers(body, role)
     if whole:
         pass                                          # the host keeps it whole: never cut here
@@ -501,7 +564,7 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     name = section or "SKILL.md"
     for line in _LAUNCHER_LINES:        # "the launcher you used": named as this client names it (the short command when on PATH)
         body = body.replace(line, f"Run {quoted_launcher()} with:")
-    if section != "license" and skill != "pptx":   # a reference is a section of this guide, not a file: its link becomes the command that prints it (pptx references are files on disk)
+    if section != "license" and skill != "pptx":   # a reference is a section of this guide, not a file: its link becomes the command that prints it (a text of pptx had its pointers turned above)
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)}{_role_option(role)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
@@ -509,6 +572,14 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
                f"{' --license' if section == 'license' else ''}{_role_option(role)}")
     _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], command, section, role=role)
     return 0
+
+
+def _pptx_from_disk(found: tuple[str, str]) -> tuple[dict, bytes]:
+    """The headers and body of a text of the manual read from the selected engine, as a served section gives them."""
+    text, version = found
+    install.touch_used(version)
+    _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
+    return {HEADER_GUIDE_VERSION: version}, text.encode("utf-8")
 
 
 def _remaining_parts(skill: str, section: str | None, what: str, first: bytes, total: int, role: str | None = None) -> bytes:

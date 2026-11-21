@@ -232,7 +232,10 @@ If the launcher is gone, deleting those subfolders and the keychain item by hand
    Python and the client (stage 1), each checked against a SHA-256 pinned in `launcher.json`, then hands over.
 3. The client downloads the rest of the runtime against a signed manifest, signs the computer in (activation
    code or browser approval), installs the engine and prints the instructions.
-   The deck-design text is fetched at each use and never stored. Its specimen images are not shipped either:
+   The deck-design text is fetched at each use and never stored. The engine's manual is read through the launcher too
+   (`theodore guide pptx`, and `theodore guide pptx <name>` for one of its other texts, such as the build API): each
+   text comes in parts that fit one answer of the assistant, from the service when it holds the text for the account,
+   otherwise from the installed engine's own file. The specimen images are not shipped either:
    `theodore specimen <file>` fetches one into a private folder in Theodore's own cache. Nothing runs in the background, so the
    folder is removed by the first Theodore command run after it is an hour old, and at the latest by the uninstall.
 4. Every status is three lines the assistant can act on:
