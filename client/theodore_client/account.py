@@ -639,7 +639,30 @@ def _fresh_update_state(reason: str) -> None:
     install.reset_update_state(reason)
 
 
+RELEASE_TIMEOUT = 5.0
+
+
+def release_installation() -> bool:
+    """Tell the service that this computer leaves the account (logout, uninstall), so it stops counting as one of the
+    account's computers. Until 0.4.24 only the sign-in on the computer went: the service kept listing the computer as
+    logged in, and a person who had installed a few times met the account's limit of computers. Best effort, a few
+    seconds, before the sign-in is deleted: with no connection, or a service without the route, the computer stays
+    listed until its owner removes it in Settings. True when the service took it."""
+    cred = credentials.load()
+    if not cred or not cred.get("installation_secret"):
+        return False
+    try:
+        # An empty object as the body (the route reads none): a POST with no length is refused by some proxies.
+        api.call("installation_release", bearer=cred["installation_secret"], body={}, timeout=RELEASE_TIMEOUT, exact_timeout=True,
+                 learn_refusals=False)
+        return True
+    except Exception as exc:       # never the reason a logout or an uninstall fails
+        core.log(f"release: the service was not told that this computer left the account ({exc.__class__.__name__})")
+        return False
+
+
 def logout() -> Status:
+    release_installation()
     credentials.delete()
     delete_token()
     from . import device

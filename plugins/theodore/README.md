@@ -100,7 +100,7 @@ Code's settings. Its `--no-settings` leaves the rules out.
 - On Windows, Claude Code needs Git Bash to load Theodore: install Git for Windows from git-scm.com first, or use the
   sentence on your Theodore page, which brings its own.
 - To remove everything: `~/.theodore/bin/theodore uninstall` (Windows:
-  `"%USERPROFILE%\.theodore\bin\theodore.cmd" uninstall`). It removes Theodore's folders, its sign-in and its
-  registrations, takes back exactly what was changed in your assistants' settings and instructions, and names anything
+  `"%USERPROFILE%\.theodore\bin\theodore.cmd" uninstall`). It removes Theodore's folders, its sign-in (the computer
+  also leaves your account's list of computers) and its registrations, takes back exactly what was changed in your assistants' settings and instructions, and names anything
   it could not remove. Removing the plugin in the assistant alone leaves Theodore's folder in place.
 - Questions and security reports: support@theodoreand.ai

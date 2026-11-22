@@ -28,21 +28,40 @@ RECORD_KEY = "claude_desktop"
 FOR = "claude-desktop"
 
 
+LEFT_MARKER = ".user-data-left."
+
+
+def data_left(folder: Path) -> bool:
+    """The Claude app no longer keeps its data in this folder. When the Windows app moves its data to
+    %LOCALAPPDATA%\\Claude-Data it leaves a file named `.user-data-left.<its package family>` where the data was (seen
+    2026-11-22, app 6.28899: the folder held nothing else afterwards). Nothing reads a configuration file written
+    there after that."""
+    try:
+        return any(child.name.startswith(LEFT_MARKER) for child in folder.iterdir())
+    except OSError:
+        return False
+
+
 def config_dirs() -> list[Path]:
     """The app's folders that exist on this computer (it creates its folder on first start)."""
     if core.IS_WINDOWS:
         found = []
-        appdata = os.environ.get("APPDATA")
-        if appdata and (Path(appdata) / "Claude").is_dir():
-            found.append(Path(appdata) / "Claude")
-        # The Microsoft Store build keeps its roaming folder inside its package.
         local = os.environ.get("LOCALAPPDATA")
+        # Since November 2026 the app keeps its data, this file included, in %LOCALAPPDATA%\Claude-Data\<its package
+        # family>: a plain folder, the same one from inside the app's package and from outside it.
+        moved = Path(local) / "Claude-Data" if local else None
+        if moved and moved.is_dir():
+            found += [folder for folder in sorted(moved.iterdir()) if folder.is_dir()]
+        older = []
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            older.append(Path(appdata) / "Claude")
+        # The Microsoft Store build kept its roaming folder inside its package.
         packages = Path(local) / "Packages" if local else None
         if packages and packages.is_dir():
-            for package in sorted(packages.glob("Claude_*")):
-                folder = package / "LocalCache" / "Roaming" / "Claude"
-                if folder.is_dir():
-                    found.append(folder)
+            older += [package / "LocalCache" / "Roaming" / "Claude" for package in sorted(packages.glob("Claude_*"))]
+        # A folder the app has left is not one of its folders any more: an entry written there would load nowhere.
+        found += [folder for folder in older if folder.is_dir() and not data_left(folder)]
         return found
     if os.uname().sysname == "Darwin":
         folder = Path.home() / "Library" / "Application Support" / "Claude"
@@ -204,6 +223,9 @@ def unregister(record: dict, left: list[str], notes: list[str]) -> list[str]:
     files changed. Updates `record` in place (the key goes once nothing is left to take back)."""
     files = record.get(RECORD_KEY) or {}
     changed = []
+    recorded = set(files)
+    written = [mine.get("entry") for mine in files.values() if mine.get("ours")]
+    made_servers = any(mine.get("created_servers") for mine in files.values() if mine.get("ours"))
     for name, mine in list(files.items()):
         path = Path(name)
         if not mine.get("ours"):
@@ -233,8 +255,65 @@ def unregister(record: dict, left: list[str], notes: list[str]) -> list[str]:
             continue
         files.pop(name)
         changed.append(str(path))
+    # The app may have moved its configuration file since Theodore wrote to it, the entry with it (Windows, November
+    # 2026: from its package's folder to %LOCALAPPDATA%\Claude-Data). An entry Theodore wrote that is now in a file the
+    # record does not name is taken back as well; an entry that is not what Theodore wrote stays, as above.
+    for folder in config_dirs() if written else []:
+        path = folder / "claude_desktop_config.json"
+        if str(path) in recorded:
+            continue
+        settings = _load(path)
+        servers = settings.get("mcpServers") if isinstance(settings, dict) else None
+        current = servers.get(ENTRY_NAME) if isinstance(servers, dict) else None
+        if current is None or not any(_ours(current, entry_written) for entry_written in written):
+            continue
+        del servers[ENTRY_NAME]
+        if made_servers and servers == {}:
+            del settings["mcpServers"]
+        try:
+            _write(path, settings)
+        except OSError as exc:
+            left.append(f"the {ENTRY_NAME} entry in {path} ({exc.__class__.__name__}; remove it by hand)")
+            continue
+        changed.append(str(path))
     if files:
         record[RECORD_KEY] = files
     else:
         record.pop(RECORD_KEY, None)
     return changed
+
+
+def left_behind(record: dict) -> bool:
+    """Theodore's entry was written to a folder the Claude app has since left (data_left): the app's chat no longer
+    loads it from there. Cheap: the record and one folder listing per recorded file."""
+    return any(mine.get("ours") and data_left(Path(name).parent) for name, mine in (record.get(RECORD_KEY) or {}).items())
+
+
+def follow(record: dict) -> list[str]:
+    """After the app moved its data: Theodore's entry goes from the file in the folder the app left (a file nothing
+    reads) and is written where the app keeps its configuration now, when it is not there already (the app usually
+    carries the file along, entry included). Updates `record` in place; one line per file, as register."""
+    files = record.get(RECORD_KEY) or {}
+    for name, mine in list(files.items()):
+        path = Path(name)
+        if not (mine.get("ours") and data_left(path.parent)):
+            continue
+        settings = _load(path) if path.exists() else {}
+        servers = settings.get("mcpServers") if isinstance(settings, dict) else None
+        if isinstance(servers, dict) and _ours(servers.get(ENTRY_NAME), mine.get("entry")):
+            del servers[ENTRY_NAME]
+            if mine.get("created_servers") and servers == {}:
+                del settings["mcpServers"]
+            try:
+                if settings:
+                    _write(path, settings)
+                else:
+                    path.unlink()               # the file held Theodore's entry and nothing else: Theodore made it there
+            except OSError:
+                pass                            # a file nothing reads: it stays, and is not Theodore's concern again
+        files.pop(name)
+    if files:
+        record[RECORD_KEY] = files
+    else:
+        record.pop(RECORD_KEY, None)
+    return register(record)

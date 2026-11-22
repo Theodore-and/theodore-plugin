@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.24
+
+- `theodore uninstall` and `theodore logout` tell the Theodore service that the computer is leaving your account, so it no longer counts as one of your account's computers. Before, only the sign-in on the computer went: the account kept listing the computer as logged in, and after ten installs, each of them uninstalled, a new install was refused with "this account already has 10 computers logged in". The call takes a few seconds at most and never stops an uninstall: without a connection the computer stays listed until you remove it in Settings, under Computers and assistants.
+- Windows: Theodore follows the Claude app to where it now keeps its settings. Since its update of November 2026 the app keeps its data in `%LOCALAPPDATA%\Claude-Data` and no longer in the folder inside its package. A set-up made after that update wrote Theodore's entry for the app's chat into the old folder, which the app no longer reads, and said the Claude app was registered. The entry is now written where the app reads it; an installation whose entry is in the old folder puts it right at its next command; and the uninstall removes the entry from the file the app carried to its new folder.
+
 ## 0.4.23
 
 - A text read in parts comes in the fewest parts that hold it, about even in size, cut where a `## ` heading begins when one lies where a cut may fall and otherwise at a line end. In 0.4.22 (staging only) the build API came as three parts on a Mac, the first one its opening paragraph alone, because its first section was just over one part; an assistant that reads a first part of a few lines may not read on. It is two parts now, on every system.
