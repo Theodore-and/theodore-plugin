@@ -372,10 +372,13 @@ class Specimen(ClientCase):
         self.api._send = real
         self.assertEqual(self.client("specimen", "cover-01.jpg", "second.jpg").returncode, 0)
 
-    def test_the_first_good_sheet_is_not_kept_when_a_later_one_is_refused(self):
+    def test_a_name_that_is_not_a_sheet_does_not_cost_the_good_one(self):
+        # until 0.4.30 one name the service has no sheet for failed the whole call (tests/test_specimen_names_not_found.py)
         result = self.client("specimen", "cover-01.jpg", "absent.jpg")
-        self.refused(result, "USAGE", 64)
-        self.assertNotIn(str(self.temp), result.stdout.split("THEODORE")[0], "no path is printed")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        path, note = result.stdout.splitlines()
+        self.assertEqual(Path(path).read_bytes(), JPEG)
+        self.assertTrue(note.startswith("no such sheet: absent.jpg"), note)
 
     def test_a_sheet_over_one_mebibyte_or_of_another_type_is_refused(self):
         self.api.specimens["big.jpg"] = b"\xff\xd8" + b"x" * (1 << 20)

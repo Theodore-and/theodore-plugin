@@ -1,5 +1,29 @@
 # Changes
 
+## 0.4.30
+
+- A specimen name that is not a sheet no longer costs the other sheets of the same call. Every sheet that exists is delivered and its path printed; after the paths comes one line for each name that is not a sheet, naming the nearest real names: the same words in another order (`tables-the-range.jpg` is `range-tables.jpg`), or, for a close-up's code in a gap of its numbers, the codes of that family that exist. Only when no sheet at all is delivered does the call fail, and then it names the nearest names. Until now one wrong name failed the whole call with "a wrong command" and a pointer to `help`, which lists no sheets. Seen on 2026-11-22 in the conversations of first-deck runs: two calls lost seven and three valid sheets that way. The tool server's `specimen` answers the same way.
+- Designers working side by side no longer remove each other's sheets. A designer refused a sheet because its working folder holds every place a sheet may go removed every specimen folder on the computer, as a sign-out does, so a sheet another designer had just been given was gone when it opened it (seen once on 2026-11-22: a path printed, gone less than a second later). That refusal, and the one for automatic reports being off, now remove nothing; a sign-out, a refused account and a paused channel still remove every sheet. A call that fails after it has written a sheet also keeps that folder until its hour is up, since another call may already have been given that sheet.
+- The line that says how the design instructions' links are read now comes first in the instructions, after their front matter. For an account with Studio on, the instructions are longer than one answer holds, and the cut took their end, where that line was. An instructions text cut for length now says so on its first line, and says where to read the rest.
+
+## 0.4.29
+
+- Each slide's designer (the Studio agent) works at high effort, whatever effort your session is set to. Versions 0.4.10 to 0.4.12 asked for the same; 0.4.13 to 0.4.27 left effort to the assistant's own setting.
+- The two loaders carry the same line (`effort: high`). The assistant applies it to the rest of the message in which Theodore is loaded, and a later message runs at the effort you set. Measured on 2026-11-22 from the effort the assistant records for each step: Claude Code 2.1.329 did this; Claude Code 2.1.292 applied the line only when a loader was called by name (`/theodore:deck-design`, `/theodore:pptx`). On both, every step of a designer ran at high.
+- The Studio agent reads Theodore's texts with the commands its message gives. It used to load both instruction sets whole, which gave each slide's designer the text written for the whole deck (measured on 2026-11-22: every designer in six did).
+
+## 0.4.28
+
+Staging only: what 0.4.29 holds, with a changelog and a README that said the loaders raise the effort of the turn in which the assistant loads them. Measured, they do not; 0.4.29 says what happens.
+
+## 0.4.27
+
+- The first lines of Theodore's build instructions no longer name the build API or say to read it first. They said "the build API and its references ... (pptxgenjs first ...)" since 0.4.22. An assistant asked for a deck then read the build API before it had prepared the deck's slides, and the ones that did built every slide alone instead of giving each slide its own design pass. The manual names each of its texts where it is needed; the line now only says how a text it names is read.
+
+## 0.4.26
+
+Staging only (with engine 1.0.0-rc.30, which was not released): long texts in parts in Claude Code, the line on links first, the Studio agent's reading route, sheets as images to open. Not in 0.4.27.
+
 ## 0.4.25
 
 - A settings file of the Claude app that starts with a byte-order mark is read all the same (Windows PowerShell and some editors write one). 0.4.24 (staging only) refused such a file as not valid JSON, so Theodore's entry for the app's chat was not written, and an installation that was following the app to its new folder gave up there.

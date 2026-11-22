@@ -1,6 +1,7 @@
 ---
 name: pptx
 description: "This session's slides skill, installed by the user: makes presentations, decks, slides and pitch decks, delivered as PowerPoint files, and works on any existing .pptx. Use it for any request for a presentation, deck or slides, whether or not a file format is named. Use this skill any time a .pptx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, presentations, or section appendices; reading, parsing, or extracting text from any .pptx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; addressing review comments; translating decks to Arabic or other RTL languages; working with templates, layouts, speaker notes, or comments. When slides are being created, restructured, or visually redesigned — not just mechanically edited — also use the deck-design skill first."
+effort: high
 allowed-tools: Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)
 ---
 

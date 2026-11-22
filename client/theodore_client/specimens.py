@@ -93,6 +93,94 @@ def valid_name(name: str) -> bool:
     return bool(NAME.fullmatch(name)) and name.split(".", 1)[0].upper() not in DEVICES
 
 
+class NoSuchSheet(Exception):
+    """The service has no sheet of this name (its 404): said beside the sheets that were delivered, never instead of them."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
+
+
+def index_sheets(headers, raw: bytes) -> list[str] | None:
+    """The sheet names of the published index (GET /v1/guide/deck-design?form=index: {..., specimens: [{file}]}), each
+    a valid name; None when the answer is not that index (an older service answers the text)."""
+    import json
+    if "json" not in str(headers.get("Content-Type") or "").lower():
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    items = data.get("specimens") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return None
+    names = []
+    for item in items:
+        name = item.get("file") if isinstance(item, dict) else item
+        if isinstance(name, str) and valid_name(name) and name not in names:
+            names.append(name)
+    return names or None
+
+
+FAMILY = re.compile(r"([A-Za-z]{1,4})([0-9]{1,3})")       # a code-like name: letters, then digits (AX9)
+
+
+def _words(stem: str) -> set[str]:
+    return {word for word in re.split(r"[-_.]+", stem.lower()) if word}
+
+
+def nearest(name: str, names: list[str] | None, most: int = 3) -> list[str]:
+    """The real sheet names nearest to `name`, nearest first. A code-like name (AX9): the codes of its family that exist,
+    the closest numbers first. Any other: the names that share the most of its words in any order, then the closest
+    spellings."""
+    if not names:
+        return []
+    stem = name[:-4] if name.lower().endswith(".jpg") else name
+    code = FAMILY.fullmatch(stem)
+    if code:
+        family, number = code.group(1).upper(), int(code.group(2))
+        same = [(int(m.group(2)), n) for n in names if (m := FAMILY.fullmatch(n[:-4])) and m.group(1).upper() == family]
+        if same:
+            return [n for _num, n in sorted(same, key=lambda item: (abs(item[0] - number), item[0]))]
+    import difflib
+    asked = _words(stem)
+    scored = []
+    for candidate in names:
+        theirs = _words(candidate[:-4])
+        shared = len(asked & theirs) / len(asked | theirs) if asked | theirs else 0.0
+        spelling = difflib.SequenceMatcher(None, stem.lower(), candidate[:-4].lower()).ratio()
+        if shared >= 0.5 or spelling >= 0.6:
+            scored.append((-shared, -spelling, candidate))
+    return [candidate for _s, _p, candidate in sorted(scored)[:most]]
+
+
+def missing_note(name: str, names: list[str] | None) -> str:
+    """One line for a name that is not a sheet, with the nearest real names when the list of sheets is known."""
+    near = nearest(name, names)
+    code = FAMILY.fullmatch(name[:-4] if name.lower().endswith(".jpg") else name)
+    if near and code and FAMILY.fullmatch(near[0][:-4]):
+        number = int(code.group(2))
+        ordered = sorted(near, key=lambda n: int(FAMILY.fullmatch(n[:-4]).group(2)))
+        below = [n for n in ordered if int(FAMILY.fullmatch(n[:-4]).group(2)) < number][-1:]
+        above = [n for n in ordered if int(FAMILY.fullmatch(n[:-4]).group(2)) > number][:1]
+        family = FAMILY.fullmatch(near[0][:-4]).group(1).upper()
+        return (f"no such sheet: {name}; nearest: {', '.join(below + above)} "
+                f"(the {family} codes that exist: {', '.join(n[:-4] for n in ordered)})")
+    if near:
+        return f"no such sheet: {name}; nearest: {', '.join(near)}"
+    if names:
+        return f"no such sheet: {name}; no sheet has a similar name"
+    return f"no such sheet: {name}"
+
+
+def none_delivered(notes: list[str], again: str) -> Status:
+    """No sheet of the call exists: the nearest names, and how to ask for them (`again`: the command or the tool)."""
+    return Status("USAGE", f"no sheet was delivered: {'. '.join(notes)}.",
+                  f"{again} with the nearest name if it is the sheet you meant; the sheet names are the .jpg links in the "
+                  f"deck-design text. Otherwise continue without it.",
+                  "A design specimen I asked for has another name; I am looking for the right one.")
+
+
 def cache_root() -> Path:
     """The user's cache folder for specimen folders: the root used when the temporary folder is inside the working folder."""
     if sys.platform == "darwin":
@@ -228,6 +316,15 @@ def _make_private(folder: Path) -> None:
         kernel.LocalFree(descriptor)
 
 
+def local_block(status: Status) -> Status:
+    """A BLOCKED_BY_POLICY that this computer decided about this one call (the working folder holds every place a sheet
+    may go; automatic reports are off): not a refusal of the device or the account, so it removes no specimen folder.
+    Until 0.4.30 it did (core.emit), and a designer refused in one folder emptied the folders of the designers working
+    beside it at that moment: a path printed a second before was gone when it was opened."""
+    status.keeps_sheets = True
+    return status
+
+
 def make_folder() -> Path:
     """A new folder for this run's sheets, recorded before anything is put in it. No private folder outside the
     working folder, the deck and Theodore's folder: no sheet is fetched."""
@@ -275,12 +372,12 @@ def make_folder() -> Path:
         return folder
     if problem is None:
         here = Path.cwd()
-        raise Status("BLOCKED_BY_POLICY", f"the specimen sheet was not fetched: the working folder ({here}) contains every place a "
+        raise local_block(Status("BLOCKED_BY_POLICY", f"the specimen sheet was not fetched: the working folder ({here}) contains every place a "
                                           f"specimen folder may go ({', '.join(str(r) for r in roots())}), and sheets are never put "
                                           f"inside the working folder.",
                      "continue without the sheet; do not fetch it another way. Sheets work when the assistant works in a project "
                      "folder that does not contain the user's temporary or cache folder.",
-                     "I could not open a design specimen from this working folder; I am continuing without it.")
+                     "I could not open a design specimen from this working folder; I am continuing without it."))
     raise Status("INTERNAL", f"the specimen sheet was not fetched: {problem}.",
                  "continue without the sheet; do not fetch it another way.",
                  "I could not open a design specimen on this computer; I am continuing without it.")

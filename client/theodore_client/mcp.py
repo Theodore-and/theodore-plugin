@@ -482,10 +482,15 @@ def _sheet(name: str, current: str | None) -> bytes:
     if held:
         asked["If-None-Match"] = f'"{held[0]}"'
     try:
-        status, headers, raw = commands._api("guide_specimen", what, file=name, query={"skill": "deck-design"},
+        status, headers, raw = commands._api("guide_specimen", what, passing=("not_found",), file=name, query={"skill": "deck-design"},
                                              headers=asked, redirects=False, limit=specimens.MAX_BYTES)
     except api.TooLarge:
         raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused.") from None
+    except api.ApiError as error:       # passed through only for not_found: said beside the sheets that came
+        SHEETS.pop(name, None)
+        if error.code != "not_found":
+            raise api.status_from(error, what) from None
+        raise specimens.NoSuchSheet(name) from None
     if core.refused():
         raise api.sign_in_required()
     if status == 304 and held:
@@ -509,8 +514,9 @@ def _image(raw: bytes) -> dict:
 
 def tool_specimen(args: dict) -> dict:
     """`file` is one name (the result is that image, as before) or a list of up to SPECIMEN_MAX_PER_CALL names (for
-    each, in the order asked, a text block with the name and then its image). All or nothing: a refused sheet answers
-    with its status and no image."""
+    each, in the order asked, a text block with the name and then its image). A name the service has no sheet for
+    (0.4.30) is one text block naming the nearest real names, and the other sheets still come; only when no sheet at all
+    comes is the answer a USAGE status naming them. Any other refusal answers with its status and no image."""
     asked = args.get("file")
     many = isinstance(asked, list)
     names = [specimens.file_name(name) for name in (asked if many else [asked])]     # a bare code is its close-up's file
@@ -523,18 +529,29 @@ def tool_specimen(args: dict) -> dict:
     if INDEX is None and not INDEX_TRIED:
         _index()
     sheets: dict[str, bytes] = {}
+    missing: list[str] = []
     for name in names:
-        if name not in sheets:
+        if name not in sheets and name not in missing:
             # The confirmation's age is checked for every sheet served, so no batch serves a held sheet more than
             # REVALIDATE_SECONDS after the service last confirmed it.
-            sheets[name] = _sheet(name, _validate())
+            try:
+                sheets[name] = _sheet(name, _validate())
+            except specimens.NoSuchSheet:
+                missing.append(name)
     if core.refused():
         raise api.sign_in_required()
+    notes = {name: specimens.missing_note(name, (INDEX or {}).get("specimens") or None) for name in missing}
+    if not sheets:
+        again = f'call {DESKTOP_TOOL} with action "specimen" again' if FOR == DESKTOP else "call the specimen tool again"
+        raise specimens.none_delivered(list(notes.values()), again)
     if not many:
         return {"content": [_image(sheets[names[0]])]}
     content: list[dict] = []
     for name in names:
-        content += [{"type": "text", "text": name}, _image(sheets[name])]
+        if name in sheets:
+            content += [{"type": "text", "text": name}, _image(sheets[name])]
+        elif name in notes:
+            content.append({"type": "text", "text": notes.pop(name)})
     return {"content": content}
 
 
@@ -702,7 +719,7 @@ def call_tool(name: str, args) -> dict:
         result = handler(args if isinstance(args, dict) else {})
     except Status as status:
         if core.refused() or status.name not in KEEP_HELD_ON:
-            forget(refused=core.refused() or status.name in REFUSALS)
+            forget(refused=core.refused() or (status.name in REFUSALS and not getattr(status, "keeps_sheets", False)))
         withdraw.resume()           # the service ended this computer's access: Theodore's files go (withdraw.py)
         return _status(status)
     except api.TooLarge as exc:
