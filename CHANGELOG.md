@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.26
+
+- In Claude Code a long text of the design guidance comes in parts that fit one answer, cut where its `## ` headings begin, as the engine's manual already does. Claude Code shows the assistant one command's output whole only below about 30,000 characters; of a longer one it shows a 2 KB preview and the path of a saved file. Until now the client printed such a text whole there, and the assistants read the start of the saved file.
+- The line that says how the guidance's links are read comes first, in the skill's instructions and in the main text. It came last, and the instructions of an account with Studio were cut for length just before it. Instructions that are cut say so in their first line too, with the command for the rest.
+- The Studio agent reads the texts with the commands its message gives. It loaded both skills with the assistant's Skill tool, which gives the text written for the whole deck, not the shorter one for a single slide.
+- After a text that links specimen sheets, the client's note says that `theodore specimen` prints one path for each file and that each path is an image to open and look at; it no longer says "Open only the sheets you need". `theodore specimen` says the same after the paths it prints. In the runs read on 2026-11-22 the assistants fetched 40 sheets and opened 19.
+
 ## 0.4.25
 
 - A settings file of the Claude app that starts with a byte-order mark is read all the same (Windows PowerShell and some editors write one). 0.4.24 (staging only) refused such a file as not valid JSON, so Theodore's entry for the app's chat was not written, and an installation that was following the app to its new folder gave up there.

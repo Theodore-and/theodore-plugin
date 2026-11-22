@@ -700,8 +700,8 @@ class Guide(ClientCase):
         three = self.client("guide", "deck-design", "craft", "--part", "3")
         self.assertNotIn("NEXT PART", three.stdout.splitlines()[-1])
 
-    # WHOLETEXT (2026-11-15): one request for a text gives the whole text where the host keeps a long output whole
-    # (Claude Code); elsewhere, and with --part, no part can be mistaken for the whole text.
+    # WHOLETEXT (2026-11-15): no part can be mistaken for the whole text. (Until 0.4.25 a text was printed whole in
+    # Claude Code whatever its length; since then it is cut there at its headings: tests/test_served_texts_in_parts.py.)
     CRAFT = "".join(f"craft line {i:05d} " + "y" * 60 + "\n" for i in range(700))      # about 55,000 characters: three parts
     CC = {"CLAUDECODE": "1"}
 
@@ -715,38 +715,6 @@ class Guide(ClientCase):
         args = f'skill "{skill}"' + (f', section "{section}"' if section else "")
         self.assertIn(f"mcp__plugin_theodore_theodore__guide is available, it returns this text whole in one step", head)
         self.assertIn(f"({args})", head)
-
-    def test_under_claude_code_a_paged_section_prints_whole_in_one_document(self):
-        self.sign_in()
-        self.api.guides["deck-design"]["craft"] = self.CRAFT
-        self.api.guide_whole_tail = {"craft": "\nLICENCE LINE.\n"}
-        result = self.client("guide", "deck-design", "craft", env=self.CC)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        out = result.stdout
-        self.assertEqual(out.splitlines()[0], "=== THEODORE deck-design g1 (beta), part 1/1 ===")
-        self.assertTrue(out.splitlines()[1].startswith(f"THIS IS THE WHOLE TEXT: {len(self.CRAFT) + 15} characters"), out[:300])
-        self.assertOpening(out, "deck-design", "craft")
-        self.assertEqual(self.whole_body(out, "craft"), self.CRAFT + "\nLICENCE LINE.\n", "the server's whole composition, byte for byte")
-        self.assertEqual([q.get("form") for q in self.api.guide_queries], ["whole"], "one request")
-        self.assertEqual([line[:7] for line in out.splitlines() if line.startswith("=== ")], ["=== THE", "=== END"])
-        self.assertNotIn("NEXT PART", out)
-        self.assertTrue(out.splitlines()[-1].endswith(". THE TEXT IS COMPLETE. ==="), out.splitlines()[-1])
-        licence = self.client("guide", "deck-design", "--license", env=self.CC).stdout
-        self.assertOpening(licence, "deck-design", "license")
-        self.assertNotIn("NEXT PART", licence)
-
-    def test_under_claude_code_an_older_paging_service_is_asked_for_every_part_in_order(self):
-        self.sign_in()
-        self.api.guide_whole = False
-        self.api.guides["deck-design"]["craft"] = self.CRAFT
-        result = self.client("guide", "deck-design", "craft", env=self.CC)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual([(q.get("form"), q.get("part")) for q in self.api.guide_queries], [("whole", None), (None, "2"), (None, "3")])
-        parts = [self.CRAFT[i:i + 24000] for i in range(0, len(self.CRAFT), 24000)]
-        self.assertEqual(len(parts), 3)
-        self.assertEqual(self.whole_body(result.stdout, "craft"), "".join(parts), "the parts joined in order, byte for byte")
-        self.assertEqual([line[:7] for line in result.stdout.splitlines() if line.startswith(("=== ", "THIS IS"))], ["=== THE", "THIS IS", "=== END"])
-        self.assertNotIn("NEXT PART", result.stdout)
 
     def test_a_part_that_cannot_be_had_prints_nothing_of_the_text_and_says_what_is_missing(self):
         self.sign_in()

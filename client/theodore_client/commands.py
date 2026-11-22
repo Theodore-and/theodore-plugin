@@ -89,8 +89,11 @@ def split_parts(text: str, limit: int = GUIDE_PART_CHARS) -> list[str]:
 GUIDE_TOOL = "mcp__plugin_theodore_theodore__guide"      # the plugin's guide tool, as Claude Code names it
 
 
-def whole_by_default() -> bool:
-    """The host keeps a long command output whole (Claude Code), so a guide without --part prints the whole text."""
+def cut_here() -> bool:
+    """Claude Code: a served text is fetched whole and cut here, at its own headings (split_parts), into parts that fit
+    one answer. Claude Code shows the assistant one command's output whole only below about 30,000 characters; a
+    longer one reaches it as a 2 KB preview and the path of a saved file. Until 0.4.25 a text was printed whole
+    there whatever its length (2026-11-15), and the assistants read the saved file's first thousands of characters."""
     return bool(os.environ.get("CLAUDECODE"))
 
 
@@ -324,7 +327,6 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool,
         raise core.usage(f"unknown skill '{skill}'. The skills are: {', '.join(SKILLS)}.")
     if part is not None and part < 1:
         raise core.usage("--part starts at 1.")
-    whole = part is None and whole_by_default()
     part = part or 1
     if skill == "pptx":
         if license_text:
@@ -332,19 +334,18 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool,
         if section and _section_name(section).lower() in MANUAL_NAMES:
             section = None                  # the main text by its name (an engine message names it so): `guide pptx`
         if not section:
-            return _guide_pptx(part, whole=whole, role=role)
+            return _guide_pptx(part, role=role)
         # A text of the manual by its name: one the service serves to this account, else the selected engine's own file.
-        # Never whole: a text longer than a host shows of one answer reaches the assistant as a short preview, and the
-        # build API is such a text. Its parts end at its headings.
-        whole = False
+        # Its parts end at its headings, on every host.
     if license_text and role:
         raise core.usage("--license takes no --role.")
-    return _guide_remote(skill, "license" if license_text else section, part, whole=whole, role=role)
+    return _guide_remote(skill, "license" if license_text else section, part, here=cut_here(), role=role)
 
 
 def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True, role: str | None = None,
                 pointers: bool = True) -> int:
-    """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
+    """The engine's manual: part `part` of it, or with `whole` all of it (the guide tool asks for it whole, with no
+    opening lines; the command never does)."""
     claims = account.require("pptx")
     install.require_runtime()
     first = install.current_engine() is None
@@ -495,13 +496,15 @@ def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
                       f"run {launcher} guide {skill}{_role_option(role)}; its text names the sections it has.")
 
 
-def _guide_remote(skill: str, section: str | None, part: int, whole: bool = False, role: str | None = None) -> int:
-    """A served text: part `part` of it, or with `whole` the whole text in one document (one answer with form=whole;
-    an older service that still pages is asked for every part, in order, and nothing is printed unless all came)."""
+def _guide_remote(skill: str, section: str | None, part: int, here: bool = False, role: str | None = None) -> int:
+    """A served text: part `part` of it. With `here` (Claude Code), and always for a text of the pptx manual, the text
+    is fetched whole (one answer with form=whole; an older service that still pages is asked for every part, in
+    order, and nothing is printed unless all came) and its parts are cut here, at its own headings (split_parts);
+    otherwise the parts are the service's."""
     claims = account.require(skill)
-    # A section of pptx is fetched whole and paged here, at its own headings (split_parts), whatever the service's paging.
-    paged_here = skill == "pptx" and bool(section) and section != "license"
-    query = _role_query({"form": "whole"} if whole or paged_here else ({"part": part} if part > 1 else None), role)
+    pptx_text = skill == "pptx" and bool(section) and section != "license"
+    paged_here = pptx_text or here
+    query = _role_query({"form": "whole"} if paged_here else ({"part": part} if part > 1 else None), role)
     what = f"guide {skill}"
     if section and section != "license":
         given, section = section, _section_name(section)
@@ -512,13 +515,13 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
         except api.ApiError:
             if part > 1 and not paged_here:
                 raise core.usage(f"{what} {section} has no part {part}.") from None
-            on_disk = _pptx_disk_section(section) if paged_here else None
+            on_disk = _pptx_disk_section(section) if pptx_text else None
             if on_disk is None:
                 raise _no_such_section(skill, section, role) from None
             headers, raw = _pptx_from_disk(on_disk)
         except Status as status:
             # no connection: a text the engine brought as a file is still there to read, as the engine still builds
-            on_disk = _pptx_disk_section(section) if paged_here and status.name == "OFFLINE" else None
+            on_disk = _pptx_disk_section(section) if pptx_text and status.name == "OFFLINE" else None
             if on_disk is None:
                 raise
             headers, raw = _pptx_from_disk(on_disk)
@@ -528,22 +531,14 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
         _status, headers, raw = _api("guide", what, skill=skill, query=query)
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     label = headers.get(HEADER_GUIDE_VERSION) or "current"
-    if (whole or paged_here) and total > 1:
+    if paged_here and total > 1:
         raw = _remaining_parts(skill, section, what, raw, total, role)
         total = 1
     body = raw.decode("utf-8", errors="replace")
-    if paged_here:                            # before its paging: a command must not be cut in two
+    # Everything the client writes into the text comes before its paging: a command must not be cut in two, and a part
+    # is measured as it is printed.
+    if pptx_text:
         body = _pptx_pointers(body, role)
-    if whole:
-        pass                                          # the host keeps it whole: never cut here
-    elif total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
-        parts = split_parts(body)
-        total = len(parts)
-        if part > total:
-            raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
-        body = parts[part - 1]
-    elif part > total:
-        raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     name = section or "SKILL.md"
     for line in _LAUNCHER_LINES:        # "the launcher you used": named as this client names it (the short command when on PATH)
         body = body.replace(line, f"Run {quoted_launcher()} with:")
@@ -551,6 +546,16 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
         body = REFERENCE_LINK.sub(lambda match: f"](run: {quoted_launcher()} guide {skill} {match.group(1)}{_role_option(role)})", body)
     if skill == "deck-design" and section != "license":      # sheets are named, never shipped: say how to look at one
         body = specimens.guide_links(body, quoted_launcher())
+    if not section:
+        body = _links_first(body)
+    if total == 1 and len(body) > GUIDE_PART_CHARS:    # one text longer than a part: cut here, so no answer is shown short
+        parts = split_parts(body)
+        total = len(parts)
+        if part > total:
+            raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
+        body = parts[part - 1]
+    elif part > total:
+        raise core.usage(f"{what} has {total} part(s); there is no part {part}.")
     command = (f"{quoted_launcher()} guide {skill}{' ' + section if section and section != 'license' else ''}"
                f"{' --license' if section == 'license' else ''}{_role_option(role)}")
     _print_document(skill, label, str(claims.get("plan", "unknown")), name, body, part, total, [], command, section, role=role)
@@ -601,14 +606,39 @@ def _without_frontmatter(text: str) -> str:
 
 
 def _bounded(text: str, rest: str) -> str:
-    """At most SKILL_BODY_MAX_CHARS: past that, the text up to a line end within the limit and one line naming where
-    the rest is."""
+    """At most SKILL_BODY_MAX_CHARS: past that, the text up to a line end within the limit, with one line naming where
+    the rest is at its end and, from 0.4.25, one saying so at its top (the deck-design body of an account with Studio
+    was cut for weeks and its last line, the only one saying how its links are read, went unseen)."""
     if len(text) <= SKILL_BODY_MAX_CHARS:
         return text
+    first = f"[This document is longer than one answer holds and is cut near its end. Read it, then read its rest: {rest}]\n\n"
     pointer = f"\n[The rest of this document: {rest}]\n"
-    room = SKILL_BODY_MAX_CHARS - len(pointer)
+    room = SKILL_BODY_MAX_CHARS - len(pointer) - len(first)
     cut = text.rfind("\n", 0, room)
-    return text[:cut + 1 if cut > 0 else room] + pointer
+    return first + text[:cut + 1 if cut > 0 else room] + pointer
+
+
+LINKS_LINE = "Links in this guidance are read "
+
+
+def _links_first(text: str) -> str:
+    """The service closes a skill's main text with one line that says how the text's links are read (through this
+    launcher, or with the guide tool). It is printed first: a reader meets the links before the end of the text, and a
+    text cut for length loses its end. A text with front matter keeps it on top; a text without the line is unchanged."""
+    lines = text.splitlines(keepends=True)
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].startswith(LINKS_LINE):
+            line = lines.pop(index).rstrip("\n") + "\n\n"
+            while index and index == len(lines) and not lines[index - 1].strip():     # the blank lines that set it apart
+                lines.pop(index - 1)
+                index -= 1
+            at = 0
+            if lines and lines[0] == "---\n" and "---\n" in lines[1:]:
+                at = lines.index("---\n", 1) + 1
+                while at < len(lines) and not lines[at].strip():
+                    at += 1
+            return "".join(lines[:at]) + line + "".join(lines[at:])
+    return text
 
 
 def _deck_design_body() -> tuple[str, str]:
@@ -625,7 +655,7 @@ def _deck_design_body() -> tuple[str, str]:
     if core.refused():
         raise api.sign_in_required()
     rest = 'call the Theodore guide tool with skill "deck-design"' if tool else f"run {quoted_launcher()} guide deck-design"
-    body = _without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace"))
+    body = _links_first(_without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace")))
     # The host ran this command, not the agent: "the launcher you used" (or the service's "where it is" wording for
     # tool delivery) becomes this launcher's own path, which is true however the text arrived.
     for line in _LAUNCHER_LINES:
@@ -714,6 +744,9 @@ def specimen(files: list[str]) -> int:
         raise
     for name in files:
         print(paths[name].resolve().as_posix(), flush=True)
+    # On the error stream, which an assistant's shell shows with the paths: what reads the paths from the output (one a
+    # line, as documented) is not given a line that is no path.
+    print(specimens.OPEN_EACH, file=sys.stderr, flush=True)
     return 0
 
 

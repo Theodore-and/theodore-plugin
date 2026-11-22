@@ -394,5 +394,11 @@ def guide_links(text: str, launcher: str) -> str:
     return (out if out.endswith("\n") else out + "\n") + (
         "\n--- Specimen sheets (from Theodore's launcher) ---\n"
         f"The links above that end in .jpg name specimen sheets. To look at a sheet, run {launcher} specimen <file> "
-        f"(up to {MAX_FILES} files in one call) and open the path it prints. Open only the sheets you need. "
+        f"(up to {MAX_FILES} files in one call): it prints one path for each file, and each path is an image to open "
+        "and look at. "
         "Do not copy or keep the sheets, and do not describe them to the user beyond what the design needs.\n")
+
+
+# After the paths `theodore specimen` prints (0.4.25): a designer fetched three to seven sheets and opened two; the
+# answer was paths and nothing said they are pictures to look at.
+OPEN_EACH = "[Each path above is an image: open each one and look at it.]"
