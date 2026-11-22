@@ -438,10 +438,11 @@ class Specimens(unittest.TestCase):
             def fake(route, what, **kwargs):
                 calls.append((route, kwargs))
                 return self.answer(self.JPEG)
-            out = []
+            out, beside = [], []
             with mock.patch.object(account, "require", return_value={"plan": "beta"}), mock.patch.object(commands, "_api", side_effect=fake), \
-                    mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
+                    mock.patch("builtins.print", side_effect=lambda *a, **k: (beside if k.get("file") is sys.stderr else out).append(a[0])):
                 self.assertEqual(commands.specimen(["cover-01.jpg", "cover-01.jpg", "b.jpg"]), 0)
+            self.assertEqual(beside, [specimens.OPEN_EACH], "after the paths, beside them: each path is an image to open (0.4.26)")
             self.assertEqual([c[0] for c in calls], ["guide_specimen", "guide_specimen"], "a name given twice is fetched once")
             for _route, kwargs in calls:
                 self.assertEqual((kwargs["query"], kwargs["redirects"], kwargs["limit"]), ({"skill": "deck-design"}, False, 1 << 20))
@@ -557,8 +558,9 @@ class Specimens(unittest.TestCase):
         self.assertTrue(out.startswith("# Covers\n![Cover](cover-01.jpg) [grid](Grid_2.b.jpg)\n" + untouched))
         tail = out[out.index(untouched) + len(untouched):]
         self.assertEqual(tail.count('"/x y/theodore" specimen <file>'), 1)
-        for word in ("open the path it prints", "only the sheets", "Do not copy"):
+        for word in ("it prints one path for each file", "each path is an image to open and look at", "Do not copy"):
             self.assertIn(word, tail)
+        self.assertNotIn("only the sheets", tail, "0.4.26: the method asks a designer to look at the sheets it weighs")
         self.assertEqual(specimens.guide_links(untouched, "theodore"), untouched, "no sheet link: nothing is added")
         self.assertTrue(specimens.guide_links("no newline ![c](specimens/c.jpg)", "t").startswith("no newline ![c](c.jpg)\n\n---"))
 
