@@ -3,8 +3,9 @@
 A terminal opens in the user's folder, and on Windows that folder contains every place a specimen folder may go: the
 temporary folder is %LOCALAPPDATA%\\Temp and Theodore's cache is under %LOCALAPPDATA% too. The rule "never inside the
 working folder" then refused every sheet (BLOCKED_BY_POLICY) and the designer was told to go on without them. Seen on
-2026-11-22 on the Windows test machine, from C:\\Users\\<name> and from C:\\. And a text of the guidance asked for as
-a sheet (`specimen worked-04.md`) is answered with the command that reads it.
+2026-11-22 on the Windows test machine, from C:\\Users\\<name>. From that folder itself, and only when no other place is
+possible, Theodore's own cache folder is used. And a text of the guidance asked for as a sheet
+(`specimen worked-04.md`) is answered with the command that reads it.
 """
 
 from __future__ import annotations
@@ -43,10 +44,25 @@ class SheetsFromTheUsersOwnFolder(ClientCase):
         if not IS_WINDOWS:
             self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700, "private to the user, as everywhere")
 
-    def test_started_above_the_users_folder_it_works_the_same(self):
-        result = self.sheet(self.box.user_home.parent)
+    def test_with_a_temporary_folder_outside_the_users_folder_that_one_is_used_as_before(self):
+        # macOS and Linux: the cache is inside the home, the temporary folder is not
+        result = self.client("specimen", "cover-01.jpg", cwd=self.box.user_home)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(self.cache.resolve(), Path(result.stdout.strip().splitlines()[0]).resolve().parents)
+        path = Path(result.stdout.strip().splitlines()[0])
+        self.assertIn(Path(self.box.env["TMPDIR"]).resolve(), path.resolve().parents)
+        self.assertNotIn(self.cache.resolve(), path.resolve().parents)
+
+    def test_a_folder_above_the_users_that_holds_every_place_is_still_refused(self):
+        inside = self.box.user_home.parent / "tmp-above"
+        inside.mkdir()
+        result = self.client("specimen", "cover-01.jpg", cwd=self.box.user_home.parent, env={"TMPDIR": str(inside)})
+        if result.returncode == 0:              # another temporary folder of the system was used: never under that folder
+            path = Path(result.stdout.strip().splitlines()[0])
+            self.addCleanup(lambda: __import__("shutil").rmtree(path.parent, True))
+            self.assertNotIn(self.box.user_home.parent.resolve(), path.resolve().parents)
+        else:
+            self.assertStatus(result, "BLOCKED_BY_POLICY", 73)
+        self.assertEqual(list(self.box.user_home.parent.rglob("*.jpg")), [])
 
     def test_a_project_folder_that_holds_the_cache_and_the_temporary_folder_is_still_refused(self):
         # not the user's own folder: a folder inside it that happens to contain both places

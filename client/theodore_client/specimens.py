@@ -166,27 +166,20 @@ def _within(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-def _home_or_above(folder: Path) -> bool:
-    """The user's own folder, or a folder that contains it (a drive's root): where a terminal opens, not a project."""
+def _in_the_users_own_folder() -> bool:
+    """The assistant works in the user's own folder itself: where a terminal opens, not a project."""
     with contextlib.suppress(OSError, RuntimeError):
-        home = Path.home().resolve()
-        return folder == home or folder in home.parents
+        return Path.cwd().resolve() == Path.home().resolve()
     return False
 
 
-def _usable(root: Path) -> bool:
-    r"""Never inside the folder the assistant works in, never inside a deck (a folder holding .pptx-state), never inside
-    Theodore's folder (the cache root that Windows keeps under %LOCALAPPDATA%\Theodore\Cache is the one exception: it
-    is made for this).
-
-    One working folder is not a project: the user's own folder, or a folder above it. A terminal opens there, and on
-    Windows it contains every place a specimen folder may go (the temporary folder is %LOCALAPPDATA%\Temp), so until
-    0.4.24 an assistant started there was refused every sheet and told to design without them. From there Theodore's
-    own cache folder is used: an application's folder under the user's, private to the user, not something the
-    assistant's work is made of."""
+def _usable(root: Path, working_folder: bool = True) -> bool:
+    r"""Never inside the folder the assistant works in (whatever it holds, the user's home included), never inside a
+    deck (a folder holding .pptx-state), never inside Theodore's folder (the cache root that Windows keeps under
+    %LOCALAPPDATA%\Theodore\Cache is the one exception: it is made for this). `working_folder` False leaves the first
+    rule out: make_folder's one exception, below."""
     with contextlib.suppress(OSError, RuntimeError):
-        here = Path.cwd().resolve()
-        if _within(root, here) and not (root == cache_root().resolve() and _home_or_above(here)):
+        if working_folder and _within(root, Path.cwd().resolve()):
             return False
         if root != cache_root().resolve() and _within(root, core.home().root.resolve()):
             return False
@@ -240,9 +233,17 @@ def make_folder() -> Path:
     working folder, the deck and Theodore's folder: no sheet is fetched."""
     problem = None
     # Theodore's own cache first (the host settings' Read rule covers it; the system's temporary folder is shared,
-    # swept and indexed by other tools); the temporary folder only when a project folder contains the cache.
+    # swept and indexed by other tools); the temporary folder only when the working folder contains the cache.
     cache = cache_root().resolve()
     usable = [root for root in roots() if _usable(root)]
+    # The one exception to "never inside the working folder" (0.4.24): the assistant works in the user's own folder
+    # itself and that folder contains every place a specimen folder may go. That is Windows, where a terminal opens
+    # in C:\Users\<name> and the temporary folder is %LOCALAPPDATA%\Temp: an assistant started there was refused every
+    # sheet and told to design without them. Theodore's own cache folder is used then, the very folder the sheets go
+    # to from a project folder, private to the user. A folder above the user's, or a project folder that holds every
+    # place, is still refused; on macOS and Linux the temporary folder lies outside the home and is used as before.
+    if not usable and _in_the_users_own_folder() and _usable(cache, working_folder=False):
+        usable = [cache]
     for root in ([cache] if cache in usable else usable):
         if root == cache_root().resolve():
             with contextlib.suppress(OSError):
