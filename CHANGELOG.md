@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.28
+
+- Theodore asks for high effort for its own work: each slide's designer (the Studio agent) and the turn in which the assistant loads Theodore's design or build instructions. The rest of your session keeps the effort you chose. Measured on 2026-11-22 on one request built both ways: at high effort the deck got one more designer, a review by fresh eyes and five times the specimen sheets studied, for about three times the time and usage of the default. Versions 0.4.10 to 0.4.12 asked for the same; 0.4.13 to 0.4.27 left effort to the assistant's own setting.
+
 ## 0.4.27
 
 - The first lines of Theodore's build instructions no longer name the build API or say to read it first. They said "the build API and its references ... (pptxgenjs first ...)" since 0.4.22. An assistant asked for a deck then read the build API before it had prepared the deck's slides, and the ones that did built every slide alone instead of giving each slide its own design pass. The manual names each of its texts where it is needed; the line now only says how a text it names is read.

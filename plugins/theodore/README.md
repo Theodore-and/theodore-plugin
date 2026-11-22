@@ -9,6 +9,10 @@ each (`scripts/theodore`, and `theodore.cmd` for Windows), one agent definition 
 the definition of a local tool server. This page lists everything it runs, fetches, sends and changes. The same, in
 full and meant to be checked against the code, is in `SECURITY.md` and `README.md` of the plugin's repository.
 
+The two loaders and the agent ask the assistant for high effort (`effort: high`): for the turn in which Theodore's
+instructions load, and for each slide the agent designs. The rest of your session keeps the effort you set. High
+effort gives a deck more study and a review, and uses more of your AI plan than the default.
+
 ## What it runs
 
 - **The launcher**, when one of Theodore's two loaders is used or your assistant runs a Theodore command. On first
