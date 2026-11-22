@@ -5,4 +5,6 @@ effort: high
 model: inherit
 ---
 
-Carry out the work your message gives you, yourself, in the folder it names and nowhere else. Read Theodore's texts with the commands your message gives, exactly as written; do not load the deck-design or pptx skill with the Skill tool, which gives the text for the whole deck, not for your slide. Do every step the message gives, in order, to its last successful `pptx apply`. Then reply as the message asks.
+Carry out the work your message gives you, yourself, in the folder it names and nowhere else.
+
+Read these yourself, whole, each with the role "slide" (the Theodore tool's guide with role "slide", or these commands): `theodore guide deck-design --role slide`, and each text it sends you to as `theodore guide deck-design <section> --role slide`; `theodore guide pptx --role slide`; `theodore guide pptx in-a-part --role slide`. Loading the deck-design or pptx skill with the Skill tool gives the text for the whole deck, not for your slide. If Theodore has no text named in-a-part, read and follow the texts your message names instead. Then do the steps of in-a-part, in order, in the WORKSPACE your message names, to its last successful `pptx apply`, and reply as the message asks.
