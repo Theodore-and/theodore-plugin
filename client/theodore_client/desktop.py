@@ -107,11 +107,13 @@ def _ours(value, written: dict | None) -> bool:
 
 
 def _load(path: Path):
-    """The file's object, {} when there is no file, None when it is not a JSON object (then nothing is touched)."""
+    """The file's object, {} when there is no file, None when it is not a JSON object (then nothing is touched). A
+    file that starts with a byte-order mark is read all the same (Windows PowerShell and some editors write one; until
+    0.4.25 such a file was refused as not valid JSON and Theodore's entry was not written)."""
     if not path.exists():
         return {}
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     return value if isinstance(value, dict) else None
@@ -305,7 +307,7 @@ def follow(record: dict) -> list[str]:
             if mine.get("created_servers") and servers == {}:
                 del settings["mcpServers"]
             try:
-                if settings:
+                if settings and settings != {"mcpServers": {}}:
                     _write(path, settings)
                 else:
                     path.unlink()               # the file held Theodore's entry and nothing else: Theodore made it there

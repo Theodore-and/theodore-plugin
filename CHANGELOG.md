@@ -1,6 +1,14 @@
 # Changes
 
+## 0.4.25
+
+- A settings file of the Claude app that starts with a byte-order mark is read all the same (Windows PowerShell and some editors write one). 0.4.24 (staging only) refused such a file as not valid JSON, so Theodore's entry for the app's chat was not written, and an installation that was following the app to its new folder gave up there.
+- When Theodore's entry leaves the folder the Claude app no longer reads, a settings file there that held that entry and nothing else is removed, whichever of its records names it. 0.4.24 could leave it behind with an empty list.
+
 ## 0.4.24
+
+Staging only; everything in it is in 0.4.25.
+
 
 - `theodore uninstall` and `theodore logout` tell the Theodore service that the computer is leaving your account, so it no longer counts as one of your account's computers. Before, only the sign-in on the computer went: the account kept listing the computer as logged in, and after ten installs, each of them uninstalled, a new install was refused with "this account already has 10 computers logged in". The call takes a few seconds at most and never stops an uninstall: without a connection the computer stays listed until you remove it in Settings, under Computers and assistants.
 - Specimen sheets open for an assistant that was started in your own user folder, where a terminal opens. On Windows that folder contains both places a sheet may be kept (the temporary folder and Theodore's cache), and the rule that a sheet is never put inside the working folder refused every one: the design went on without them. From your user folder itself the sheets now go to Theodore's own cache folder, the one they go to from a project folder, private to you as before. Everywhere else nothing changes: a sheet is never put inside a project folder, and a folder above your user folder is still refused.

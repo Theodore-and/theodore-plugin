@@ -180,6 +180,29 @@ class TheClaudeAppMovedItsData(unittest.TestCase):
         self.assertEqual(self.servers(stale), {"notes": {"command": "notes.exe"}}, "only Theodore's entry left the old file")
         self.assertEqual(list(record[desktop.RECORD_KEY]), [str(new)])
 
+    def test_a_file_theodore_alone_made_in_the_old_folder_goes_whichever_record_names_it(self):
+        # The same file was recorded twice by a set-up run inside the app's package (%APPDATA%\\Claude is that folder
+        # there): the second record does not say Theodore made the object, and the emptied file must not stay.
+        self.leave(self.old)
+        new = self.config(self.new, {"preferences": {}})
+        stale = self.config(self.old, {"mcpServers": {"theodore": desktop.entry()}})
+        record = {desktop.RECORD_KEY: {str(stale): {"ours": True, "entry": desktop.entry()}}}
+        desktop.follow(record)
+        self.assertFalse(stale.exists())
+        self.assertEqual(self.servers(new), {"theodore": desktop.entry()})
+
+    def test_a_settings_file_that_starts_with_a_byte_order_mark_is_read_and_written_plain(self):
+        self.leave(self.old)
+        new = self.config(self.new)
+        new.write_bytes(b"\xef\xbb\xbf" + json.dumps({"preferences": {"sidebarMode": "chat"}}).encode("utf-8"))
+        record: dict = {}
+        self.assertEqual(desktop.register(record), ["claude-desktop: registered (it loads when the Claude app is quit and opened again)"])
+        raw = new.read_bytes()
+        self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), "written back as plain JSON")
+        written = json.loads(raw.decode("utf-8"))
+        self.assertEqual(written["preferences"], {"sidebarMode": "chat"})
+        self.assertIn("theodore", written["mcpServers"])
+
     def test_nothing_is_followed_while_the_app_has_not_moved(self):
         old = self.config(self.old, {})
         record: dict = {}
