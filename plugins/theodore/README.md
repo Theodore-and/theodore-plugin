@@ -9,9 +9,11 @@ each (`scripts/theodore`, and `theodore.cmd` for Windows), one agent definition 
 the definition of a local tool server. This page lists everything it runs, fetches, sends and changes. The same, in
 full and meant to be checked against the code, is in `SECURITY.md` and `README.md` of the plugin's repository.
 
-The two loaders and the agent ask the assistant for high effort (`effort: high`): for the turn in which Theodore's
-instructions load, and for each slide the agent designs. The rest of your session keeps the effort you set. High
-effort gives a deck more study and a review, and uses more of your AI plan than the default.
+The agent asks the assistant for high effort (`effort: high`), so each slide's designer always works at high
+effort. The two loaders carry the same line: the assistant applies it to the rest of the message in which Theodore
+is loaded (Claude Code 2.1.329; version 2.1.292 applied it only when a loader was called by name,
+`/theodore:deck-design` or `/theodore:pptx`). A later message runs at the effort you set, and so does the rest of
+your session. High effort uses more of your AI plan than the default.
 
 ## What it runs
 

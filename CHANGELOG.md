@@ -1,9 +1,14 @@
 # Changes
 
+## 0.4.29
+
+- Each slide's designer (the Studio agent) works at high effort, whatever effort your session is set to. Versions 0.4.10 to 0.4.12 asked for the same; 0.4.13 to 0.4.27 left effort to the assistant's own setting.
+- The two loaders carry the same line (`effort: high`). The assistant applies it to the rest of the message in which Theodore is loaded, and a later message runs at the effort you set. Measured on 2026-11-22 from the effort the assistant records for each step: Claude Code 2.1.329 did this; Claude Code 2.1.292 applied the line only when a loader was called by name (`/theodore:deck-design`, `/theodore:pptx`). On both, every step of a designer ran at high.
+- The Studio agent reads Theodore's texts with the commands its message gives. It used to load both instruction sets whole, which gave each slide's designer the text written for the whole deck (measured on 2026-11-22: every designer in six did).
+
 ## 0.4.28
 
-- Theodore asks for high effort for its own work: each slide's designer (the Studio agent) and the turn in which the assistant loads Theodore's design or build instructions. The rest of your session keeps the effort you chose. Measured on 2026-11-22 on one request built both ways: at high effort the deck got one more designer, a review by fresh eyes and five times the specimen sheets studied, for about three times the time and usage of the default. Versions 0.4.10 to 0.4.12 asked for the same; 0.4.13 to 0.4.27 left effort to the assistant's own setting.
-- The Studio agent reads Theodore's texts with the commands its message gives. It used to load both instruction sets whole, which gave each slide's designer the text written for the whole deck (measured on 2026-11-22: every designer in six did). For engine 1.0.0-rc.31, whose message to a designer carries those commands.
+Staging only: what 0.4.29 holds, with a changelog and a README that said the loaders raise the effort of the turn in which the assistant loads them. Measured, they do not; 0.4.29 says what happens.
 
 ## 0.4.27
 
