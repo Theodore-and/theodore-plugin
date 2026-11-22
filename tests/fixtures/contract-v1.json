@@ -137,7 +137,7 @@
     "channel": "theodore-channel-manifest@1",
     "runtime": "theodore-runtime-manifest@1"
   },
-  "openapi_sha256": "3441b1c3e37c75439799000a39a880ea6355e9f59aa1b2351cb37c3902ef53a1",
+  "openapi_sha256": "3b6a368ef8056a0dd951f3f07d2bf5714ada0c36c68ca584b525f82bac89a5c0",
   "origins": {
     "production": {
       "api": "https://api.theodoreand.ai",
@@ -268,6 +268,20 @@
         "401",
         "403",
         "409",
+        "422",
+        "429",
+        "500",
+        "503"
+      ]
+    },
+    "v1.installation.release": {
+      "auth": "installation",
+      "method": "POST",
+      "path": "/v1/installation/release",
+      "responses": [
+        "200",
+        "401",
+        "403",
         "422",
         "429",
         "500",

@@ -696,6 +696,14 @@ def specimen(files: list[str]) -> int:
     if not 1 <= len(files) <= specimens.MAX_FILES:
         raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
     files = [specimens.file_name(name) for name in files]       # a bare code (HC3) is its close-up's file (HC3.jpg)
+    texts = [name for name in files if isinstance(name, str) and name.lower().endswith(".md")]
+    if texts:       # a text of the guidance asked for as a sheet (three designers in six did, 2026-11-22): say what reads it
+        section = _section_name(texts[0])
+        shown = "".join(ch for ch in texts[0] if ch.isprintable())[:80]
+        if SECTION_NAME.fullmatch(section):
+            raise core.usage(f"'{shown}' is a text of the guidance, not a specimen sheet: specimen opens images, and their names end in .jpg.",
+                             f"read that text with {quoted_launcher()} guide deck-design {section} (with the same --role as your other "
+                             f"guide commands, if they carry one); then run specimen with the .jpg names the text gives.")
     if not all(specimens.valid_name(name) for name in files):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
     try:
@@ -2143,10 +2151,32 @@ def settings_remove() -> list[str]:
     return lines + notes or ["nothing to take back"]
 
 
+def _follow_claude_app() -> None:
+    """The Claude app for Windows moved its data in November 2026 (desktop.data_left). An installation whose entry was
+    written where the app kept its configuration before gets it where the app keeps it now, at its next command, and
+    the entry in the file nothing reads goes. Costs a record read and a folder listing; never fails or prints in the
+    command it runs in."""
+    if not core.IS_WINDOWS:
+        return
+    try:
+        record = _host_record()
+        if not desktop.left_behind(record):
+            return
+        for line in desktop.follow(record):
+            core.log(f"hosts: the Claude app moved its data: {line}")
+        if record:
+            _save_host_record(record)
+        else:
+            core.remove_tree(_host_record_path())
+    except Exception as exc:
+        core.log(f"hosts: the Claude app's moved folder was not followed ({exc.__class__.__name__}: {exc})")
+
+
 def ensure_hosts() -> None:
     """Finish the registration an installer left undone (see above), then the settings (ensure_settings). Never fails
     or prints in the command it runs in."""
     ensure_settings()
+    _follow_claude_app()
     marker = _hosts_pending_path()
     try:
         if not marker.exists():
@@ -3545,6 +3575,8 @@ def _uninstall(keep_hosts: bool) -> int:
     stopped = _stop_theodore_processes()
     if stopped:
         core.log(f"uninstall: stopped Theodore's own processes {stopped}")
+    if account.release_installation():
+        core.log("uninstall: the service was told that this computer left the account")
     if not credentials.delete():
         left.append(f"the sign-in item in the login keychain (service {credentials.SERVICE})")
     for cache in _render_cache_dirs():

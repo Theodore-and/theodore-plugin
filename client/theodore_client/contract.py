@@ -56,6 +56,7 @@ ROUTES = {
     "keys": ("GET", "/v1/keys", False),
     "usage": ("POST", "/v1/usage", True),
     "installation_bind": ("POST", "/v1/installation/bind", True),     # device binding (P039): the public key, once
+    "installation_release": ("POST", "/v1/installation/release", True),   # this computer leaves the account (logout, uninstall)
     "licence_nonce": ("POST", "/v1/licence/nonce", True),             # a single-use nonce for the refresh's proof
     "studio_get": ("GET", "/v1/studio", True),                        # the account's Studio setting (lane ONBOARD)
     "studio_set": ("PUT", "/v1/studio", True),

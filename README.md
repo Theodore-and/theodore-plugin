@@ -212,7 +212,9 @@ when nothing else is in it). What is left afterwards:
   by the first Theodore command run after it is an hour old (there is no background process, so not before Theodore
   runs again), and the uninstall (the launcher's and the installer's own included) removes every one, wherever `TMPDIR`
   pointed; one it could not remove keeps its record for the next uninstall. When the temporary folder lies inside the working folder they go to `~/Library/Caches/Theodore/specimens`,
-  `~/.cache/theodore/specimens` or `%LOCALAPPDATA%\Theodore\Cache\specimens` instead; never under the working folder.
+  `~/.cache/theodore/specimens` or `%LOCALAPPDATA%\Theodore\Cache\specimens` instead; never under the working folder,
+  with one exception: an assistant started in your own user folder itself (where a terminal opens) uses that cache
+  folder when the user folder contains the temporary folder too, as on Windows. Before 0.4.25 it was refused every sheet there.
 - In the assistants' settings: what was there before. The uninstall removes Theodore's two permission rules, the
   marketplace entry it created (left as it is, and said so, if you changed it since), restores an `autoUpdate` value
   it changed (an explicit `false` included), removes a marketplace only if Theodore's registration added it, and

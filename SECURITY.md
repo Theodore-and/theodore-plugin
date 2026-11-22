@@ -37,12 +37,13 @@ installer's are in `install/`.
 | Design guidance | Each time the deck-design instructions are loaded; it is never stored on disk | each use |
 | The engine's manual | A text of the pptx manual read by its name (`theodore guide pptx <name>`, for example the build API): the service is asked for it and serves the ones it holds for your account; a name it does not serve is read from the installed engine's own file, which is also what happens with no connection. Either way it is printed in parts that fit one answer of the assistant, and the client stores nothing of it | each time one is read |
 | Resumed session | When Claude Code resumes a conversation that loaded Theodore's instructions: one request for the signed release manifest, to compare the version the conversation loaded with the current one (nothing about the conversation is sent; two seconds at most) | once per resume of such a conversation |
-| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private folder in Theodore's own cache (the system's temporary folder only when the assistant works in a folder that contains the cache), removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
+| Specimen sheets | A deck-design specimen image the assistant asks to look at: fetched on demand into a private folder in Theodore's own cache (the system's temporary folder only when the assistant works in a folder that contains the cache; never inside the folder the assistant works in, with one exception: an assistant started in your own user folder itself, where a terminal opens, uses Theodore's cache when that folder contains the temporary folder as well, as it does on Windows), removed by the first Theodore command run after it is an hour old (nothing runs in the background) and by the uninstall, never shipped | when asked |
 | Downloads | Runtime, engine and asset packs | when installing or updating |
 | A short "in use" note | Engine, client and plugin versions and the assistant's name | at most once per hour |
 | `theodore report` | A bug report or feedback, see below | when filed |
 | Usage counts | What Theodore did, as counts and names from a fixed list, see below; only while your account's usage counts are on | at the end of a deck (`pptx finish`), otherwise at most when the oldest waiting count is 15 minutes old and you use Theodore |
 | `theodore prefs` | Saving, listing or removing a preference you asked to keep | when used |
+| Leaving the account | `theodore logout` and `theodore uninstall` tell the service that this computer is leaving your account (one request with the computer's own sign-in, nothing else in it), so it stops counting as one of the account's computers; without a connection the computer stays listed until you remove it in Settings | at logout and at uninstall |
 | Studio | Reads your account's Studio setting at the end of set-up (to ask about it once), and `theodore studio on` or `off` changes it, as the portal's Settings switch does | at set-up, and when used |
 
 Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand.ai` (installer and sign-in
@@ -64,7 +65,9 @@ assistants: `theodore hosts register` does those); `theodore hosts settings --re
 keeps them off, and a line you deleted is not written again. Versions 0.4.18 to 0.4.20 left all of it to the
 installer. The installer adds, when Claude Desktop is on this computer, one entry named
 `theodore` in its `claude_desktop_config.json` that starts Theodore's local server for Desktop chat (the uninstall
-removes it), and writes one line between
+removes it; on Windows the file is the one in the folder the app keeps its data in now, `%LOCALAPPDATA%\Claude-Data`
+since the app's update of November 2026, and an entry written to the app's former folder is moved there at the next
+command), and writes one line between
 `<!-- theodore:begin -->` and `<!-- theodore:end -->` in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`
 (`CLAUDE_CONFIG_DIR` and `CODEX_HOME` when set), for each of the two assistants found, because the sentence that
 starts it asks for that ("Set up Theodore and use it for all my presentations"): "The user chose Theodore for every
@@ -251,7 +254,8 @@ changed since the client last learned it, the service refuses the report, stores
 
 ## Removing everything
 
-`theodore uninstall` (see README.md) removes Theodore's folders, the keychain item, the render cache and the
+`theodore uninstall` (see README.md) tells the service that this computer is leaving your account (so it no longer
+counts as one of the account's computers), removes Theodore's folders, the keychain item, the render cache and the
 plugin registrations, and names anything it could not remove (it then ends with `RETRY`, not `OK`). What it did is
 written beside Theodore's folder, never inside it (`~/.theodore-uninstall.log`; Windows:
 `%USERPROFILE%\.theodore-uninstall.log`), so it can still be read once the folder is gone; it holds paths and

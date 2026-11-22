@@ -157,6 +157,8 @@ class FakeApi:
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
         self.devices: dict[str, dict] = {}            # device_code -> {user_code, status}
         self.installations: dict[str, dict] = {}      # id -> {secret, revoked, gen}
+        self.released: list[str] = []                 # installations that released themselves (logout, uninstall)
+        self.release_route = True                     # False: a service from before POST /v1/installation/release
         self.plan, self.features, self.channel_name = "beta", ["pptx", "deck-design", "agent-reports"], "beta"
         self.grace_seconds = 7 * 86400
         self.account_state = "active"     # or "suspended" / "inactive"
@@ -542,6 +544,12 @@ class FakeApi:
         installation_id = self._installation(h)
         if installation_id is None:
             return None
+        if route == ["installation", "release"] and method == "POST":
+            if not self.release_route:      # a service from before the route
+                return self._error(h, 404, "not_found", "no such route")
+            self.installations[installation_id]["revoked"] = True
+            self.released.append(installation_id)
+            return self._send(h, 200, {"released": True})
         if route == ["installation", "bind"] and method == "POST":
             if self.binding is None:
                 return self._error(h, 404, "not_found", "no such route")
