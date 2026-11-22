@@ -594,7 +594,8 @@ class Guide(ClientCase):
         self.assertEqual(lines[2], f"          python3 ...  ->  {launcher} python ...")
         self.assertEqual(lines[3], f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>")
         self.assertIn(f"<pptx-skill-dir> = {self.box.home / 'engines' / self.ENGINE_VERSION / 'skills' / 'pptx'}", lines[4])
-        self.assertEqual(lines[5], "--- SKILL.md ---")
+        self.assertIn("guide pptx <name>", lines[5])
+        self.assertEqual(lines[6], "--- SKILL.md ---")
         manual = (self.box.home / "engines" / self.ENGINE_VERSION / "skills" / "pptx" / "SKILL.md").read_text()
         body = result.stdout.split("--- SKILL.md ---\n", 1)[1].rsplit("=== END", 1)[0]
         self.assertEqual(body, manual)                                      # verbatim
@@ -1006,7 +1007,7 @@ class Engine(ClientCase):
             lines = out.splitlines()
             bindings = next(i for i, line in enumerate(lines) if line.startswith("Bindings: pptx <verb>"))
             self.assertTrue(lines[bindings + 3].lstrip().startswith("<pptx-skill-dir> = "), args)
-            self.assertEqual(lines[bindings + 4], "SERVED-POINTER: first instruction.", args)
+            self.assertEqual(lines[bindings + 5], "SERVED-POINTER: first instruction.", args)
             self.assertLess(out.index("DIRECTIONS."), out.index(manual), args)
 
     def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
@@ -3246,20 +3247,19 @@ class HostTest(ClientCase):
         self.assertEqual([r["path"] for r in self.api.requests if "passwd" in r["path"] or ".." in r["path"]], [])
 
     def test_guide_pptx_section_prints_a_served_section_and_refuses_an_unserved_one_cleanly(self):
-        """Lane STUDIO: `guide pptx <section>` reads a section the service serves; pptx links stay file paths (the
-        manual's references are on disk). A section not served (an older service, an account without it) is a
-        clean USAGE that fetches nothing else."""
+        """Lane STUDIO: `guide pptx <section>` reads a section the service serves; a link to a text of the manual is
+        the command that prints it (0.4.22). A section neither served nor in the engine is a clean USAGE."""
         self.sign_in()
         self.api.guides["pptx"]["served-part"] = "SERVED-PPTX see [charts](references/pptxgenjs-charts.md)\n"
         result = self.client("guide", "pptx", "served-part")
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("SERVED-PPTX see [charts](references/pptxgenjs-charts.md)", result.stdout)
+        self.assertIn(" guide pptx pptxgenjs-charts)", result.stdout)
         self.assertEqual(result.stdout.splitlines()[4], "--- served-part ---")     # after the title and the three opening lines
         before = len(self.api.requests)
         first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
         self.assertIn("guide pptx has no section 'not-served'.", first)
         self.assertIn("guide pptx for the manual", nxt)
-        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/pptx/not-served"])
+        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/pptx/not-served", "/v1/guide/pptx"])
         self.assertStatus(self.client("guide", "pptx", "--license"), "USAGE", 64)
 
     # --- 5: uninstall with an assistant that never had Theodore ------------------------------------------------------------------

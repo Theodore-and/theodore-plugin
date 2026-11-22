@@ -408,7 +408,14 @@ def _fetch_whole(skill: str, section: str | None, role: str | None = None) -> st
                                                  query=query, headers=conditional)
         except api.ApiError:
             GUIDES.pop(key, None)
-            raise commands._no_such_section(skill, name, role) from None
+            # a text of the manual the service does not serve: the selected engine's own file (an engine up to rc.28)
+            on_disk = commands._pptx_disk_section(name) if skill == "pptx" else None
+            if on_disk is None:
+                raise commands._no_such_section(skill, name, role) from None
+            _headers, raw = commands._pptx_from_disk(on_disk)
+            if core.refused():
+                raise api.sign_in_required() from None
+            return raw.decode("utf-8", errors="replace")
         route, extra = "guide_section", {"section": name}
     else:
         status, headers, raw = commands._api("guide", what, skill=skill, query=query, headers=conditional)
@@ -443,7 +450,7 @@ def _pptx_manual(role: str | None = None) -> str:
     build, so a chat says nothing about versions; the notice stays for the coding hosts' next skill load."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP, role=role)
+        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP, role=role, pointers=FOR != DESKTOP)
     return buffer.getvalue()
 
 
@@ -456,8 +463,8 @@ def tool_guide(args: dict) -> dict:
         raise core.usage(f"unknown skill {skill!r}. The skills are: {', '.join(SKILLS)}.")
     if section is not None and not isinstance(section, str):
         raise core.usage("section is a string.")
-    if skill == "pptx" and not section:
-        return _text(_pptx_manual(role))
+    if skill == "pptx" and (not section or commands._section_name(section).lower() in commands.MANUAL_NAMES):
+        return _text(_pptx_manual(role))        # the main text, also by the name an engine message gives it
     return _text(_fetch_whole(skill, section or None, role))
 
 
@@ -603,6 +610,8 @@ def _desktop_guide(args: dict) -> dict:
     launcher to read them with and this tool names no skill (TR-G78T5N: the action answered for deck-design only, so
     that section could not be read from a chat)."""
     asked = {"section": args["section"], "role": args.get("role")}
+    if commands._section_name(args["section"]).lower() in commands.MANUAL_NAMES:
+        return chatbuild.manual()               # the build instructions by their name: what action "manual" returns
     try:
         return tool_guide({"skill": "deck-design", **asked})
     except Status as refusal:
