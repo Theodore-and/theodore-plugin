@@ -696,6 +696,14 @@ def specimen(files: list[str]) -> int:
     if not 1 <= len(files) <= specimens.MAX_FILES:
         raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
     files = [specimens.file_name(name) for name in files]       # a bare code (HC3) is its close-up's file (HC3.jpg)
+    texts = [name for name in files if isinstance(name, str) and name.lower().endswith(".md")]
+    if texts:       # a text of the guidance asked for as a sheet (three designers in six did, 2026-11-22): say what reads it
+        section = _section_name(texts[0])
+        shown = "".join(ch for ch in texts[0] if ch.isprintable())[:80]
+        if SECTION_NAME.fullmatch(section):
+            raise core.usage(f"'{shown}' is a text of the guidance, not a specimen sheet: specimen opens images, and their names end in .jpg.",
+                             f"read that text with {quoted_launcher()} guide deck-design {section} (with the same --role as your other "
+                             f"guide commands, if they carry one); then run specimen with the .jpg names the text gives.")
     if not all(specimens.valid_name(name) for name in files):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
     try:
