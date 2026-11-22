@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.27
+
+- The first lines of Theodore's build instructions no longer name the build API or say to read it first. They said "the build API and its references ... (pptxgenjs first ...)" since 0.4.22. An assistant asked for a deck then read the build API before it had prepared the deck's slides, and the ones that did built every slide alone instead of giving each slide its own design pass. The manual names each of its texts where it is needed; the line now only says how a text it names is read.
+
+## 0.4.26
+
+Staging only (with engine 1.0.0-rc.30, which was not released): long texts in parts in Claude Code, the line on links first, the Studio agent's reading route, sheets as images to open. Not in 0.4.27.
+
 ## 0.4.25
 
 - A settings file of the Claude app that starts with a byte-order mark is read all the same (Windows PowerShell and some editors write one). 0.4.24 (staging only) refused such a file as not valid JSON, so Theodore's entry for the app's chat was not written, and an installation that was following the app to its new folder gave up there.

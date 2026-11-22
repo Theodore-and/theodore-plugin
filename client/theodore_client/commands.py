@@ -306,9 +306,14 @@ def _pptx_manual_text(directory: Path, version: str, role: str | None, pointers:
 
 def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str) -> str:
     """How the manual's other texts are read: through the launcher, which prints each in parts that fit one answer (a
-    file read with cat can be longer than a host shows, and the assistant then sees only its start)."""
-    texts = (f"          the build API and its references  ->  {launcher} guide pptx <name>   (pptxgenjs first; a name that "
-             "is not one lists them)")
+    file read with cat can be longer than a host shows, and the assistant then sees only its start).
+
+    The line names no text and no order (0.4.27). Until then it read "the build API and its references ... (pptxgenjs
+    first ...)", in the first lines of every pptx body: an assistant asked for a deck read the build API before it had
+    prepared the deck's slides, and the ones that did went on to build every slide alone (2026-11-22: on a real
+    request the installed product built alone where the same texts read from a checkout, which has no such line,
+    started a designer per slide). The manual itself names each text where it is needed."""
+    texts = f"          a text this manual names  ->  {launcher} guide pptx <name>   (a name that is not one lists them)"
     if on_disk:
         return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}\n{texts}"
     return texts
