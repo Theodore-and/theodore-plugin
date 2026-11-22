@@ -3,6 +3,7 @@
 ## 0.4.28
 
 - Theodore asks for high effort for its own work: each slide's designer (the Studio agent) and the turn in which the assistant loads Theodore's design or build instructions. The rest of your session keeps the effort you chose. Measured on 2026-11-22 on one request built both ways: at high effort the deck got one more designer, a review by fresh eyes and five times the specimen sheets studied, for about three times the time and usage of the default. Versions 0.4.10 to 0.4.12 asked for the same; 0.4.13 to 0.4.27 left effort to the assistant's own setting.
+- The Studio agent reads Theodore's texts with the commands its message gives. It used to load both instruction sets whole, which gave each slide's designer the text written for the whole deck (measured on 2026-11-22: every designer in six did). For engine 1.0.0-rc.31, whose message to a designer carries those commands.
 
 ## 0.4.27
 
