@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.31
+
+- The Studio agent carries its own reading list: Theodore's design text, its build text and the steps for one slide, each read for a slide's designer. It used to take the commands from the message that started it, and that message is written by the assistant from a text the assistant itself holds; on 2026-11-22 some assistants ran those commands themselves and built every slide alone instead of handing the slides out (two full builds on Windows that day). With the list in the agent's own instructions, a later version of Theodore's texts can stop naming the commands to the assistant at all. Until then nothing changes for a deck: where Theodore has no text named `in-a-part`, the agent follows the texts its message names, as before.
+- A plugin update is used from the assistant's next session, so this version goes out ahead of the texts that rely on it.
+
 ## 0.4.30
 
 - A specimen name that is not a sheet no longer costs the other sheets of the same call. Every sheet that exists is delivered and its path printed; after the paths comes one line for each name that is not a sheet, naming the nearest real names: the same words in another order (`tables-the-range.jpg` is `range-tables.jpg`), or, for a close-up's code in a gap of its numbers, the codes of that family that exist. Only when no sheet at all is delivered does the call fail, and then it names the nearest names. Until now one wrong name failed the whole call with "a wrong command" and a pointer to `help`, which lists no sheets. Seen on 2026-11-22 in the conversations of first-deck runs: two calls lost seven and three valid sheets that way. The tool server's `specimen` answers the same way.
