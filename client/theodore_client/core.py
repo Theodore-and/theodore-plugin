@@ -53,7 +53,8 @@ NOTHING_TO_TELL = "nothing; do not mention this to the user."
 
 
 # Statuses after which no specimen folder is kept on this computer: signed out or revoked, refused by the account or
-# its plan, update required (kill switch), blocked by policy, connector only.
+# its plan, update required (kill switch), blocked by policy, connector only. A status this computer decided about one
+# call alone (specimens.local_block: keeps_sheets) is none of those.
 SHEET_REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED", "BLOCKED_BY_POLICY", "CONNECTOR_REQUIRED")
 
 
@@ -71,7 +72,7 @@ def emit(status: Status) -> int:
     elif getattr(status, "auto_report", False):
         from . import commands         # imported here: commands imports this module
         status = commands.report_internal(status)      # sent before the status is printed; never raises
-    if _REFUSAL or status.name in SHEET_REFUSALS:
+    if _REFUSAL or (status.name in SHEET_REFUSALS and not getattr(status, "keeps_sheets", False)):
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
     if getattr(status, "refusal", False):

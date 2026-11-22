@@ -1,5 +1,11 @@
 # Changes
 
+## 0.4.30
+
+- A specimen name that is not a sheet no longer costs the other sheets of the same call. Every sheet that exists is delivered and its path printed; after the paths comes one line for each name that is not a sheet, naming the nearest real names: the same words in another order (`tables-the-range.jpg` is `range-tables.jpg`), or, for a close-up's code in a gap of its numbers, the codes of that family that exist. Only when no sheet at all is delivered does the call fail, and then it names the nearest names. Until now one wrong name failed the whole call with "a wrong command" and a pointer to `help`, which lists no sheets. Seen on 2026-11-22 in the conversations of first-deck runs: two calls lost seven and three valid sheets that way. The tool server's `specimen` answers the same way.
+- Designers working side by side no longer remove each other's sheets. A designer refused a sheet because its working folder holds every place a sheet may go removed every specimen folder on the computer, as a sign-out does, so a sheet another designer had just been given was gone when it opened it (seen once on 2026-11-22: a path printed, gone less than a second later). That refusal, and the one for automatic reports being off, now remove nothing; a sign-out, a refused account and a paused channel still remove every sheet. A call that fails after it has written a sheet also keeps that folder until its hour is up, since another call may already have been given that sheet.
+- The line that says how the design instructions' links are read now comes first in the instructions, after their front matter. For an account with Studio on, the instructions are longer than one answer holds, and the cut took their end, where that line was. An instructions text cut for length now says so on its first line, and says where to read the rest.
+
 ## 0.4.29
 
 - Each slide's designer (the Studio agent) works at high effort, whatever effort your session is set to. Versions 0.4.10 to 0.4.12 asked for the same; 0.4.13 to 0.4.27 left effort to the assistant's own setting.

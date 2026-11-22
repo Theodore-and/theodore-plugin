@@ -537,6 +537,8 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
         raw = _remaining_parts(skill, section, what, raw, total, role)
         total = 1
     body = raw.decode("utf-8", errors="replace")
+    if not section:                           # before any paging here: the line on links opens the text (0.4.30)
+        body = _links_first(body)
     if paged_here:                            # before its paging: a command must not be cut in two
         body = _pptx_pointers(body, role)
     if whole:
@@ -606,14 +608,39 @@ def _without_frontmatter(text: str) -> str:
 
 
 def _bounded(text: str, rest: str) -> str:
-    """At most SKILL_BODY_MAX_CHARS: past that, the text up to a line end within the limit and one line naming where
-    the rest is."""
+    """At most SKILL_BODY_MAX_CHARS: past that, the text up to a line end within the limit, with one line naming where
+    the rest is at its end and, from 0.4.30, one saying so at its top (the deck-design body of an account with Studio
+    was cut, and its last line, the only one saying how its links are read, went unseen)."""
     if len(text) <= SKILL_BODY_MAX_CHARS:
         return text
+    first = f"[This document is longer than one answer holds and is cut near its end. Read it, then read its rest: {rest}]\n\n"
     pointer = f"\n[The rest of this document: {rest}]\n"
-    room = SKILL_BODY_MAX_CHARS - len(pointer)
+    room = SKILL_BODY_MAX_CHARS - len(pointer) - len(first)
     cut = text.rfind("\n", 0, room)
-    return text[:cut + 1 if cut > 0 else room] + pointer
+    return first + text[:cut + 1 if cut > 0 else room] + pointer
+
+
+LINKS_LINE = "Links in this guidance are read "
+
+
+def _links_first(text: str) -> str:
+    """The service closes a skill's main text with one line that says how the text's links are read (through this
+    launcher, or with the guide tool). It is printed first: a reader meets the links before the end of the text, and a
+    text cut for length loses its end. A text with front matter keeps it on top; a text without the line is unchanged."""
+    lines = text.splitlines(keepends=True)
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].startswith(LINKS_LINE):
+            line = lines.pop(index).rstrip("\n") + "\n\n"
+            while index and index == len(lines) and not lines[index - 1].strip():     # the blank lines that set it apart
+                lines.pop(index - 1)
+                index -= 1
+            at = 0
+            if lines and lines[0] == "---\n" and "---\n" in lines[1:]:
+                at = lines.index("---\n", 1) + 1
+                while at < len(lines) and not lines[at].strip():
+                    at += 1
+            return "".join(lines[:at]) + line + "".join(lines[at:])
+    return text
 
 
 def _deck_design_body() -> tuple[str, str]:
@@ -630,7 +657,7 @@ def _deck_design_body() -> tuple[str, str]:
     if core.refused():
         raise api.sign_in_required()
     rest = 'call the Theodore guide tool with skill "deck-design"' if tool else f"run {quoted_launcher()} guide deck-design"
-    body = _without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace"))
+    body = _links_first(_without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace")))
     # The host ran this command, not the agent: "the launcher you used" (or the service's "where it is" wording for
     # tool delivery) becomes this launcher's own path, which is true however the text arrived.
     for line in _LAUNCHER_LINES:
@@ -696,8 +723,10 @@ def skill(name: str) -> int:
 def specimen(files: list[str]) -> int:
     """Fetch deck-design specimen sheets into a private temporary folder of this run and print one path per line.
     A sheet this computer already holds in a recent specimen folder is checked with the service (If-None-Match) and,
-    when unchanged, its path is printed instead. All or nothing: a sheet that is refused leaves no folder and no path.
-    A refusal that signs the device out or refuses the account removes every specimen folder."""
+    when unchanged, its path is printed instead. A name the service has no sheet for (0.4.30) is said on a line of its
+    own after the paths, with the nearest real names, and the other sheets are still delivered; only when no sheet at
+    all is delivered is the call a USAGE status, naming the nearest names. Any other refusal fails the whole call: no
+    path is printed. A refusal that signs the device out or refuses the account removes every specimen folder."""
     if not 1 <= len(files) <= specimens.MAX_FILES:
         raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
     files = [specimens.file_name(name) for name in files]       # a bare code (HC3) is its close-up's file (HC3.jpg)
@@ -712,23 +741,50 @@ def specimen(files: list[str]) -> int:
     if not all(specimens.valid_name(name) for name in files):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
     try:
-        paths = _specimen_paths(files)
+        paths, missing = _specimen_paths(files)
+        notes = [specimens.missing_note(name, _sheet_names()) for name in missing] if missing else []
+        if missing and core.refused():
+            raise api.sign_in_required()
+        if not paths:
+            raise specimens.none_delivered(notes, f"run {quoted_launcher()} specimen")
     except Status as status:
         if core.refused() or status.name in ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT"):
             specimens.sweep(everything=True)
         raise
     for name in files:
-        print(paths[name].resolve().as_posix(), flush=True)
+        if name in paths:
+            print(paths[name].resolve().as_posix(), flush=True)
+    for note in notes:          # on the paths' own stream, right after them: a reader of the last lines sees both
+        print(note, flush=True)
     return 0
 
 
-def _specimen_paths(files: list[str]) -> dict[str, Path]:
+_SHEET_NAMES: list | None = None
+
+
+def _sheet_names() -> list[str] | None:
+    """The account's sheet names, from the published index the tool server lists them from (asked once a process, only
+    when a name was not found). None when it cannot be had: the notes then name no nearest sheet."""
+    global _SHEET_NAMES
+    if _SHEET_NAMES is None:
+        _SHEET_NAMES = []
+        try:
+            _s, headers, raw = _api("guide", "specimen", skill="deck-design", query={"form": "index"})
+            _SHEET_NAMES = specimens.index_sheets(headers, raw) or []
+        except (Status, api.TooLarge):
+            pass
+    return _SHEET_NAMES or None
+
+
+def _specimen_paths(files: list[str]) -> tuple[dict[str, Path], list[str]]:
+    """The path of each sheet delivered, and the names the service has no sheet for, in the order asked."""
     account.require("deck-design")
     copies = {name: specimens.held(name) for name in dict.fromkeys(files)}
     # A sheet not held needs a folder: made before anything is fetched, so a working folder that leaves no private
     # place for sheets stops the call before any sheet is downloaded (as before 0.3.4).
     folder = specimens.make_folder() if any(copy is None for copy in copies.values()) else None
     paths: dict[str, Path] = {}
+    missing: list[str] = []
     try:
         for name, copy in copies.items():
             what = f"specimen {name}"
@@ -739,10 +795,15 @@ def _specimen_paths(files: list[str]) -> dict[str, Path]:
                 except OSError:
                     copy = None
             try:
-                status, headers, raw = _api("guide_specimen", what, file=name, query={"skill": "deck-design"},
+                status, headers, raw = _api("guide_specimen", what, passing=("not_found",), file=name, query={"skill": "deck-design"},
                                             headers=asked, redirects=False, limit=specimens.MAX_BYTES)
             except api.TooLarge:
                 raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
+            except api.ApiError as error:       # passed through only for not_found: no such sheet; the others still come
+                if error.code != "not_found":
+                    raise api.status_from(error, what) from None
+                missing.append(name)
+                continue
             if core.refused():
                 raise api.sign_in_required()
             if status == 304 and copy is not None:
@@ -764,12 +825,15 @@ def _specimen_paths(files: list[str]) -> dict[str, Path]:
                              "run the same command again once. If it fails again, continue without the sheet.",
                              "A design specimen could not be opened just now; I am trying once more.") from None
     except BaseException:
-        if folder is not None:
+        # A sheet already written here may be printed by another Theodore call at this moment: from the record, it
+        # reuses held sheets (held()). The folder goes only when nothing was written in it; one that holds sheets stays,
+        # recorded and private, until the sweep after its hour (or at once after a refusal of the device or account).
+        if folder is not None and not any(path.parent == folder for path in paths.values()):
             core.remove_tree(folder)
         raise
     if folder is not None and not any(path.parent == folder for path in paths.values()):
-        core.remove_tree(folder)        # every sheet was held after all: the empty folder goes
-    return paths
+        core.remove_tree(folder)        # every sheet was held after all, or none was found: the empty folder goes
+    return paths, missing
 
 
 def _heartbeat(engine_version: str) -> None:
@@ -889,7 +953,7 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
             summary = {"off": "automatic reports are off for this account; nothing was sent.",
                        "plan": "automatic reports are not part of this account's plan; nothing was sent.",
                        "unknown": "whether automatic reports are on for this account is not known yet; nothing was sent."}[why]
-            return core.emit(Status("BLOCKED_BY_POLICY", summary, _REPORTS_OFF_NEXT, None))
+            return core.emit(specimens.local_block(Status("BLOCKED_BY_POLICY", summary, _REPORTS_OFF_NEXT, None)))
     outbox.flush()                  # reports kept for later go first, oldest first (a few seconds at most; never raises)
     try:
         _status, _headers, raw = _api("reports", "report", body=payload, keep=outbox.later)
@@ -900,8 +964,8 @@ def report(kind: str, title: str, details: str, verb: str | None, code: str | No
     except Status as status_:
         if status_.name == "BLOCKED_BY_POLICY":      # the server's backstop: the report reached it and was refused
             account.remember_automatic_reports_off()
-            return core.emit(Status("BLOCKED_BY_POLICY", "automatic reports are off for this account; the Theodore service refused this "
-                                    "report and did not store it.", _REPORTS_OFF_NEXT, None))
+            return core.emit(specimens.local_block(Status("BLOCKED_BY_POLICY", "automatic reports are off for this account; the Theodore "
+                                    "service refused this report and did not store it.", _REPORTS_OFF_NEXT, None)))
         raise
     answer = json.loads(raw.decode("utf-8") or "{}")
     reference = answer.get('ref') or answer.get('id') or 'received'
