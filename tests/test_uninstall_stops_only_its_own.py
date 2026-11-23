@@ -159,5 +159,32 @@ class RecordsAndLauncher(unittest.TestCase):
         self.assertIn("""ps -ww -o command= -p "$bp" 2>/dev/null | grep -q -e ' __bootstrap' && kill "$bp\"""", text)
 
 
+class BatchLauncherStopsNothingAboveIt(unittest.TestCase):
+    """theodore.cmd's own uninstall (no Python yet) stops the programs running from Theodore's folder by their program
+    file; the assistant's shell can be the Git Bash Theodore put there, so nothing above the command is stopped. Run
+    with PowerShell's own engine where one is installed (pwsh), the system's process list replaced by a fixed one."""
+
+    def command(self) -> str:
+        text = (REPO / "plugins" / "theodore" / "skills" / "pptx" / "scripts" / "theodore.cmd").read_bytes().decode("ascii")
+        line = next(x for x in text.split("\r\n") if "HOME_SCAN, [StringComparison]" in x)
+        return line.split('-Command "', 1)[1].rsplit('" <nul', 1)[0]
+
+    def test_the_line_leaves_out_every_process_above_it(self):
+        self.assertIn("-and -not $keep.ContainsKey([int]$_.ProcessId)", self.command())
+
+    @unittest.skipUnless(__import__("shutil").which("pwsh"), "PowerShell (pwsh) is not installed here")
+    def test_powershell_stops_only_the_folders_programs_below_it(self):
+        fake = ("function Get-CimInstance { param($c) @("
+                "[pscustomobject]@{ProcessId=$PID; ParentProcessId=50; ExecutablePath='C:\\T\\x\\ps.exe'},"
+                "[pscustomobject]@{ProcessId=50; ParentProcessId=40; ExecutablePath='C:\\T\\tools\\git\\bin\\bash.exe'},"
+                "[pscustomobject]@{ProcessId=40; ParentProcessId=1; ExecutablePath='C:\\other\\claude.exe'},"
+                "[pscustomobject]@{ProcessId=77; ParentProcessId=40; ExecutablePath='C:\\T\\runtime\\python.exe'},"
+                "[pscustomobject]@{ProcessId=88; ParentProcessId=40; ExecutablePath='C:\\other\\x.exe'}) }; "
+                "function Stop-Process { param($Id, [switch]$Force, $ErrorAction) Write-Output \"stop $Id\" }; ")
+        done = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", fake + self.command()],
+                              env={**os.environ, "HOME_SCAN": "C:\\T\\"}, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.stdout.split(), ["stop", "77"], done.stdout + done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

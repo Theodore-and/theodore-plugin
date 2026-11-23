@@ -918,9 +918,10 @@ rem Only Theodore's own subfolders: the folder may hold things that are not Theo
 rem may be inside one of them: delete, then report what is still there (if defined and call echo run late enough).
 rem Theodore's own programs still running from inside the folder (a background download, the tool server) are stopped
 rem first, found by where their program file is; then every folder but bin is removed, retried for ten seconds while
-rem Windows releases the last files (a scanner may hold a file it has just seen).
+rem Windows releases the last files (a scanner may hold a file it has just seen). Never this command or anything above
+rem it (0.4.32): the assistant's own shell can be the Git Bash in Theodore's folder; the walk goes up from PowerShell.
 set "HOME_SCAN=%HOME_DIR%\"
-if exist "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:HOME_SCAN, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" <nul >nul 2>&1
+if exist "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" "%SYS32%\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "$all = @(Get-CimInstance Win32_Process); $up = @{}; foreach ($p in $all) { $up[[int]$p.ProcessId] = [int]$p.ParentProcessId }; $keep = @{}; $at = $PID; while ($at -and -not $keep.ContainsKey($at)) { $keep[$at] = 1; $at = $up[$at] }; $all | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:HOME_SCAN, [StringComparison]::OrdinalIgnoreCase) -and -not $keep.ContainsKey([int]$_.ProcessId) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" <nul >nul 2>&1
 set "BTRY=0"
 :bare_retry
 for %%D in (%OWNED_DIRS%) do if /i not "%%D"=="bin" if exist "%HOME_DIR%\%%D" rmdir /s /q "%HOME_DIR%\%%D" >nul 2>&1

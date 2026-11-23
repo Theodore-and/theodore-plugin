@@ -97,11 +97,17 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
         home = self.box.home
         held = home / "runtime" / "held-by-a-job.bin"
-        holder = subprocess.Popen([sys.executable, "-c", "import sys, time; f = open(sys.argv[1], 'wb'); "
+        # The job runs Theodore's own Python, inside the folder (0.4.32: an uninstall stops a recorded number only when
+        # the process runs from Theodore's folder and was running when its record was written). This suite installs
+        # the real runtime bundle on Windows, so that Python is there and runs; its child is the same Python.
+        python = home / "runtime" / (home / "runtime" / "current.txt").read_text(encoding="utf-8").strip() / "python" / "python.exe"
+        self.assertTrue(python.is_file(), python)
+        holder = subprocess.Popen([str(python), "-I", "-c", "import sys, time; f = open(sys.argv[1], 'wb'); "
                                    "child = __import__('subprocess').Popen([sys.executable, '-c', 'import time; time.sleep(600)']); "
                                    "time.sleep(600)", str(held)],
                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(lambda: holder.poll() is None and holder.kill())
+        time.sleep(1)                           # the record is written once the process exists, as Job.spawn does
         (home / "state" / "jobs").mkdir(parents=True, exist_ok=True)
         (home / "state" / "jobs" / "libreoffice.json").write_text(json.dumps({"pid": holder.pid, "phase": "downloading LibreOffice",
                                                                                 "percent": 30, "started": int(time.time())}))
