@@ -49,6 +49,9 @@ HELD_GUIDE_CHARS_MAX = 16 << 20
 
 ROLE = {"type": "string", "enum": list(commands.ROLES), "description": '"slide" for an agent given one slide.'}
 CODE_PATTERN = "^[A-Z]{2}[0-9]{1,3}$"           # a close-up's bare code (specimens.CODE): HC3 is HC3.jpg
+# A worked example's image (specimens.WORKED), bare or as the texts link it: the published index never lists these, and
+# a host that checks arguments against the schema would refuse one before it reached this server (0.4.32).
+WORKED_PATTERN = "^(specimens/)?worked-[a-z0-9-]+\\.jpg$"
 
 DESCRIPTIONS = {
     "list": "Lists the files of a Theodore skill.",
@@ -192,8 +195,8 @@ def _plugin_tools(index: dict | None = None) -> list[dict]:
     # The deck-design sections as a folder would list them; any other name is still accepted (a pptx section the
     # service serves to this account, lane STUDIO), and an unknown one answers that there is no such section.
     section = {"anyOf": [{"type": "string", "enum": sections}, {"type": "string"}]} if sections else {"type": "string"}
-    sheet = {"anyOf": [{"type": "string", "enum": sheets}, {"type": "string", "pattern": CODE_PATTERN}]} if sheets \
-        else {"type": "string"}
+    sheet = {"anyOf": [{"type": "string", "enum": sheets}, {"type": "string", "pattern": CODE_PATTERN},
+                       {"type": "string", "pattern": WORKED_PATTERN}]} if sheets else {"type": "string"}
     return [
         {"name": "list", "description": DESCRIPTIONS["list"],
          "inputSchema": {"type": "object", "properties": {"skill": {"type": "string", "enum": list(SKILLS)}},

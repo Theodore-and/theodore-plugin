@@ -549,7 +549,14 @@ fi
 if [ "${1:-}" = "uninstall" ]; then
   # Theodore's Python is not there (never installed, or removed by something else): the launcher does what the
   # client's uninstall does, as far as sh can, and says what it could not do.
-  [ -f "$B/pid" ] && kill "$(cat "$B/pid" 2>/dev/null)" 2>/dev/null
+  # The bootstrap job, only while its number is still that job's (0.4.32): a number left by a job that was stopped
+  # can be another program's by now, so the process must be running the launcher's job (its command line says
+  # __bootstrap). Without ps nothing is stopped.
+  bp=$(cat "$B/pid" 2>/dev/null)
+  case "$bp" in
+    ''|*[!0-9]*) ;;
+    *) ps -ww -o command= -p "$bp" 2>/dev/null | grep -q -e ' __bootstrap' && kill "$bp" 2>/dev/null ;;
+  esac
   left=
   unreg() { # name command...: run an unregistration; anything but "done" or "nothing there" is residue
     name=$1; shift

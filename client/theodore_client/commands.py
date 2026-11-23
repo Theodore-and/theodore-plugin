@@ -304,7 +304,7 @@ def _pptx_manual_text(directory: Path, version: str, role: str | None, pointers:
     return _pptx_pointers(raw.decode("utf-8", errors="replace"), role), False
 
 
-def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str) -> str:
+def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str, role: str | None = None) -> str:
     """How the manual's other texts are read: through the launcher, which prints each in parts that fit one answer (a
     file read with cat can be longer than a host shows, and the assistant then sees only its start).
 
@@ -312,8 +312,12 @@ def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str) -> str:
     first ...)", in the first lines of every pptx body: an assistant asked for a deck read the build API before it had
     prepared the deck's slides, and the ones that did went on to build every slide alone (2026-11-22: on a real
     request the installed product built alone where the same texts read from a checkout, which has no such line,
-    started a designer per slide). The manual itself names each text where it is needed."""
-    texts = f"          a text this manual names  ->  {launcher} guide pptx <name>   (a name that is not one lists them)"
+    started a designer per slide). The manual itself names each text where it is needed.
+
+    For a reader with a role (a slide's designer) the command carries it (0.4.32): without `--role slide` a designer
+    who followed this line was given the lead's composition of the text. The lead's line is unchanged."""
+    texts = (f"          a text this manual names  ->  {launcher} guide pptx <name>{_role_option(role)}"
+             f"   (a name that is not one lists them)")
     if on_disk:
         return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}\n{texts}"
     return texts
@@ -373,7 +377,7 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: b
         header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
                   f"          python3 ...  ->  {launcher} python ...",
                   f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
-                  _pptx_files_binding(directory, on_disk, launcher)]
+                  _pptx_files_binding(directory, on_disk, launcher, role)]
         directions = _directions("pptx", role)
         if directions.startswith("THEODORE OFFLINE: "):
             header.insert(0, directions)         # first thing read: the agent fetches it again before building
@@ -466,13 +470,18 @@ def _section_name(given: str) -> str:
 
 def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
     """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
-    the ones the service serves to this account and the texts the selected engine brought as files."""
+    the ones the service serves to this account and the texts the selected engine brought as files.
+
+    Both lists are the reader's own (0.4.32): the entry is fetched with the reader's role, so a designer is shown the
+    sections a designer's entry links, and the pptx index is asked with that role too. Until then a designer who named
+    no section was shown the lead's list, lead-only names among them, which the service then refused to that reader.
+    The sheet index the specimen commands read is not a list of sections and is asked as before."""
     launcher = quoted_launcher()
     shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if skill == "pptx":
         served: list[str] = []
         try:
-            _status, _headers, raw = _api("guide", "guide pptx", skill="pptx", query={"form": "index"})
+            _status, _headers, raw = _api("guide", "guide pptx", skill="pptx", query=_role_query({"form": "index"}, role))
             index = json.loads(raw.decode("utf-8", errors="replace") or "{}")
             served = [str(s.get("name")) for s in index.get("sections") or []
                       if isinstance(s, dict) and s.get("name") and s.get("name") != MANUAL_SECTION]
@@ -486,7 +495,7 @@ def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
         return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx{_role_option(role)} for the manual.")
     names: list[str] = []
     try:
-        _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill)
+        _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill, query=_role_query(None, role))
         for name in REFERENCE_LINK.findall(raw.decode("utf-8", errors="replace")):
             if name not in names:
                 names.append(name)
@@ -3439,27 +3448,78 @@ def _codex_leftovers() -> None:
                 config.unlink()
 
 
-def _theodore_pids() -> list[int]:
+def _inside(text: str, root: Path) -> bool:
+    """Whether a program path (Windows) or a command line (elsewhere) names something inside Theodore's folder."""
+    forms = {str(root).rstrip("\\/")}
+    with contextlib.suppress(OSError):
+        forms.add(os.path.realpath(root).rstrip("\\/"))
+    if core.IS_WINDOWS:
+        return any(text.lower().startswith(form.lower() + "\\") for form in forms if form)
+    return any(form + "/" in text for form in forms if form)
+
+
+def _recorded_is_ours(pid: int, record: Path, root: Path, job_word: str | None = None) -> tuple[bool, str]:
+    """Whether the process holding `pid` now is the one Theodore wrote `record` for, with the reason when it is not.
+    Both must hold (0.4.32):
+    - it runs from inside Theodore's folder: on Windows its program file (Theodore's Python, Node or LibreOffice), on
+      the other systems its command line (Theodore's Python and client; for the launcher's job, `job_word`, which its
+      command line carries whichever copy of the launcher started it);
+    - it started no later than the record's last write. The process a record was written for, or a parent for it
+      (Job.spawn writes the number after the child exists), was running when the record was last written; a process
+      that took the number over was started after that one ended, so after the record's last write.
+    Anything that cannot be read is no proof: such a process is left alone. A stray Theodore process left behind is
+    reported and retried by the uninstall; a stranger's program stopped is not undone."""
+    program, started = core.process_facts(pid)
+    if not program or started is None:
+        return False, "what it runs or when it started cannot be read"
+    if not _inside(program, root) and not (job_word and job_word in program.split() and "theodore" in program):
+        return False, "it does not run from Theodore's folder"
+    try:
+        written = record.stat().st_mtime
+    except OSError:
+        return False, "its record cannot be read"
+    if started > written + core.START_TOLERANCE:
+        return False, "it started after its record was last written, so the number is another process's now"
+    return True, ""
+
+
+def _theodore_pids() -> dict[int, float | None]:
     """Theodore's own running processes, each found by a file Theodore wrote for it, never by name: every background
-    job (state/jobs/*.json), the launcher's bootstrap (state/bootstrap/pid) and every tool server
-    (state/servers/<pid>). This process is never among them."""
+    job (state/jobs/*.json) that has not finished, the launcher's bootstrap (state/bootstrap/pid) and every tool server
+    (state/servers/<pid>); each only when the process holding the number now is the one its record was written for
+    (_recorded_is_ours). Never this process or any process above it. Each with the time it started, so that a number
+    is not acted on again once its process has ended and another has it."""
     home = core.home()
-    pids: set[int] = set()
+    records: list[tuple[int, Path, str | None]] = []
     for path in (sorted(home.jobs.glob("*.json")) if home.jobs.is_dir() else []):
+        state = Job(path.stem).read()
+        if state.get("done") or state.get("failed"):        # a finished job's number is nobody's of Theodore's
+            continue
         with contextlib.suppress(ValueError, TypeError):
-            pids.add(int(Job(path.stem).read().get("pid") or 0))
+            records.append((int(state.get("pid") or 0), path, None))
     with contextlib.suppress(OSError, ValueError):
-        pids.add(int((home.state / "bootstrap" / "pid").read_text(encoding="utf-8").strip() or 0))
+        bootstrap = home.state / "bootstrap" / "pid"
+        records.append((int(bootstrap.read_text(encoding="utf-8").strip() or 0), bootstrap, "__bootstrap"))
     servers = home.state / "servers"
     for path in (servers.iterdir() if servers.is_dir() else []):
         with contextlib.suppress(ValueError):
-            pids.add(int(path.name))
-    return sorted(p for p in pids if p > 0 and p != os.getpid() and core.pid_alive(p))
+            records.append((int(path.name), path, None))
+    mine = core.ancestors()
+    found: dict[int, float | None] = {}
+    for pid, record, job_word in records:
+        if pid <= 0 or pid in mine or pid in found or not core.pid_alive(pid):
+            continue
+        ours, why = _recorded_is_ours(pid, record, home.root, job_word)
+        if ours:
+            found[pid] = core.process_facts(pid)[1]
+        else:
+            core.log(f"uninstall: process {pid} named by {record.name} left alone: {why}")
+    return found
 
 
 def _processes_in_folder(root: Path) -> list[int]:
     """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, LibreOffice, Git
-    Bash), whatever started them; never this process or its parents. Read with WMI. Empty elsewhere."""
+    Bash), whatever started them; never this process or any process above it. Read with WMI. Empty elsewhere."""
     if not core.IS_WINDOWS or not root.exists():
         return []
     ps = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -3468,19 +3528,29 @@ def _processes_in_folder(root: Path) -> list[int]:
                       "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
                       "$_.ExecutablePath.StartsWith($env:THEODORE_ROOT_SCAN, [StringComparison]::OrdinalIgnoreCase) } | "
                       "ForEach-Object { $_.ProcessId }"], timeout=60)
-    mine = {os.getpid(), os.getppid()}
+    mine = core.ancestors()
     return sorted({int(x) for x in out.split() if x.isdigit()} - mine) if code == 0 else []
+
+
+def _same_process(pid: int, started: float | None) -> bool:
+    """Still the process that was chosen: alive, and started when it did then (a number freed meanwhile is another's)."""
+    if not core.pid_alive(pid):
+        return False
+    now = core.process_facts(pid)[1]
+    return started is not None and now is not None and abs(now - started) <= core.START_TOLERANCE
 
 
 def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
     """Stop Theodore's own processes and the processes they started (on Windows the whole tree: a download or an
     unpacker holds files in the folder, and Windows cannot delete a file in use), then wait until they are gone. On
     Windows also every process running a program from inside Theodore's folder (the launcher's bootstrap has no pid
-    record there), each logged."""
-    pids = _theodore_pids()
+    record there), each logged. A process is stopped by force only while it is still the one chosen."""
+    chosen = _theodore_pids()
+    pids = list(chosen)
     for pid in _processes_in_folder(core.home().root):
-        if pid not in pids:
+        if pid not in chosen:
             pids.append(pid)
+            chosen[pid] = core.process_facts(pid)[1]
             core.log(f"uninstall: process {pid} runs a program from inside {core.home().root}: stopped")
     for pid in pids:
         if core.IS_WINDOWS:
@@ -3490,17 +3560,28 @@ def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
             with contextlib.suppress(OSError):
                 os.killpg(os.getpgid(pid), 15) if os.getpgid(pid) == pid else os.kill(pid, 15)
     deadline = time.monotonic() + wait
-    while time.monotonic() < deadline and any(core.pid_alive(p) for p in pids):
+    while time.monotonic() < deadline and any(_same_process(p, chosen[p]) for p in pids):
         time.sleep(0.25)
     if not core.IS_WINDOWS:
         for pid in pids:
-            if core.pid_alive(pid):
+            if _same_process(pid, chosen[pid]):
                 with contextlib.suppress(OSError):
                     os.kill(pid, 9)
     return pids
 
 
 UNINSTALL_MARKER = ".theodore-uninstalling"
+# The cleanup's answer to whoever stopped it (0.4.32). The cleanup removes this file, then looks for the marker, before
+# every step that could touch what a new installation writes; it writes the file only where no such step is under way
+# (removing what it has already renamed, waiting between passes, or stopped). So an installer or launcher that removed
+# the marker and then sees this file knows nothing it writes from then on is removed: the next step of the cleanup
+# looks for the marker first, finds it gone, and stops. It replaced a fixed five-second pause (on 2026-11-23 a pass
+# that had begun before the pause was still removing staging\ when the new installer wrote there: SETUP_FAILED DISK).
+CLEANUP_SAFE = ".theodore-cleanup-safe"
+# What the cleanup renames a folder to before it removes it. No installer or launcher ever writes a name of this form,
+# so removing it is safe at any time, however long it takes; one interrupted (a reboot) is removed by the next pass or
+# the next uninstall, and an installation never reads it.
+REMOVING = ".removing-"
 
 
 # The cleanup script's paths reach it only through these variables, never written into it: cmd.exe reads a batch file
@@ -3514,37 +3595,66 @@ CLEANUP_VARS = ("THEODORE_CLEANUP_ROOT", "THEODORE_CLEANUP_RESULT", "THEODORE_CL
 
 def _cleanup_script(names: list[str], keep_specimen_record: bool) -> str:
     """The cleanup batch file: ASCII only, every path read from CLEANUP_VARS. With the argument "probe" it only answers
-    whether it sees the marker in Theodore's folder (exit 0) or not (exit 3), and touches nothing."""
+    whether it sees the marker in Theodore's folder (exit 0) or not (exit 3), and touches nothing.
+
+    Each folder is first renamed to <name>.removing-<random> (one quick step in the same folder), then removed under
+    that name. Only a folder that cannot be renamed (a file in it still held) is removed where it is, as before. Every
+    step that could reach what a new installation writes (a rename, a removal in place, a file of state\\) is preceded
+    by removing CLEANUP_SAFE and then looking for the marker: until 0.4.31 the marker was looked for once a pass, and a
+    pass over a large folder outlasted the installer's pause. The subroutines get only Theodore's own names as
+    arguments (`call` expands % once more, so a path is never passed to one)."""
     for name in names:
         if not name.isascii() or not name.replace(".", "").replace("_", "").replace("-", "").isalnum():
             raise ValueError(f"not a folder name the cleanup can hold: {name!r}")
     root, result = "%THEODORE_CLEANUP_ROOT%", "%THEODORE_CLEANUP_RESULT%"
     marker = f'"{root}\\{UNINSTALL_MARKER}"'
+    safe = f'"{root}\\{CLEANUP_SAFE}"'
+    # Safe at any time: only names no installation uses. Folders, then files (a renamed file, should one be).
+    sweep = [f'for /d %%D in ("{root}\\*{REMOVING}*") do rmdir /s /q "%%~fD" >nul 2>&1',
+             f'for %%F in ("{root}\\*{REMOVING}*") do del /f /q "%%~fF" >nul 2>&1']
     lines = ["@echo off", "setlocal enableextensions disabledelayedexpansion",
-             'if /i "%~1"=="probe" goto probe', "set N=0",
+             'if /i "%~1"=="probe" goto probe', "set N=0", "set STOP=",
              # A few seconds first: the launcher that called the client reads its own file to its end once it exits.
              "ping -n 3 127.0.0.1 >nul", ":again",
-             f"if exist {marker} goto pass", f'>"{result}" echo stopped: a new installation started in the folder', "goto end",
-             ":pass"]
+             f"if not exist {marker} goto stopped"]
     for name in names:
-        if name == "state" and keep_specimen_record:
-            lines.append(f'for /d %%D in ("{root}\\{name}\\*") do rmdir /s /q "%%D" >nul 2>&1')
-            lines.append(f'for %%F in ("{root}\\{name}\\*") do if /i not "%%~nxF"=="%THEODORE_CLEANUP_KEEP%" del /f /q "%%F" >nul 2>&1')
-        else:
-            lines.append(f'if exist "{root}\\{name}" rmdir /s /q "{root}\\{name}" >nul 2>&1')
+        lines.append("call :keep_state" if name == "state" and keep_specimen_record else f"call :take {name}")
+    # Nothing a new installation writes is touched from here to the next pass: the answer is there meanwhile.
+    lines += ["if defined STOP goto stopped", f"type nul >{safe} 2>nul"] + sweep
     gone = [n for n in names if not (n == "state" and keep_specimen_record)]
     # Every second for up to five minutes; the result says how many passes it took and what, if anything, stayed.
-    lines += [f'if exist "{root}\\{n}" goto wait' for n in gone]
+    lines += [f'if exist "{root}\\{n}" goto wait' for n in gone] + [f'if exist "{root}\\*{REMOVING}*" goto wait']
     lines += ["goto done", ":wait", "set /a N+=1", "if %N% geq 300 goto done", "ping -n 2 127.0.0.1 >nul", "goto again",
-              ":done", f"del /f /q {marker} >nul 2>&1", f'rmdir "{root}" >nul 2>&1', f'>>"{result}" echo passes: %N%']
+              # The marker and the empty folder go only while no installation has started: then the folder is its.
+              ":done", f"del /f /q {safe} >nul 2>&1", f"if not exist {marker} set STOP=1",
+              f"if not defined STOP del /f /q {marker} >nul 2>&1", f'if not defined STOP rmdir "{root}" >nul 2>&1',
+              f'>>"{result}" echo passes: %N%']
     lines += [f'if exist "{root}\\{n}" (>>"{result}" echo left: {n})' for n in gone]
+    lines += [f'if exist "{root}\\*{REMOVING}*" (>>"{result}" echo left: renamed folders)']
+    lines += [f'if not exist "{root}" (>>"{result}" echo removed: the folder)', "if defined STOP goto stopped", "goto end",
+              # Stopped: the answer for whoever stopped it, then what this cleanup renamed goes (it is nobody's now).
+              ":stopped", f'>>"{result}" echo stopped: a new installation started in the folder', f"type nul >{safe} 2>nul"]
+    lines += sweep
     # The result is kept five minutes for whoever wants to confirm, then this folder goes too: nothing is left.
     # Out of its own folder first: a process's current folder cannot be removed, so the empty
     # %TEMP%\theodore-uninstall-<random> stayed after every uninstall (WINDOWS, W-12). The `cd` comes after `(goto)` on the
     # same line: ending the batch ends its setlocal, which puts the folder it saved (this one) back as the current one.
-    lines += [f'if not exist "{root}" (>>"{result}" echo removed: the folder)', ":end", "ping -n 301 127.0.0.1 >nul",
+    lines += [":end", "ping -n 301 127.0.0.1 >nul",
               '(goto) 2>nul & cd /d "%THEODORE_CLEANUP_WORK%\\.." & rmdir /s /q "%THEODORE_CLEANUP_WORK%"',
-              ":probe", f"if not exist {marker} exit /b 3", 'if not exist "%THEODORE_CLEANUP_SCRIPT%" exit /b 4', "exit /b 0"]
+              ":probe", f"if not exist {marker} exit /b 3", 'if not exist "%THEODORE_CLEANUP_SCRIPT%" exit /b 4', "exit /b 0",
+              # One of Theodore's folders (%1): renamed, then removed under its new name in the sweep; in place only
+              # when the rename failed. A stop is a flag: a `goto` out of a called label would not end the pass.
+              ":take", "if defined STOP exit /b 0", f'if not exist "{root}\\%~1" exit /b 0',
+              f"del /f /q {safe} >nul 2>&1", f"if not exist {marker} set STOP=1", "if defined STOP exit /b 0",
+              f'set "T=%~1{REMOVING}%RANDOM%%RANDOM%"', f'ren "{root}\\%~1" "%T%" >nul 2>&1',
+              f'if not exist "{root}\\%~1" exit /b 0', f'rmdir /s /q "{root}\\%~1" >nul 2>&1', "exit /b 0",
+              # state\ with the record of specimen folders still to remove: everything else in it, one entry at a time.
+              ":keep_state", f'for /d %%D in ("{root}\\state\\*") do call :drop d "%%~nxD"',
+              f'for %%F in ("{root}\\state\\*") do if /i not "%%~nxF"=="%THEODORE_CLEANUP_KEEP%" call :drop f "%%~nxF"',
+              "exit /b 0",
+              ":drop", "if defined STOP exit /b 0", f"del /f /q {safe} >nul 2>&1", f"if not exist {marker} set STOP=1", "if defined STOP exit /b 0",
+              f'if "%~1"=="d" rmdir /s /q "{root}\\state\\%~2" >nul 2>&1',
+              f'if "%~1"=="f" del /f /q "{root}\\state\\%~2" >nul 2>&1', "exit /b 0"]
     text = "\r\n".join(lines) + "\r\n"
     assert text.isascii()
     return text
@@ -3672,8 +3782,11 @@ def _uninstall(keep_hosts: bool) -> int:
             if name in ("runtime", "client", "bin") or (name == "state" and specimens_left):
                 continue
             core.remove_tree(root / name)
+        # What an earlier cleanup renamed and could not finish removing (a reboot in between) goes too (0.4.32).
+        for left_over in (root.glob(f"*{REMOVING}*") if root.is_dir() else []):
+            core.remove_tree(left_over)
         names = list(core.OWNED)        # each guarded by "if exist" in the script: a folder written meanwhile (a log) goes too
-        pending = any((root / x).exists() for x in names)
+        pending = any((root / x).exists() for x in names) or (root.is_dir() and any(root.glob(f"*{REMOVING}*")))
         result = _windows_cleanup(root, names, bool(specimens_left)) if pending else None
         if pending and result is None:      # the cleanup could not see the folder: it stays, and is named as left
             left.append(f"Theodore's folder {root} (nothing of Theodore runs any more; it can be deleted by hand)")

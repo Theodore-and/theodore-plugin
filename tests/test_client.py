@@ -1914,9 +1914,12 @@ class StatusDoctorUninstall(ClientCase):
         # the file Theodore wrote for it, never by name; this test's own processes of the same name are untouched.
         self.ready()
         sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
-        job = subprocess.Popen(sleeper, start_new_session=True)
-        server = subprocess.Popen(sleeper, start_new_session=True)
+        # A job and a server run Theodore's client from its folder (0.4.32: a recorded number is acted on only then).
+        ours = sleeper + [str(self.box.home / "client" / "current")]
+        job = subprocess.Popen(ours, start_new_session=True)
+        server = subprocess.Popen(ours, start_new_session=True)
         bystander = subprocess.Popen(sleeper, start_new_session=True)
+        time.sleep(0.5)                 # each was running before its record was written, as Theodore's are
         for proc in (job, server, bystander):
             self.addCleanup(lambda p=proc: p.poll() is None and p.kill())
         jobs = self.box.home / "state" / "jobs"

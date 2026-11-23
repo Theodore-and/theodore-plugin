@@ -40,6 +40,12 @@ MAX_BYTES = 1 << 20
 NAME = re.compile(r"[A-Za-z0-9._-]{1,80}\.jpg")
 CODE = re.compile(r"[A-Z]{2}[0-9]{1,3}")          # a close-up's code, as the texts print it under a drawing: HC3 is HC3.jpg
 LINK = re.compile(r"\]\(specimens/([A-Za-z0-9._-]{1,80}\.jpg)\)")
+# A worked example's image (0.4.32): served by its exact name, never listed in the published index. The worked-notes
+# text names each one. So a name of this form that the service does not have is never matched against the index, whose
+# names are all of other kinds: a nearest name from it would be a wrong sheet offered with confidence.
+WORKED = re.compile(r"worked-[a-z0-9-]+\.jpg")
+# How a text links a sheet: `specimens/<file>.jpg`. A reader may give the link's path as it is (0.4.32).
+LINK_FOLDER = ("./specimens/", "specimens/")
 # Names Windows gives to devices, whatever follows the first dot: never a file name here, on any system.
 DEVICES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT{i}" for i in range(10))}
 
@@ -85,7 +91,13 @@ def content_matches(raw: bytes, etag: str | None) -> bool:
 
 
 def file_name(name):
-    """A bare code names its close-up's file; any other name is left as it is (and checked by valid_name)."""
+    """A bare code names its close-up's file; a name given as the texts link it (`specimens/<file>.jpg`) is that file;
+    any other name is left as it is (and checked by valid_name)."""
+    if isinstance(name, str):
+        for folder in LINK_FOLDER:
+            if name.startswith(folder):
+                name = name[len(folder):]
+                break
     return f"{name}.jpg" if isinstance(name, str) and CODE.fullmatch(name) else name
 
 
@@ -155,7 +167,10 @@ def nearest(name: str, names: list[str] | None, most: int = 3) -> list[str]:
 
 
 def missing_note(name: str, names: list[str] | None) -> str:
-    """One line for a name that is not a sheet, with the nearest real names when the list of sheets is known."""
+    """One line for a name that is not a sheet, with the nearest real names when the list of sheets is known. A worked
+    example's image is not in that list (WORKED): its line names no other sheet and says where the exact names are."""
+    if WORKED.fullmatch(name):
+        return f"no such sheet: {name}; the worked-notes text gives each worked image's exact name"
     near = nearest(name, names)
     code = FAMILY.fullmatch(name[:-4] if name.lower().endswith(".jpg") else name)
     if near and code and FAMILY.fullmatch(near[0][:-4]):
