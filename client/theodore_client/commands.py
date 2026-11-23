@@ -3448,27 +3448,78 @@ def _codex_leftovers() -> None:
                 config.unlink()
 
 
-def _theodore_pids() -> list[int]:
+def _inside(text: str, root: Path) -> bool:
+    """Whether a program path (Windows) or a command line (elsewhere) names something inside Theodore's folder."""
+    forms = {str(root).rstrip("\\/")}
+    with contextlib.suppress(OSError):
+        forms.add(os.path.realpath(root).rstrip("\\/"))
+    if core.IS_WINDOWS:
+        return any(text.lower().startswith(form.lower() + "\\") for form in forms if form)
+    return any(form + "/" in text for form in forms if form)
+
+
+def _recorded_is_ours(pid: int, record: Path, root: Path, job_word: str | None = None) -> tuple[bool, str]:
+    """Whether the process holding `pid` now is the one Theodore wrote `record` for, with the reason when it is not.
+    Both must hold (0.4.32):
+    - it runs from inside Theodore's folder: on Windows its program file (Theodore's Python, Node or LibreOffice), on
+      the other systems its command line (Theodore's Python and client; for the launcher's job, `job_word`, which its
+      command line carries whichever copy of the launcher started it);
+    - it started no later than the record's last write. The process a record was written for, or a parent for it
+      (Job.spawn writes the number after the child exists), was running when the record was last written; a process
+      that took the number over was started after that one ended, so after the record's last write.
+    Anything that cannot be read is no proof: such a process is left alone. A stray Theodore process left behind is
+    reported and retried by the uninstall; a stranger's program stopped is not undone."""
+    program, started = core.process_facts(pid)
+    if not program or started is None:
+        return False, "what it runs or when it started cannot be read"
+    if not _inside(program, root) and not (job_word and job_word in program.split() and "theodore" in program):
+        return False, "it does not run from Theodore's folder"
+    try:
+        written = record.stat().st_mtime
+    except OSError:
+        return False, "its record cannot be read"
+    if started > written + core.START_TOLERANCE:
+        return False, "it started after its record was last written, so the number is another process's now"
+    return True, ""
+
+
+def _theodore_pids() -> dict[int, float | None]:
     """Theodore's own running processes, each found by a file Theodore wrote for it, never by name: every background
-    job (state/jobs/*.json), the launcher's bootstrap (state/bootstrap/pid) and every tool server
-    (state/servers/<pid>). This process is never among them."""
+    job (state/jobs/*.json) that has not finished, the launcher's bootstrap (state/bootstrap/pid) and every tool server
+    (state/servers/<pid>); each only when the process holding the number now is the one its record was written for
+    (_recorded_is_ours). Never this process or any process above it. Each with the time it started, so that a number
+    is not acted on again once its process has ended and another has it."""
     home = core.home()
-    pids: set[int] = set()
+    records: list[tuple[int, Path, str | None]] = []
     for path in (sorted(home.jobs.glob("*.json")) if home.jobs.is_dir() else []):
+        state = Job(path.stem).read()
+        if state.get("done") or state.get("failed"):        # a finished job's number is nobody's of Theodore's
+            continue
         with contextlib.suppress(ValueError, TypeError):
-            pids.add(int(Job(path.stem).read().get("pid") or 0))
+            records.append((int(state.get("pid") or 0), path, None))
     with contextlib.suppress(OSError, ValueError):
-        pids.add(int((home.state / "bootstrap" / "pid").read_text(encoding="utf-8").strip() or 0))
+        bootstrap = home.state / "bootstrap" / "pid"
+        records.append((int(bootstrap.read_text(encoding="utf-8").strip() or 0), bootstrap, "__bootstrap"))
     servers = home.state / "servers"
     for path in (servers.iterdir() if servers.is_dir() else []):
         with contextlib.suppress(ValueError):
-            pids.add(int(path.name))
-    return sorted(p for p in pids if p > 0 and p != os.getpid() and core.pid_alive(p))
+            records.append((int(path.name), path, None))
+    mine = core.ancestors()
+    found: dict[int, float | None] = {}
+    for pid, record, job_word in records:
+        if pid <= 0 or pid in mine or pid in found or not core.pid_alive(pid):
+            continue
+        ours, why = _recorded_is_ours(pid, record, home.root, job_word)
+        if ours:
+            found[pid] = core.process_facts(pid)[1]
+        else:
+            core.log(f"uninstall: process {pid} named by {record.name} left alone: {why}")
+    return found
 
 
 def _processes_in_folder(root: Path) -> list[int]:
     """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, LibreOffice, Git
-    Bash), whatever started them; never this process or its parents. Read with WMI. Empty elsewhere."""
+    Bash), whatever started them; never this process or any process above it. Read with WMI. Empty elsewhere."""
     if not core.IS_WINDOWS or not root.exists():
         return []
     ps = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -3477,19 +3528,29 @@ def _processes_in_folder(root: Path) -> list[int]:
                       "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
                       "$_.ExecutablePath.StartsWith($env:THEODORE_ROOT_SCAN, [StringComparison]::OrdinalIgnoreCase) } | "
                       "ForEach-Object { $_.ProcessId }"], timeout=60)
-    mine = {os.getpid(), os.getppid()}
+    mine = core.ancestors()
     return sorted({int(x) for x in out.split() if x.isdigit()} - mine) if code == 0 else []
+
+
+def _same_process(pid: int, started: float | None) -> bool:
+    """Still the process that was chosen: alive, and started when it did then (a number freed meanwhile is another's)."""
+    if not core.pid_alive(pid):
+        return False
+    now = core.process_facts(pid)[1]
+    return started is not None and now is not None and abs(now - started) <= core.START_TOLERANCE
 
 
 def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
     """Stop Theodore's own processes and the processes they started (on Windows the whole tree: a download or an
     unpacker holds files in the folder, and Windows cannot delete a file in use), then wait until they are gone. On
     Windows also every process running a program from inside Theodore's folder (the launcher's bootstrap has no pid
-    record there), each logged."""
-    pids = _theodore_pids()
+    record there), each logged. A process is stopped by force only while it is still the one chosen."""
+    chosen = _theodore_pids()
+    pids = list(chosen)
     for pid in _processes_in_folder(core.home().root):
-        if pid not in pids:
+        if pid not in chosen:
             pids.append(pid)
+            chosen[pid] = core.process_facts(pid)[1]
             core.log(f"uninstall: process {pid} runs a program from inside {core.home().root}: stopped")
     for pid in pids:
         if core.IS_WINDOWS:
@@ -3499,11 +3560,11 @@ def _stop_theodore_processes(wait: float = 15.0) -> list[int]:
             with contextlib.suppress(OSError):
                 os.killpg(os.getpgid(pid), 15) if os.getpgid(pid) == pid else os.kill(pid, 15)
     deadline = time.monotonic() + wait
-    while time.monotonic() < deadline and any(core.pid_alive(p) for p in pids):
+    while time.monotonic() < deadline and any(_same_process(p, chosen[p]) for p in pids):
         time.sleep(0.25)
     if not core.IS_WINDOWS:
         for pid in pids:
-            if core.pid_alive(pid):
+            if _same_process(pid, chosen[pid]):
                 with contextlib.suppress(OSError):
                     os.kill(pid, 9)
     return pids

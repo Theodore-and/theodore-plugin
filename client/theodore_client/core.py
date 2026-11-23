@@ -1022,6 +1022,140 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+# --- whose process a number is (0.4.32) -------------------------------------------------------------------------------
+# A process number read from a file proves nothing by itself: a job's record keeps its number after the job has ended,
+# and the system hands freed numbers out again (quickly on Windows). An uninstall stopped whatever held a recorded
+# number, so it could stop a stranger's program and, with taskkill /T /F, everything that program had started (seen on
+# the Windows test machine on 2026-11-23, with a stand-in given a finished job's number). What a process is now is read
+# here; commands._recorded_is_ours decides from it.
+
+def _windows_process_facts(pid: int) -> tuple[str | None, float | None]:
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))          # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None, None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        program = buffer.value if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)) else None
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        started = None
+        if kernel32.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+            ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime      # 100 ns since 1601-01-01 UTC
+            started = ticks / 1e7 - 11644473600 if ticks else None
+        return program, started
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _ps(pid: int, field: str) -> str | None:
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", f"{field}=", "-p", str(int(pid))], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = out.stdout.decode("utf-8", "replace").strip()
+    return text if out.returncode == 0 and text else None
+
+
+def _elapsed_seconds(text: str) -> float | None:
+    """ps's etime: [[dd-]hh:]mm:ss."""
+    days, _, rest = text.strip().rpartition("-")
+    try:
+        parts = [int(x) for x in rest.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0)
+        return int(days or 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except ValueError:
+        return None
+
+
+def _posix_process_facts(pid: int) -> tuple[str | None, float | None]:
+    proc = Path("/proc") / str(int(pid))
+    if (proc / "stat").exists():            # Linux: exact, and no program to start
+        try:
+            command = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip() or None
+            fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+            boot = next(float(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime "))
+            return command, boot + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+        except (OSError, ValueError, IndexError, StopIteration):
+            return None, None
+    command = _ps(pid, "command")
+    elapsed = _elapsed_seconds(_ps(pid, "etime") or "")
+    return command, (time.time() - elapsed if elapsed is not None else None)
+
+
+def process_facts(pid: int) -> tuple[str | None, float | None]:
+    """(what the process runs, when it started, seconds since the epoch) for the process holding `pid` now; None for
+    what cannot be read. What it runs: on Windows its program file, elsewhere its whole command line."""
+    if not pid or pid <= 0:
+        return None, None
+    try:
+        return _windows_process_facts(pid) if IS_WINDOWS else _posix_process_facts(pid)
+    except Exception:       # noqa: BLE001  no proof: the caller leaves the process alone
+        return None, None
+
+
+# How much later than its record's last write a process may seem to have started and still be the one that wrote it:
+# Windows times are exact; ps gives whole seconds of elapsed time.
+START_TOLERANCE = 1.0 if IS_WINDOWS else 2.0
+
+
+def _parents() -> dict[int, int]:
+    """Every process's parent, by number (empty when it cannot be read)."""
+    parents: dict[int, int] = {}
+    if IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)              # TH32CS_SNAPPROCESS
+        if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+            return parents
+        try:
+            entry = Entry()
+            entry.dwSize = ctypes.sizeof(Entry)
+            more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while more:
+                parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return parents
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, timeout=10).stdout.decode("ascii", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return parents
+    for line in out.splitlines():
+        with contextlib.suppress(ValueError):
+            pid, ppid = (int(x) for x in line.split())
+            parents[pid] = ppid
+    return parents
+
+
+def ancestors() -> set[int]:
+    """This process and every process above it, to the top: never stopped by Theodore, whatever a record says (a
+    parent's number can be another program's now, which is only more left alone)."""
+    mine = {os.getpid(), os.getppid()}
+    try:
+        parents = _parents()
+    except Exception:       # noqa: BLE001
+        parents = {}
+    at = os.getppid()
+    while at and at in parents and parents[at] not in mine and parents[at] > 0:
+        at = parents[at]
+        mine.add(at)
+    mine.discard(0)
+    return mine
+
+
 class Job:
     """state/jobs/<name>.json: {pid, phase, percent, done, failed:{cause, detail}} for one detached task."""
 
@@ -1051,11 +1185,13 @@ class Job:
             fields["percent"] = max(0, min(100, int(percent)))
         self.update(**fields)
 
+    # A finished job's record no longer names a process (0.4.32): the number is soon another program's. Records written
+    # before keep theirs, so whoever acts on a number still checks whose it is (commands._recorded_is_ours).
     def finish(self) -> None:
-        self.update(done=True, percent=100, phase="done")
+        self.update(done=True, percent=100, phase="done", pid=0)
 
     def fail(self, cause: str, detail: str) -> None:
-        self.update(failed={"cause": cause, "detail": scrub_secrets(detail)[:300]})
+        self.update(failed={"cause": cause, "detail": scrub_secrets(detail)[:300]}, pid=0)
 
     def clear(self) -> None:
         with contextlib.suppress(OSError):
