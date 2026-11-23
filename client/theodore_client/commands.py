@@ -304,7 +304,7 @@ def _pptx_manual_text(directory: Path, version: str, role: str | None, pointers:
     return _pptx_pointers(raw.decode("utf-8", errors="replace"), role), False
 
 
-def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str) -> str:
+def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str, role: str | None = None) -> str:
     """How the manual's other texts are read: through the launcher, which prints each in parts that fit one answer (a
     file read with cat can be longer than a host shows, and the assistant then sees only its start).
 
@@ -312,8 +312,12 @@ def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str) -> str:
     first ...)", in the first lines of every pptx body: an assistant asked for a deck read the build API before it had
     prepared the deck's slides, and the ones that did went on to build every slide alone (2026-11-22: on a real
     request the installed product built alone where the same texts read from a checkout, which has no such line,
-    started a designer per slide). The manual itself names each text where it is needed."""
-    texts = f"          a text this manual names  ->  {launcher} guide pptx <name>   (a name that is not one lists them)"
+    started a designer per slide). The manual itself names each text where it is needed.
+
+    For a reader with a role (a slide's designer) the command carries it (0.4.32): without `--role slide` a designer
+    who followed this line was given the lead's composition of the text. The lead's line is unchanged."""
+    texts = (f"          a text this manual names  ->  {launcher} guide pptx <name>{_role_option(role)}"
+             f"   (a name that is not one lists them)")
     if on_disk:
         return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}\n{texts}"
     return texts
@@ -373,7 +377,7 @@ def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: b
         header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
                   f"          python3 ...  ->  {launcher} python ...",
                   f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
-                  _pptx_files_binding(directory, on_disk, launcher)]
+                  _pptx_files_binding(directory, on_disk, launcher, role)]
         directions = _directions("pptx", role)
         if directions.startswith("THEODORE OFFLINE: "):
             header.insert(0, directions)         # first thing read: the agent fetches it again before building
@@ -466,13 +470,18 @@ def _section_name(given: str) -> str:
 
 def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
     """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
-    the ones the service serves to this account and the texts the selected engine brought as files."""
+    the ones the service serves to this account and the texts the selected engine brought as files.
+
+    Both lists are the reader's own (0.4.32): the entry is fetched with the reader's role, so a designer is shown the
+    sections a designer's entry links, and the pptx index is asked with that role too. Until then a designer who named
+    no section was shown the lead's list, lead-only names among them, which the service then refused to that reader.
+    The sheet index the specimen commands read is not a list of sections and is asked as before."""
     launcher = quoted_launcher()
     shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if skill == "pptx":
         served: list[str] = []
         try:
-            _status, _headers, raw = _api("guide", "guide pptx", skill="pptx", query={"form": "index"})
+            _status, _headers, raw = _api("guide", "guide pptx", skill="pptx", query=_role_query({"form": "index"}, role))
             index = json.loads(raw.decode("utf-8", errors="replace") or "{}")
             served = [str(s.get("name")) for s in index.get("sections") or []
                       if isinstance(s, dict) and s.get("name") and s.get("name") != MANUAL_SECTION]
@@ -486,7 +495,7 @@ def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
         return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx{_role_option(role)} for the manual.")
     names: list[str] = []
     try:
-        _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill)
+        _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill, query=_role_query(None, role))
         for name in REFERENCE_LINK.findall(raw.decode("utf-8", errors="replace")):
             if name not in names:
                 names.append(name)

@@ -104,9 +104,11 @@ class Listing(McpCase):
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
         one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
         code = {"type": "string", "pattern": "^[A-Z]{2}[0-9]{1,3}$"}         # a close-up's bare code (P042b)
-        self.assertEqual(one["anyOf"], [{"type": "string", "enum": ["cover-01.jpg", "rules-and-ledgers.jpg"]}, code])
+        worked = {"type": "string", "pattern": "^(specimens/)?worked-[a-z0-9-]+\\.jpg$"}   # never listed (0.4.32)
+        self.assertEqual(one["anyOf"], [{"type": "string", "enum": ["cover-01.jpg", "rules-and-ledgers.jpg"]}, code, worked])
         self.assertEqual((many["type"], many["items"]["anyOf"][0]["enum"], many["items"]["anyOf"][1], many["minItems"], many["maxItems"]),
                          ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], code, 1, 6))
+        self.assertEqual(many["items"]["anyOf"][2], worked)
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["role"],
                          {"type": "string", "enum": ["lead", "slide"], "description": '"slide" for an agent given one slide.'})
         self.assertEqual([t["description"] for t in tools.values()],

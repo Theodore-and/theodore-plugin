@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.32
+
+- A slide's designer who names a text that does not exist is now shown only the texts a designer can read. The list was taken from the text written for the whole deck, so it named texts that are not for one slide, and asking for one of those was then refused.
+- The line at the top of the build instructions that says how to read a text they name now gives a slide's designer the command with `--role slide`. Without it, a designer who followed the line was given the text as written for the whole deck. What the assistant leading the deck sees is unchanged.
+- A worked example is fetched by its exact name even though the list of sheets no longer names it: `specimen worked-<...>.jpg` and the tool server's `specimen` ask the service for it, and the tool server's description of its arguments accepts such a name. A worked example's name that does not exist is answered with a line saying the worked-notes text gives the exact names, instead of a sheet of another kind offered in its place.
+- A sheet can be asked for as the texts link it: `specimen specimens/<file>.jpg` is the same as `specimen <file>.jpg`, in the launcher and in the tool server. A text was already read by its link (`guide deck-design <name>.md`).
+
 ## 0.4.31
 
 - The Studio agent carries its own reading list: Theodore's design text, its build text and the steps for one slide, each read for a slide's designer. It used to take the commands from the message that started it, and that message is written by the assistant from a text the assistant itself holds; on 2026-11-22 some assistants ran those commands themselves and built every slide alone instead of handing the slides out (two full builds on Windows that day). With the list in the agent's own instructions, a later version of Theodore's texts can stop naming the commands to the assistant at all. Until then nothing changes for a deck: where Theodore has no text named `in-a-part`, the agent follows the texts its message names, as before.

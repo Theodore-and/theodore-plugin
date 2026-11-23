@@ -61,8 +61,8 @@ set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.4.31"
-set "PIN_CLIENT=client/client-0.4.31.tar dae9b9e2352a562e6e3464664776b0fe8a68b0b33f8b2ecbdd08ac74cb420ec4"
+set "PIN_CLIENT_VERSION=0.4.32"
+set "PIN_CLIENT=client/client-0.4.32.tar bb2ff3cd9183c175648aeb1fb10a0e07b1bd80fca2d278a74285811b1c402f26"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
