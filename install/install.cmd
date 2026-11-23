@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.4.32"
-set "PIN_CLIENT=client/client-0.4.32.tar bb2ff3cd9183c175648aeb1fb10a0e07b1bd80fca2d278a74285811b1c402f26"
+set "PIN_CLIENT=client/client-0.4.32.tar bc7ec62e4d7ed1d53d7ae9f962a41267065e298990c17be34493534aafaf62d2"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -160,8 +160,8 @@ rem An install always goes into %USERPROFILE%\.theodore (or THEODORE_HOME); an e
 if not defined THEODORE_HOME set "HOME_DIR=%USERPROFILE%\.theodore"
 if "%HOME_DIR%"=="\.theodore" goto :not_writable
 rem An uninstall's cleanup may still be running in this folder (an install right after an uninstall): its marker goes
-rem first, which stops it, then a pause lets a pass in progress end before anything is written.
-if exist "%HOME_DIR%\.theodore-uninstalling" (del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1 & ping -n 6 127.0.0.1 >nul)
+rem first, which stops it, then the cleanup's answer is awaited before anything is written (see :stop_cleanup).
+if exist "%HOME_DIR%\.theodore-uninstalling" call :stop_cleanup
 rem A Theodore folder belongs to one service, the one it was set up for (state\environment): this installer does not
 rem reuse a folder of another. Uninstalling is the way out, so it is allowed.
 set "MY_API=%API_BASE%"
@@ -612,6 +612,25 @@ set "TRY=%HOME_DIR%\staging\install-%RANDOM%%RANDOM%"
 mkdir "%TRY%" 2>nul && set "WORK=%TRY%"
 exit /b 0
 
+:stop_cleanup
+rem The marker goes, then this waits for .theodore-cleanup-safe: the cleanup writes it only where nothing it does can
+rem touch what an installation writes, and looks for the marker before each such step, so from then on it stops before
+rem touching anything. A fixed five-second pause did not do: on 2026-11-23 a pass that had begun before it was still
+rem removing staging\ while this installer wrote there. At most a minute (a cleanup that was killed never answers),
+rem then on in any case; CLEANUP_BUSY then lets a failure to write say what it most likely is.
+set /a CLEANUP_WAITED=0
+del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1
+:stop_cleanup_wait
+if exist "%HOME_DIR%\.theodore-cleanup-safe" goto :stop_cleanup_done
+if %CLEANUP_WAITED% GEQ 60 set "CLEANUP_BUSY=1"
+if %CLEANUP_WAITED% GEQ 60 goto :stop_cleanup_done
+"%SYS32%\ping.exe" -n 2 127.0.0.1 >nul 2>&1
+set /a CLEANUP_WAITED+=1
+goto :stop_cleanup_wait
+:stop_cleanup_done
+del /f /q "%HOME_DIR%\.theodore-cleanup-safe" >nul 2>&1
+exit /b 0
+
 :make_safe
 rem A new folder under state\ (mkdir fails when the name exists) whose ACL is exactly: the current user, full control.
 set "TRY=%HOME_DIR%\state\incoming-%RANDOM%%RANDOM%"
@@ -833,10 +852,20 @@ echo TELL THE USER: Theodore's installer needs Windows 10 version 1803 or later.
 exit /b 69
 
 :not_writable
+if defined CLEANUP_BUSY goto :cleanup_busy
 echo THEODORE SETUP_FAILED: cause DISK: Theodore's folder is not writable.
 echo NEXT: free disk space or set THEODORE_HOME to a writable folder, then run the installer again.
 echo TELL THE USER: Theodore could not write its files. The disk may be full or the folder protected.
 set "RC=68"
+goto :finish
+
+:cleanup_busy
+rem The uninstall's cleanup did not answer within a minute of this installer stopping it: the files it could not
+rem write are most likely still being removed, not a full or protected disk.
+echo THEODORE RETRY: an uninstall that ran just before is still removing Theodore's previous files in "%HOME_DIR%", so this installation could not write there yet.
+echo NEXT: run the same installer command again in a minute.
+echo TELL THE USER: Theodore is still finishing the removal of its previous installation; I will run the installer again in a minute.
+set "RC=75"
 goto :finish
 
 :download_failed

@@ -89,8 +89,9 @@ if defined READY goto :run_client
 
 rem --- not installed yet -------------------------------------------------------------------------------------------
 if /i "%~1"=="uninstall" goto :uninstall_bare
-rem An uninstall's cleanup may still be running in this folder: its marker goes first, which stops it (see install.cmd).
-if exist "%HOME_DIR%\.theodore-uninstalling" (del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1 & ping -n 6 127.0.0.1 >nul)
+rem An uninstall's cleanup may still be running in this folder: its marker goes first, which stops it, then the
+rem cleanup's answer is awaited before anything is written (see :stop_cleanup and install.cmd).
+if exist "%HOME_DIR%\.theodore-uninstalling" call :stop_cleanup
 if /i "%~1"=="mcp" goto :mcp_not_ready
 rem Expired specimen folders go before the bootstrap starts, so also when it fails (the client sweeps once it runs).
 call :sweep_specimens
@@ -573,6 +574,24 @@ rem %1 cause; DETAIL holds the detail. Writes state\bootstrap\failed (cause on l
 del /q "%B%\phase" >nul 2>&1
 exit /b 1
 
+:stop_cleanup
+rem The marker goes, then this waits for .theodore-cleanup-safe: the cleanup writes it only where nothing it does can
+rem touch what an installation writes, and looks for the marker before each such step, so from then on it stops before
+rem touching anything (the same as install.cmd). At most a minute, then on in any case; CLEANUP_BUSY then lets a
+rem failure to write say what it most likely is (the job started by PowerShell or in the foreground inherits it).
+set /a CLEANUP_WAITED=0
+del /f /q "%HOME_DIR%\.theodore-uninstalling" >nul 2>&1
+:stop_cleanup_wait
+if exist "%HOME_DIR%\.theodore-cleanup-safe" goto :stop_cleanup_done
+if %CLEANUP_WAITED% GEQ 60 set "CLEANUP_BUSY=1"
+if %CLEANUP_WAITED% GEQ 60 goto :stop_cleanup_done
+"%SYS32%\ping.exe" -n 2 127.0.0.1 >nul 2>&1
+set /a CLEANUP_WAITED+=1
+goto :stop_cleanup_wait
+:stop_cleanup_done
+del /f /q "%HOME_DIR%\.theodore-cleanup-safe" >nul 2>&1
+exit /b 0
+
 :bootstrap_entry
 rem Started by WMI the job has the user's default environment, not the caller's: the home comes as an argument.
 if not "%~2"=="" set "HOME_DIR=%~f2"
@@ -686,7 +705,8 @@ exit /b 1
 call :fail HASH_MISMATCH
 exit /b 1
 :job_disk
-call :fail DISK
+if defined CLEANUP_BUSY call :fail UNINSTALLING
+if not defined CLEANUP_BUSY call :fail DISK
 exit /b 1
 
 rem =====================================================================================================================
@@ -724,6 +744,7 @@ echo TELL THE USER: Theodore's PowerPoint engine does not run on this kind of co
 exit /b 69
 
 :not_writable
+if defined CLEANUP_BUSY goto :cleanup_busy
 setlocal EnableDelayedExpansion
 echo THEODORE SETUP_FAILED: cause DISK: !HOME_DIR! is not writable.
 echo NEXT: make !HOME_DIR! writable (or set THEODORE_HOME to a writable folder), then run the same command again.
@@ -764,6 +785,7 @@ if /i "%F_CAUSE%"=="NETWORK" goto :failed_network
 if /i "%F_CAUSE%"=="TLS_INTERCEPT" goto :failed_tls
 if /i "%F_CAUSE%"=="PROXY_AUTH" goto :failed_proxy
 if /i "%F_CAUSE%"=="DISK" goto :failed_disk
+if /i "%F_CAUSE%"=="UNINSTALLING" goto :cleanup_busy
 if /i "%F_CAUSE%"=="HASH_MISMATCH" goto :failed_hash
 echo THEODORE INTERNAL: setup failed: %F_DETAIL%
 echo NEXT: reinstall the Theodore plugin, then run the same command again.
@@ -784,6 +806,14 @@ echo THEODORE SETUP_FAILED: cause PROXY_AUTH: %F_DETAIL%.
 echo NEXT: the network proxy asks for a sign-in. Ask the user to sign in to the proxy (opening any website in a browser usually does it), then run the same command again.
 echo TELL THE USER: The network proxy needs you to sign in before Theodore can download its files.
 exit /b 68
+:cleanup_busy
+rem The uninstall's cleanup did not answer within a minute of this command stopping it: what could not be written is
+rem most likely still being removed, not a full or protected disk.
+setlocal EnableDelayedExpansion
+echo THEODORE RETRY: an uninstall that ran just before is still removing Theodore's previous files in !HOME_DIR!, so Theodore could not set itself up there yet.
+echo NEXT: run the same command again in a minute.
+echo TELL THE USER: Theodore is still finishing the removal of its previous installation; I will try again in a minute.
+exit /b 75
 :failed_disk
 echo THEODORE SETUP_FAILED: cause DISK: %F_DETAIL%.
 echo NEXT: free disk space or make Theodore's folder writable, then run the same command again.

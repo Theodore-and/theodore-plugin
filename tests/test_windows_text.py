@@ -79,9 +79,10 @@ class WindowsCleanup(unittest.TestCase):
         self.assertEqual(specimens.registry().name, env["THEODORE_CLEANUP_KEEP"])
         self.assertIs(probe[2]["env"], env)
         seen = cmd_reads(raw, env)
-        self.assertIn(f'if exist "{self.root}\\{commands.UNINSTALL_MARKER}" goto pass', seen)
-        self.assertIn(f'if exist "{self.root}\\bin" rmdir /s /q "{self.root}\\bin" >nul 2>&1', seen)
-        self.assertIn(f'rmdir "{self.root}" >nul 2>&1', seen)
+        self.assertIn(f'if not exist "{self.root}\\{commands.UNINSTALL_MARKER}" goto stopped', seen)
+        self.assertIn(f'ren "{self.root}\\%~1" "%T%" >nul 2>&1', seen)       # each folder renamed first (0.4.32)
+        self.assertIn(f'rmdir /s /q "{self.root}\\%~1" >nul 2>&1', seen)
+        self.assertIn(f'if not defined STOP rmdir "{self.root}" >nul 2>&1', seen)
         # Every expanded path sits inside double quotes, so &, ( ) and ^ in it are never cmd syntax.
         for line in raw.decode("ascii").split("\r\n"):
             for m in re.finditer(r"%THEODORE_CLEANUP_[A-Z]+%", line):
