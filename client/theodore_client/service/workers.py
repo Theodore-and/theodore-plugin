@@ -190,9 +190,11 @@ class Worker:
     _counter = 0
     _counter_lock = threading.Lock()
 
-    def __init__(self, pool: "Pool", spec: Spec):
+    def __init__(self, pool: "Pool", spec: Spec, group: str | None = None, env: dict | None = None):
         self.pool = pool
         self.spec = spec
+        self.group = group or spec.version          # the engine version, or a chat folder's confined workers
+        self.base_env = env                         # that confinement's environment (chatbuild.restricted_env)
         self.process: subprocess.Popen | None = None
         self.channel: frames.Channel | None = None
         self.ready = threading.Event()
@@ -222,12 +224,14 @@ class Worker:
     # --- life ---------------------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        env = install.engine_env(self.spec.directory)
+        env = dict(self.base_env) if self.base_env is not None else install.engine_env(self.spec.directory)
+        # A confined worker keeps its store under its private home (the folders its Node may touch).
+        work = Path(env["THEODORE_HOME"]) / "work" if self.base_env is not None and env.get("THEODORE_HOME") \
+            else core.home().root / "work"           # its own folder between calls (lane B: B-A-worker.md, 1)
         env["THEODORE_RESIDENT"] = "1"
-        env["THEODORE_WORK_DIR"] = str(core.home().root / "work")
+        env["THEODORE_WORK_DIR"] = str(work)
         env["PYTHONUNBUFFERED"] = "1"
         command = [self.spec.python(), "-I", str(self.spec.serve_script), "serve", "--protocol", str(frames.PROTOCOL)]
-        work = core.home().root / "work"            # its own folder between calls (lane B: B-A-worker.md, 1)
         work.mkdir(parents=True, exist_ok=True)
         # Unbuffered pipes: no buffer lock a reader thread could hold when the service exits (Python aborts at
         # shutdown on a daemon thread blocked inside a buffered read).
@@ -501,16 +505,16 @@ class Pool:
             with contextlib.suppress(Exception):
                 run.__exit__(None, None, None)
 
-    def _spawn(self, spec: Spec) -> Worker:
-        worker = Worker(self, spec)
+    def _spawn(self, spec: Spec, group: str | None = None, env: dict | None = None) -> Worker:
+        worker = Worker(self, spec, group, env)
         with self.cond:
-            self.workers.setdefault(spec.version, []).append(worker)
+            self.workers.setdefault(worker.group, []).append(worker)
         self._hold_engine_run()
         try:
             worker.start()
         except OSError as exc:
             with self.cond:
-                self.workers[spec.version].remove(worker)
+                self.workers[worker.group].remove(worker)
                 self.cond.notify_all()
             raise WorkerFailed(f"the worker could not start ({exc})") from None
         threading.Thread(target=self._watch_start, args=(worker,), name="worker-start", daemon=True).start()
@@ -557,8 +561,12 @@ class Pool:
     def _live(self, version: str) -> list[Worker]:
         return [w for w in self.workers.get(version, []) if not w.dead.is_set() and not w.retiring]
 
-    def _acquire(self, spec: Spec, key: str | None, priority: str, call) -> Worker:
-        """A ready, idle worker of the version for this call; starts one when none is free and the pool may grow."""
+    def _acquire(self, spec: Spec, key: str | None, priority: str, call, group: str | None = None, env: dict | None = None,
+                 most: int | None = None) -> Worker:
+        """A ready, idle worker of the version (or of a confined group) for this call; starts one when none is free and
+        the pool may grow."""
+        group = group or spec.version
+        most = self.most if most is None else most
         started_one = False
         with self.cond:
             while True:
@@ -566,7 +574,7 @@ class Pool:
                     raise WorkerFailed("the service is stopping")
                 if self._oneshot(spec.version):
                     raise WorkerFailed("workers of this engine do not start")
-                live = self._live(spec.version)
+                live = self._live(group)
                 idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
                 chosen = None
                 if key and self.affinity.get(key) in idle:
@@ -579,11 +587,11 @@ class Pool:
                         self.affinity[key] = chosen
                     return chosen
                 starting = [w for w in live if not w.ready.is_set()]
-                if not starting and (len(live) < self.most) and not started_one:
+                if not starting and (len(live) < most) and not started_one:
                     started_one = True
                     self.cond.release()
                     try:
-                        self._spawn(spec)
+                        self._spawn(spec, group, env)
                         call.count("spawned")       # a worker started for this call: a process start the harness counts
                     finally:
                         self.cond.acquire()
@@ -602,7 +610,7 @@ class Pool:
 
     def _replace(self, old: Worker) -> None:
         with contextlib.suppress(Exception):
-            spare = self._spawn(old.spec)
+            spare = self._spawn(old.spec, old.group, old.base_env)
             spare.wait_ready(READY_WAIT_S)
         old.retire()
 
@@ -611,11 +619,15 @@ class Pool:
             for key, owner in list(self.affinity.items()):
                 if owner is worker:
                     self.affinity.pop(key, None)
-            versions = self.workers.get(worker.spec.version, [])
+            versions = self.workers.get(worker.group, [])
             if worker in versions:
                 versions.remove(worker)
             empty = not any(self.workers.values())
+            chats_left = any(ws for group, ws in self.workers.items() if group.startswith(CHAT_GROUP))
             self.cond.notify_all()
+        if worker.group.startswith(CHAT_GROUP) and not chats_left:
+            from .. import chatbuild
+            chatbuild.drop_licence_copy()           # the copy a chat's workers read goes with the last of them
         if empty:
             self._release_engine_run()
 
@@ -624,10 +636,10 @@ class Pool:
         now = time.monotonic()
         current = install.selected_engine()
         with self.cond:
-            for version, workers in list(self.workers.items()):
+            for group, workers in list(self.workers.items()):
                 live = [w for w in workers if not w.dead.is_set() and not w.retiring]
                 idle = sorted([w for w in live if not w.busy and w.ready.is_set()], key=lambda w: w.last_used)
-                keep = 1 if version == current else 0
+                keep = 1 if group == current else 0
                 for worker in idle[:max(0, len(live) - keep)]:
                     if now - worker.last_used > IDLE_SHRINK_S:
                         worker.retire(0)
@@ -688,6 +700,39 @@ class Pool:
                         call.count(name, value)
                 return int(result.get("exit", 78)), list(result.get("pending") or [])
         return 75, []
+
+
+    def run_confined(self, call, version: str, argv: list[str], env: dict, stdin: dict | None, folder: str,
+                     base_env: dict) -> tuple[int, list] | None:
+        """A chat's engine command on a warm worker of its own folder, started in that chat's confinement (`base_env`:
+        Node's permission model on the folder, a private home holding the licence copy). None when the engine has no
+        worker: the chat then runs a process of its own, as before."""
+        spec = Spec(version)
+        if not spec.resident() or self._oneshot(version):
+            return None
+        group = f"{CHAT_GROUP}{version}:{folder}"
+        try:
+            worker = self._acquire(spec, None, classify(argv), call, group=group, env=base_env, most=1)
+        except WorkerFailed:
+            return None
+        try:
+            result = worker.run(call, argv, env, stdin, None, classify(argv))
+        except WorkerFailed:
+            self._release(worker)
+            call.out(RETRY_TEXT)
+            return 75, []
+        self._release(worker)
+        return int(result.get("exit", 78)), list(result.get("pending") or [])
+
+    def close_confined(self) -> None:
+        """Every chat's workers end now (the licence was refused or withdrawn)."""
+        with self.cond:
+            workers = [w for group, ws in self.workers.items() if group.startswith(CHAT_GROUP) for w in ws]
+        for worker in workers:
+            worker.kill()
+
+
+CHAT_GROUP = "chat:"
 
 
 def _may_rerun(priority: str, inputs, committed: bool) -> bool:

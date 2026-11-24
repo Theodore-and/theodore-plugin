@@ -153,7 +153,8 @@ while True:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))
         say(json.dumps({"argv": argv, "cwd": run.get("cwd"), "pid": os.getpid(), "priority": run.get("priority"),
                         "key": run.get("key"), "env": {k: os.environ[k] for k in names if k in (run.get("env") or {})},
-                        "resident": os.environ.get("THEODORE_RESIDENT")}) + "\n")
+                        "resident": os.environ.get("THEODORE_RESIDENT"), "home": os.environ.get("THEODORE_HOME"),
+                        "node_options": os.environ.get("NODE_OPTIONS"), "work": os.environ.get("THEODORE_WORK_DIR")}) + "\n")
         say("a line on standard error\n", "stderr")
     for k, v in saved.items():
         if v is None:

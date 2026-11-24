@@ -95,10 +95,56 @@ class _Flag:
         return bool(_state().app_client)
 
 
+class _Collect:
+    """The client of a chat's engine call: its output gathered for the chat's own answer, its progress passed on."""
+
+    role = "probe"
+    host = "unknown"
+    plugin_root = None
+    alive = True
+
+    def __init__(self, outer, collected: list):
+        self.outer = outer
+        self.collected = collected
+        self.session_id = outer.session
+
+    def send(self, frame: dict) -> None:
+        if frame.get("t") == "out":
+            self.collected.append(str(frame.get("data") or ""))
+        elif frame.get("t") == "progress":
+            self.outer.set_phase(str(frame.get("phase") or "working"))
+
+
+def _engine_runner(version, directory, args, folder, env, stdin_text):
+    """chatbuild.ENGINE_RUNNER in the service: the chat's command on a warm worker of its folder, confined by `env` as
+    chatbuild's own process was. None when the engine has no worker (chatbuild then runs a process)."""
+    del directory
+    ctx = context.current()
+    outer = getattr(ctx, "call", None) if ctx is not None else None
+    if _SERVICE is None or outer is None:
+        return None
+    collected: list[str] = []
+    from . import router
+    inner = router.Call(_SERVICE.router, _Collect(outer, collected),
+                        {"t": "call", "id": f"{outer.id}.engine", "tool": "pptx", "args": list(args), "cwd": str(folder),
+                         "images": False})
+    inner.cancelled = outer.cancelled
+    overlay = {k: ("" if v is None else v) for k, v in (ctx.env or {}).items()}
+    stdin = {"encoding": "utf-8", "data": stdin_text} if stdin_text else None
+    result = _SERVICE.pool.run_confined(inner, version, list(args), overlay, stdin, str(folder), env)
+    if result is None:
+        return None
+    for name, value in inner.counters.items():
+        outer.count(name, value)
+    return result[0], "".join(collected)
+
+
 def install(service) -> None:
-    """In the service: chatbuild's per-process state becomes per-session."""
+    """In the service: chatbuild's per-process state becomes per-session, and a chat's engine commands run on warm
+    workers confined to its folder."""
     global _SERVICE
     _SERVICE = service
+    chatbuild.ENGINE_RUNNER = _engine_runner
     chatbuild.FOLDERS = _Proxy("folders")
     chatbuild.OPEN = _Proxy("open")
     chatbuild.STARTS = _Proxy("starts")
@@ -150,8 +196,12 @@ def _status(service, status: Status) -> dict:
     elif getattr(status, "auto_report", False):
         status = commands.report_internal(status)
     if core.refused() or status.name not in tools.KEEP_HELD_ON:
-        tools._forget_texts(service, refused=core.refused() or (status.name in tools.REFUSALS                # noqa: SLF001
-                                                                and not getattr(status, "keeps_sheets", False)))
+        refused = core.refused() or (status.name in tools.REFUSALS and not getattr(status, "keeps_sheets", False))
+        tools._forget_texts(service, refused=refused)                # noqa: SLF001
+        if refused:                     # no chat keeps a worker, nor its licence copy, past a refusal
+            with contextlib.suppress(Exception):
+                service.pool.close_confined()
+            chatbuild.drop_licence_copy()
     return _text(mcp.desktop_text(status.render()), error=status.name != "OK")
 
 

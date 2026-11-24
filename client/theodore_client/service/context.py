@@ -28,10 +28,10 @@ KEPT = ("CODEX_HOME",)             # where Codex keeps its configuration: the us
 
 
 class CallContext:
-    __slots__ = ("session", "host", "env", "cwd", "call_id", "tool", "progress", "cancelled")
+    __slots__ = ("session", "host", "env", "cwd", "call_id", "tool", "progress", "cancelled", "call")
 
     def __init__(self, *, session: str = "", host: str = "", env: dict | None = None, cwd: str | None = None,
-                 call_id: str = "", tool: str = "", progress=None, cancelled=None):
+                 call_id: str = "", tool: str = "", progress=None, cancelled=None, call=None):
         self.session = session
         self.host = host
         self.env = env if env is not None else {}
@@ -40,6 +40,7 @@ class CallContext:
         self.tool = tool
         self.progress = progress            # progress(phase) or None
         self.cancelled = cancelled          # a threading.Event or None
+        self.call = call                    # the router's Call being answered
 
 
 def current() -> CallContext | None:
