@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.33
+
+- The Studio agent reads, for its slide, Theodore's design text and build text first, then the steps for one slide from the design text (`in-a-part`), and each text those steps name at the step that names it, from the design text or the build text. Its description says the message that starts it comes from the design text's deck steps. This is the reading list of Theodore's next texts (the engine's `agents/studio.md`), where the steps for one slide move into the design text. Where the design text has no text named `in-a-part`, the agent follows the texts its message names, as before.
+- A plugin update is used from the assistant's next session, so this version goes out ahead of the texts that rely on it.
+
 ## 0.4.32
 
 - A slide's designer who names a text that does not exist is now shown only the texts a designer can read. The list was taken from the text written for the whole deck, so it named texts that are not for one slide, and asking for one of those was then refused.
