@@ -397,8 +397,10 @@ if not exist "%T%" set "T=%LAUNCHER%"
 
 rem --- 5. the assistants on this computer ------------------------------------------------------------------------------
 echo theodore-install: registering Theodore in the assistants found on this computer
-call "%%T%%" hosts register
+rem Its lines say what it registered; its own status block is left out (lane L3), as install.sh.
+call "%%T%%" hosts register >"%WORK%\hosts.txt"
 set "HOSTS_RC=%ERRORLEVEL%"
+"%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\hosts.txt"
 rem Claude Code on Windows with no Git Bash cannot load the skills: PortableGit into Theodore's folder, Claude Code pointed at it.
 call "%%T%%" tools install git --if-needed
 rem No permission rule goes into an assistant's settings (lane L3, 24 November 2026: the assistant running this declined an
