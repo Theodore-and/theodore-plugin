@@ -405,7 +405,7 @@ class HostLimits(unittest.TestCase):
         self.assertNotIn('if not "%WRC%"=="0" if not "%WRC%"=="67" exit /b 1', cmd)
         self.assertIn('set "SETUP_WAIT_DEFAULT=180"', cmd)
         for text, setup, marker, register, doctor in (
-                (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
+                (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\nhosts_out=$(theodore hosts register)\n", "doctor_out=$(theodore doctor)"),
                 (cmd, 'call "%%LAUNCHER%%" setup --wait %SETUP_WAIT% >"%WORK%\\setup.txt"', 'state\\hosts.pending', '\ncall "%%T%%" hosts register',
                  'call "%%T%%" doctor >"%WORK%\\doctor.txt"')):
             self.assertLess(text.index(marker), text.index(setup), "the marker is written before the long step")
