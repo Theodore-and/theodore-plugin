@@ -552,6 +552,17 @@ def shim_texts() -> dict[str, str] | None:
     return {"theodore": lines + f'exec {_sh_quote(str(home().launcher()))} "$@"\n'}
 
 
+def shim_files() -> dict[str, bytes] | None:
+    """{file name: content} of the short command as it is written now: the native front once it is placed (front.py:
+    on Windows its own copy, theodore.exe; elsewhere a script that runs it), else the text shim_texts gives."""
+    from . import front
+    placed = front.shim_bytes()
+    if placed:
+        return placed
+    texts = shim_texts()
+    return None if texts is None else {name: text.encode("utf-8") for name, text in texts.items()}
+
+
 _SHIM_ACTIVE: list[bool] = []
 
 
@@ -562,21 +573,21 @@ def shim_active() -> bool:
     active = False
     with contextlib.suppress(OSError, ValueError):
         found = shutil.which(SHIM_NAME)
-        texts = shim_texts()
-        if found and texts:
+        files = shim_files()
+        if found and files:
             path = Path(found)
             # Windows names it as PATHEXT spells the extension (theodore.CMD): the file name is matched without case.
-            name = next((n for n in texts if n.lower() == path.name.lower()), None) if IS_WINDOWS else path.name
-            active = name in texts and shim_matches(path, texts[name])
+            name = next((n for n in files if n.lower() == path.name.lower()), None) if IS_WINDOWS else path.name
+            active = name in files and shim_matches(path, files[name])
     _SHIM_ACTIVE[:] = [active]
     return active
 
 
-def shim_matches(path: Path, text: str) -> bool:
-    """The file holds exactly this text, byte for byte (read as bytes: a text read turns the batch file's CRLF into LF,
-    and the Windows short command then never matched; WINDOWS's recount)."""
+def shim_matches(path: Path, text: str | bytes) -> bool:
+    """The file holds exactly this text (or these bytes), byte for byte (read as bytes: a text read turns the batch
+    file's CRLF into LF, and the Windows short command then never matched; WINDOWS's recount)."""
     try:
-        return path.read_bytes() == text.encode("utf-8")
+        return path.read_bytes() == (text if isinstance(text, bytes) else text.encode("utf-8"))
     except OSError:
         return False
 

@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, desktop, install, outbox, routing, sessions, specimens, usage
+from . import __version__, account, api, core, credentials, desktop, front, install, outbox, routing, sessions, specimens, usage
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -2254,6 +2254,7 @@ def _follow_claude_app() -> None:
 def ensure_hosts() -> None:
     """Finish the registration an installer left undone (see above), then the settings (ensure_settings). Never fails
     or prints in the command it runs in."""
+    front.refresh()             # the native front and launch.json in step with what is installed (front.py)
     ensure_settings()
     _follow_claude_app()
     marker = _hosts_pending_path()
@@ -2686,16 +2687,24 @@ def _shim_paths(record: dict) -> list[Path]:
     return [Path(p) for p in ((record.get("shim") or {}).get("files") or [])]
 
 
+_PROGRAM_HEADS = (b"MZ", b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")     # Windows, Linux, macOS, macOS universal
+
+
 def _shim_ours(path: Path) -> bool:
+    """Theodore wrote this file: its mark is in the first lines of a script, or anywhere in the native front."""
     try:
-        return core.SHIM_MARK in path.read_text(encoding="utf-8", errors="replace")[:400]
+        with open(path, "rb") as handle:
+            head = handle.read(400)
+            if head.startswith(_PROGRAM_HEADS):
+                return core.SHIM_MARK.encode("utf-8") in head + handle.read()
+        return core.SHIM_MARK in head.decode("utf-8", errors="replace")
     except OSError:
         return False
 
 
 def _shim_apply(only_new: bool = False) -> str:
     record = _host_record()
-    texts = core.shim_texts()
+    texts = core.shim_files()
     folder = core.shim_dir()
     if record.get("shim_gone") and only_new:
         return "short command: left out (it was removed after Theodore wrote it)"
@@ -2720,8 +2729,15 @@ def _shim_apply(only_new: bool = False) -> str:
             return f"short command: not written ({path} exists and is not Theodore's)"
     try:
         folder.mkdir(parents=True, exist_ok=True)
+        # The other form goes (the scripts once the front is placed, or the front once it is not): in Git Bash an
+        # extensionless `theodore` script would come before theodore.exe.
+        for name in {"theodore", "theodore.cmd", "theodore.exe"} - set(texts):
+            if (folder / name).exists() and _shim_ours(folder / name):
+                front.discard(folder / name)
         for path in targets:
             if not core.shim_matches(path, texts[path.name]):
+                if path.suffix == ".exe" and path.exists():
+                    front.discard(path)         # a running copy is moved aside, not overwritten
                 core.write_atomic(path, texts[path.name], 0o755)
     except OSError as exc:
         return f"short command: not written ({exc.__class__.__name__}: {exc})"
@@ -2745,7 +2761,7 @@ def _shim_take_back(left: list[str], notes: list[str]) -> None:
             notes.append(f"{path} was replaced after Theodore wrote it, so it was left as it is")
             continue
         try:
-            path.unlink()
+            front.discard(path)
         except OSError as exc:
             left.append(f"the short command {path} ({exc.__class__.__name__})")
             kept.append(str(path))
@@ -2766,7 +2782,7 @@ def _short_rules() -> set[str]:
 def _shim_written() -> bool:
     """The short command Theodore wrote is in place, as written now (its rules exist only then). Told from the files, not
     from this process's PATH: a Theodore command started by a host with another PATH must not take its rules away."""
-    texts = core.shim_texts()
+    texts = core.shim_files()
     paths = _shim_paths(_host_record())
     if not texts or not paths:
         return False
@@ -3201,7 +3217,11 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
 
 # --- the installer's plugin step ----------------------------------------------------------------------------------------
 
-CODEX_MCP_WINDOWS_COMMAND = "./skills/pptx/scripts/theodore.cmd"
+# Codex's server entry on Windows, by the published `sh` form it replaces: the plugin's command (scripts/, which runs
+# the native front when the plugin carries it, else the launcher), or the launcher itself in a plugin before it.
+CODEX_MCP_WINDOWS_COMMANDS = {"./scripts/unix/theodore": "./scripts/Windows_NT/theodore.cmd",
+                              "./skills/pptx/scripts/theodore": "./skills/pptx/scripts/theodore.cmd"}
+CODEX_MCP_WINDOWS_COMMAND = CODEX_MCP_WINDOWS_COMMANDS["./scripts/unix/theodore"]
 
 
 def _codex_mcp_for_windows(path: Path) -> None:
@@ -3218,9 +3238,9 @@ def _codex_mcp_for_windows(path: Path) -> None:
     if not isinstance(entry, dict) or entry.get("command") != "sh":
         return
     args = entry.get("args")
-    if not isinstance(args, list) or not args or args[0] != "./skills/pptx/scripts/theodore":
+    if not isinstance(args, list) or not args or args[0] not in CODEX_MCP_WINDOWS_COMMANDS:
         return
-    entry["command"] = CODEX_MCP_WINDOWS_COMMAND
+    entry["command"] = CODEX_MCP_WINDOWS_COMMANDS[args[0]]
     entry["args"] = args[1:]
     core.write_atomic(path, json.dumps(data, indent=2) + "\n", 0o644)
 
@@ -3286,10 +3306,13 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
     if core.IS_WINDOWS:
         _codex_mcp_for_windows(home.plugin / "plugins" / "theodore" / "mcp.json")
     else:
-        for name in ("pptx", "deck-design"):
-            launcher = home.plugin / "plugins" / "theodore" / "skills" / name / "scripts" / "theodore"
-            if launcher.exists():
-                launcher.chmod(0o755)
+        plugin = home.plugin / "plugins" / "theodore"
+        for program in [plugin / "skills" / name / "scripts" / "theodore" for name in ("pptx", "deck-design")] + \
+                [plugin / "scripts" / name for name in ("unix/theodore", "Darwin/theodore", "Linux/theodore", "theodore-darwin",
+                                                        "theodore-linux-x64", "theodore-linux-arm64")]:
+            if program.exists():
+                program.chmod(0o755)
+    front.refresh()                     # the native front this plugin carries, and launch.json (front.py)
     print(f"theodore-install: plugin {version} is in {home.plugin} (signed by {envelope.get('kid')})", flush=True)
     return 0
 

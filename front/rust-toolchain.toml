@@ -1,0 +1,4 @@
+# The toolchain the release builds use (ci/front-build.sh, .github/workflows/front.yml): one compiler for every target.
+[toolchain]
+channel = "1.94.0"
+profile = "minimal"

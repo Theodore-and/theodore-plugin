@@ -1,0 +1,166 @@
+{
+  "v": 1,
+  "note": "tools/list of the plugin's relay (Claude Code, Cowork). The relay serves this list at once; the section and file enums are filled from the published index the service fetched online (call tool 'list', params {skill: '*', form: 'tools'}; C1 request A-4) when it answers, followed by notifications/tools/list_changed. For --for claude-desktop and --for codex the relay serves chatbuild's one 'theodore' tool instead.",
+  "tools": [
+    {
+      "name": "pptx",
+      "description": "Theodore's engine on this computer: runs one pptx command (the same arguments as `theodore pptx` in a shell) and returns its answer; pictures come back as images.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "args"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "what follows `theodore pptx`, one argument per item, e.g. [\"slide\", \"list\", \"/path/to/workspace\"]"
+          },
+          "cwd": {
+            "type": "string",
+            "description": "the folder relative paths start from; absolute paths need none"
+          },
+          "images": {
+            "type": "boolean",
+            "description": "false to leave pictures out of the answer (their paths stay in the text)"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "anthropic/alwaysLoad": true,
+        "anthropic/maxResultSizeChars": 500000
+      }
+    },
+    {
+      "name": "guide",
+      "description": "Returns one file of a Theodore skill, whole, or several files in one answer.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skill"
+        ],
+        "properties": {
+          "skill": {
+            "type": "string",
+            "enum": [
+              "deck-design",
+              "pptx"
+            ]
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "maxItems": 8
+              }
+            ],
+            "description": "one section, or a list fetched in one request (C6)"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "slide"
+            ],
+            "description": "\"slide\" for an agent given one slide."
+          }
+        }
+      },
+      "_meta": {
+        "anthropic/alwaysLoad": true,
+        "anthropic/maxResultSizeChars": 400000
+      }
+    },
+    {
+      "name": "specimen",
+      "description": "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "maxItems": 6
+              }
+            ],
+            "description": "one sheet, or a list fetched in one request (C6)"
+          }
+        }
+      },
+      "_meta": {
+        "anthropic/alwaysLoad": true
+      }
+    },
+    {
+      "name": "theodore",
+      "description": "Theodore's own commands on this computer: status, doctor, report, prefs, studio, packs, update, version (the same arguments as `theodore <command>` in a shell).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "args"
+        ],
+        "properties": {
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "list",
+      "description": "Lists the files of a Theodore skill.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "skill"
+        ],
+        "properties": {
+          "skill": {
+            "type": "string",
+            "enum": [
+              "deck-design",
+              "pptx"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -5,7 +5,7 @@
       "type": "stdio",
       "command": "sh",
       "args": [
-        "./skills/pptx/scripts/theodore",
+        "./scripts/unix/theodore",
         "mcp",
         "--for",
         "codex"
