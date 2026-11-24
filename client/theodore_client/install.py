@@ -467,7 +467,27 @@ def current_engine() -> str | None:
 
 
 def engine_python(directory: Path) -> Path:
-    return directory / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+    """The interpreter an engine runs on: its runtime's own Python. The venv beside the engine adds nothing (made with
+    --system-site-packages, nothing installed into it), and on Windows its python.exe is a redirector that starts the
+    runtime's python.exe as a second process (45 to 50 ms a command on the Windows test machine). The runtime is the
+    one the engine was installed for (.theodore-engine.json), else the one its venv names (pyvenv.cfg); the venv's own
+    interpreter only when neither is on disk."""
+    venv = directory / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+    runtime_id = str(core.read_json(directory / ".theodore-engine.json").get("runtime_id") or "")
+    if runtime_id and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", runtime_id) and runtime_id not in (".", ".."):
+        base = core.home().runtime_python(runtime_id)
+        if base is not None and base.is_file():
+            return base
+    try:
+        for line in (directory / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home" and value.strip():
+                base = Path(value.strip()) / ("python.exe" if IS_WINDOWS else "python3")
+                if base.is_file():
+                    return base
+    except OSError:
+        pass
+    return venv
 
 
 def engine_env(directory: Path) -> dict:

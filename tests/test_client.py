@@ -895,10 +895,13 @@ class Engine(ClientCase):
         self.assertEqual(self.client("pptx", "exit", "0").returncode, 0)
         env = json.loads(self.client("pptx", "env").stdout)
         self.assertEqual(env["path0"], str(self.box.home / "engines" / self.ENGINE_VERSION / ".runtime" / "bin"))
-        self.assertTrue(env["venv"] and env["node_modules"])
+        self.assertTrue(env["node_modules"])
+        # 0.4.34: the engine runs on its runtime's own Python, not through the venv beside it (on Windows a redirector
+        # that starts a second process); the venv is still made, for a client that rolls back.
+        self.assertTrue(env["runtime_python"], "started by the runtime's python")
         self.assertEqual(env["home"], str(self.box.home))
-        py = self.client("python", "-c", "import sys; print('venv' if sys.prefix != sys.base_prefix else 'base')")
-        self.assertEqual(py.stdout.strip(), "venv")
+        py = self.client("python", "-c", "import os, sys; print('venv' if sys.prefix != sys.base_prefix else os.environ.get('THEODORE_TEST_STARTED_BY'))")
+        self.assertEqual(py.stdout.strip(), "runtime-python")
 
     def test_engine_layout_matches_the_design(self):
         self.ready()

@@ -119,5 +119,38 @@ class PackScan(HomeCase):
                 self.assertEqual(bool(re.search(pattern, text)), bool(re.search(new, text)), (pack, text))
 
 
+class EnginePython(HomeCase):
+    """The engine runs on its runtime's own python.exe, not the venv's redirector (a second process on Windows)."""
+
+    def engine(self, runtime_id: str | None, venv_home: Path | None) -> Path:
+        directory = self.home / "engines" / "1.0.0-rc.33"
+        (directory / ".venv").mkdir(parents=True)
+        record = {"version": "1.0.0-rc.33", **({"runtime_id": runtime_id} if runtime_id is not None else {})}
+        core.write_json(directory / ".theodore-engine.json", record)
+        if venv_home is not None:
+            (directory / ".venv" / "pyvenv.cfg").write_text(f"home = {venv_home}\ninclude-system-site-packages = true\n", encoding="utf-8")
+        return directory
+
+    def runtime(self, runtime_id: str) -> Path:
+        python = core.home().runtime_python(runtime_id)
+        python.parent.mkdir(parents=True)
+        python.write_text("", encoding="utf-8")
+        return python
+
+    def test_the_runtime_the_engine_was_installed_for(self):
+        python = self.runtime("rt1")
+        self.assertEqual(install.engine_python(self.engine("rt1", None)), python)
+
+    def test_else_the_runtime_its_venv_names(self):
+        python = self.runtime("rt2")
+        directory = self.engine(None, python.parent)
+        self.assertEqual(install.engine_python(directory), python)
+        core.write_json(directory / ".theodore-engine.json", {"runtime_id": ".."})        # never a path out of runtime/
+        self.assertEqual(install.engine_python(directory), python)
+
+    def test_else_the_venv_as_before(self):
+        directory = self.engine("gone", self.tmp / "nowhere")
+        self.assertEqual(install.engine_python(directory), directory / ".venv" / ("Scripts/python.exe" if core.IS_WINDOWS else "bin/python"))
+
 if __name__ == "__main__":
     unittest.main()
