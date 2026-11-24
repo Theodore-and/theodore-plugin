@@ -229,6 +229,11 @@ class OlderService(TextsCase):
         self.assertEqual([raw is not None for _n, raw, _note in got], [True, True, False])
         self.assertEqual(self.texts.specimens(["a.jpg"])[0][1], JPEG)
         self.assertEqual(self.fake.served["specimen", "a.jpg", 304], 1)
+        six = [f"s{n}.jpg" for n in range(6)]
+        self.fake.specimens.update({name: JPEG + name.encode() for name in six})
+        for _ in range(3):
+            self.assertTrue(all(raw is not None for _n, raw, _note in self.texts.specimens(six)))
+        self.assertLessEqual(self.pool.opened, api.KEPT_IDLE_MAX, "never more connections than the pool keeps")
 
 
 class Index(TextsCase):

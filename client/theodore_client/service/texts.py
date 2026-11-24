@@ -360,16 +360,25 @@ class Texts:
     # --- the single routes (a service from before the batch route) -------------------------------------------------------
 
     def _single(self, items: list[Item], held: dict, what: str) -> list[Got]:
+        """One request per item, at most as many at once as the pool keeps open (on rig 2, six sheets at once opened
+        two new TLS connections on every call: 26 connections over a probe that needs 4)."""
         if len(items) == 1:
             return [self._one(items[0], held[items[0]], what)]
         results: list = [None] * len(items)
+        queue = list(enumerate(items))
+        lock = threading.Lock()
 
-        def run(number: int, item: Item) -> None:
-            try:
-                results[number] = self._one(item, held[item], what)
-            except BaseException as exc:        # noqa: BLE001  raised in the caller's thread below
-                results[number] = exc
-        threads = [threading.Thread(target=run, args=(number, item), daemon=True) for number, item in enumerate(items)]
+        def run() -> None:
+            while True:
+                with lock:
+                    if not queue:
+                        return
+                    number, item = queue.pop(0)
+                try:
+                    results[number] = self._one(item, held[item], what)
+                except BaseException as exc:        # noqa: BLE001  raised in the caller's thread below
+                    results[number] = exc
+        threads = [threading.Thread(target=run, daemon=True) for _ in range(min(len(items), max(1, self.pool.idle_max)))]
         for thread in threads:
             thread.start()
         for thread in threads:
