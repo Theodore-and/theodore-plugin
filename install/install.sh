@@ -545,8 +545,11 @@ theodore() { THEODORE_HOME=$HOME_DIR sh "$T" "$@"; }
 
 # --- 5. the assistants on this computer ----------------------------------------------------------------------------------
 say "registering Theodore in the assistants found on this computer"
-theodore hosts register
+# Its lines say what it registered; its own status block is left out (lane L3): the installer's last status is the
+# welcome, and the block's sentence about the Claude app's chats sent an assistant to tell the user to reopen the app.
+hosts_out=$(theodore hosts register)
 HOSTS_RC=$?
+printf '%s\n' "$hosts_out" | grep -v -E '^(THEODORE [A-Z_]+: |NEXT: |TELL THE USER: )'
 # No permission rule goes into an assistant's settings (lane L3, 24 November 2026: the assistant running this declined
 # an installer that changes its own permissions, in all three real set-ups). Theodore's skills carry the permissions
 # they need; `theodore hosts settings --apply` adds rules only when the user asks for it.
