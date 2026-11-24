@@ -67,9 +67,11 @@ hot() {
   case "${1:-}" in session-start|__bootstrap|uninstall) return 1 ;; esac
   case "$0" in */*) ;; *) return 1 ;; esac
   case "${OSTYPE:-}" in
-    msys*)
-      # The client gets the folder's Windows paths (THEODORE_HOME, its own folder); the shell reads and starts in
-      # MSYS's own form (/c/...), as the short command and the full launcher do.
+    msys*|cygwin*)
+      # Git Bash: its bash and sh say OSTYPE=cygwin (Git for Windows in the Claude app's package, rig 2, 24 Nov) or
+      # msys. The client gets the folder's Windows paths (THEODORE_HOME, its own folder); the shell reads and starts in
+      # MSYS's own form (/c/...), as the short command and the full launcher do. A Cygwin of its own, whose drives are
+      # /cygdrive/c/..., finds none of these files and goes on to the full launcher.
       if [ -n "${THEODORE_HOME:-}" ]; then
         hot_home=$THEODORE_HOME
       else
@@ -87,7 +89,6 @@ hot() {
       [ -f "$hot_py" ] && [ -f "$hot_u/client/$hot_cv/__main__.py" ] && [ -f "$hot_u/bin/theodore.cmd" ] || return 1
       THEODORE_SKILL_DIR=${THEODORE_SKILL_DIR:-${0%/*/*}}         # as the full launcher's Git Bash branch sets it
       ;;
-    cygwin*) return 1 ;;
     *)
       hot_home=${THEODORE_HOME:-${HOME:-}/.theodore}
       case "$hot_home" in /*) ;; *) return 1 ;; esac
