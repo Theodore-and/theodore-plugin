@@ -364,8 +364,8 @@ class PptxManual:
         return _pptx_pointers(answer.text(), self.role), False, directions
 
     def document(self, got: dict | None, *, part: int = 1, whole: bool = True, opening: bool = True, notices: bool = True,
-                 pointers: bool = True) -> str:
-        """The manual as `guide pptx` prints it: part `part` of it, or `whole`."""
+                 pointers: bool = True, bindings: str = "launcher") -> str:
+        """The manual as `guide pptx` prints it: part `part` of it, or `whole`; `bindings` as _pptx_header takes it."""
         text, on_disk, directions = self.texts(got, pointers)
         parts = [text] if whole else split_parts(text)
         if part > len(parts):
@@ -373,10 +373,7 @@ class PptxManual:
         launcher = quoted_launcher()
         header = []
         if part == 1:
-            header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
-                      f"          python3 ...  ->  {launcher} python ...",
-                      f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
-                      _pptx_files_binding(self.directory, on_disk, launcher, self.role)]
+            header = _pptx_header(self.directory, on_disk, self.role, bindings)
             if directions.startswith("THEODORE OFFLINE: "):
                 header.insert(0, directions)         # first thing read: the agent fetches it again before building
             elif directions:
@@ -402,6 +399,40 @@ def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str, role: str
     if on_disk:
         return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}\n{texts}"
     return texts
+
+
+def reader_bindings(bindings: str | None = None) -> str | None:
+    """The bindings a composition uses: the ones given, else "tool" when the service says this call's reader has the
+    plugin's tools (THEODORE_TOOLS=1: every MCP call, and a shell command from a session whose relay said hello), else
+    None (each composition decides as before)."""
+    if bindings is not None:
+        return bindings
+    return "tool" if os.environ.get("THEODORE_TOOLS") == "1" else None
+
+
+def _pptx_header(directory: Path, on_disk: bool, role: str | None = None, bindings: str = "launcher") -> list[str]:
+    """The Bindings lines that open the pptx manual. The engine's texts say `pptx <verb>` and rely on them (DESIGN
+    2.1). `bindings` "tool" (the reader has the plugin's tools: a guide tool call, or a skill or guide command from a
+    session whose relay said hello) maps the verbs, Theodore's other commands and the manual's other texts to the
+    Theodore tools, the launcher kept as the fallback where a tool is missing (lane J's J2 wording); "launcher", the
+    form every shell reader gets, is unchanged."""
+    launcher = quoted_launcher()
+    if bindings != "tool":
+        return [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
+                f"          python3 ...  ->  {launcher} python ...",
+                f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
+                _pptx_files_binding(directory, on_disk, launcher, role)]
+    reader = ' and role "slide"' if role == "slide" else ""
+    lines = [f"Bindings: pptx <verb> …  ->  the Theodore tool pptx, args [<verb>, …]; only where that tool is missing: "
+             f"{launcher} pptx <verb> … in a shell",
+             f"          python3 ...  ->  {launcher} python ...",
+             f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  the Theodore tools guide, specimen "
+             f"and theodore; only where they are missing: {launcher} <command>"]
+    if on_disk:
+        lines.append(f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}")
+    lines.append(f'          a text this manual names  ->  the Theodore tool guide with skill "pptx" and section "<name>"{reader}'
+                 f"   (a name that is not one lists them)")
+    return lines
 
 
 def guide(skill: str, section: str | None, part: int | None, license_text: bool, role: str | None = None) -> int:
@@ -433,13 +464,15 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool,
 
 
 def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True, role: str | None = None,
-                pointers: bool = True) -> int:
-    """The engine's manual: whole, or part `part` of it, printed. Its served texts come in one request."""
+                pointers: bool = True, bindings: str | None = None) -> int:
+    """The engine's manual: whole, or part `part` of it, printed. Its served texts come in one request. `bindings`
+    "tool": the reader has the plugin's tools (the service passes it for a session whose relay said hello)."""
     from .service import texts
     manual = PptxManual.prepare(role, check=True)
     got = manual.fetch(texts.current())
     _heartbeat(manual.version)      # at most hourly; the request above already refused a revoked device
-    sys.stdout.write(manual.document(got, part=part, whole=whole, opening=opening, notices=notices, pointers=pointers))
+    sys.stdout.write(manual.document(got, part=part, whole=whole, opening=opening, notices=notices, pointers=pointers,
+                                     bindings=reader_bindings(bindings) or "launcher"))
     sys.stdout.flush()
     if opening:
         sessions.record_loaded("pptx", manual.version)
@@ -670,21 +703,25 @@ def _links_first(text: str) -> str:
     return text
 
 
-def skill_text(name: str, texts, host: str | None = None, check: bool = False) -> tuple[str, str]:
+def skill_text(name: str, texts, host: str | None = None, check: bool = False, bindings: str | None = None) -> tuple[str, str]:
     """(a skill's instructions as a skill file's body, the version they came from), from ONE request on `texts` (the
     process's Texts). `host` names the assistant (the service passes the session's; else this process's). `check`: the
-    one-shot command's update check and heartbeat, which the service runs on its timers instead."""
+    one-shot command's update check and heartbeat, which the service runs on its timers instead. `bindings`: "tool"
+    when the reader is known to have the plugin's tools (the service: a session whose relay said hello, on any system,
+    given here or as THEODORE_TOOLS=1), "launcher" when known not to; None decides by the host as before."""
+    bindings = reader_bindings(bindings)
     if name == "deck-design":
-        return _deck_design_body(texts, host or core.host_name())
-    return _pptx_body(texts, check)
+        return _deck_design_body(texts, host or core.host_name(), bindings)
+    return _pptx_body(texts, check, bindings or "launcher")
 
 
-def _deck_design_body(texts, host: str) -> tuple[str, str]:
+def _deck_design_body(texts, host: str, bindings: str | None = None) -> tuple[str, str]:
     from .service.texts import Item
     account.require("deck-design")
-    # Claude Code has the plugin's guide tool (its wording for the links), except on Windows, where the plugin cannot
-    # register its server (sh is not on the path Claude Code spawns from): there the launcher's wording.
-    tool = host == "claude-code" and not core.IS_WINDOWS
+    # Claude Code has the plugin's guide tool (its wording for the links), except on Windows, where the plugin's own
+    # server could not start until the relay (sh is not on the path Claude Code spawns from): there the launcher's
+    # wording. A session the service knows has its relay says so itself, on any system.
+    tool = bindings == "tool" if bindings is not None else host == "claude-code" and not core.IS_WINDOWS
     answer = texts.fetch([Item("section", "deck-design", "", "lead", "tool" if tool else "launcher")], "guide deck-design")[0]
     if answer.status != 200:
         raise api.status_from(api.ApiError(404, "not_found", "no deck-design guidance for this account's channel."), "guide deck-design")
@@ -703,7 +740,7 @@ _LAUNCHER_LINES = ("Run the Theodore launcher you used to get these instructions
                    "Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd on Windows) with:")
 
 
-def _pptx_body(texts, check: bool = False) -> tuple[str, str]:
+def _pptx_body(texts, check: bool = False, bindings: str = "launcher") -> tuple[str, str]:
     manual = PptxManual.prepare(None, check=check, downloading=f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. "
                                                                  f"Do not use another slide tool meanwhile.")
     got = manual.fetch(texts)
@@ -713,16 +750,14 @@ def _pptx_body(texts, check: bool = False) -> tuple[str, str]:
     if core.refused():
         raise api.sign_in_required()
     launcher = quoted_launcher()
-    header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
-              f"          python3 ...  ->  {launcher} python ...",
-              f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
-              _pptx_files_binding(manual.directory, on_disk, launcher)]
+    header = _pptx_header(manual.directory, on_disk, None, bindings)
     if directions.startswith("THEODORE OFFLINE: "):
         header.insert(0, directions)             # first thing read: the agent fetches it again before building
     elif directions:
         header += directions.rstrip("\n").split("\n")
     body = "\n".join(header) + "\n\n" + _without_frontmatter(text)
-    return _bounded(body, f"run {launcher} guide pptx"), manual.version
+    rest = 'call the Theodore guide tool with skill "pptx"' if bindings == "tool" else f"run {launcher} guide pptx"
+    return _bounded(body, rest), manual.version
 
 
 def skill(name: str) -> int:

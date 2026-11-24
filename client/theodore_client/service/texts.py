@@ -559,7 +559,8 @@ class Texts:
         out = []
         for kind, name in plan:
             if kind == "manual":
-                out.append(manual.document(manual_got, opening=False, notices=bindings != "chat", pointers=bindings != "chat"))
+                out.append(manual.document(manual_got, opening=False, notices=bindings != "chat", pointers=bindings != "chat",
+                                           bindings="tool" if bindings == "tool" else "launcher"))
                 continue
             answer = got[Item("section", skill, name, reader, self._bindings_sent(bindings))]
             if answer.status == 404:
@@ -748,13 +749,16 @@ class Texts:
 
     # --- skill bodies ----------------------------------------------------------------------------------------------------
 
-    def skill_body(self, name: str, *, session: str | None = None, host: str | None = None, check: bool = False) -> str:
+    def skill_body(self, name: str, *, session: str | None = None, host: str | None = None, check: bool = False,
+                   bindings: str | None = None) -> str:
         """A skill's instructions as a skill file's body, with the update notices first (what `theodore skill` prints),
-        from one request. `check`: the one-shot command's update check and heartbeat (the service has timers)."""
+        from one request. `check`: the one-shot command's update check and heartbeat (the service has timers).
+        `bindings` "tool": the session's relay said hello, so its reader has the plugin's tools (the pptx manual's
+        header and deck-design's links then name them); None decides by the host."""
         del session
         if name not in SKILLS:
             raise core.usage(f"unknown skill '{name}'. The skills are: {', '.join(SKILLS)}.")
-        body, _version = commands.skill_text(name, self, host=host, check=check)
+        body, _version = commands.skill_text(name, self, host=host, check=check, bindings=bindings)
         notices = [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
         if notices:
             body = "\n".join(notices) + "\n" + body

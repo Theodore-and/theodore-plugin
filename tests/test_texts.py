@@ -261,19 +261,26 @@ class SkillBodies(TextsCase):
         self.assertIn("ENTRY", body)
         self.assertEqual(len(self.posts()), 1)
         self.assertEqual(self.fake.batches[0][0]["bindings"], "launcher" if core.IS_WINDOWS else "tool")
+        with mock.patch.object(texts_module.install, "take_announcement", return_value=None), \
+                mock.patch.object(texts_module.install, "plugin_notice", return_value=None), \
+                mock.patch.object(texts_module.commands.account, "require", return_value={"plan": "beta"}), \
+                mock.patch.object(core, "IS_WINDOWS", True):
+            self.texts.skill_body("deck-design", host="claude-code", bindings="tool")      # a session with its relay
+            self.texts.skill_body("deck-design", host="claude-code")                       # none known: as before
+        self.assertEqual([batch[0]["bindings"] for batch in self.fake.batches[1:]], ["tool", "launcher"])
 
 
 class PptxManualFromTexts(TextsCase):
     """The pptx manual through the service's Texts: the account's directions and the served manual in one request;
     offline, an engine's own manual is still given, with the line that says the directions could not be reached."""
 
-    def manual(self, on_disk):
-        return commands.PptxManual(None, "beta", "1.0.0-rc.33", self.home / "engines" / "1.0.0-rc.33", on_disk)
+    def manual(self, on_disk, role=None):
+        return commands.PptxManual(role, "beta", "1.0.0-rc.33", self.home / "engines" / "1.0.0-rc.33", on_disk)
 
     def quiet(self, on_disk):
         """The engine (its manual on disk or not) without an installed one; no notices, no engine record."""
         stack = ExitStack()
-        stack.enter_context(mock.patch.object(commands.PptxManual, "prepare", return_value=self.manual(on_disk)))
+        stack.enter_context(mock.patch.object(commands.PptxManual, "prepare", side_effect=lambda role, *a, **k: self.manual(on_disk, role)))
         stack.enter_context(mock.patch.object(install, "touch_used"))
         stack.enter_context(mock.patch.object(install, "take_announcement", return_value=None))
         stack.enter_context(mock.patch.object(install, "plugin_notice", return_value=None))
@@ -288,6 +295,34 @@ class PptxManualFromTexts(TextsCase):
         self.assertLess(text.index("DIRECTIONS FOR THIS ACCOUNT."), text.index("Served manual text."))
         self.assertEqual(len(self.posts()), 1)
         self.assertEqual([(i["section"], i["bindings"]) for i in self.fake.batches[0]], [("", "launcher"), ("manual", "launcher")])
+
+    def test_a_reader_with_the_tools_gets_the_header_in_the_tool_form(self):
+        self.fake.guides["pptx"] = {"": "DIRECTIONS.\n", "manual": "# Manual\n\nServed manual text.\n"}
+        with self.quiet(None):
+            tool = self.texts.guide("pptx", None, None, bindings="tool")[0].splitlines()
+            designer = self.texts.guide("pptx", None, "slide", bindings="tool")[0]
+            shell = self.texts.guide("pptx", None, None, bindings="launcher")[0].splitlines()
+            body = self.texts.skill_body("pptx", bindings="tool")
+        first = next(i for i, line in enumerate(tool) if line.startswith("Bindings: "))
+        self.assertTrue(tool[first].startswith("Bindings: pptx <verb> …  ->  the Theodore tool pptx, args [<verb>, …]; "
+                                               "only where that tool is missing: "), tool[first])
+        self.assertTrue(tool[first].endswith(" pptx <verb> … in a shell"), tool[first])
+        self.assertIn("->  the Theodore tools guide, specimen and theodore; only where they are missing: ", tool[first + 2])
+        self.assertEqual(tool[first + 3], '          a text this manual names  ->  the Theodore tool guide with skill "pptx" and '
+                                          'section "<name>"   (a name that is not one lists them)')
+        self.assertIn('section "<name>" and role "slide"   (a name', designer)
+        self.assertTrue(next(line for line in shell if line.startswith("Bindings: ")).startswith("Bindings: pptx <verb>  ->  "),
+                        "the launcher form is unchanged")
+        self.assertTrue(body.startswith("Bindings: pptx <verb> …  ->  the Theodore tool pptx"), body[:120])
+
+    def test_the_service_can_say_so_in_the_calls_environment(self):
+        self.fake.guides["pptx"] = {"": "DIRECTIONS.\n", "manual": "# Manual\n\nServed manual text.\n"}
+        with self.quiet(None), mock.patch.dict(os.environ, {"THEODORE_TOOLS": "1"}):
+            body = self.texts.skill_body("pptx")
+        self.assertTrue(body.startswith("Bindings: pptx <verb> …  ->  the Theodore tool pptx"), body[:120])
+        with self.quiet(None), mock.patch.dict(os.environ, {"THEODORE_TOOLS": ""}):
+            body = self.texts.skill_body("pptx")
+        self.assertTrue(body.startswith("Bindings: pptx <verb>  ->  "), body[:120])
 
     def test_offline_the_engines_own_manual_comes_with_the_line_that_says_so(self):
         self.fake.down = True
