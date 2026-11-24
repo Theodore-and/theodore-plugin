@@ -9,14 +9,13 @@ this process (the one-shot path). THEODORE_SERVICE=0 always takes that path.
 
 from __future__ import annotations
 
-import base64
 import os
-import secrets
 import sys
-import threading
 
 from .. import core
-from . import client as service_client, context, endpoint
+
+# Nothing else at import: with THEODORE_SERVICE=0 or THEODORE_RESIDENT=0 an engine command takes the lean one-shot path
+# (verbs.py), which loads no network, hashing or archive module (0.4.34); run() imports what reaching the service needs.
 
 FRONT_COMMANDS = ("pptx", "guide", "specimen", "skill")
 # The Bash tool's limit minus 30 s (Claude Code: BASH_MAX_TIMEOUT_MS, 10 minutes), as the native front reckons it.
@@ -82,12 +81,17 @@ def _stdin(args: list[str]) -> dict | None:
     try:
         return {"encoding": "utf-8", "data": data.decode("utf-8")}
     except UnicodeDecodeError:
+        import base64
         return {"encoding": "base64", "data": base64.b64encode(data).decode("ascii")}
 
 
 def run(argv: list[str]) -> int | None:
     if not enabled() or not argv or argv[0] not in FRONT_COMMANDS:
         return None
+    import secrets
+    import threading
+
+    from . import client as service_client, context, endpoint
     done = threading.Event()
     result: dict = {}
     out = getattr(sys.stdout, "buffer", None)
