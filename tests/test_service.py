@@ -386,6 +386,69 @@ class Burst(ServiceCase):
         self.assertEqual(len({json.loads(Collector.stdout(f).splitlines()[0])["pid"] for f in frames_}), 3)
 
 
+class StudioParts(ServiceCase):
+    """A Studio deck's parts applied together (lanes G and F; the coordinator's decision, 25 Nov): a lone part's apply
+    runs at once; the others of a burst gather and go in one build per free worker; each designer gets its own answer."""
+
+    def prepared(self, parts: int, in_turn: bool = False) -> Path:
+        lead = self.box.tmp / "deck"
+        lead.mkdir(exist_ok=True)
+        self.client_, self.got = self.connect()
+        args = ["prepare", str(lead), "--parts", str(parts)] + (["--in-turn"] if in_turn else [])
+        self.call(self.client_, self.got, "prep", args)
+        deadline = time.monotonic() + 30
+        want = int(self.env["THEODORE_SERVICE_WORKERS"])
+        while time.monotonic() < deadline and \
+                len([p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]]) < want:
+            time.sleep(0.1)
+        time.sleep(0.5)
+        return lead
+
+    def burst(self, lead: Path, names: list[str], hold: str = "0.3") -> dict:
+        for name in names:
+            self.call(self.client_, self.got, name, ["apply", str(lead / "parts" / name), "--hold", hold], wait=False)
+        return {name: self.got.wait(name, 60) for name in names}
+
+    def test_a_burst_goes_in_one_build_per_free_worker_and_each_gets_its_own_answer(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
+        self.service()
+        lead = self.prepared(7)
+        names = [f"s{i:02d}" for i in range(1, 8)]
+        frames_ = self.burst(lead, names)
+        batches = []
+        for name in names:
+            done = Collector.done(frames_[name])
+            self.assertEqual(done["exit"], 0, frames_[name])
+            answer = json.loads(Collector.stdout(frames_[name]).splitlines()[0])
+            self.assertEqual(Path(answer["argv"][1]).name, name, "each designer got its own part's answer")
+            batches.append(answer.get("batch", 1))
+            if answer.get("batch"):
+                self.assertEqual((done.get("counters") or {}).get("files_written"), 1, "its own part's counts")
+        self.assertIn(1, batches, "the first to arrive ran alone, at once")
+        self.assertGreaterEqual(max(batches), 2, "those that followed went in one build")
+        self.assertLessEqual(len(set(batches)), 3, f"few builds for seven parts: {batches}")
+        lone = json.loads(Collector.stdout(frames_[names[batches.index(1)]]).splitlines()[0])
+        self.assertEqual(lone["build_threads"], str(max(1, (os.cpu_count() or 2) // 2)), "THEODORE_BUILD_THREADS")
+
+    def test_a_lone_part_apply_runs_at_once_as_a_plain_apply(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
+        self.service()
+        lead = self.prepared(3)
+        frames_ = self.burst(lead, ["s02"], hold="0")
+        answer = json.loads(Collector.stdout(frames_["s02"]).splitlines()[0])
+        self.assertNotIn("batch", answer, "alone: the plain apply, no window, no batch")
+        self.assertEqual(answer["argv"][:2], ["apply", str(lead / "parts" / "s02")])
+
+    def test_parts_that_come_in_turn_are_never_gathered(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
+        self.service()
+        lead = self.prepared(4, in_turn=True)
+        frames_ = self.burst(lead, ["s01", "s02", "s03", "s04"])
+        for name, got in frames_.items():
+            answer = json.loads(Collector.stdout(got).splitlines()[0])
+            self.assertNotIn("batch", answer, name)
+
+
 class Lifecycle(ServiceCase):
     def test_nothing_runs_after_the_last_relay_detaches(self):
         record = self.service()

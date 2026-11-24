@@ -230,6 +230,7 @@ class Worker:
         self.info: dict = {}
         self.busy = False
         self.rank: int | None = None                # the rank of the call it runs (RANKS)
+        self.build_threads: int | None = None       # THEODORE_BUILD_THREADS for its Node builds (lane F), when set
         self.retiring = False
         self.calls = 0
         self.rss_mb = 0.0
@@ -258,6 +259,8 @@ class Worker:
             else core.home().root / "work"           # its own folder between calls (lane B: B-A-worker.md, 1)
         env["THEODORE_RESIDENT"] = "1"
         env["THEODORE_WORK_DIR"] = str(work)
+        if self.build_threads:
+            env["THEODORE_BUILD_THREADS"] = str(self.build_threads)
         env["PYTHONUNBUFFERED"] = "1"
         command = [self.spec.python(), "-I", str(self.spec.serve_script), "serve", "--protocol", str(frames.PROTOCOL)]
         work.mkdir(parents=True, exist_ok=True)
@@ -503,6 +506,7 @@ class Pool:
         self.cond = threading.Condition()
         self.waiting: dict[str, list[tuple[int, int]]] = {}    # per group: the waiting calls' (rank, arrival)
         self._arrivals = 0
+        self.on_release: list = []                  # called with the version when a worker is free again (parts.py)
         self.keys = _KeyLock()
         self.closed = False
         self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
@@ -539,11 +543,16 @@ class Pool:
                 run.__exit__(None, None, None)
 
     def _spawn(self, spec: Spec, group: str | None = None, env: dict | None = None, limit: int | None = None) -> Worker | None:
-        """A new worker of the group, started; None when `limit` workers of it live already."""
+        """A new worker of the group, started; None when `limit` workers of it live already. Each builds on
+        max(1, cores // pool size) Node threads (THEODORE_BUILD_THREADS; lane F and the coordinator, 25 Nov), so a
+        burst's builds share the cores instead of oversubscribing them."""
         worker = Worker(self, spec, group, env)
         with self.cond:
-            if limit is not None and len(self._live(worker.group)) >= limit:
+            live = self._live(worker.group)
+            if limit is not None and len(live) >= limit:
                 return None
+            if env is None:
+                worker.build_threads = max(1, (os.cpu_count() or 2) // max(1, self.most))
             self.workers.setdefault(worker.group, []).append(worker)
         self._hold_engine_run()
         try:
@@ -601,6 +610,15 @@ class Pool:
                 missing = count - len(self._live(version))
             for _ in range(max(0, missing)):
                 threading.Thread(target=one, args=(spec,), name="pool-warm-up", daemon=True).start()
+
+    def can_apply_parts(self, version: str) -> bool:
+        """A ready worker of the engine said it takes several Studio parts in one apply (`ready.features`)."""
+        with self.cond:
+            return any("apply-parts" in (w.info.get("features") or []) for w in self._live(version) if w.ready.is_set())
+
+    def idle_count(self, version: str) -> int:
+        with self.cond:
+            return sum(1 for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal)
 
     def _oneshot(self, version: str) -> bool:
         until = self.oneshot_until.get(version)
@@ -674,6 +692,9 @@ class Pool:
             worker.busy = False
             worker.rank = None
             self.cond.notify_all()
+        for hook in list(self.on_release):
+            with contextlib.suppress(Exception):
+                hook(worker.group)
         if worker.calls >= RECYCLE_CALLS or worker.rss_mb >= RECYCLE_RSS_MB:
             self.service.log(f"worker {worker.spec.version} recycled after {worker.calls} calls, {worker.rss_mb:.0f} MB")
             threading.Thread(target=self._replace, args=(worker,), daemon=True).start()
@@ -738,25 +759,35 @@ class Pool:
 
     # --- running a call ------------------------------------------------------------------------------------------------
 
-    def run(self, call, version: str, argv: list[str], env: dict, stdin: dict | None) -> tuple[int, list]:
-        """Run one engine command for `call`. Returns (exit code, pending)."""
+    def run(self, call, version: str, argv: list[str], env: dict, stdin: dict | None, keys: list[str] | None = None,
+            order: int | None = None, acquired=None) -> tuple[int, list]:
+        """Run one engine command for `call`. Returns (exit code, pending). `keys`: the workspace keys a batch of
+        Studio parts holds (parts.py), instead of the one its argv names; `acquired`: called once a worker took it,
+        or once it will not get one."""
         spec = Spec(version)
         priority = classify(argv)
-        order = rank(argv, call.cwd)
-        key = workspace_key(argv, call.cwd)
+        order = rank(argv, call.cwd) if order is None else order
+        key = workspace_key(argv, call.cwd) if keys is None else None
         if not spec.resident() or self._oneshot(version):
             return run_oneshot(self.service, call, spec, argv, env, stdin), []
-        if argv[:1] == ["prepare"]:
-            self.warm_up(version)               # its parts' applies are coming: warm workers for them
-        with self.keys.held(key if priority != "read" else None):
+        held = sorted(set(keys)) if keys is not None else [key if priority != "read" else None]
+        with contextlib.ExitStack() as stack:
+            for one in held:
+                stack.enter_context(self.keys.held(one))
             for attempt in (1, 2):
                 try:
                     worker = self._acquire(spec, key, priority, call, rank=order)
                 except WorkerFailed as exc:
+                    if acquired is not None:
+                        acquired()
+                        acquired = None
                     if call.cancelled.is_set():
                         return 130, []
                     self.service.log(f"no worker for engine {version} ({exc}); one-shot")
                     return run_oneshot(self.service, call, spec, argv, env, stdin), []
+                if acquired is not None:
+                    acquired()
+                    acquired = None
                 if call.cancelled.is_set():         # cancelled while a worker was being found: nothing starts
                     self._release(worker)
                     return 130, []
