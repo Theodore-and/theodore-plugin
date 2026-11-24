@@ -53,12 +53,11 @@ pub fn default_home() -> PathBuf {
     new
 }
 
-/// The plugin folder this program was shipped in (`<plugin>/bin/<this>`), when it was: the relay's `--plugin-root`
-/// when the host gave none, and where the set-up launcher is found.
+/// The plugin folder this program was shipped in (`<plugin>/scripts/<this>`, or `<plugin>/scripts/Windows_NT/<this>`),
+/// when it was: the relay's `--plugin-root` when the host gave none, and where the set-up launcher is found.
 pub fn plugin_root_of_exe() -> Option<PathBuf> {
     let exe = sys::simplify(fs::canonicalize(env::current_exe().ok()?).ok()?);
-    let root = exe.parent()?.parent()?;
-    root.join("skills").join("pptx").join("scripts").is_dir().then(|| root.to_path_buf())
+    exe.ancestors().skip(2).take(2).find(|root| root.join("skills").join("pptx").join("scripts").is_dir()).map(Path::to_path_buf)
 }
 
 pub struct Launch {

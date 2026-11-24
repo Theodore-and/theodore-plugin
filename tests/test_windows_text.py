@@ -644,10 +644,10 @@ class CodexServerOnWindows(unittest.TestCase):
         self.path.write_text(json.dumps(published))
         commands._codex_mcp_for_windows(self.path)
         entry = json.loads(self.path.read_text())["mcpServers"]["theodore"]
-        self.assertEqual(entry["command"], "./scripts/theodore.cmd", "the plugin's command: the front, else the launcher")
+        self.assertEqual(entry["command"], "./scripts/Windows_NT/theodore.cmd", "the plugin's command: the front, else the launcher")
         self.assertEqual(entry["args"], ["mcp", "--for", "codex"])
         self.assertEqual(entry["type"], "stdio")
-        self.assertTrue((Path(support.PLUGIN) / "scripts" / "theodore.cmd").is_file())
+        self.assertTrue((Path(support.PLUGIN) / "scripts" / "Windows_NT" / "theodore.cmd").is_file())
         # A plugin from before the front: its launcher, the form lane WINDOWS saw Codex start.
         published["mcpServers"]["theodore"]["args"] = ["./skills/pptx/scripts/theodore", "mcp", "--for", "codex"]
         self.path.write_text(json.dumps(published))

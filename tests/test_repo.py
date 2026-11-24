@@ -130,8 +130,12 @@ class Stubs(unittest.TestCase):
             self.assertNotIn(path.suffix, (".py", ".js", ".mjs", ".ps1"), f"{path}: the plugin carries no program but the launcher")
         self.assertEqual(sorted(p.name for p in PLUGIN.iterdir()),
                          [".claude-plugin", ".mcp.json", "LICENSE", "README.md", "agents", "hooks", "logo.png", "mcp.json", "plugin.json", "scripts", "skills"])
-        # The native front's command (lane C): two small scripts here; its builds are added to the archives, never committed.
-        self.assertEqual(sorted(p.name for p in (PLUGIN / "scripts").iterdir()), ["theodore", "theodore.cmd"])
+        # The native front's command (lane C), one folder per value of OS (.mcp.json names scripts/${OS:-unix}/theodore):
+        # small scripts only; the front's builds are added to the archives, never committed.
+        front = PLUGIN / "scripts"
+        self.assertEqual(sorted(str(p.relative_to(front)) for p in front.rglob("*") if p.is_file()),
+                         ["Darwin/theodore", "Linux/theodore", "Windows_NT/theodore.cmd", "unix/theodore"])
+        self.assertEqual({(front / f / "theodore").read_bytes() for f in ("unix", "Darwin", "Linux")}, {(front / "unix" / "theodore").read_bytes()})
         # The one agent, Studio (theodore:studio in the engine's texts); its words belong to the design text, not to this repository.
         self.assertEqual(sorted(p.name for p in (PLUGIN / "agents").iterdir()), ["studio.md"])
         agent = frontmatter((PLUGIN / "agents" / "studio.md").read_text(encoding="utf-8"))
@@ -220,7 +224,7 @@ class GeneratedFiles(unittest.TestCase):
                 names = bundle.namelist()
                 self.assertIn(".claude-plugin/plugin.json", names)
                 self.assertIn("skills/pptx/scripts/theodore", names)
-                for script in ("skills/pptx/scripts/theodore", "scripts/theodore"):
+                for script in ("skills/pptx/scripts/theodore", "scripts/unix/theodore"):
                     self.assertEqual((bundle.getinfo(script).external_attr >> 16) & 0o777, 0o755, script)
                 self.assertIn(b"\r\n", bundle.read("skills/pptx/scripts/theodore.cmd"))
                 self.assertEqual(bundle.read("agents/studio.md"), (PLUGIN / "agents" / "studio.md").read_bytes())
@@ -432,9 +436,9 @@ class HostLimits(unittest.TestCase):
         self.assertIn('-o "%SAFE%\\activation.pending"', cmd, "the answer goes to the private folder first")
 
     def test_line_endings(self):
-        for path in (SCRIPTS / "theodore", ROOT / "install" / "install.sh", PLUGIN / "scripts" / "theodore"):
+        for path in (SCRIPTS / "theodore", ROOT / "install" / "install.sh", PLUGIN / "scripts" / "unix" / "theodore"):
             self.assertNotIn(b"\r", path.read_bytes(), path.name)
-        for path in (SCRIPTS / "theodore.cmd", ROOT / "install" / "install.cmd", PLUGIN / "scripts" / "theodore.cmd"):
+        for path in (SCRIPTS / "theodore.cmd", ROOT / "install" / "install.cmd", PLUGIN / "scripts" / "Windows_NT" / "theodore.cmd"):
             data = path.read_bytes()
             self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), f"{path.name}: every line ends CRLF")
             data.decode("ascii")
@@ -443,7 +447,7 @@ class HostLimits(unittest.TestCase):
         self.assertIn("plugins/theodore/skills/*/scripts/theodore text eol=lf", attributes)
 
     def test_shell_syntax(self):
-        for script in (SCRIPTS / "theodore", ROOT / "install" / "install.sh", PLUGIN / "scripts" / "theodore"):
+        for script in (SCRIPTS / "theodore", ROOT / "install" / "install.sh", PLUGIN / "scripts" / "unix" / "theodore"):
             for shell in ("sh", "dash", "bash"):
                 exe = shutil.which(shell)
                 if exe:
@@ -512,20 +516,23 @@ class HostLimits(unittest.TestCase):
         # the signed front, else theodore.cmd); on macOS and Linux the file itself is executable with its #!/bin/sh line.
         # Proved on Windows Server 2022 with Claude Code (lane PLUGFIX, 2026-11-13): "sh ..." failed to connect, the path
         # connected. The command is in scripts/, not bin/: claude.ai and Cowork refuse a plugin with a top-level bin/.
+        # On Windows the host takes an extensionless file over the .exe beside it, and fails (contract C0-2, W2): the entry
+        # names scripts/${OS:-unix}/theodore, and Windows' folder (OS=Windows_NT) holds no extensionless file, so the host
+        # finds theodore.exe there (W1). Both expansions proved by `claude --plugin-dir ... mcp list` (2.1.292).
         self.assertEqual(json.loads((PLUGIN / ".mcp.json").read_text()),
-                         {"mcpServers": {"theodore": {"command": "${CLAUDE_PLUGIN_ROOT}/scripts/theodore",
+                         {"mcpServers": {"theodore": {"command": "${CLAUDE_PLUGIN_ROOT}/scripts/${OS:-unix}/theodore",
                                                       "args": ["mcp", "--plugin-root", "${CLAUDE_PLUGIN_ROOT}"]}}})
         front = PLUGIN / "scripts"
-        self.assertTrue((front / "theodore.cmd").is_file(), "the Windows command beside it, which PATHEXT finds")
-        self.assertTrue((front / "theodore").read_text().startswith("#!/bin/sh\n"))
+        self.assertEqual(sorted(p.name for p in (front / "Windows_NT").iterdir()), ["theodore.cmd"], "nothing extensionless")
+        self.assertTrue((front / "unix" / "theodore").read_text().startswith("#!/bin/sh\n"))
         self.assertTrue((SCRIPTS / "theodore.cmd").is_file(), "the launcher both fall back to")
-        for script in ("plugins/theodore/skills/pptx/scripts/theodore", "plugins/theodore/scripts/theodore"):
+        for script in ["plugins/theodore/skills/pptx/scripts/theodore"] + [f"plugins/theodore/scripts/{f}/theodore" for f in ("unix", "Darwin", "Linux")]:
             mode = subprocess.run(["git", "ls-files", "-s", script], cwd=ROOT, capture_output=True, text=True).stdout.split(" ")[0]
             if mode:                # a git checkout: committed executable, so every copy of it runs
                 self.assertEqual(mode, "100755", script)
         self.assertEqual(json.loads((PLUGIN / "mcp.json").read_text()),
                          {"$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-                          "mcpServers": {"theodore": {"type": "stdio", "command": "sh", "args": ["./scripts/theodore", "mcp", "--for", "codex"]}}},
+                          "mcpServers": {"theodore": {"type": "stdio", "command": "sh", "args": ["./scripts/unix/theodore", "mcp", "--for", "codex"]}}},
                          "Codex 0.160 reads an Agent Plugins mcp.json only with its $schema and a type (codex-rs codex-mcp/src/agent_plugin_config.rs); "
                          "without them it logged 'missing field $schema' and never started the server (lane CHATGPT)")
         self.assertEqual(portable["mcpServers"], "./mcp.json")

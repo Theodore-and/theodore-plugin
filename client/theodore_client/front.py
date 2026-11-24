@@ -1,7 +1,7 @@
 """The native front (DESIGN §2.2, contract C1): its copy in <home>/bin, and the launch.json it reads there.
 
 The plugin carries the front built for each system in its scripts/ folder (theodore-darwin, theodore-linux-x64,
-theodore-linux-arm64, theodore.exe; a plugin may not have a top-level bin/, which claude.ai and Cowork refuse). This
+theodore-linux-arm64, Windows_NT/theodore.exe; a plugin may not have a top-level bin/, which claude.ai and Cowork refuse). This
 module copies the one for this computer to <home>/bin/theodore-front (theodore-front.exe on Windows), where the short
 command and the plugin's MCP entry reach it, and writes <home>/bin/launch.json (C1 launch-json v1): how the front starts
 the service and the client. Both are rewritten whenever what they say changes: an install, an update of the plugin,
@@ -28,10 +28,11 @@ LAUNCH_NAME = "launch.json"
 
 
 def binary_name() -> str | None:
-    """The plugin's file for this system, or None when there is no front for it (Windows on ARM runs the x64 one)."""
+    """The plugin's file for this system, under its scripts/ folder, or None when there is no front for it (Windows on
+    ARM runs the x64 one). The Windows one is in Windows_NT/, the folder the plugin's MCP entry names there."""
     system, arch = core.platform_arch()
     if IS_WINDOWS:
-        return "theodore.exe" if arch in ("x64", "arm64", "amd64") else None
+        return "Windows_NT/theodore.exe" if arch in ("x64", "arm64", "amd64") else None
     if system == "darwin":
         return "theodore-darwin"          # one universal file: arm64 and x64
     if system == "linux":

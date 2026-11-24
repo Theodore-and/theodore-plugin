@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "theodore": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/theodore",
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/${OS:-unix}/theodore",
       "args": [
         "mcp",
         "--plugin-root",

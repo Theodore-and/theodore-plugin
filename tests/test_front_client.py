@@ -71,8 +71,8 @@ class Placement(Home):
     def test_binary_names(self):
         for system, arch, windows, name in [("darwin", "arm64", False, "theodore-darwin"), ("darwin", "x64", False, "theodore-darwin"),
                                             ("linux", "x64", False, "theodore-linux-x64"), ("linux", "arm64", False, "theodore-linux-arm64"),
-                                            ("linux", "riscv64", False, None), ("win32", "x64", True, "theodore.exe"),
-                                            ("win32", "arm64", True, "theodore.exe")]:
+                                            ("linux", "riscv64", False, None), ("win32", "x64", True, "Windows_NT/theodore.exe"),
+                                            ("win32", "arm64", True, "Windows_NT/theodore.exe")]:
             with mock.patch.object(core, "platform_arch", return_value=(system, arch)), mock.patch.object(front, "IS_WINDOWS", windows):
                 self.assertEqual(front.binary_name(), name, (system, arch))
 
@@ -100,13 +100,14 @@ class Placement(Home):
         self.assertEqual(front.installed(), placed)
 
     def test_an_unsigned_windows_front_is_never_placed(self):
-        (self.plugin / "theodore.exe").write_bytes(pe(False))
+        (self.plugin / "Windows_NT").mkdir()
+        (self.plugin / "Windows_NT" / "theodore.exe").write_bytes(pe(False))
         with mock.patch.object(core, "platform_arch", return_value=("win32", "x64")), mock.patch.object(front, "IS_WINDOWS", True), \
                 mock.patch.object(front, "FRONT_NAME", "theodore-front.exe"):
             self.assertIsNone(front.source())
             self.assertIsNone(front.place())
-            (self.plugin / "theodore.exe").write_bytes(pe(True))
-            self.assertEqual(front.source(), self.plugin / "theodore.exe")
+            (self.plugin / "Windows_NT" / "theodore.exe").write_bytes(pe(True))
+            self.assertEqual(front.source(), self.plugin / "Windows_NT" / "theodore.exe")
             front.place()
             self.assertTrue((self.home / "bin" / "theodore-front.exe").exists())
 
@@ -225,7 +226,7 @@ class Archives(unittest.TestCase):
             with zipfile.ZipFile(Path(tmp) / "out" / record["zip"]["file"]) as bundle:
                 for name in ("theodore-darwin", "theodore-linux-x64", "theodore-linux-arm64"):
                     self.assertEqual((bundle.getinfo(f"scripts/{name}").external_attr >> 16) & 0o777, 0o755)
-                self.assertIn("scripts/theodore.exe", bundle.namelist(), "a test build carries it unsigned")
+                self.assertIn("scripts/Windows_NT/theodore.exe", bundle.namelist(), "a test build carries it unsigned")
             import tarfile
             with tarfile.open(Path(tmp) / "out" / record["tar"]["file"]) as tar:
                 self.assertEqual(tar.getmember("plugins/theodore/scripts/theodore-darwin").mode, 0o755)
@@ -233,7 +234,7 @@ class Archives(unittest.TestCase):
                 build_plugin_archives.front_files(builds, release=True)
             self.assertIn("Authenticode", str(refused.exception))
             (builds / "theodore.exe").write_bytes(pe(True))
-            self.assertIn("scripts/theodore.exe", build_plugin_archives.front_files(builds, release=True))
+            self.assertIn("scripts/Windows_NT/theodore.exe", build_plugin_archives.front_files(builds, release=True))
 
 
 if __name__ == "__main__":
