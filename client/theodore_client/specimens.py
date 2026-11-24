@@ -20,16 +20,17 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import secrets
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 from . import core
 from .core import Status
+
+secrets = core.LazyModule("secrets")         # only when sheets are written
+tempfile = core.LazyModule("tempfile")
 
 PREFIX = "theodore-specimens-"
 KEEP_SECONDS = 3600

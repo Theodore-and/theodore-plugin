@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, desktop, install, outbox, routing, sessions, specimens, usage
+from . import __version__, account, api, core, credentials, desktop, install, outbox, routing, sessions, specimens
 from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -860,30 +860,6 @@ def _heartbeat(engine_version: str) -> None:
     except (api.ApiError, api.NetworkError):
         return
     outbox.flush()          # the service answered: reports kept for later go now (a few seconds at most; never raises)
-
-
-# --- engine pass-through -----------------------------------------------------------------------------------------------------
-
-def run_pptx(args: list[str]) -> int:
-    account.require("pptx", allow_refresh=False)
-    account.check_in_background()      # at most one detached licence refresh an hour; never waited for
-    install.require_runtime()
-    install.wait_for_packs(args)
-    install.wait_for_renderer(args)
-    sessions.engine_notice(args[0] if args else "")
-    code = install.run_engine(args)
-    if args[:1] == ["finish"]:
-        # The usage counts and the reports kept for later go at the end of a deck, in a detached send (never on the
-        # command's own time; never raises, never prints).
-        usage.send_in_background(force=True, reports=True)
-    return code
-
-
-def run_python(args: list[str]) -> int:
-    account.require("pptx", allow_refresh=False)
-    account.check_in_background()
-    install.require_runtime()
-    return install.run_engine(args, python_passthrough=True)
 
 
 # --- reports and preferences -------------------------------------------------------------------------------------------------

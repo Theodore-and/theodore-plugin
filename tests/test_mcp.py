@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
 from support import CLIENT_DIR, IS_WINDOWS, RUNTIME_ID, ClientCase, FakeApi, Sandbox, cmd_command, engine_zip, fake_runtime_parts
+from theodore_client import api  # noqa: E402
 
 JPEG = b"\xff\xd8\xff\xe0" + b"sheet bytes " * 50 + b"\xff\xd9"
 ENTRY = "# Deck design\n\nENTRY-MARKER é—“quoted”\n" + "".join(f"line {i:05d} " + "x" * 70 + "\n" for i in range(800))
@@ -614,11 +615,15 @@ class SideBySide(McpCase):
             return connection
         self.api.server.get_request = counting
         server = self.server()
+        deadline = time.monotonic() + 30
+        while len(accepted) < api.KEPT_WARM and time.monotonic() < deadline:     # opened side by side at its start
+            time.sleep(0.02)
+        self.assertEqual(len(accepted), api.KEPT_WARM)
         for _ in range(6):
             self.assertEqual(server.call("guide", skill="deck-design", section="part0")["content"][0]["text"], "TEXT 0\n")
         self.assertEqual((self.api.served["guide", "part0", 200], self.api.served["guide", "part0", 304]), (1, 5),
                          "every call goes to the service; a repeat is a 304")
-        self.assertLessEqual(len(accepted), 2, "one kept-alive connection (and the one opened at start), not one per call")
+        self.assertEqual(len(accepted), api.KEPT_WARM, "the calls go on the connections opened at its start, none of their own")
         server.close()
 
     def test_answers_written_side_by_side_never_interleave(self):

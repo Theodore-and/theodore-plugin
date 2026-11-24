@@ -6,15 +6,18 @@ import contextlib
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
 
-from . import __version__, api, core, credentials, ed25519
+from . import __version__, core, credentials
 from .contract import (ACTIVATION_CODE_PATTERN, DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, DEVICE_CLIENT_ID, ENTITLEMENT_AUD,
                        ENTITLEMENT_ENV, ENTITLEMENT_FILE_KEY)
 from .core import Status, quoted_launcher
+
+api = core.LazyModule(__package__ + ".api")     # the network stack only when a call needs it (an engine command does not)
+ed25519 = core.LazyModule(__package__ + ".ed25519")       # a signature is checked only when a licence or a release arrives
+socket = core.LazyModule("socket")
 
 
 # --- signed documents --------------------------------------------------------------------------------------------------
@@ -64,10 +67,12 @@ def _token_path():
 
 
 def decode_claims(token: str) -> dict:
-    """The claims of a JWS compact token. The engine verifies the signature; the client only reads the dates."""
+    """The claims of a JWS compact token. The engine verifies the signature; the client only reads the dates (with no
+    signature code loaded: ed25519 computes its curve's points when imported)."""
+    import base64
     try:
         _header, payload, _sig = token.split(".")
-        claims = json.loads(ed25519.b64url_decode(payload))
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         return claims if isinstance(claims, dict) else {}
     except (ValueError, AttributeError):
         return {}

@@ -78,6 +78,26 @@ class EngineVerbPath(ClientCase):
         self.client("pptx", "--help", env=env)
         self.assertEqual(len(starts.read_text().splitlines()), 5, "another build of the engine prints its own help again")
 
+    def test_an_engine_command_loads_no_network_archive_or_command_table_module(self):
+        """0.4.34: `pptx` and `python` go to verbs.py, which needs neither the network stack nor the archives, the
+        argument parser, the command table, the signature code or OpenSSL's hashes (tens of milliseconds a command on
+        the Windows test machine, where several of them are DLLs)."""
+        import subprocess
+        from support import CLIENT_DIR
+        self.ready()
+        self.client("pptx", "--help")                   # kept from now on
+        workspace = self.box.tmp / "ws"
+        workspace.mkdir()
+        heavy = {"ssl", "http.client", "email.parser", "argparse", "tarfile", "zipfile", "concurrent.futures",
+                 "urllib.request", "theodore_client.api", "theodore_client.commands", "theodore_client.mcp",
+                 "theodore_client.ed25519", "hashlib", "_hashlib", "socket", "uuid", "secrets", "tempfile", "shutil"}
+        for args in (["pptx", "--help"], ["pptx", "exit", "0"], ["pptx", "slide", "list", str(workspace)], ["python", "-c", "pass"]):
+            run = subprocess.run([sys.executable, "-X", "importtime", "-I", str(CLIENT_DIR), *args], env=self.box.env,
+                                 capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, cwd=str(self.box.tmp))
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            loaded = {line.rsplit("|", 1)[-1].strip() for line in run.stderr.splitlines() if line.startswith("import time:")}
+            self.assertIn("theodore_client.verbs", loaded, args)
+            self.assertEqual(sorted(heavy & loaded), [], f"loaded by {args}")
 
 
 if __name__ == "__main__":

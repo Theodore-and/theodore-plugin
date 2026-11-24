@@ -460,8 +460,9 @@ class WindowsShortCommand(unittest.TestCase):
         hot, rest = text.split('h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n', 1)
         self.assertNotIn("cygpath", hot, "the hot path starts no program before the client")
         self.assertIn(f"w={core._sh_quote(str(core.home().root))} h='/c/Users/T/.theodore'\n", hot)
-        self.assertIn('"$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n', hot, "the client gets Windows paths")
-        self.assertIn('[ "$x" -eq 126 ] || exit "$x"', hot, "a refused start falls through to the launcher, which says so")
+        self.assertIn('    exec "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n', hot,
+                      "the client gets Windows paths; exec: no forked copy of the shell waits beside it")
+        self.assertLess(hot.index("shopt -s execfail"), hot.index("exec "), "a refused start falls through to the launcher, which says so")
         self.assertIn('exec sh "$b/theodore" "$@"', rest)
         self.assertEqual((core._msys_path("C:\\Users\\Théo\\.theodore"), core._msys_path("\\\\srv\\share\\x"), core._msys_path("rel")),
                          ("/c/Users/Théo/.theodore", None, None))

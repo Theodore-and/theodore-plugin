@@ -172,8 +172,10 @@ class RefusalFromOutput(HomeCase):
         import io
         sink = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         script = "import sys; sys.stdout.write('é' * 50000 + '\\nlast line'); sys.stdout.flush(); sys.exit(3)"
+        # The engine writes UTF-8 everywhere (engine_env's PYTHONIOENCODING; on Windows a pipe otherwise gets the ANSI
+        # code page), and its bytes pass through unchanged.
         with mock.patch.object(sys, "stdout", sink):
-            code, tail, _whole = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
+            code, tail, _whole = install._call_passing_output([sys.executable, "-c", script], {**os.environ, "PYTHONIOENCODING": "utf-8"})
         self.assertEqual(code, 3)
         self.assertEqual(sink.buffer.getvalue().decode("utf-8"), "é" * 50000 + "\nlast line")
         self.assertTrue(tail.endswith(b"\nlast line"))

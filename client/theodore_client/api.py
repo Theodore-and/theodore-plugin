@@ -558,7 +558,8 @@ def call_json(route: str, **kwargs):
 # sent twice (a GET; a caller says so for anything else). A redirect is answered by request(), with its own rules.
 # Nothing is written to disk.
 
-KEPT_IDLE_MAX = 4               # connections kept open while idle; more may be open at once, and close when done
+KEPT_IDLE_MAX = 8               # connections kept open while idle; more may be open at once, and close when done
+KEPT_WARM = 5                   # opened side by side when the tool server starts: a lead and four designers at once
 KEPT_IDLE_SECONDS = 240.0       # an idle connection older than this is closed rather than tried (proxies drop them)
 KEPT_PROXY_SECONDS = 60.0       # the system's proxy setting is read again after this
 _REUSED_LOST = (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
@@ -574,7 +575,6 @@ class KeptAlive:
         self._lock = threading.Lock()
         self._idle: list[tuple[tuple, http.client.HTTPConnection, float]] = []   # (route, connection, idle since)
         self._proxies: dict[tuple[str, str], tuple[str | None, float]] = {}
-        self._context: ssl.SSLContext | None = None
 
     def _proxy(self, scheme: str, host: str) -> str | None:
         now = time.monotonic()
@@ -610,10 +610,9 @@ class KeptAlive:
         if scheme == "http":
             connection: http.client.HTTPConnection = http.client.HTTPConnection(host, port, timeout=timeout)
         else:
-            with self._lock:
-                if self._context is None:
-                    self._context = _ssl_context()
-                context = self._context
+            # A context of its own: truststore's holds a lock through each handshake and certificate check, so connections
+            # opened at once on one context were set up one after another (about 150 ms apart on the Windows test machine).
+            context = _ssl_context()
             if proxy:
                 parts = urllib.parse.urlsplit(proxy)
                 connection = _AnyAddressHTTPS(parts.hostname, parts.port or 80, context=context, timeout=timeout)
@@ -670,25 +669,33 @@ class KeptAlive:
                 return
         connection.close()
 
-    def warm(self) -> None:
-        """Open one connection to the API in the background (TCP and TLS done), unless one is idle already, so the
-        next request finds it. Never raises, never waits."""
+    def warm(self, count: int = 1) -> None:
+        """Open connections to the API in the background (TCP and TLS done), side by side, until `count` are idle, so
+        the next requests, as many at once, find them. Never raises, never waits."""
+        def one(route: tuple) -> None:
+            try:
+                connection = self._open(route, _timeout(core.config()["api_base"], 20.0))
+            except Exception:       # noqa: BLE001  warming is a courtesy: the request opens its own connection
+                return
+            with self._lock:
+                if len(self._idle) < self.idle_max:
+                    self._idle.append((route, connection, time.monotonic()))
+                    return
+            connection.close()
+
         def run() -> None:
             try:
                 route = self._route(str(core.config().get("api_base") or "").rstrip("/") + "/")
-                if route is None:
-                    return
-                with self._lock:
-                    if any(item[0] == route for item in self._idle):
-                        return
-                connection = self._open(route, _timeout(core.config()["api_base"], 20.0))
-                with self._lock:
-                    if len(self._idle) < self.idle_max:
-                        self._idle.append((route, connection, time.monotonic()))
-                        return
-                connection.close()
-            except Exception:       # noqa: BLE001  warming is a courtesy: the request opens its own connection
-                pass
+            except Exception:       # noqa: BLE001
+                return
+            if route is None:
+                return
+            with self._lock:
+                missing = min(count, self.idle_max) - sum(1 for item in self._idle if item[0] == route)
+            for _ in range(missing - 1):
+                threading.Thread(target=one, args=(route,), name="theodore-warm", daemon=True).start()
+            if missing > 0:
+                one(route)
         threading.Thread(target=run, name="theodore-warm", daemon=True).start()
 
     def close(self) -> None:
