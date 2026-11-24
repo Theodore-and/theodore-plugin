@@ -76,7 +76,8 @@ def _ssl_context() -> ssl.SSLContext:
 # crypt32 built none (CertFreeCertificateChain on NULL), so a failure of crypt32's own became a native fault, and the
 # address race counted it as a dead address. Now: a chain that was not built is not freed (the system's own error
 # shows); a check that fails in itself (not a certificate it refuses) is tried again, CERT_CHECK_WAITS apart; then the
-# address race tries OpenSSL against the same system store (Windows); and what still fails is a LocalFault.
+# address race tries OpenSSL against the same system store (Windows); and what still fails is a LocalFault. Each retry
+# and the OpenSSL try write one line through core.log, each with "certificate check failed".
 CERT_CHECK_WAITS = (0.25, 0.5, 1.0, 2.0)
 _GUARD_LOCK = threading.Lock()
 _GUARDED: list[bool] = []
@@ -103,6 +104,9 @@ def _guard_certificate_check(trust=None, windows=None) -> None:
             fault = None
             for wait in (0.0, *CERT_CHECK_WAITS):
                 if wait:
+                    # One line a retry (client.log, or the log a service process names): the rig counts them.
+                    core.log(f"network: the system's certificate check failed in itself ({fault.__class__.__name__}: "
+                             f"{fault}); tried again in {wait:g} s")
                     time.sleep(wait)
                 try:
                     return check(sock_or_sslobj, server_hostname)
