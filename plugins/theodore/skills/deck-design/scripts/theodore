@@ -102,19 +102,18 @@ hot() {
   THEODORE_HOME=$hot_home THEODORE_LAUNCHER=$hot_launcher
   export THEODORE_HOME THEODORE_LAUNCHER
   [ -n "${THEODORE_SKILL_DIR:-}" ] && export THEODORE_SKILL_DIR
-  # `skill`: whatever it says goes to standard output, and it exits 0 (the client does so for it; see below).
-  # exec where the shell has execfail (bash: the sh of macOS and of Git Bash): no copy of this shell waits beside the
-  # client (in Git Bash a forked copy is one more process started), and a start the system refuses (exit 126) returns
-  # here, so the full launcher below says so (BLOCKED_BY_POLICY). A shell without it (dash) runs the client as a child.
-  if command -v shopt >/dev/null 2>&1 && shopt -s execfail 2>/dev/null; then
-    [ "${1:-}" = skill ] && exec 2>&1
-    exec "$hot_py" -I "$hot_client" "$@"
-    return 1
-  fi
+  # `skill`: whatever it says goes to standard output and it exits 0, whatever the client does (see below); a child.
   if [ "${1:-}" = skill ]; then
     "$hot_py" -I "$hot_client" "$@" 2>&1
     [ $? -eq 126 ] && return 1
     exit 0
+  fi
+  # exec where the shell has execfail (bash: the sh of macOS and of Git Bash): no copy of this shell waits beside the
+  # client (in Git Bash a forked copy is one more process started), and a start the system refuses (exit 126) returns
+  # here, so the full launcher below says so (BLOCKED_BY_POLICY). A shell without it (dash) runs the client as a child.
+  if command -v shopt >/dev/null 2>&1 && shopt -s execfail 2>/dev/null; then
+    exec "$hot_py" -I "$hot_client" "$@"
+    return 1
   fi
   "$hot_py" -I "$hot_client" "$@"
   hot_rc=$?
