@@ -11,6 +11,8 @@ The stand-in engine's verbs:
   image PATH        stdout names PATH (the service attaches it); exit 0
   write FILE        `inputs` for FILE, `committed`, then writes it; exit 0
   slide list WS     a listing; exit 0
+`--hold S` with any verb: busy S seconds first (its echo then says t0 and t1, wall clock).
+FAKE_WORKER_START_S in the worker's environment: its warm-up takes that long before `ready`.
 FAKE_WORKER_FATAL in the worker's environment makes it answer `fatal` instead of `ready`.
 """
 
@@ -56,6 +58,7 @@ def read():
     (n,) = struct.unpack("<I", head)
     body = _read_exact(n)
     return None if body is None else json.loads(body.decode("utf-8"))
+time.sleep(float(os.environ.get("FAKE_WORKER_START_S") or 0))     # a slow warm-up (a loaded machine)
 if os.environ.get("FAKE_WORKER_FATAL"):
     send({"t": "fatal", "code": "IMPORT", "message": "a stand-in failure", "exit": 78})
     sys.exit(78)
@@ -95,6 +98,11 @@ while True:
     def say(text, stream="stdout"):
         send({"t": "out", "id": call, "stream": stream, "data": text})
     verb = argv[0] if argv else "--help"
+    t0 = time.time()
+    if "--hold" in argv:                    # any verb: busy this long first (a long call, a part's build)
+        hold_end = time.monotonic() + float(argv[argv.index("--hold") + 1])
+        while time.monotonic() < hold_end and call not in cancelled:
+            time.sleep(0.02)
     if "--crash-once" in argv:              # dies the first time (and leaves the flag), works the second
         flag = argv[argv.index("--crash-once") + 1]
         if verb == "write":
@@ -157,6 +165,7 @@ while True:
     else:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))
         say(json.dumps({"argv": argv, "cwd": run.get("cwd"), "pid": os.getpid(), "priority": run.get("priority"),
+                        "t0": t0, "t1": time.time(),
                         "key": run.get("key"), "env": {k: os.environ[k] for k in names if k in (run.get("env") or {})},
                         "resident": os.environ.get("THEODORE_RESIDENT"), "home": os.environ.get("THEODORE_HOME"),
                         "node_options": os.environ.get("NODE_OPTIONS"), "work": os.environ.get("THEODORE_WORK_DIR")}) + "\n")

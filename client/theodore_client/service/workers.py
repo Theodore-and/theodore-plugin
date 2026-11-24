@@ -1,12 +1,15 @@
 """Engine workers (DESIGN §3.2, §3.5, §4.4, §4.6; contract C2) and the one-shot path.
 
 A worker is `<runtime python> -I <engine>/skills/pptx/scripts/engine.py serve --protocol 1`, warm, one engine version,
-one call at a time, spoken to in C2 frames over its stdin and stdout. The pool keeps workers per engine version:
-1 on machines with 8 GB of RAM or less, else min(3, cores - 1), growing on demand (to MAX) and shrinking to 1 after
-5 idle minutes. A workspace key goes to the worker that served it last when that one is free; writes on one key run
-one at a time in arrival order; a read never waits behind a long call when another worker is free (the disk is the
-truth). A worker that dies answers its call with 75 (RETRY), or re-runs it once when that is safe (C2 "Crashes"); one
-past 800 MB or 2,000 calls is replaced by a spare.
+one call at a time, spoken to in C2 frames over its stdin and stdout. The pool keeps one worker of the current engine
+warm and grows under load to one worker per core (a build is CPU-bound; the service, the relay and the host mostly
+wait), within MEMORY_SHARE of the computer's memory at WORKER_MB a worker; it shrinks back after 5 idle minutes.
+Several calls waiting at once start several workers at once, and a deck's `prepare` (its parts are coming) starts
+them ahead of the designers' first applies. Waiting calls take workers in order of expected cost (reads, then writes
+and a part's apply, then long verbs; B-A-worker 12), and long calls never hold every worker: one is kept for short
+calls. A workspace key goes to the worker that served it last when that one is free; writes on one key run one at a
+time in arrival order (the disk is the truth). A worker that dies answers its call with 75 (RETRY), or re-runs it once
+when that is safe (C2 "Crashes"); one past 800 MB or 2,000 calls is replaced by a spare.
 
 An engine without `engine.py` (up to rc.34), or a worker that cannot start, runs each command one-shot, as the client
 runs it today, but started from the warm service (no launcher, no client start).
@@ -34,6 +37,10 @@ IS_WINDOWS = os.name == "nt"
 READY_WAIT_S = 90.0
 IDLE_SHRINK_S = 300.0
 RECYCLE_RSS_MB = 800.0
+WORKER_MB = 600.0                 # one warm worker with its Node and renderer, for the pool's memory cap
+MEMORY_SHARE = 0.4                # at most this share of the computer's memory goes to workers
+MOST_WORKERS = 16
+RANKS = {"read": 0, "write": 1, "long": 2}      # the queue's order: expected cost (B-A-worker 12)
 RECYCLE_CALLS = 2000
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
@@ -69,6 +76,26 @@ def classify(argv: list[str]) -> str:
     if verb in LONG_VERBS:
         return "long"
     return "write"
+
+
+def rank(argv: list[str], cwd: str | None) -> int:
+    """The order a waiting call takes a worker in: reads, then writes and a part's apply (lane G's parts: about 100 ms,
+    the burst of a Studio deck's designers), then long verbs."""
+    priority = classify(argv)
+    if priority == "long" and part_apply(argv, cwd):
+        return RANKS["write"]
+    return RANKS.get(priority, RANKS["write"])
+
+
+def part_apply(argv: list[str], cwd: str | None) -> bool:
+    """`apply <lead>/parts/<part>`: a Studio part's apply (lane G)."""
+    if not argv or argv[0] != "apply":
+        return False
+    target = next((arg for arg in argv[1:] if not arg.startswith("-")), None)
+    if not target:
+        return False
+    path = Path(target) if os.path.isabs(target) else Path(cwd or ".") / target
+    return path.parent.name == "parts"
 
 
 def _is_workspace(folder: Path) -> str | None:
@@ -202,6 +229,7 @@ class Worker:
         self.fatal: dict | None = None
         self.info: dict = {}
         self.busy = False
+        self.rank: int | None = None                # the rank of the call it runs (RANKS)
         self.retiring = False
         self.calls = 0
         self.rss_mb = 0.0
@@ -421,15 +449,14 @@ def _ram_bytes() -> int:
 
 
 def pool_sizes() -> tuple[int, int]:
-    """(base, most) workers per engine version."""
+    """(base, most) workers per engine version: one kept warm, and under load one per core within MEMORY_SHARE of the
+    memory at WORKER_MB each (2 at least, MOST_WORKERS at most). THEODORE_SERVICE_WORKERS sets both."""
     forced = os.environ.get("THEODORE_SERVICE_WORKERS")
     if forced and forced.isdigit() and int(forced) > 0:
         return int(forced), int(forced)
     cores = os.cpu_count() or 2
-    if _ram_bytes() <= (8 << 30) + (512 << 20):
-        return 1, 2
-    base = min(3, max(1, cores - 1))
-    return base, max(base, min(6, cores))
+    by_memory = int(_ram_bytes() * MEMORY_SHARE // (WORKER_MB * (1 << 20)))
+    return 1, max(2, min(cores, by_memory, MOST_WORKERS))
 
 
 class _KeyLock:
@@ -474,6 +501,8 @@ class Pool:
         self.workers: dict[str, list[Worker]] = {}
         self.affinity: dict[str, Worker] = {}
         self.cond = threading.Condition()
+        self.waiting: dict[str, list[tuple[int, int]]] = {}    # per group: the waiting calls' (rank, arrival)
+        self._arrivals = 0
         self.keys = _KeyLock()
         self.closed = False
         self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
@@ -509,9 +538,12 @@ class Pool:
             with contextlib.suppress(Exception):
                 run.__exit__(None, None, None)
 
-    def _spawn(self, spec: Spec, group: str | None = None, env: dict | None = None) -> Worker:
+    def _spawn(self, spec: Spec, group: str | None = None, env: dict | None = None, limit: int | None = None) -> Worker | None:
+        """A new worker of the group, started; None when `limit` workers of it live already."""
         worker = Worker(self, spec, group, env)
         with self.cond:
+            if limit is not None and len(self._live(worker.group)) >= limit:
+                return None
             self.workers.setdefault(worker.group, []).append(worker)
         self._hold_engine_run()
         try:
@@ -553,6 +585,23 @@ class Pool:
                     self._spawn(spec)
         threading.Thread(target=warm, name="pool-warm", daemon=True).start()
 
+    def warm_up(self, version: str, count: int | None = None) -> None:
+        """Workers of the engine started now, side by side and in the background, up to `count` (the pool's size):
+        a Studio deck's `prepare` means its designers' applies are coming, and each should find a warm worker."""
+        count = self.most if count is None else min(count, self.most)
+
+        def one(spec: Spec) -> None:
+            with contextlib.suppress(Exception):
+                self._spawn(spec, limit=count)
+        with contextlib.suppress(Exception):
+            spec = Spec(version)
+            if not spec.resident() or self._oneshot(version):
+                return
+            with self.cond:
+                missing = count - len(self._live(version))
+            for _ in range(max(0, missing)):
+                threading.Thread(target=one, args=(spec,), name="pool-warm-up", daemon=True).start()
+
     def _oneshot(self, version: str) -> bool:
         until = self.oneshot_until.get(version)
         if until is None:
@@ -566,47 +615,64 @@ class Pool:
         return [w for w in self.workers.get(version, []) if not w.dead.is_set() and not w.retiring]
 
     def _acquire(self, spec: Spec, key: str | None, priority: str, call, group: str | None = None, env: dict | None = None,
-                 most: int | None = None) -> Worker:
-        """A ready, idle worker of the version (or of a confined group) for this call; starts one when none is free and
-        the pool may grow."""
+                 most: int | None = None, rank: int | None = None) -> Worker:
+        """A ready, idle worker of the version (or of a confined group) for this call. Waiting calls take workers in
+        order of (rank, arrival); a long call never takes the last worker long calls could hold (one stays for short
+        calls); with no idle worker the pool grows, as many starts at once as calls wait, up to `most`."""
         group = group or spec.version
         most = self.most if most is None else most
-        started_one = False
+        rank = RANKS.get(priority, RANKS["write"]) if rank is None else rank
+        long_most = max(1, most - 1)
+        spawned = False
         with self.cond:
-            while True:
-                if self.closed:
-                    raise WorkerFailed("the service is stopping")
-                if self._oneshot(spec.version):
-                    raise WorkerFailed("workers of this engine do not start")
-                live = self._live(group)
-                idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
-                chosen = None
-                if key and self.affinity.get(key) in idle:
-                    chosen = self.affinity[key]
-                elif idle:
-                    chosen = min(idle, key=lambda w: (len(w.keys), w.calls))
-                if chosen is not None:
-                    chosen.busy = True
-                    if key:
-                        self.affinity[key] = chosen
-                    return chosen
-                starting = [w for w in live if not w.ready.is_set()]
-                if not starting and (len(live) < most) and not started_one:
-                    started_one = True
-                    self.cond.release()
-                    try:
-                        self._spawn(spec, group, env)
-                        call.count("spawned")       # a worker started for this call: a process start the harness counts
-                    finally:
-                        self.cond.acquire()
-                    continue
-                if call.cancelled.is_set():
-                    raise WorkerFailed("cancelled while waiting for a worker")
-                self.cond.wait(0.25)
+            self._arrivals += 1
+            ticket = (rank, self._arrivals)
+            waiting = self.waiting.setdefault(group, [])
+            waiting.append(ticket)
+            try:
+                while True:
+                    if self.closed:
+                        raise WorkerFailed("the service is stopping")
+                    if self._oneshot(spec.version):
+                        raise WorkerFailed("workers of this engine do not start")
+                    live = self._live(group)
+                    idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
+                    ahead = sum(1 for other in waiting if other < ticket)
+                    allowed = rank < RANKS["long"] or \
+                        sum(1 for w in live if w.busy and w.rank == RANKS["long"]) < long_most
+                    if idle and ahead < len(idle) and allowed:
+                        chosen = self.affinity.get(key) if key and self.affinity.get(key) in idle else \
+                            min(idle, key=lambda w: (len(w.keys), w.calls))
+                        chosen.busy = True
+                        chosen.rank = rank
+                        if key:
+                            self.affinity[key] = chosen
+                        if rank == RANKS["long"] and len(idle) == 1 and len(live) < most:
+                            # the last warm worker went to a long call: another starts for the short ones to come
+                            threading.Thread(target=self._spawn, args=(spec, group, env, most), name="pool-spare",
+                                             daemon=True).start()
+                        return chosen
+                    starting = [w for w in live if not w.ready.is_set()]
+                    if not spawned and len(live) < most and len(starting) < len(waiting):
+                        spawned = True
+                        self.cond.release()
+                        try:
+                            if self._spawn(spec, group, env, most) is not None:
+                                call.count("spawned")   # a worker started for this call: a process start the harness counts
+                        finally:
+                            self.cond.acquire()
+                        continue
+                    if call.cancelled.is_set():
+                        raise WorkerFailed("cancelled while waiting for a worker")
+                    self.cond.wait(0.25)
+            finally:
+                waiting.remove(ticket)
+                self.cond.notify_all()
 
     def _release(self, worker: Worker) -> None:
         with self.cond:
             worker.busy = False
+            worker.rank = None
             self.cond.notify_all()
         if worker.calls >= RECYCLE_CALLS or worker.rss_mb >= RECYCLE_RSS_MB:
             self.service.log(f"worker {worker.spec.version} recycled after {worker.calls} calls, {worker.rss_mb:.0f} MB")
@@ -676,13 +742,16 @@ class Pool:
         """Run one engine command for `call`. Returns (exit code, pending)."""
         spec = Spec(version)
         priority = classify(argv)
+        order = rank(argv, call.cwd)
         key = workspace_key(argv, call.cwd)
         if not spec.resident() or self._oneshot(version):
             return run_oneshot(self.service, call, spec, argv, env, stdin), []
+        if argv[:1] == ["prepare"]:
+            self.warm_up(version)               # its parts' applies are coming: warm workers for them
         with self.keys.held(key if priority != "read" else None):
             for attempt in (1, 2):
                 try:
-                    worker = self._acquire(spec, key, priority, call)
+                    worker = self._acquire(spec, key, priority, call, rank=order)
                 except WorkerFailed as exc:
                     if call.cancelled.is_set():
                         return 130, []
