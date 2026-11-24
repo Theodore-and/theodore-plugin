@@ -104,20 +104,20 @@ class PlatformCase(unittest.TestCase):
 
 class Platform(PlatformCase):
     def test_start_endpoint_worker_crash_and_stop(self):
-        started = time.monotonic()
+        started = time.perf_counter()               # perf_counter: Windows' monotonic clock ticks every 15.6 ms
         client, got = self.client()
-        cold = time.monotonic() - started
+        cold = time.perf_counter() - started
         record = endpoint.read_service_json(self.home)
         self.assertEqual(record["endpoint"]["kind"], "pipe" if IS_WINDOWS else "unix")
         if IS_WINDOWS:
-            self.assertTrue(record["endpoint"]["address"].startswith("\\\\.\\pipe\\theodore-"))
+            self.assertTrue(record["endpoint"]["address"].startswith(r"\\.\pipe\theodore-"))
         first = json.loads(Collector.stdout(self.call(client, got, "a", ["echo", "one"])).splitlines()[0])
         self.assertEqual(first["resident"], "1")
         timed = []
         for n in range(5):
-            began = time.monotonic()
+            began = time.perf_counter()
             again = json.loads(Collector.stdout(self.call(client, got, f"w{n}", ["echo", str(n)])).splitlines()[0])
-            timed.append((time.monotonic() - began) * 1000)
+            timed.append((time.perf_counter() - began) * 1000)
             self.assertEqual(again["pid"], first["pid"], "the same warm worker")
         print(f"\n[platform] cold start and connect {cold:.2f} s; warm calls at the C1 boundary (ms): "
               f"{', '.join(f'{t:.1f}' for t in timed)}", file=sys.stderr)
@@ -174,7 +174,7 @@ class Platform(PlatformCase):
             time.sleep(0.1)
         self.assertEqual((successor or {}).get("version"), "9.9.9")
         if IS_WINDOWS:          # the old service's pipe instances may still hold the plain name: then its own (A-3)
-            self.assertTrue(successor["endpoint"]["address"].startswith("\\.\pipe\theodore-"))
+            self.assertTrue(successor["endpoint"]["address"].startswith(r"\\.\pipe\theodore-"))
         after = json.loads(Collector.stdout(self.call(client, got, "after", ["echo", "new"])).splitlines()[0])
         self.assertEqual(after["argv"], ["echo", "new"])
         self.assertTrue(self.gone(record["pid"], 15), "the old service left")

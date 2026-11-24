@@ -50,6 +50,7 @@ class Call:
         self.images = frame.get("images", True) is not False
         self.deadline_ms = frame.get("deadline_ms")
         self.started = time.monotonic()
+        self.started_perf = time.perf_counter()   # elapsed_ms: Windows' monotonic clock ticks only every 15.6 ms
         self.ended: float | None = None
         self.exit: int | None = None
         self.pending: list = []
@@ -132,7 +133,8 @@ class Call:
 
     def send_progress(self, now: float) -> None:
         self.last_progress = now
-        frame = {"t": "progress", "id": self.id, "elapsed_ms": int((now - self.started) * 1000), "phase": self.phase}
+        frame = {"t": "progress", "id": self.id, "elapsed_ms": int((time.perf_counter() - self.started_perf) * 1000),
+                 "phase": self.phase}
         if self.progress_done is not None:
             frame["done"] = max(0, int(self.progress_done))
         if self.progress_total is not None:
@@ -145,7 +147,8 @@ class Call:
         self.exit = max(0, min(255, int(exit_code)))
         self.ended = time.monotonic()
         self.pending = list(pending or [])
-        frame = {"t": "done", "id": self.id, "exit": self.exit, "elapsed_ms": int((self.ended - self.started) * 1000)}
+        frame = {"t": "done", "id": self.id, "exit": self.exit,
+                 "elapsed_ms": int((time.perf_counter() - self.started_perf) * 1000)}
         if self.pending:
             frame["pending"] = self.pending
         counters = {k: int(v) for k, v in self.counters.items() if k in COUNTERS and isinstance(v, int) and v >= 0}
@@ -249,7 +252,7 @@ class Router:
             subscriber.send({"t": "out", "id": call.id, "stream": "stdout",
                              "data": json.dumps({"code": "STILL_RUNNING", "call": call.id}) + "\n"})
             subscriber.send({"t": "done", "id": call.id, "exit": EXIT_STILL_RUNNING,
-                             "elapsed_ms": int((time.monotonic() - call.started) * 1000)})
+                             "elapsed_ms": int((time.perf_counter() - call.started_perf) * 1000)})
 
     def _run(self, call: Call) -> None:
         from . import tools
