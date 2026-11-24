@@ -106,6 +106,7 @@ extern "system" {
     fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> BOOL>, add: BOOL) -> BOOL;
     fn LocalFree(mem: *mut c_void) -> *mut c_void;
     fn ExitProcess(code: u32) -> !;
+    fn GetNamedPipeServerProcessId(pipe: HANDLE, pid: *mut u32) -> BOOL;
 }
 
 #[link(name = "advapi32")]
@@ -212,44 +213,53 @@ pub fn owned_by_me(_path: &Path) -> bool {
     true // the folder is the user's (%USERPROFILE%); the pipe's DACL is the service's protection
 }
 
-/// C1's start lock on Windows: the named mutex `Local\theodore-start-<id16>`, released when dropped.
+/// C1's start lock on Windows: the named mutex `Local\theodore-start-<id16>`, then the file lock on
+/// `<home>\state\run\start.lock` (the same file inside and outside the Claude app's package, which a named object may
+/// not be), in that order, as the service's own start takes them; both released when dropped.
 pub struct StartLock {
     h: HANDLE,
+    _file: Option<std::fs::File>,
 }
 
 unsafe impl Send for StartLock {}
 
 impl StartLock {
-    pub fn acquire(_home: &Path, id16: &str, timeout: Duration) -> io::Result<StartLock> {
+    pub fn acquire(home: &Path, id16: &str, timeout: Duration) -> io::Result<StartLock> {
+        let deadline = Instant::now() + timeout;
         let name = wide(OsStr::new(&format!("Local\\theodore-start-{id16}")));
         let h = unsafe { CreateMutexW(null_mut(), 0, name.as_ptr()) };
         if invalid(h) {
             return Err(last_error());
         }
         let ms = timeout.as_millis().min(u128::from(INFINITE - 1)) as u32;
-        match unsafe { WaitForSingleObject(h, ms) } {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(StartLock { h }),
+        let mut lock = match unsafe { WaitForSingleObject(h, ms) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => StartLock { h, _file: None },
             WAIT_TIMEOUT => {
                 unsafe { CloseHandle(h) };
-                Err(io::Error::new(io::ErrorKind::TimedOut, "another Theodore command is starting the service"))
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "another Theodore command is starting the service"));
             }
             _ => {
                 let err = last_error();
                 unsafe { CloseHandle(h) };
-                Err(err)
+                return Err(err);
             }
-        }
+        };
+        lock._file = Some(super::lock_start_file(home, deadline)?);     // on an error the mutex goes with `lock`
+        Ok(lock)
     }
 }
 
 impl Drop for StartLock {
     fn drop(&mut self) {
+        self._file = None;
         unsafe {
             ReleaseMutex(self.h);
             CloseHandle(self.h);
         }
     }
 }
+
+pub fn restrict_folder(_path: &Path) {}
 
 /// A named-pipe client handle opened for overlapped I/O: reads and writes from different threads at once.
 pub struct Pipe {
@@ -261,7 +271,20 @@ unsafe impl Send for Pipe {}
 unsafe impl Sync for Pipe {}
 
 impl Pipe {
-    pub fn connect(name: &str, timeout: Duration) -> io::Result<Pipe> {
+    /// Opens the service's pipe and checks that its server is the process `service.json` names (`expected_pid`, when
+    /// it names one): a pipe of that name made by anything else is not the service, and gets no secret.
+    pub fn connect(name: &str, timeout: Duration, expected_pid: Option<u32>) -> io::Result<Pipe> {
+        let pipe = Pipe::open(name, timeout)?;
+        if let Some(expected) = expected_pid.filter(|p| *p != 0) {
+            let mut server = 0u32;
+            if unsafe { GetNamedPipeServerProcessId(pipe.h, &mut server) } != 0 && server != expected {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("the pipe's server is process {server}, not the service's {expected}")));
+            }
+        }
+        Ok(pipe)
+    }
+
+    fn open(name: &str, timeout: Duration) -> io::Result<Pipe> {
         let path = wide(OsStr::new(name));
         let deadline = Instant::now() + timeout;
         loop {

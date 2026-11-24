@@ -1,10 +1,10 @@
 //! macOS and Linux: a few calls of the C library, declared here (the same names and values on both).
 
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,13 +18,10 @@ extern "C" {
     fn setsid() -> i32;
     fn fork() -> i32;
     fn _exit(code: i32) -> !;
-    fn flock(fd: i32, operation: i32) -> i32;
     fn signal(signum: i32, handler: usize) -> usize;
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
 }
 
-const LOCK_EX: i32 = 2;
-const LOCK_NB: i32 = 4;
 const SIGINT: i32 = 2;
 
 pub fn user_id() -> String {
@@ -51,25 +48,13 @@ pub struct StartLock {
 
 impl StartLock {
     pub fn acquire(home: &Path, _id16: &str, timeout: Duration) -> io::Result<StartLock> {
-        let run = crate::home::run_dir(home);
-        fs::create_dir_all(&run)?;
-        let _ = fs::set_permissions(&run, fs::Permissions::from_mode(0o700));
-        let file = OpenOptions::new().create(true).read(true).write(true).mode(0o600).open(run.join("start.lock"))?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-                return Ok(StartLock { _file: file });
-            }
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::WouldBlock && err.kind() != io::ErrorKind::Interrupted {
-                return Err(err);
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "another Theodore command is starting the service"));
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        Ok(StartLock { _file: super::lock_start_file(home, Instant::now() + timeout)? })
     }
+}
+
+/// The run folder is this user's alone (0700).
+pub fn restrict_folder(path: &Path) {
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
 }
 
 /// Starts `program args` in a session of its own and as nobody's child (a double fork: the first child starts a new

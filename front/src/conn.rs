@@ -22,14 +22,16 @@ fn unsupported(what: &str) -> io::Error {
 }
 
 impl Conn {
-    pub fn connect(endpoint: &Endpoint, timeout: Duration) -> io::Result<Conn> {
+    /// `pid`: the service's process as `service.json` names it (the pipe's server is checked against it on Windows).
+    pub fn connect(endpoint: &Endpoint, timeout: Duration, pid: Option<u32>) -> io::Result<Conn> {
+        let _ = pid;
         match endpoint {
             #[cfg(unix)]
             Endpoint::Unix(path) => Ok(Conn::Unix(std::os::unix::net::UnixStream::connect(path)?)),
             #[cfg(not(unix))]
             Endpoint::Unix(_) => Err(unsupported("Unix socket")),
             #[cfg(windows)]
-            Endpoint::Pipe(name) => Ok(Conn::Pipe(Arc::new(crate::sys::Pipe::connect(name, timeout)?))),
+            Endpoint::Pipe(name) => Ok(Conn::Pipe(Arc::new(crate::sys::Pipe::connect(name, timeout, pid)?))),
             #[cfg(not(windows))]
             Endpoint::Pipe(_) => Err(unsupported("named pipe")),
             Endpoint::Tcp(address, port) => {

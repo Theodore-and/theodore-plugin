@@ -84,7 +84,7 @@ impl Failure {
 pub fn connect(home: &Path, hello: &Hello) -> Result<Connected, Failure> {
     for attempt in 0..3 {
         let info = home::read_service(home).ok_or_else(|| Failure::Unreachable("no service is running".into()))?;
-        let mut conn = Conn::connect(&info.endpoint, CONNECT_TIMEOUT)
+        let mut conn = Conn::connect(&info.endpoint, CONNECT_TIMEOUT, u32::try_from(info.pid).ok())
             .map_err(|e| Failure::Unreachable(format!("its endpoint does not answer ({e})")))?;
         let _ = conn.set_read_timeout(Some(WELCOME_TIMEOUT));
         frame::write(&mut conn, &hello.frame(&info.secret)).map_err(|e| Failure::Unreachable(format!("hello: {e}")))?;
