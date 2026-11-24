@@ -84,6 +84,7 @@ class Service:
         self.router = routing.Router(self)
         self.sessions = sessions_mod.Sessions(on_open=self._session_opened, on_close=self._session_closed)
         self.pool = None
+        self.parts = None
         self.texts = None
         self.licence = None
         self.timers = None
@@ -126,7 +127,7 @@ class Service:
 
     def _setup_parts(self) -> None:
         from .. import api, core, credentials
-        from . import chat, licence, texts, timers, workers
+        from . import chat, licence, parts, texts, timers, workers
         core.scope_refusals_per_thread()        # a refusal belongs to the call that learned it (core.begin_call per call)
         credentials.keep_in_memory()            # read once, again when the files that change with it change
         if getattr(api, "KEPT", None) is not None and hasattr(api, "DEFAULT_POOL"):
@@ -142,6 +143,7 @@ class Service:
         if use is not None:
             use(self.texts)
         self.pool = workers.Pool(self)
+        self.parts = parts.Gatherer(self.pool)      # a Studio deck's parts applied together (lanes G and F)
         self.timers = timers.Timers(self)
 
     def _warm_api(self) -> None:

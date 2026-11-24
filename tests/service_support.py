@@ -62,7 +62,8 @@ time.sleep(float(os.environ.get("FAKE_WORKER_START_S") or 0))     # a slow warm-
 if os.environ.get("FAKE_WORKER_FATAL"):
     send({"t": "fatal", "code": "IMPORT", "message": "a stand-in failure", "exit": 78})
     sys.exit(78)
-send({"t": "ready", "v": 1, "protocol": 1, "engine": {"version": VERSION, "build": "test", "semantics": "b1"},
+FEATURES = ["apply-parts"] if os.environ.get("FAKE_APPLY_PARTS") else []
+send({"t": "ready", "v": 1, "protocol": 1, "features": FEATURES, "engine": {"version": VERSION, "build": "test", "semantics": "b1"},
       "pid": os.getpid(), "warm_ms": 1, "rss_mb": 20.0, "verbs": ["echo", "sleep", "slide"]})
 runs, cancelled, state = queue.Queue(), set(), {"calls": 0}
 def reader():
@@ -98,6 +99,7 @@ while True:
     def say(text, stream="stdout"):
         send({"t": "out", "id": call, "stream": stream, "data": text})
     verb = argv[0] if argv else "--help"
+    targets = [a for i, a in enumerate(argv[1:], 1) if not a.startswith("-") and argv[i - 1] != "--hold"]
     t0 = time.time()
     if "--hold" in argv:                    # any verb: busy this long first (a long call, a part's build)
         hold_end = time.monotonic() + float(argv[argv.index("--hold") + 1])
@@ -150,6 +152,23 @@ while True:
         if verb == "apply":
             answer["render_summary"] = {"regenerated_pages": [int(n) for n in os.environ.get("FAKE_DRAWN", "2").split(",")]}
         say(json.dumps(answer, indent=2) + "\n")
+    elif verb == "prepare":                 # lane G's answer: the parts, and whether they come at once
+        n = int(argv[argv.index("--parts") + 1]) if "--parts" in argv else 3
+        lead = argv[1]
+        rows = [{"part": f"s{i:02d}", "slide": f"s{i:02d}", "workspace": os.path.join(lead, "parts", f"s{i:02d}"),
+                 "status": "created"} for i in range(1, n + 1)]
+        for row in rows:
+            os.makedirs(row["workspace"], exist_ok=True)
+        say(json.dumps({"ok": True, "prepared": "parts", "in_turn": "--in-turn" in argv, "parts": rows}) + "\n")
+    elif verb == "apply" and FEATURES and len(targets) > 1 and os.environ.get("FAKE_PARTS_REFUSED"):
+        code = 2                            # the call itself refused (lane G): one object, no parts
+        say(json.dumps({"ok": False, "summary": "refused", "error": "parts of two decks"}) + "\n")
+    elif verb == "apply" and FEATURES and len(targets) > 1:
+        # lane G's several parts in one build: one object, each part's own exit and stdout (what it alone prints)
+        rows = [{"part": part, "exit": 0, "stdout": json.dumps({"argv": ["apply", part], "pid": os.getpid(),
+                                                                "batch": len(targets), "t0": t0, "t1": time.time()}) + "\n"}
+                for part in targets]
+        say(json.dumps({"ok": True, "summary": f"{len(rows)} parts applied in 1 build(s)", "builds": 1, "parts": rows}) + "\n")
     elif verb == "write":
         path = argv[1]
         try:
@@ -165,7 +184,7 @@ while True:
     else:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))
         say(json.dumps({"argv": argv, "cwd": run.get("cwd"), "pid": os.getpid(), "priority": run.get("priority"),
-                        "t0": t0, "t1": time.time(),
+                        "t0": t0, "t1": time.time(), "build_threads": os.environ.get("THEODORE_BUILD_THREADS"),
                         "key": run.get("key"), "env": {k: os.environ[k] for k in names if k in (run.get("env") or {})},
                         "resident": os.environ.get("THEODORE_RESIDENT"), "home": os.environ.get("THEODORE_HOME"),
                         "node_options": os.environ.get("NODE_OPTIONS"), "work": os.environ.get("THEODORE_WORK_DIR")}) + "\n")

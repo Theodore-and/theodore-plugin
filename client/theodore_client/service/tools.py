@@ -143,7 +143,14 @@ def tool_pptx(service, call) -> tuple[int, list]:
     if early.getvalue():
         call.out(early.getvalue(), "stderr")
     call.set_phase(f"pptx {args[0]}")
-    code, pending = service.pool.run(call, version, args, _engine_env(call), call.stdin)
+    env = _engine_env(call)
+    wanted = service.parts.wants(version, args, call)
+    if wanted is not None:                  # a Studio part arriving with the others: one build for several (parts.py)
+        code, pending = service.parts.run(call, version, args, env, wanted)
+    else:
+        code, pending = service.pool.run(call, version, args, env, call.stdin)
+    if args[0] == "prepare" and code == 0:
+        _parts_coming(service, version, args, call)
     with contextlib.suppress(Exception):
         install._pin_workspaces(args, version)          # noqa: SLF001  the workspace's pin, as the client wrote it
     if code in (1, install.LICENCE_EXIT):     # the engine's licence refusal, read from its last JSON object (L1)
@@ -157,6 +164,27 @@ def tool_pptx(service, call) -> tuple[int, list]:
     if args[0] == "finish":
         threading.Thread(target=_after_finish, name="after-finish", daemon=True).start()
     return code, pending
+
+
+def _parts_coming(service, version: str, args: list[str], call) -> None:
+    """`prepare`'s answer says how its parts come (lane G): all at once (`in_turn` false; Studio) warms a worker per
+    part up to the pool's size and gathers their applies; one at a time (`in_turn` true) needs neither. An answer
+    without these (an engine before them) warms the pool to its size, as a burst may follow."""
+    answer = _last_json("".join(call.stdout_kept))
+    if answer.get("ok") is False:
+        return
+    lead = next((arg for arg in args[1:] if not arg.startswith("-")), None)
+    if lead is not None and not os.path.isabs(lead):
+        lead = os.path.join(call.cwd or ".", lead)
+    if answer.get("in_turn") is True:
+        if lead:
+            service.parts.prepared(lead, at_once=False)
+        return
+    parts = answer.get("parts")
+    count = answer.get("tasks") if isinstance(answer.get("tasks"), int) else (len(parts) if isinstance(parts, list) else None)
+    if lead and answer.get("prepared") == "parts":
+        service.parts.prepared(lead, at_once=True)
+    service.pool.warm_up(version, count)
 
 
 def _after_finish() -> None:

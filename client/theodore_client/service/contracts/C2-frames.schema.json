@@ -293,6 +293,16 @@
             "type": "string"
           },
           "minItems": 1
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "apply-parts"
+            ]
+          },
+          "uniqueItems": true
         }
       }
     },
