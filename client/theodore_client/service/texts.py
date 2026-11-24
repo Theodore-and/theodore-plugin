@@ -90,6 +90,7 @@ class Texts:
         self._require = require or account.require
         self._notify = notify
         self._lock = threading.RLock()
+        self._index_fetch = threading.Lock()       # one index fetch at a time
         self._index: dict | None = None            # deck-design's published index, when known
         self._index_tried = False                  # a specimen call asks for a missing index once, not on every call
         self._sheets: dict[str, tuple[str, bytes, str | None]] = {}      # name -> (sha256, bytes, index ETag fetched under)
@@ -199,20 +200,23 @@ class Texts:
                 self._notify()
 
     def index(self, skill: str = "deck-design", role: str | None = None) -> dict | None:
-        """The published index of `skill` (deck-design only today; `role` is not sent yet), fetched once and held."""
+        """The published index of `skill` (deck-design only today; `role` is not sent yet), fetched once and held.
+        One fetch at a time: a caller that comes while it is on its way waits for it (the service asks at session open
+        and for the relay's names at once)."""
         del role
         if skill != "deck-design":
             return None
-        with self._lock:
-            if self._index is not None:
+        with self._index_fetch:
+            with self._lock:
+                if self._index is not None:
+                    return self._index
+                self._index_tried = True
+            fresh = self._fetch_index()
+            with self._lock:
+                if self._index is None:
+                    self._index = fresh
+                    self._validated_at = time.monotonic() if fresh and fresh.get("etag") else None
                 return self._index
-            self._index_tried = True
-        fresh = self._fetch_index()
-        with self._lock:
-            if self._index is None:
-                self._index = fresh
-                self._validated_at = time.monotonic() if fresh and fresh.get("etag") else None
-            return self._index
 
     def _seen_version(self, version: str | None) -> None:
         """A guide answer named its guide version: when it is not the index's, fetch the index again and say so."""
@@ -394,9 +398,10 @@ class Texts:
         del session
         self._require("deck-design")
         with self._lock:
-            want_index = self._index is None and not self._index_tried
-        if want_index:
-            self.index("deck-design")
+            want_index = self._index is None
+        if want_index:                  # asked for once, or waited for while the session's own request is on its way
+            if not self._index_tried or self._index_fetch.locked():
+                self.index("deck-design")
         sheets: dict[str, bytes] = {}
         missing: list[str] = []
         for name in names:
