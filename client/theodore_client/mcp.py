@@ -717,7 +717,7 @@ def call_tool(name: str, args) -> dict:
     if BLOCKED is not None:
         return _status(BLOCKED)
     core._REFUSAL, core._REFUSAL_EMITTED = None, False      # each call learns afresh (a device may sign in again meanwhile)
-    specimens.sweep()               # the launcher's folders older than an hour go, as before any launcher command
+    specimens.sweep(quick=True)     # the launcher's folders older than an hour go, as before any launcher command
     try:
         result = handler(args if isinstance(args, dict) else {})
     except Status as status:

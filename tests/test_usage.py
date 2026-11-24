@@ -411,14 +411,50 @@ class ClientStatus(InProcess):
             self.run_cli("prefs", "list")
         self.assertFalse(usage.ledger_path().exists())
 
-    def test_a_command_sends_at_its_start_only_when_the_oldest_line_is_fifteen_minutes_old(self):
-        self.write(command_event(-16 * 60))
-        with redirect_stdout(io.StringIO()):
-            cli._main(["usage"])
-            self.assertEqual(self.api.usage_bodies, [], "usage itself never sends")
+    def test_a_command_starts_a_detached_send_only_when_the_oldest_line_is_fifteen_minutes_old(self):
+        """0.4.34: a command never sends on its own time (it waited up to 2 s, on every command while the network was
+        slow); it starts one detached send (`usage --send`) and goes on."""
+        spawned = []
+        with mock.patch.object(core.Job, "spawn", lambda job, argv: spawned.append((job.name, argv))), \
+                redirect_stdout(io.StringIO()):
+            self.write(command_event(-14 * 60))
             cli._main(["version"])
+            self.assertEqual(spawned, [], "not yet due")
+            self.write(command_event(-16 * 60))       # appended after a fresher line: the first line decides, as sent
+            cli._main(["usage"])
+            self.assertEqual(spawned, [], "usage itself never sends")
+            os.remove(usage.ledger_path())
+            self.write(command_event(-16 * 60))
+            cli._main(["version"])
+        self.assertEqual(spawned, [(usage.SEND_JOB, ["usage", "--send"])])
+        self.assertEqual(self.api.usage_bodies, [], "the command itself sent nothing")
+        self.assertEqual(usage.send_job(False, False), 0)          # what the detached send does
         self.assertEqual(len(self.api.usage_bodies), 1)
         self.assertEqual(self.lines(), [])
+
+    def test_a_send_with_no_answer_waits_before_the_next_one(self):
+        self.write(command_event(-16 * 60))
+        self.api.usage_delay = 4                       # past the 2 s a send waits
+        usage.flush(force=True)
+        state = self.state()
+        self.assertEqual(state["failures"], 1)
+        self.assertAlmostEqual(state["retry_at"], core.now() + usage.RETRY_FIRST_S, delta=30)
+        with mock.patch.object(core.Job, "spawn", side_effect=AssertionError("started while backing off")):
+            self.assertFalse(usage.send_in_background())
+        self.api.usage_delay = 0
+        with mock.patch.dict(os.environ, {"THEODORE_TEST_CLOCK_OFFSET": str(usage.RETRY_FIRST_S + 60)}):
+            spawned = []
+            with mock.patch.object(core.Job, "spawn", lambda job, argv: spawned.append(argv)):
+                self.assertTrue(usage.send_in_background(), "the wait is over")
+            usage.flush(force=True)
+            self.assertNotIn("retry_at", self.state(), "an answer ends the wait")
+            self.assertNotIn("failures", self.state())
+        state, waits = {}, []
+        for _ in range(20):                            # doubling from 15 minutes, never past 6 hours
+            usage._backoff(state)
+            waits.append(round(state["retry_at"] - core.now()))
+        self.assertEqual(waits[:3], [usage.RETRY_FIRST_S, 2 * usage.RETRY_FIRST_S, 4 * usage.RETRY_FIRST_S])
+        self.assertEqual(max(waits), usage.RETRY_MAX_S)
 
     def test_usage_help(self):
         out = io.StringIO()
@@ -474,6 +510,7 @@ class Commands(ClientCase):
         self.assertEqual(self.client("pptx", "start", str(workspace)).returncode, 0)
         self.assertEqual(len(self.ledger().read_text().splitlines()), 1)
         self.assertEqual(self.client("pptx", "finish", str(workspace)).returncode, 0)
+        self.box.wait_jobs()                    # the end of a deck sends in a detached send (0.4.34)
         self.assertEqual(len(self.api.usage_bodies), 1)
         body = self.api.usage_bodies[0].decode()
         self.assertEqual([e["verb"] for e in json.loads(body)["events"]], ["start", "finish"])
@@ -534,9 +571,11 @@ class Commands(ClientCase):
         result = self.client("pptx", "finish", str(workspace))
         elapsed = time.monotonic() - started
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertLess(elapsed, baseline + 3.0, "the usage send is abandoned after two seconds")
+        self.assertLess(elapsed, baseline + 1.5, "finish never waits for the usage send (a detached send, 0.4.34)")
         self.assertNotIn("usage", result.stdout.lower())
+        self.box.wait_jobs()
         self.assertEqual(len(self.ledger().read_text().splitlines()), 2, "kept for the next time")
+        self.assertIn("retry_at", json.loads((self.box.home / "state" / "usage.json").read_text()), "and the next send waits")
 
     def test_usage_show_through_the_command_line(self):
         self.ready()

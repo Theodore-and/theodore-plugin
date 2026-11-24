@@ -368,6 +368,81 @@ def _oldest_ms() -> int | None:
     return events[0][0]["ts"] if events else None
 
 
+def _first_ms() -> int | None:
+    """The time of the ledger's first line, read alone (the engine appends in time order): what a command checks before
+    it starts a send. A first line that is not an event: the whole ledger is read, as the send itself does."""
+    try:
+        with open(ledger_path(), "rb") as ledger:
+            for line in ledger:
+                if line.strip():
+                    try:
+                        event = json.loads(line.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        break
+                    return int(event["ts"]) if valid_event(event) else _oldest_ms()
+    except OSError:
+        return None
+    return _oldest_ms()
+
+
+# Sending never happens on a command's own time (0.4.34): a command that finds the oldest waiting line 15 minutes old
+# (or a deck's end, `pptx finish`) starts one detached send and goes on. A send that met no answer, or a "later" (429,
+# 5xx), waits before the next one: 15 minutes, doubling, at most 6 hours (state "retry_at", "failures").
+SEND_JOB = "usage-send"
+RETRY_FIRST_S = USAGE_FLUSH_AGE_S
+RETRY_MAX_S = 6 * 3600
+
+
+def _backoff(state: dict) -> None:
+    failures = min(int(state.get("failures") or 0) + 1, 16)
+    state["failures"] = failures
+    state["retry_at"] = int(core.now() + min(RETRY_FIRST_S * 2 ** (failures - 1), RETRY_MAX_S))
+
+
+def send_in_background(force: bool = False, reports: bool = False) -> bool:
+    """Start the detached send when it is due: usage is on, a line waits, the oldest is 15 minutes old (or `force`), no
+    send runs and the last failure's wait is over; with `reports`, also when reports wait in the outbox (the end of a
+    deck sends both). True when a send was started. Never raises, never prints, never waits for the network."""
+    try:
+        due = False
+        if enabled() and (ledger_path().exists() or _taking_path().exists()):
+            state = _state()
+            if core.now() >= float(state.get("retry_at") or 0):
+                if force:
+                    due = True
+                else:
+                    oldest = _first_ms()
+                    due = oldest is not None and oldest <= int(core.now() * 1000) - USAGE_FLUSH_AGE_S * 1000
+        if not due and reports:
+            from . import outbox
+            due = outbox.count() > 0
+        if not due:
+            return False
+        job = core.Job(SEND_JOB)
+        if job.alive():
+            return False
+        job.spawn(["usage", "--send", *(["--force"] if force else []), *(["--reports"] if reports else [])])
+        return True
+    except Exception as exc:        # noqa: BLE001  usage counts never change what a command does
+        with contextlib.suppress(Exception):
+            core.log(f"usage: send not started ({exc.__class__.__name__})")
+        return False
+
+
+def send_job(force: bool, reports: bool) -> int:
+    """The detached send: one batch (as flush), then, at a deck's end, the reports kept for later. Exit 0 always."""
+    job = core.Job(SEND_JOB)
+    job.begin("usage")
+    try:
+        flush(force=force)
+        if reports:
+            from . import outbox
+            outbox.flush()
+    finally:
+        job.finish()
+    return 0
+
+
 def _post(bearer: str, data: bytes):
     """One POST, answered within two seconds or abandoned: (HTTP status, error code) or None for no answer."""
     from . import api
@@ -412,6 +487,11 @@ def flush(force: bool = False) -> None:
             answer = _post(cred["installation_secret"], encode(body))
             sent = {event["event_id"] for event in body["events"]}
             state = _state()
+            if answer is None or answer[0] == 429 or answer[0] >= 500:
+                _backoff(state)                     # no answer, or "later": the next send waits (doubling, at most 6 h)
+            else:
+                state.pop("failures", None)
+                state.pop("retry_at", None)
             if answer is not None and 200 <= answer[0] < 300:
                 state["dropped"] = max(0, int(state.get("dropped") or 0) - int(body.get("dropped") or 0))
                 state.pop("pending", None)
