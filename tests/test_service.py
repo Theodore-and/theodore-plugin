@@ -339,6 +339,39 @@ class Lifecycle(ServiceCase):
         self.record = successor
 
 
+class ChatWarm(ServiceCase):
+    def test_a_chats_command_runs_on_a_warm_worker_confined_to_its_folder(self):
+        from theodore_client import chatbuild
+        self.api.features = [*self.api.features, chatbuild.CHAT_BUILD_FEATURE]
+        self.sign_in()                          # again: the licence now carries the chat's feature
+        folder = self.box.tmp / "Documents" / "Board"
+        folder.mkdir(parents=True)
+        self.env["HOME"] = str(self.box.tmp)
+        self.service()
+        client, got = self.connect(session="chat-1")
+        answers = []
+        for n in range(2):
+            client.send_call({"t": "call", "id": f"r{n}", "tool": "chat", "cwd": str(self.box.tmp),
+                              "params": {"action": "run", "folder": str(folder), "args": ["list", str(n)], "_app_client": True}},
+                             start=False)
+            result = json.loads(Collector.stdout(got.wait(f"r{n}", 60)))
+            self.assertFalse(result.get("isError"), result)
+            answers.append(json.loads(result["content"][0]["text"].split("\n", 1)[1].splitlines()[0]))
+        first, second = answers
+        self.assertEqual((first["resident"], first["argv"]), ("1", ["list", "0"]), "a warm worker ran it")
+        self.assertEqual(second["pid"], first["pid"], "the same warm worker for the same folder")
+        self.assertEqual(Path(first["home"]), self.box.home / "state" / "chat", "its private home, as a chat's process had")
+        self.assertIn("--permission", first["node_options"])
+        self.assertIn(str(folder.resolve()), first["node_options"])
+        self.assertTrue((self.box.home / "state" / "chat" / "state" / "entitlement.json").exists(), "the copy lives with the worker")
+        client.close()
+        record = endpoint.read_service_json(self.box.home)
+        if record:
+            self.assertTrue(wait_gone(record["pid"], 15))
+        self.assertTrue(wait_gone(first["pid"], 10))
+        self.assertFalse((self.box.home / "state" / "chat" / "state" / "entitlement.json").exists(), "and goes with it")
+
+
 class ShellTexts(ServiceCase):
     def test_skill_and_guide_through_the_service(self):
         self.api.guides["deck-design"][""] = "# Deck design\n\nENTRY BODY FOR THE SHELL\n"
