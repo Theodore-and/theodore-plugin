@@ -585,11 +585,12 @@ class Texts:
         return out
 
     def _seen_version(self, version: str) -> None:
-        """A new entry named a guide version that is not the held index's: the index is asked again in the background."""
+        """A new entry named a guide version that is not the held index's: the index is asked again now (one request
+        more, only at a version change), so the relays learn the new names before this call answers."""
         with self._lock:
             index = self._index
         if version and index is not None and index.get("version") and version != index["version"]:
-            threading.Thread(target=self._quiet_index, name="texts-index", daemon=True).start()
+            self._quiet_index()
 
     # --- specimens -------------------------------------------------------------------------------------------------------
 
