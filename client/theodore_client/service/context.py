@@ -6,7 +6,7 @@ command learns refusals into process globals (core.mark_refused). One service an
 - `install_environ()` makes `os.environ` read the current call's overlay first (C1's allow-list: CLAUDECODE,
   CLAUDE_CODE_SESSION_ID, CLAUDE_PLUGIN_ROOT, CODEX_THREAD_ID, THEODORE_*), over the service's own environment, from
   which the host markers are removed at start. A value of None in the overlay hides a variable for the call.
-- `entered(ctx)` sets the call for this thread; core reads its refusal facts from `ctx.refusal` (core._call_state).
+- `entered(ctx)` sets the call for this thread. Its refusal facts are core's per-thread scope (core.begin_call).
 """
 
 from __future__ import annotations
@@ -27,21 +27,8 @@ HOST_MARKER_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_")
 KEPT = ("CODEX_HOME",)             # where Codex keeps its configuration: the user's, whichever session asks
 
 
-class RefusalState:
-    """What core keeps per command about a refusal (core._REFUSAL, _REFUSAL_EMITTED, _LAST_EMITTED and account's
-    built status), kept per call in the service."""
-
-    __slots__ = ("refusal", "emitted", "last", "status")
-
-    def __init__(self):
-        self.refusal = None
-        self.emitted = False
-        self.last = None
-        self.status = None
-
-
 class CallContext:
-    __slots__ = ("session", "host", "env", "cwd", "call_id", "tool", "refusal", "progress", "cancelled")
+    __slots__ = ("session", "host", "env", "cwd", "call_id", "tool", "progress", "cancelled")
 
     def __init__(self, *, session: str = "", host: str = "", env: dict | None = None, cwd: str | None = None,
                  call_id: str = "", tool: str = "", progress=None, cancelled=None):
@@ -51,7 +38,6 @@ class CallContext:
         self.cwd = cwd
         self.call_id = call_id
         self.tool = tool
-        self.refusal = RefusalState()
         self.progress = progress            # progress(phase) or None
         self.cancelled = cancelled          # a threading.Event or None
 

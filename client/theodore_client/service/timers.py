@@ -118,8 +118,9 @@ class Timers:
                 install.check_updates(force=False, wait=0.0, timeout=3.0)
 
     def session_opened(self, session) -> None:
-        threading.Thread(target=self._safely, args=(lambda: self._updates(session.id),), name="update-check",
-                         daemon=True).start()
+        """Nothing at a session's open: its first skill load (`skill pptx`, run in this service) checks for updates
+        for that session, as before; this clock checks every 6 hours for a service that outlives its sessions."""
+        del session
 
     def _sweep(self) -> None:
         from .. import specimens

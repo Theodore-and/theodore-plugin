@@ -4,7 +4,8 @@ codex`; the plugin's server when its client is the Claude app), served by the se
 What the action does is unchanged (mcp.desktop_call, chatbuild.py): begin, guide, specimen, report, preferences,
 check, manual, run, read, write, edit, list, reveal; the confinement of a chat's engine command is chatbuild's. What
 chatbuild kept per process (the folders a chat named, the decks it opened, its starts, its notice, whether the client
-is the Claude app, the request's _meta and progress) is kept per session here: one service serves every chat.
+is the Claude app) is kept per session here: one service serves every chat; the request's _meta and its progress are
+the call's own (chatbuild.set_call).
 
 The answer is the MCP result itself, as JSON on stdout (lane A's request A-5): its content array mixes texts and
 images in an order the generic frames do not carry. The relay passes it through as the result.
@@ -25,7 +26,7 @@ _SERVICE = None
 
 
 class ChatState:
-    __slots__ = ("folders", "open", "starts", "notice", "app_client", "meta", "progress")
+    __slots__ = ("folders", "open", "starts", "notice", "app_client")
 
     def __init__(self):
         self.folders: list = []
@@ -33,8 +34,6 @@ class ChatState:
         self.starts: dict = {}
         self.notice: list = []
         self.app_client = False
-        self.meta: dict = {}
-        self.progress = None
 
 
 _FALLBACK = ChatState()
@@ -96,44 +95,6 @@ class _Flag:
         return bool(_state().app_client)
 
 
-class _Meta(dict):
-    """dict for `isinstance(META, dict)`; every read is the session's current _meta."""
-
-    def _target(self):
-        return _state().meta
-
-    def get(self, key, default=None):
-        return self._target().get(key, default)
-
-    def __getitem__(self, key):
-        return self._target()[key]
-
-    def __contains__(self, key):
-        return key in self._target()
-
-    def __iter__(self):
-        return iter(self._target())
-
-    def __len__(self):
-        return len(self._target())
-
-    def keys(self):
-        return self._target().keys()
-
-    def items(self):
-        return self._target().items()
-
-
-class _Progress:
-    def __bool__(self):
-        return _state().progress is not None
-
-    def __call__(self, *args):
-        progress = _state().progress
-        if progress is not None:
-            progress(*args)
-
-
 def install(service) -> None:
     """In the service: chatbuild's per-process state becomes per-session."""
     global _SERVICE
@@ -143,8 +104,6 @@ def install(service) -> None:
     chatbuild.STARTS = _Proxy("starts")
     chatbuild.NOTICE = _Proxy("notice")
     chatbuild.APP_CLIENT = _Flag()
-    chatbuild.META = _Meta()
-    chatbuild.PROGRESS = _Progress()
 
 
 def session_closed(session) -> None:
@@ -158,13 +117,12 @@ def call(service, call_) -> int:
     state = _state()
     state.app_client = bool(params.pop("_app_client", state.app_client))
     meta = params.pop("_meta", None)
-    state.meta = meta if isinstance(meta, dict) else {}
-    state.progress = lambda elapsed, message: call_.set_phase(message)
+    # The request's _meta (Codex's thread) and the call's progress, in this call's own thread (chatbuild.set_call).
+    chatbuild.set_call(lambda elapsed, message: call_.set_phase(message), meta if isinstance(meta, dict) else {})
     try:
         result = _answer(service, params)
     finally:
-        state.progress = None
-        state.meta = {}
+        chatbuild.set_call(None, {})
     call_.out(json.dumps(result, ensure_ascii=False))
     return 1 if result.get("isError") else 0
 

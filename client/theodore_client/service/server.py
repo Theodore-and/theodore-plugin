@@ -119,7 +119,12 @@ class Service:
         return True
 
     def _setup_parts(self) -> None:
+        from .. import api, core, credentials
         from . import chat, licence, texts, timers, workers
+        core.scope_refusals_per_thread()        # a refusal belongs to the call that learned it (core.begin_call per call)
+        credentials.keep_in_memory()            # read once, again when the files that change with it change
+        if getattr(api, "KEPT", None) is not None and hasattr(api, "DEFAULT_POOL"):
+            api.DEFAULT_POOL = api.KEPT         # every request of this process over the kept-alive connections
         chat.install(self)
         self.licence = licence.Licence(self)
         self.texts = texts.Texts(credential=self.licence.credential, require=self.licence.require_texts,

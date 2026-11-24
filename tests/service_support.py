@@ -130,6 +130,13 @@ while True:
         code = 77
     elif verb == "image":
         say(json.dumps({"ok": True, "rendered_images": [argv[1]]}) + "\n")
+    elif verb in ("render", "apply") and len(argv) > 1 and argv[1].endswith(".jpg"):
+        # as the engine answers: every page listed, the ones drawn anew named apart (apply), or the pages asked (render)
+        pictures = argv[1:]
+        answer = {"ok": True, "rendered_images": pictures}
+        if verb == "apply":
+            answer["render_summary"] = {"regenerated_pages": [int(n) for n in os.environ.get("FAKE_DRAWN", "2").split(",")]}
+        say(json.dumps(answer, indent=2) + "\n")
     elif verb == "write":
         path = argv[1]
         try:

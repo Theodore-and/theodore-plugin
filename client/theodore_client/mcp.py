@@ -393,11 +393,15 @@ class Relay:
     # --- frames from the service ---------------------------------------------------------------------------------------
 
     def on_notify(self, frame: dict) -> None:
-        if frame.get("method") == "tools/list_changed":
-            names = (frame.get("params") or {}).get("names")
+        if frame.get("method") != "tools/list_changed":
+            return
+        names = (frame.get("params") or {}).get("names")
+        with self.lock:
             if isinstance(names, dict):
-                with self.lock:
-                    self.names = names.get("deck-design") if isinstance(names.get("deck-design"), dict) else None
+                self.names = names.get("deck-design") if isinstance(names.get("deck-design"), dict) else None
+            # Before the host's first tools/list it has nothing to refresh: its first list carries the names.
+            changed = self.listed_once and (not isinstance(names, dict) or self.listed != self.names)
+        if changed:             # the host hears only of a list that differs from the one it was given
             self.write({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
 
     def on_frame(self, frame: dict) -> None:

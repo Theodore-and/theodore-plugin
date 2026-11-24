@@ -67,7 +67,8 @@ class Server:
         """tools/list once the names are in: the relay answers at once, and when the service's names come later it
         says tools/list_changed (contract C1, tools/list)."""
         tools = self.send("tools/list")["result"]["tools"]
-        named = any("anyOf" in ((t.get("inputSchema") or {}).get("properties") or {}).get("section", {}) for t in tools)
+        named = any("enum" in (((t.get("inputSchema") or {}).get("properties") or {}).get("section", {}).get("anyOf") or [{}])[0]
+                    for t in tools)
         if named or self.wait_notification("notifications/tools/list_changed") is None:
             return tools
         return self.send("tools/list")["result"]["tools"]

@@ -244,13 +244,18 @@ class Pool(ServiceCase):
     def test_pictures_oneshot_engines_and_a_licence_refusal(self):
         self.service()
         client, got = self.connect()
-        picture = self.box.tmp / "slide-1.jpg"
-        picture.write_bytes(b"\xff\xd8\xff\xe0" + b"pixels" * 20 + b"\xff\xd9")
-        drawn = self.call(client, got, "img", ["render", str(picture)], images=True)
+        pages = []
+        for n in (1, 2, 3):
+            page = self.box.tmp / f"slide-000{n}-123.jpg"
+            page.write_bytes(b"\xff\xd8\xff\xe0" + f"page {n}".encode() * 20 + b"\xff\xd9")
+            pages.append(page)
+        drawn = self.call(client, got, "img", ["render", *map(str, pages)], images=True)
         images = [f for f in drawn if f["t"] == "image"]
-        self.assertEqual(len(images), 1)
-        self.assertEqual(base64.b64decode(images[0]["data"]), picture.read_bytes())
-        quiet = self.call(client, got, "img2", ["render", str(picture)], images=False)
+        self.assertEqual([base64.b64decode(f["data"]) for f in images], [p.read_bytes() for p in pages], "render: the pages asked")
+        applied = self.call(client, got, "app", ["apply", *map(str, pages)], images=True)
+        images = [f for f in applied if f["t"] == "image"]
+        self.assertEqual([f["path"] for f in images], [str(pages[1])], "apply: the page drawn anew, not the cached ones")
+        quiet = self.call(client, got, "img2", ["render", *map(str, pages)], images=False)
         self.assertFalse([f for f in quiet if f["t"] == "image" and f.get("data")])
         # an engine without engine.py runs one-shot from the service
         install_engine(self.box.home, "1.0.0-rc.33", serve=False)
@@ -392,8 +397,9 @@ class Relay(ServiceCase):
         self.assertNotIn("isError", quick["result"])
         slow = wait(3)
         self.assertEqual(slow["result"]["_meta"]["exitCode"], 0)
-        self.assertEqual(quick["result"]["_meta"]["counters"], {"files_written": 0, "deckjs_full_parses": 0},
-                         "the worker's counts reach the result (request K-1)")
+        counters = quick["result"]["_meta"]["counters"]
+        self.assertEqual((counters["files_written"], counters["deckjs_full_parses"]), (0, 0), "the worker's counts (K-1)")
+        self.assertIn(counters.get("spawned", 0), (0, 1), "a worker started for the call is counted")
         with lock:
             progress = [m for m in answers.values() if m.get("method") == "notifications/progress"]
         self.assertTrue(progress and progress[0]["params"]["progressToken"] == "tok")

@@ -19,11 +19,13 @@ import base64
 import contextlib
 import json
 import os
+import re
 import threading
+import time
 from pathlib import Path
 
 from .. import account, api, core, install, specimens, usage
-from ..contract import ENGINE_REFUSALS, SKILLS
+from ..contract import SKILLS
 from ..core import Status
 from . import capture, context
 
@@ -31,6 +33,7 @@ IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 IMAGE_BYTES_MAX = 3 << 20
 IMAGES_BYTES_MAX = 12 << 20
 PICTURE_VERBS = ("apply", "render")
+NAMES_WAIT_S = 1.2
 # The MCP `theodore` tool (an agent's call) runs these; a shell's command line (role front) runs every command but
 # those that set up, remove or replace this installation, which the front runs in a client of its own (lane C).
 THEODORE_COMMANDS = ("status", "doctor", "report", "prefs", "studio", "packs", "update", "version", "whoami", "login",
@@ -49,6 +52,7 @@ def run(service, call) -> tuple[int, list]:
         env["THEODORE_HOST"] = HOSTS[call.host]
     ctx = context.CallContext(session=call.session, host=call.host, env=env, cwd=call.cwd,
                               call_id=call.id, tool=call.tool, progress=call.set_phase, cancelled=call.cancelled)
+    core.begin_call()                   # this thread learns refusals afresh (core.scope_refusals_per_thread)
     with context.entered(ctx):
         handler = HANDLERS[call.tool]
         try:
@@ -137,10 +141,8 @@ def tool_pptx(service, call) -> tuple[int, list]:
     code, pending = service.pool.run(call, version, args, _engine_env(call), call.stdin)
     with contextlib.suppress(Exception):
         install._pin_workspaces(args, version)          # noqa: SLF001  the workspace's pin, as the client wrote it
-    if code in (1, 77):
-        refusal = _licence_refusal("".join(call.stdout_kept))
-        if refusal is None and code == 77:          # a refusal the engine did not name: the client's general one
-            refusal = install._refusal_status("entitlement_malformed")      # noqa: SLF001
+    if code in (1, install.LICENCE_EXIT):     # the engine's licence refusal, read from its last JSON object (L1)
+        refusal = install.refusal_in_output("".join(call.stdout_kept), code)
         if refusal is not None:
             return _status(service, call, refusal), pending
     if call.images and args[0] in PICTURE_VERBS and not call.worker_images and code == 0:
@@ -148,25 +150,6 @@ def tool_pptx(service, call) -> tuple[int, list]:
     if args[0] == "finish":
         threading.Thread(target=_after_finish, name="after-finish", daemon=True).start()
     return code, pending
-
-
-def _licence_refusal(stdout: str) -> Status | None:
-    """The engine's licence refusal, read from its JSON line (no second engine run): the client's status for it."""
-    for line in reversed(stdout.strip().splitlines()[-5:]):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            answer = json.loads(line)
-        except ValueError:
-            continue
-        code = answer.get("code") if isinstance(answer, dict) else None
-        if ENGINE_REFUSALS.get(code):
-            status = install._refusal_status(code)          # noqa: SLF001
-            status.cause = code
-            return status
-        return None
-    return None
 
 
 def _after_finish() -> None:
@@ -178,16 +161,54 @@ def _after_finish() -> None:
         outbox.flush()
 
 
-def attach_pictures(call, output: str) -> None:
-    """The pictures an apply or render names, as image frames (at most 12; 3 MiB each, 12 MiB in all)."""
-    from .. import chatbuild
-    total = 0
-    seen: list[str] = []
-    for raw in chatbuild._image_candidates(output):             # noqa: SLF001  the same reading as the chat's run
-        path = Path(raw)
-        if not path.is_absolute() or str(path) in seen:
+def _last_json(output: str) -> dict:
+    """The engine's answer: its stdout as one JSON object, else the last object printed (one line or several)."""
+    text = output.strip()
+    for candidate in (text, text[text.rfind("\n{") + 1:] if "\n{" in text else "", text.splitlines()[-1] if text else ""):
+        if not candidate:
             continue
-        seen.append(str(path))
+        try:
+            value = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+_PAGE = re.compile(r"slide-0*(\d+)")
+
+
+def pictures_of(argv: list[str], output: str) -> list[str]:
+    """The pictures an answer is about (lane J's rule): for apply, the pages it drew anew
+    (render_summary.regenerated_pages, never the cached ones it also lists); for render, the grid it composed, the zoom
+    it drew, or the pages it was asked for. At most 12, in the engine's order."""
+    payload = _last_json(output)
+    verb = argv[0] if argv else ""
+    if verb == "apply":
+        images = [p for p in payload.get("rendered_images") or [] if isinstance(p, str)]
+        drawn = {int(p) for p in (payload.get("render_summary") or {}).get("regenerated_pages") or [] if isinstance(p, int)}
+        chosen = []
+        for position, path in enumerate(images, 1):
+            match = _PAGE.search(Path(path).name)
+            if (int(match.group(1)) if match else position) in drawn:
+                chosen.append(path)
+    elif verb == "render" and "--grid" in argv:
+        chosen = [p for p in payload.get("grid_files") or ([payload["grid_path"]] if payload.get("grid_path") else []) if isinstance(p, str)]
+    elif verb == "render" and "--zoom" in argv:
+        chosen = [p for p in payload.get("zoom_images") or [] if isinstance(p, str)]
+    elif verb == "render":
+        chosen = [p for p in payload.get("rendered_images") or [] if isinstance(p, str)]
+    else:
+        chosen = []
+    return chosen[:12]
+
+
+def attach_pictures(call, output: str) -> None:
+    """The pictures an apply or render is about, as image frames (at most 12; 3 MiB each, 12 MiB in all)."""
+    total = 0
+    for raw in pictures_of(call.args, output):
+        path = Path(raw) if Path(raw).is_absolute() else Path(call.cwd or ".") / raw
         try:
             if not path.is_file():
                 continue
@@ -293,6 +314,11 @@ def tool_list(service, call) -> int:
     params = call.params
     skill = params.get("skill")
     if params.get("form") == "tools":               # the relay's names for its tool enums (requests-P A-4)
+        # At a session's start the service's own index request is usually on its way: worth a moment, so the host's
+        # first tools/list carries the names (later ones come with tools/list_changed).
+        deadline = time.monotonic() + NAMES_WAIT_S
+        while held_index(service) is None and time.monotonic() < deadline:
+            time.sleep(0.02)
         names = tool_names(service)
         # The native relay (lane C) takes the whole list for its mode from here; the Python relay builds it itself.
         names["tools"] = relay_tools(params.get("for"), params.get("client"), names.get("deck-design"))
