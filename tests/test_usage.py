@@ -450,9 +450,10 @@ class ClientStatus(InProcess):
             self.assertNotIn("retry_at", self.state(), "an answer ends the wait")
             self.assertNotIn("failures", self.state())
         state, waits = {}, []
-        for _ in range(20):                            # doubling from 15 minutes, never past 6 hours
-            usage._backoff(state)
-            waits.append(round(state["retry_at"] - core.now()))
+        with mock.patch.object(core, "now", return_value=1_800_000_000.0):      # a whole second: retry_at is one
+            for _ in range(20):                        # doubling from 15 minutes, never past 6 hours
+                usage._backoff(state)
+                waits.append(round(state["retry_at"] - core.now()))
         self.assertEqual(waits[:3], [usage.RETRY_FIRST_S, 2 * usage.RETRY_FIRST_S, 4 * usage.RETRY_FIRST_S])
         self.assertEqual(max(waits), usage.RETRY_MAX_S)
 
