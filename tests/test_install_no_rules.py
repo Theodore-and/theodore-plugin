@@ -41,20 +41,23 @@ class Texts(unittest.TestCase):
                      'PowerShell(& "${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)',
                      "mcp__plugin_theodore_theodore__guide", "mcp__plugin_theodore_theodore__specimen", "mcp__plugin_theodore_theodore__list",
                      "Edit(//**/.theodore/workspaces/**)", "Write(//**/.theodore/workspaces/**)", "Read(//**/.theodore/workspaces/**)",
-                     "Read(//**/theodore-specimens-*/**)"):
+                     "Read(//**/theodore-specimens-*/**)", "Read(//**/.theodore/work/scratch/sheets/**)",
+                     "mcp__plugin_theodore_theodore__pptx", "mcp__plugin_theodore_theodore__theodore"):
             self.assertIn(rule, pptx)
         for rule in pptx:
             tool, _, inner = rule.partition("(")
             self.assertIn(tool, ("Bash", "PowerShell", "Edit", "Write", "Read") if inner else
                           ("mcp__plugin_theodore_theodore__guide", "mcp__plugin_theodore_theodore__specimen",
-                           "mcp__plugin_theodore_theodore__list"), rule)
+                           "mcp__plugin_theodore_theodore__list", "mcp__plugin_theodore_theodore__pptx",
+                           "mcp__plugin_theodore_theodore__theodore"), rule)
             if tool in ("Bash", "PowerShell"):
                 # a command rule names Theodore's own command first: never a wildcard before it, which would let any
                 # command that merely mentions Theodore's path run without a prompt
                 self.assertRegex(inner, r'^(theodore |& theodore |sh "\$\{CLAUDE_SKILL_DIR\}/|"\$\{CLAUDE_SKILL_DIR\}/|& "\$\{CLAUDE_SKILL_DIR\}/)', rule)
             if tool in ("Edit", "Write", "Read"):
                 self.assertRegex(inner, r"(?i)theodore", f"{rule}: a file rule names one of Theodore's own folders")
-                self.assertNotIn(inner, ("//**)", "//**/.theodore/**)"), "never the whole disk, nor Theodore's home (its sign-in lives there)")
+                self.assertNotIn(inner, ("//**)", "//**/.theodore/**)", "//**/.theodore/work/**)"),
+                                 "never the whole disk, nor Theodore's home (its sign-in lives there)")
 
     def test_install_md_lists_no_permission_change_and_says_how_to_hear_the_welcome(self):
         text = " ".join((ROOT / "install" / "install.md").read_text(encoding="utf-8").split())
