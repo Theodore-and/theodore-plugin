@@ -414,7 +414,8 @@ def refusal_status() -> Status:
     """The one answer of a command that learned, on any authenticated call, that the device was revoked or the account
     suspended (core.refusal). It cannot raise: whatever fails while it is built, a fixed block is answered."""
     global _REFUSAL_STATUS
-    if _REFUSAL_STATUS is None:
+    held = getattr(core._SCOPE, "status", None) if core._SCOPED else _REFUSAL_STATUS     # the tool server: per call
+    if held is None:
         kind, code = core.refusal() or ("revoked", "unauthenticated")
         try:
             built = revoked_status() if kind == "revoked" else suspended_status(code)
@@ -422,8 +423,12 @@ def refusal_status() -> Status:
             built = _static_sign_in(kind)
         built.refusal = True
         from . import withdraw
-        _REFUSAL_STATUS = withdraw.annotate(built)
-    return _REFUSAL_STATUS
+        held = withdraw.annotate(built)
+        if core._SCOPED:
+            core._SCOPE.status = held
+        else:
+            _REFUSAL_STATUS = held
+    return held
 
 
 _REVOKED_REASON = ("this device was signed out of Theodore (from the portal, by a suspension of the account that has since "

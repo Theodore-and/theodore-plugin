@@ -108,8 +108,9 @@ Outside that folder:
   PortableGit, unmodified, into Theodore's folder (from Theodore's download host, otherwise from the project's own
   release on github.com; pinned SHA-256) and names it in Claude Code's user settings (`env.CLAUDE_CODE_GIT_BASH_PATH`;
   a value you set is never replaced, and the uninstall takes Theodore's back).
-- **The short command `theodore`** (with the host settings, from 0.4.1): a two-line script that only runs the stable
-  launcher, written into the first of `~/.local/bin` (the folder Claude Code's own installer uses) or `~/bin` that is
+- **The short command `theodore`** (with the host settings, from 0.4.1): a short script that starts Theodore's client
+  straight from Theodore's own Python (from 0.4.34; or, when anything it needs is missing, the stable launcher), written
+  into the first of `~/.local/bin` (the folder Claude Code's own installer uses) or `~/bin` that is
   on the PATH of the shell that ran the installer; on Windows `theodore.cmd` (and a `theodore` script for Git Bash) in
   `%USERPROFILE%\.local\bin` or else `%LOCALAPPDATA%\Microsoft\WindowsApps`, which Windows puts on every user's PATH.
   It is never written over a file that is not Theodore's or where another `theodore` comes first on PATH, and the

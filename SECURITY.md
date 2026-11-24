@@ -80,7 +80,8 @@ settings, without a separate question (the person asked their assistant to set T
 share `~/.claude/settings.json`), plugin auto-update for the Theodore marketplace and permission rules that allow only
 Theodore's own commands, by their exact installed paths (the stable launcher, the plugin's skill launchers and the
 plugin's own tool server; on Windows also for Claude Code's PowerShell tool), so they run without a prompt; the
-short command `theodore`, a two-line script that only runs the stable launcher, in a per-user folder already on the
+short command `theodore`, a short script that starts Theodore's client from Theodore's own Python (or, when anything
+it needs is missing, the stable launcher), in a per-user folder already on the
 shell's PATH (`~/.local/bin` or `~/bin`; on Windows `%USERPROFILE%\.local\bin` or `%LOCALAPPDATA%\Microsoft\WindowsApps`),
 never over another file and never where another `theodore` comes first, with the rule `Bash(theodore *)` (on Windows
 also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) only while it is there; reading Claude Code's own copy of

@@ -37,6 +37,19 @@ if "%HOME_DIR%"=="\.theodore" goto :no_home
 set "STABLE=%HOME_DIR%\bin\theodore.cmd"
 set "CONF=%SELF_DIR%\launcher.json"
 set "B=%HOME_DIR%\state\bootstrap"
+rem --- 0. the hot path (0.4.34): once Theodore is set up, the client starts from here with no other program ---------
+rem cmd's own reads of the folder's records (:check_ready), where the steps below start findstr and cmd several times. None
+rem of them is needed then: the release keys were checked when Theodore was installed, the client checks the folder's
+rem service itself, and an update brings <home>\bin up to the newest launcher. Anything missing: the full launcher below.
+if /i "%~1"=="uninstall" goto :not_hot
+if "%~1"=="__bootstrap" goto :not_hot
+call :check_ready
+if not defined READY goto :not_hot
+if not exist "%STABLE%" goto :not_hot
+set "LAUNCHER=%STABLE%"
+if /i not "%SELF%"=="%STABLE%" if not defined THEODORE_SKILL_DIR for %%I in ("%SELF_DIR%\..") do set "THEODORE_SKILL_DIR=%%~fI"
+goto :run_client
+:not_hot
 if not exist "%CONF%" goto :no_conf
 rem A plugin built without its release keys (the placeholder: kid manifest-unset, an all-zero key) trusts any
 rem download: it runs nothing but uninstall. The client refuses such keys too, exactly.
