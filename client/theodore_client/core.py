@@ -63,7 +63,7 @@ def emit(status: Status) -> int:
     status printed is that refusal's block instead (account.refusal_status, which cannot raise), once, whatever else
     happened afterwards."""
     global _REFUSAL_EMITTED
-    if _REFUSAL and not getattr(status, "refusal", False):
+    if refused() and not getattr(status, "refusal", False):
         from . import account          # imported here: account imports this module
         status = account.refusal_status()
     elif status.name == "SETUP_IN_PROGRESS":
@@ -72,7 +72,7 @@ def emit(status: Status) -> int:
     elif getattr(status, "auto_report", False):
         from . import commands         # imported here: commands imports this module
         status = commands.report_internal(status)      # sent before the status is printed; never raises
-    if _REFUSAL or (status.name in SHEET_REFUSALS and not getattr(status, "keeps_sheets", False)):
+    if refused() or (status.name in SHEET_REFUSALS and not getattr(status, "keeps_sheets", False)):
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
     if getattr(status, "refusal", False):
@@ -100,20 +100,43 @@ def last_emitted() -> Status | None:
 
 _REFUSAL: tuple[str, str] | None = None
 _REFUSAL_EMITTED = False
+# The tool server answers calls side by side (one thread each): there a refusal belongs to the call that learned it,
+# and each call learns afresh (a device may sign in again between calls). scope_refusals_per_thread() turns that on;
+# begin_call() starts a call's own record.
+_SCOPED = False
+_SCOPE = threading.local()
+
+
+def scope_refusals_per_thread() -> None:
+    global _SCOPED
+    _SCOPED = True
+
+
+def begin_call() -> None:
+    """A tool call starts: nothing refused yet in this thread (with per-thread scope), else in this process."""
+    global _REFUSAL, _REFUSAL_EMITTED
+    if _SCOPED:
+        _SCOPE.refusal, _SCOPE.status = None, None
+    else:
+        _REFUSAL, _REFUSAL_EMITTED = None, False
 
 
 def mark_refused(kind: str, code: str) -> None:
     global _REFUSAL
-    if _REFUSAL is None or (kind == "revoked" and _REFUSAL[0] != "revoked"):
-        _REFUSAL = (kind, code)
+    current = refusal()
+    if current is None or (kind == "revoked" and current[0] != "revoked"):
+        if _SCOPED:
+            _SCOPE.refusal = (kind, code)
+        else:
+            _REFUSAL = (kind, code)
 
 
 def refusal() -> tuple[str, str] | None:
-    return _REFUSAL
+    return getattr(_SCOPE, "refusal", None) if _SCOPED else _REFUSAL
 
 
 def refused() -> bool:
-    return _REFUSAL is not None
+    return refusal() is not None
 
 
 # --- secrets never reach a log or a printed line ------------------------------------------------------------------------

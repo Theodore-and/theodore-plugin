@@ -528,6 +528,7 @@ def call(route: str, *, bearer: str | None = None, body=None, query: dict | None
     method, _template, needs_auth = ROUTES[route]
     if needs_auth and not bearer:
         raise sign_in_required()
+    pool = pool or DEFAULT_POOL
     send = request if pool is None else pool.request
     return send(method, url_for(route, query, **params), bearer=bearer if needs_auth else None, body=body,
                 headers=headers, timeout=timeout, redirects=redirects, limit=limit, exact_timeout=exact_timeout,
@@ -763,6 +764,7 @@ class KeptAlive:
 
 
 KEPT = KeptAlive()              # this process's pool: the tool server's calls and the service's
+DEFAULT_POOL: KeptAlive | None = None       # every call() of the process goes on it (the tool server sets KEPT)
 
 
 DOWNLOAD_ATTEMPTS = 3
