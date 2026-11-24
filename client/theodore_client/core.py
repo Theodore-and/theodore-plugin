@@ -667,9 +667,10 @@ def shim_texts() -> dict[str, str] | None:
                    '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
                    '    THEODORE_HOME=$w THEODORE_LAUNCHER="$w\\\\bin\\\\theodore.cmd"\n'
                    '    export THEODORE_HOME THEODORE_LAUNCHER\n'
-                   '    "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n'
-                   '    x=$?\n'
-                   '    [ "$x" -eq 126 ] || exit "$x"        # 126: the system refused to start it; the launcher says so\n'
+                   # exec: no copy of this shell waits beside the client (in MSYS each one is a process started);
+                   # execfail: a start the system refuses (a policy) returns here, and the launcher says so.
+                   '    shopt -s execfail 2>/dev/null\n'
+                   '    exec "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n'
                    '  fi\n'
                    'fi\n')
         return {

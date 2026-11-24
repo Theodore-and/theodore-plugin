@@ -1272,12 +1272,25 @@ class HotPath(LauncherCase):
     def started(self) -> list[str]:
         return self.log.read_text().split()
 
+    def became_the_client(self, command: list[str], env: dict) -> bool:
+        """Whether the shell started with `command` became the client itself (exec), so no copy of it waits beside the
+        client: the engine's parent, the client, has the shell's own process id."""
+        import subprocess
+        proc = subprocess.Popen([*command, "pptx", "env"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, cwd=str(self.box.tmp))
+        out, err = proc.communicate(timeout=180)
+        self.assertEqual(proc.returncode, 0, out + err)
+        return json.loads(out)["ppid"] == proc.pid
+
     @unittest.skipIf(IS_WINDOWS, "helper programs by name: the sh launcher on macOS and Linux")
     def test_a_verb_through_the_launcher_starts_two_pythons_and_nothing_else(self):
         env = self.counting()
         result = self.run_launcher("pptx", "exit", "0", env=env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.started(), ["python", "python"], "the client, then the engine on the runtime's python")
+        if "dash" not in os.path.realpath("/bin/sh"):          # dash has no execfail: there the client runs as a child
+            self.assertTrue(self.became_the_client(["/bin/sh", str(self.box.launcher)], {**self.box.env, **env}),
+                            "the launcher's shell becomes the client (exec, where the shell has execfail)")
         self.log.write_text("")
         version = self.run_launcher("version", env=env)
         self.assertIn("theodore client", version.stdout)
@@ -1309,6 +1322,7 @@ class HotPath(LauncherCase):
         result = run("pptx", "exit", "3")
         self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
         self.assertEqual(self.started(), ["python", "python"])
+        self.assertTrue(self.became_the_client([str(shim)], {**self.box.env, **env}), "the short command's shell becomes the client")
         self.log.write_text("")
         self.assertIn("theodore client", run("version").stdout)
         self.assertEqual(self.started(), ["python"])
@@ -1337,6 +1351,13 @@ class HotPath(LauncherCase):
         self.assertEqual(json.loads(stamp.read_text())["launcher_generation"], 1)
         self.assertEqual((self.box.home / "bin" / self.box.launcher.name).read_bytes(), self.box.launcher.read_bytes())
 
+    def hot_trace(self, bash: str, script: str, env: dict | None = None, cwd=None) -> str:
+        """The script's run traced (sh -x) up to the client's start, for a count that failed: which check sent it on."""
+        import subprocess
+        traced = subprocess.run([bash, "-c", f'echo "OSTYPE=$OSTYPE"; sh -x "{script}" version 2>&1 | head -80'], env=env or self.box.env,
+                                cwd=str(cwd or self.box.tmp), capture_output=True, text=True, timeout=180)
+        return traced.stdout + traced.stderr
+
     @unittest.skipUnless(IS_WINDOWS, "a job object's accounting: Windows")
     def test_on_windows_a_verb_starts_the_client_and_the_engine_and_little_else(self):
         import shutil
@@ -1349,8 +1370,9 @@ class HotPath(LauncherCase):
             sh_path = str(self.box.launcher.with_name("theodore")).replace("\\", "/")
             count, result = windows_processes([bash, "-c", f'sh "{sh_path}" pptx exit 0'], self.box.env, str(self.box.tmp))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            # bash, sh, the two python.exe, and a console host at most: no cygpath, grep, tr, dirname or uname.
-            self.assertLessEqual(count, 5, f"processes started through the sh launcher in Git Bash: {count}")
+            # Git's bash.exe and the bash it starts, sh, the two python.exe: no cygpath, grep, tr, dirname or uname.
+            if count > 5:
+                self.fail(f"processes started through the sh launcher in Git Bash: {count} > 5\n{self.hot_trace(bash, sh_path)}")
 
     @unittest.skipUnless(IS_WINDOWS, "the Windows short commands")
     def test_on_windows_the_short_commands_start_the_client_straight(self):
@@ -1383,7 +1405,9 @@ class HotPath(LauncherCase):
             count, result = windows_processes([bash, "-c", f'sh "{script}" version'], env, str(fresh.tmp))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("theodore client", result.stdout)
-            self.assertLessEqual(count, 4, f"processes started through the Git Bash short command: {count}")
+            # Git's bash.exe and the bash it starts, sh, then exec: the client's python.exe in its place.
+            if count > 4:
+                self.fail(f"processes started through the Git Bash short command: {count} > 4\n{self.hot_trace(bash, script, env, fresh.tmp)}")
 
 if __name__ == "__main__":
     unittest.main()

@@ -89,7 +89,7 @@ elif verb == "env":
                       "usage_ledger": os.environ.get("THEODORE_USAGE_LEDGER"),
                       "soffice": os.environ.get("SOFFICE_BIN"), "node_modules": (ROOT / "node_modules").is_dir(),
                       "venv": sys.prefix != sys.base_prefix, "exe": sys.executable, "engine": str(ROOT),
-                      "runtime_python": os.environ.get("THEODORE_TEST_STARTED_BY") == "runtime-python"}))
+                      "runtime_python": os.environ.get("THEODORE_TEST_STARTED_BY") == "runtime-python", "ppid": os.getppid()}))
 else:
     print(json.dumps({"verb": verb, "args": args[1:], "engine": VERSION}))
 '''
