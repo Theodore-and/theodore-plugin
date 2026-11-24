@@ -659,6 +659,11 @@ class Pool:
             with contextlib.suppress(Exception):
                 worker.process.wait(timeout=max(0.05, end - time.monotonic()))
             worker.kill()
+        if any(worker.group.startswith(CHAT_GROUP) for worker in workers):
+            # The licence copy a chat's workers read goes with them, here: the service may exit before their reader
+            # threads report them gone (worker_died).
+            from .. import chatbuild
+            chatbuild.drop_licence_copy()
         self._release_engine_run()
 
     # --- running a call ------------------------------------------------------------------------------------------------
