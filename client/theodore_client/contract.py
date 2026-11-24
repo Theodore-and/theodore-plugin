@@ -43,6 +43,7 @@ ROUTES = {
     "guide": ("GET", "/v1/guide/{skill}", True),
     "guide_section": ("GET", "/v1/guide/{skill}/{section}", True),
     "guide_specimen": ("GET", "/v1/guide/specimens/{file}", True),       # ?skill=deck-design; image/jpeg, X-Theodore-Sha256
+    "guide_batch": ("POST", "/v1/guide/batch", True),                 # contract C6: a call's sections and sheets in one request (a zip)
     "reports": ("POST", "/v1/reports", True),
     "preferences_list": ("GET", "/v1/preferences", True),
     "preferences_add": ("POST", "/v1/preferences", True),
@@ -64,7 +65,7 @@ ROUTES = {
 
 # Routes the backend is adding and its published contract (openapi.json, snapshotted in tests/fixtures) does not list
 # yet. The contract test lets these through, and fails as soon as the snapshot has one of them: then remove it here.
-PENDING_ROUTES: tuple[str, ...] = ()
+PENDING_ROUTES: tuple[str, ...] = ("guide_batch",)       # lane D, backend lane/guide-bundle
 
 # --- API error codes (backend design section 5) and the status each becomes -----------------------------------------
 # code: (HTTP status, launcher status name)

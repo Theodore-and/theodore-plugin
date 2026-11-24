@@ -52,14 +52,11 @@ class Nearest(unittest.TestCase):
         self.assertEqual(specimens.missing_note("range-tablez.jpg", None), "no such sheet: range-tablez.jpg")
 
     def test_the_index_gives_valid_names_only(self):
-        import email.message
         import json
-        headers = email.message.Message()
-        headers["Content-Type"] = "application/json"
+        from theodore_client.service import texts
         raw = json.dumps({"specimens": [{"file": "a.jpg"}, {"file": "../b.jpg"}, {"file": "NUL.jpg"}, "c.jpg", {"file": "a.jpg"}]}).encode()
-        self.assertEqual(specimens.index_sheets(headers, raw), ["a.jpg", "c.jpg"])
-        headers.replace_header("Content-Type", "text/markdown")
-        self.assertIsNone(specimens.index_sheets(headers, b"# a text"))
+        self.assertEqual(texts.parse_index(raw)["specimens"], ["a.jpg", "c.jpg"])
+        self.assertIsNone(texts.parse_index(b"# a text", content_type="text/markdown"))
 
 
 class LauncherSpecimen(ClientCase):
@@ -79,7 +76,7 @@ class LauncherSpecimen(ClientCase):
         result = self.client("specimen", "cover-01.jpg", "tables-the-range.jpg", "QX2", "QX9.jpg", "range-edges.jpg")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual([Path(line).name for line in lines[:3]], ["cover-01.jpg", "QX2.jpg", "range-edges.jpg"])
+        self.assertEqual([Path(line).name.split("-", 1)[1] for line in lines[:3]], ["cover-01.jpg", "QX2.jpg", "range-edges.jpg"])
         for line, name in zip(lines[:3], ("cover-01.jpg", "QX2.jpg", "range-edges.jpg")):
             self.assertEqual(Path(line).read_bytes(), JPEG + name.encode())
         self.assertEqual(lines[3], "no such sheet: tables-the-range.jpg; nearest: range-tables.jpg")
@@ -112,7 +109,7 @@ class LauncherSpecimen(ClientCase):
         result = self.client("specimen", "cover-01.jpg", "tables-the-range.jpg")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(Path(lines[0]).name, "cover-01.jpg")
+        self.assertEqual(Path(lines[0]).name.split("-", 1)[1], "cover-01.jpg")
         self.assertEqual(lines[1:], ["no such sheet: tables-the-range.jpg"])
 
     def test_a_name_that_is_not_a_file_name_is_still_refused_before_any_request(self):

@@ -52,7 +52,9 @@ class LauncherSheets(ClientCase):
 
     def test_a_marked_sheet_whose_content_is_not_the_published_one_is_refused(self):
         # The bytes under the mark differ from the sheet the ETag names (a sheet damaged or swapped on the way, with a
-        # transport hash recomputed to match): refused.
+        # transport hash recomputed to match): refused. The single route's rule (its ETag names the published sheet), for
+        # a service without the batch route; a batch's sheet is checked against the index's hash of the bytes sent.
+        self.api.batch_route = False
         original = self.api._send
 
         def send(h, status, body=None, headers=None, content_type="application/json"):

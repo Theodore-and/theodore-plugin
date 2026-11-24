@@ -240,8 +240,8 @@ class Guide(McpCase):
         be reached after every attempt is named first, never dropped silently."""
         self.ready()
         self.api.guides["pptx"][""] = "SERVED-POINTER.\n"
-        self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]
-        text = self.server(env={"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}).call("guide", skill="pptx")["content"][0]["text"]
+        self.api.guide_delays["pptx"] = [2.0]
+        text = self.server(env={"THEODORE_TEST_TEXTS_TIMEOUT": "1.0"}).call("guide", skill="pptx")["content"][0]["text"]
         self.assertTrue(text.splitlines()[1].startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), text[:400])
         self.assertNotIn("SERVED-POINTER", text)
         self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
