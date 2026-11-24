@@ -130,6 +130,11 @@ while True:
         code = 77
     elif verb == "image":
         say(json.dumps({"ok": True, "rendered_images": [argv[1]]}) + "\n")
+    elif verb in ("render", "apply") and len(argv) > 1 and argv[1] == "--v2":
+        # as a 2.0 engine answers (lanes F and R): one row per slide, a path when drawn, pending while the exact tier draws
+        rows = [{"slide": f"s00{n}", "page": n, "path": p} for n, p in enumerate(argv[2:], 1)]
+        rows.append({"slide": "s099", "page": 99, "pending": True})
+        say(json.dumps({"ok": True, "pictures": rows, "pending": ["s099"], "next": "run the same render again"}) + "\n")
     elif verb in ("render", "apply") and len(argv) > 1 and argv[1].endswith(".jpg"):
         # as the engine answers: every page listed, the ones drawn anew named apart (apply), or the pages asked (render)
         pictures = argv[1:]
