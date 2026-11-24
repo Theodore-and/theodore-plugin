@@ -1,9 +1,13 @@
-"""The first words after set-up, and the Studio setting (lane ONBOARD).
+"""The first words after set-up, and the Studio setting (lanes ONBOARD and L3).
 
-`welcome` is the installers' last status: a short welcome the assistant gives in the same conversation. It asks about
-Studio once per computer (state/welcome.json), only when the account has Studio on and it applies; nothing repeats the
-question later. `studio [on|off]` reads or changes the account's Studio setting, the same one the portal's Settings
-switch changes (GET/PUT /v1/studio, this installation's own account only).
+`welcome` is the installers' last status: a short welcome the assistant gives in the same conversation. Every welcome
+says Studio's state (on, off, or not in the plan: a sentence, never a question) and the asset packs' state (ready, or
+finishing by themselves with about how much is left), so nobody has to ask (the set-up of 24 November 2026: three
+questions in thirteen minutes). An installer run by a person, not by an assistant, ends with plain words for that
+person and leaves the welcome owed: the first `status` or `doctor` that says OK, or the first instructions an assistant
+loads (`guide`, a skill), gives it once (`owed`, `owed_notice`). `studio [on|off]` reads or changes the account's
+Studio setting, the same one the portal's Settings switch changes (GET/PUT /v1/studio, this installation's own account
+only).
 
 What a user is told says what Studio means for them, never how it works.
 """
@@ -46,7 +50,6 @@ def studio(action: str | None) -> int:
     if bool(state.get("studio_enabled")) != want:
         _status, _headers, raw = _api("studio_set", "Studio", body={"studio_enabled": want})
         state = _answer(raw)
-    _remember({"studio_asked": True})
     if want:
         return core.emit(Status("OK", "Studio is on for this account, from its next deck.", "nothing to do.",
                                 f"Studio is on again for your account: from your next deck, {STUDIO_ON_MEANS}."))
@@ -55,23 +58,83 @@ def studio(action: str | None) -> int:
                             "Say if you want it on again."))
 
 
-def _studio_to_ask() -> bool:
-    """Whether the welcome asks about Studio: never asked on this computer, and the account has it on, in its plan and
-    honoured by its guidance. Any failure (offline, slow, refused) leaves it out: the welcome never waits or fails."""
-    if _remembered().get("studio_asked"):
-        return False
+# How long the welcome waits for the account's Studio setting. The set-up of 24 November 2026 ran on a laptop where a
+# Studio command took about 19 s in all (the launcher and the client's start; the read itself is short): 8 s for the
+# read alone, once, at the end of an installer that has run for minutes.
+STUDIO_READ_S = 8.0
+
+
+def studio_state(timeout: float = STUDIO_READ_S) -> str | None:
+    """The account's Studio setting as the welcome says it: "on", "off", "not_included" (the plan has no Studio), or
+    None when it could not be read (not signed in, offline, slow, refused, or a guidance that does not honour it). Never
+    raises: the welcome never waits longer or fails for it."""
     try:
         from . import credentials
         cred = credentials.load()
         if not cred:
-            return False
-        _status, _headers, raw = api.call("studio_get", bearer=cred["installation_secret"], timeout=4.0,
+            return None
+        _status, _headers, raw = api.call("studio_get", bearer=cred["installation_secret"], timeout=timeout,
                                           exact_timeout=True, learn_refusals=False)
         state = _answer(raw)
-    except Exception as exc:  # noqa: BLE001  the question is optional; the welcome is not
+    except Exception as exc:  # noqa: BLE001  a sentence of the welcome, not the welcome
         core.log(f"welcome: Studio not read ({exc.__class__.__name__})")
-        return False
-    return bool(state.get("studio_enabled") and state.get("included") and state.get("available"))
+        return None
+    if not state.get("included"):
+        return "not_included"
+    if not state.get("available"):
+        return None
+    return "on" if state.get("studio_enabled") else "off"
+
+
+def studio_sentence(state: str | None) -> str | None:
+    if state == "on":
+        return f"Studio is on: {STUDIO_ON_MEANS}."
+    if state == "off":
+        return f"Studio is off: {STUDIO_OFF_MEANS}."
+    if state == "not_included":
+        return "Studio, a deeper design pass for each slide, is not part of your Theodore plan."
+    return None
+
+
+PACKS = "Its icon, flag, map and background libraries"
+
+
+def packs_sentence() -> str | None:
+    """The asset packs' state in one sentence: ready, finishing by themselves (about how much is left), or not all
+    there yet. None when the channel publishes no pack."""
+    from . import install
+    from .contract import PACK_ORDER
+    from .core import Job
+    try:
+        published = install.published_packs()
+        if published == []:
+            return None
+        names = [p for p in PACK_ORDER if published is None or p in published]
+        state = install.packs_state()
+        waiting = [p for p in names if (state.get(p) or {}).get("status") != "ready"]
+        if not waiting:
+            return f"{PACKS} are ready."
+        if Job("packs").alive():
+            left = _megabytes_left(waiting, state)
+            return (f"{PACKS} are finishing their download by themselves" + (f" (about {left} MB left)" if left else "")
+                    + "; a deck can start meanwhile.")
+        return f"{PACKS} are not all downloaded yet; the next deck fetches the rest by itself."
+    except Exception as exc:  # noqa: BLE001  a sentence of the welcome, not the welcome
+        core.log(f"welcome: packs not read ({exc.__class__.__name__})")
+        return None
+
+
+def _megabytes_left(waiting: list[str], state: dict) -> int | None:
+    from . import install
+    sizes = install.published_pack_sizes()
+    total = 0.0
+    for pack in waiting:
+        size = sizes.get(pack)
+        if not size:
+            return None
+        done = max(0, min(100, int((state.get(pack) or {}).get("percent") or 0)))
+        total += size * (100 - done) / 100
+    return max(1, round(total / 1_000_000))
 
 
 # --- the welcome -------------------------------------------------------------------------------------------------------
@@ -93,7 +156,7 @@ def _host() -> str | None:
     """The assistant running this command: "codex" or "claude-code" by the variables each sets for its commands."""
     if os.environ.get("CODEX_THREAD_ID"):
         return "codex"
-    if os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDECODE"):
+    if os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
         return "claude-code"
     return None
 
@@ -114,55 +177,56 @@ def _new_session_needed(host: str | None) -> bool:
 
 
 def _downloading() -> bool:
+    """A download of the runtime, the engine, LibreOffice or Git still going on (the packs have their own sentence)."""
     from .core import Job
-    return any(Job(name).alive() for name in ("setup", "packs", "libreoffice", "git"))
+    return any(Job(name).alive() for name in ("setup", "libreoffice", "git"))
 
 
 CLOSING = ("This welcome is your whole closing message: say nothing about permissions, settings or uninstalling unless "
            "the user asks.")
+WELCOME = ("Welcome to Theodore: it is set up and signed in on this computer, and from now on I build your presentations "
+           "with it, as PowerPoint files.")
+TO_START = "To start, share a document or your notes, say who the deck is for, and attach your template if you have one."
 
 
 def _welcome_status(name: str, summary: str, engine_downloading: bool, download_done: bool = False) -> Status:
     """The welcome as a status. `download_done`: given by the first `status` that says OK after the installer left it
     owed, so no line says a download is still going on."""
-    from . import desktop
-    from .commands import _host_record
     host = _host()
     new_session = _new_session_needed(host)
-    ask_studio = _studio_to_ask()
+    studio_ = studio_state()
     launcher = quoted_launcher()
 
-    lines = ["Welcome to Theodore. It is set up and signed in on this computer.",
-             "From now on, when you ask me for a presentation, I build it as a PowerPoint file with Theodore.",
-             "To start, share a document or your notes, say who the deck is for, and attach your template if you "
-             "have one."]
-    if ask_studio:
-        lines.append("Studio is on, so each slide gets a deeper design pass, which uses more of your AI plan. "
-                     "Would you like it off, for simpler slides that use less of it?")
+    lines = [WELCOME] + [line for line in (studio_sentence(studio_), packs_sentence()) if line] + [TO_START]
     last = []
     if not download_done and (engine_downloading or _downloading()):
         last.append("A last download finishes by itself in the next few minutes.")
     if new_session:
         last.append("Start a new session, then ask for your first deck.")
-    try:
-        if desktop.reopen_needed(_host_record()):
-            last.append("To use it in the Claude app's chats too, quit the app and open it again once.")
-    except Exception:  # noqa: BLE001  a note only
-        pass
     if last:
         lines.append(" ".join(last))
 
     give = ("give the user this welcome now, in this conversation, in at most five short lines, as written or in your "
             "own words without adding to it; ask nothing else")
-    studio_next = (f"; if they answer that they want Studio off, run {launcher} studio off (and {launcher} studio on if "
-                   "they later want it back); otherwise do nothing about it and do not ask again") if ask_studio else ""
+    studio_next = (f"; if they say they want Studio off, run {launcher} studio off ({launcher} studio on turns it back "
+                   "on); otherwise do nothing about it") if studio_ in ("on", "off") else ""
     after = (". Apart from that, run no Theodore command in this session: Codex loads Theodore's tool and permissions "
              "only when a session starts, so here each Theodore command would ask for approval; if they ask for a deck "
              "here, ask them to start a new session first") if host == "codex" else ""
-    if ask_studio:
-        _remember({"studio_asked": True})
     _remember({"owed": False, "given": True})
     return Status(name, summary, give + studio_next + after + ". " + CLOSING, " ".join(lines))
+
+
+def _for_a_person(engine_downloading: bool) -> int:
+    """The installer's ending when a person ran it in a terminal, not an assistant: plain words, no status block. The
+    welcome stays owed, so the assistant the person goes back to gives it (status, doctor, or its first instructions)."""
+    first = ("Theodore is installed on this computer and finishes a download by itself in the next few minutes."
+             if engine_downloading or _downloading() else "Theodore is set up and signed in on this computer.")
+    said = [first] + [line for line in (studio_sentence(studio_state()), packs_sentence()) if line]
+    said.append("Go back to your assistant (Claude or Codex) and ask for your presentation there.")
+    _remember({"owed": True})
+    print("\n".join(said), flush=True)
+    return 0
 
 
 def welcome(engine_downloading: bool = False) -> int:
@@ -170,8 +234,11 @@ def welcome(engine_downloading: bool = False) -> int:
     SETUP_IN_PROGRESS case). The welcome must be the last thing the assistant is given (an assistant finishes its tool
     work before it speaks): while the download goes on, the installer only sends it to `status --wait`, marks the
     welcome owed, and the first `status` that says OK gives it (`owed`). Codex runs nothing more in the set-up session,
-    so there the installer gives it at once."""
-    if engine_downloading and _host() != "codex":
+    so there the installer gives it at once. Run by a person, plain words (`_for_a_person`)."""
+    host = _host()
+    if host is None:
+        return _for_a_person(engine_downloading)
+    if engine_downloading and host != "codex":
         return core.emit(_owe())
     return core.emit(_welcome_status("OK", "Theodore is set up and signed in" + (
         "; the rest of its runtime and its engine finish downloading by themselves in the background."
@@ -217,3 +284,19 @@ def owed(summary: str) -> Status | None:
     if not _remembered().get("owed"):
         return None
     return _welcome_status("OK", summary + " Set-up is finished.", engine_downloading=False, download_done=True)
+
+
+def owed_notice() -> str | None:
+    """The welcome an installer run by a person left owed, as one notice line at the head of the first instructions an
+    assistant loads (`guide`, a skill), once; None when nothing is owed or the engine is still downloading (then the
+    `status --wait` the installer named gives it). Never raises."""
+    try:
+        if not _remembered().get("owed") or _downloading():
+            return None
+        said = " ".join(line for line in ("Theodore is set up and signed in on this computer.", studio_sentence(studio_state()),
+                                          packs_sentence()) if line)
+        _remember({"owed": False, "given": True})
+        return f"THEODORE NOTICE: {said} Tell the user once, in one or two lines; it does not stop this task."
+    except Exception as exc:  # noqa: BLE001  a notice is never the reason instructions fail to load
+        core.log(f"welcome: notice not given ({exc.__class__.__name__})")
+        return None

@@ -4,9 +4,9 @@ rem into %USERPROFILE%\.theodore (or THEODORE_HOME). Written to be run by an AI 
 rem
 rem   install.cmd --code ABCD-1234        sign this computer in with a one-time code and set everything up
 rem   install.cmd                         the same, ending with a sign-in link instead of a code (no browser opens)
-rem   install.cmd --no-settings ...       leave out Theodore's host settings (on by default: plugin auto-update, and
-rem                                       Theodore's own commands allowed in Claude Code and Codex); --accept-settings
-rem                                       is still accepted and changes nothing
+rem   install.cmd --no-settings ...       still accepted and changes nothing, as --accept-settings: Theodore writes no
+rem                                       permission rule into an assistant's settings (in Claude Code its skills carry
+rem                                       the permissions they need)
 rem   install.cmd --uninstall             remove Theodore from this computer
 rem
 rem What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
 set "PIN_CLIENT_VERSION=0.4.34"
-set "PIN_CLIENT=client/client-0.4.34.tar 3cc199002002bb2dd0347d61cb09319b7ec88403de06cbd02cc7979e57b836c8"
+set "PIN_CLIENT=client/client-0.4.34.tar e9474ebf162ddde2e236aa57efcbfe06b3a1d9a1e3d51c2d09413f39b73990a3"
 set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -82,7 +82,6 @@ if not exist "%USERPROFILE%\.theodore\bin\launcher.json" if exist "%LOCALAPPDATA
 if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
 set "CODE="
 set "UNINSTALL="
-set "NO_SETTINGS="
 set "RATE_WAIT="
 set "LIMIT_REFUSED="
 set "WORK="
@@ -101,7 +100,6 @@ if /i "%~1"=="--code" goto :arg_code
 if /i "%~1"=="--uninstall" set "UNINSTALL=1"
 if /i "%~1"=="--uninstall" goto :next_arg
 if /i "%~1"=="--accept-settings" goto :next_arg
-if /i "%~1"=="--no-settings" set "NO_SETTINGS=1"
 if /i "%~1"=="--no-settings" goto :next_arg
 goto :bad_option
 :next_arg
@@ -403,11 +401,9 @@ call "%%T%%" hosts register
 set "HOSTS_RC=%ERRORLEVEL%"
 rem Claude Code on Windows with no Git Bash cannot load the skills: PortableGit into Theodore's folder, Claude Code pointed at it.
 call "%%T%%" tools install git --if-needed
-rem The person asked their assistant to set Theodore up: its host settings come with it; --no-settings leaves them out.
-if defined NO_SETTINGS call "%%T%%" hosts settings --remove >nul 2>&1
-if defined NO_SETTINGS echo theodore-install: Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command
-if not defined NO_SETTINGS call "%%T%%" hosts settings --apply
-if not defined NO_SETTINGS echo theodore-install: Theodore's own commands, and the assistant's edits of a deck's files in .theodore\workspaces, run without asking each time; to turn that off: "%T%" hosts settings --remove
+rem No permission rule goes into an assistant's settings (lane L3, 24 November 2026: the assistant running this declined an
+rem installer that changes its own permissions, in all three real set-ups). Theodore's skills carry the permissions they
+rem need; "theodore hosts settings --apply" adds rules only when the user asks for it. As install.sh.
 if not defined SETUP_FAILED goto :background
 echo theodore-install: the stable launcher is "%T%"
 type "%WORK%\setup.txt"
@@ -438,8 +434,9 @@ if not "%RC%"=="67" goto :doctor_shown
 rem Still downloading in the background: doctor's checks, then a status that names doctor itself (its own status says
 rem "the same command", which here would be this installer).
 "%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
-rem The last status is the client's welcome (lane ONBOARD), as install.sh: a few short lines for the assistant to give
-rem in this conversation, the Studio question once, and what this host needs (a new session, the download going on).
+rem The last status is the client's welcome (lanes ONBOARD and L3), as install.sh: a few short lines for the assistant to
+rem give in this conversation, with Studio's state and the asset packs' state, and what this host needs (a new session,
+rem the download going on); run by a person, plain words, and the welcome left owed for the assistant they go back to.
 set "WELCOME_ARG=--downloading"
 call :welcome
 if not errorlevel 1 goto :finish
@@ -465,11 +462,14 @@ echo TELL THE USER: Theodore is installed and is finishing its download in the b
 set "RC=0"
 goto :finish
 :doctor_shown
-type "%WORK%\doctor.txt"
+if not "%RC%"=="0" type "%WORK%\doctor.txt"
 if not "%RC%"=="0" goto :finish
+rem Ready: doctor's checks, then the welcome as the only status (doctor's own ready line would come before it). As install.sh.
+"%SYS32%\findstr.exe" /v /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
 set "WELCOME_ARG="
 call :welcome
 if not errorlevel 1 goto :finish
+"%SYS32%\findstr.exe" /b /c:"THEODORE " /c:"NEXT: " /c:"TELL THE USER: " "%WORK%\doctor.txt"
 if not "%HOSTS_RC%"=="0" goto :hosts_left
 if not defined CODEX_THREAD_ID goto :finish
 rem Codex reads plugins, MCP servers and rules when a session starts: the deck belongs in a new session. As install.sh.

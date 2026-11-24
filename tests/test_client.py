@@ -2087,9 +2087,8 @@ class Hosts(ClientCase):
         settings.parent.mkdir(parents=True)
         original = {"permissions": {"allow": ["Bash(git status)"]}, "model": "opus"}
         settings.write_text(json.dumps(original))
-        shown = self.client("hosts", "settings")
-        _f, nxt, _t = self.assertStatus(shown, "OK", 0)
-        self.assertIn("hosts settings --remove", nxt)
+        _f, nxt, _t = self.assertStatus(self.client("hosts", "settings"), "OK", 0)
+        self.assertIn("only if the user asks for it", nxt)
         self.assertEqual(json.loads(settings.read_text()), original, "showing them changes nothing")
         script = self.box.user_home / ".claude" / "plugins" / "cache" / "theodore" / "theodore" / "0.3.10" / "skills" / "pptx" / "scripts" / "theodore"
         script.parent.mkdir(parents=True)
@@ -2157,21 +2156,6 @@ class Hosts(ClientCase):
         with mock.patch.object(core, "IS_WINDOWS", False):
             self.assertEqual(commands._claude_read_rule(Path("/Users/ann/Library/Caches/Theodore")), "Read(//Users/ann/Library/Caches/Theodore/**)")
 
-    def test_an_installation_from_before_gets_the_settings_once_at_its_next_command(self):
-        self._fake_tools()
-        settings = self.box.user_home / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
-        settings.write_text("{}")
-        self.client("doctor")
-        launcher = str(self.box.home / "bin" / "theodore")
-        allow = json.loads(settings.read_text())["permissions"]["allow"]
-        self.assertIn(f"Bash({launcher} *)", allow)
-        taken_out = json.loads(settings.read_text())
-        taken_out["permissions"]["allow"] = [r for r in allow if r != f"Bash({launcher} *)"]
-        settings.write_text(json.dumps(taken_out))
-        self.client("doctor")
-        self.assertNotIn(f"Bash({launcher} *)", json.loads(settings.read_text())["permissions"]["allow"], "once: a rule the user took out stays out")
-
     # --- the short command `theodore` and the workspace edit rule (lane PROMPTS, 0.4.1) ---------------------------------
     def _short_command_box(self) -> tuple[Path, Path]:
         self._fake_tools()
@@ -2192,13 +2176,12 @@ class Hosts(ClientCase):
         folder, settings = self._short_command_box()
         (self.box.home / "plugin" / ".agents" / "plugins").mkdir(parents=True)
         (self.box.home / "plugin" / ".agents" / "plugins" / "marketplace.json").write_text("{}")
-        self.assertStatus(self.client("hosts", "register"), "OK", 0)
-        claude_md = self.box.user_home / ".claude" / "CLAUDE.md"
-        self.assertIn(f'run "{self.box.home / "bin" / "theodore"}" uninstall.', claude_md.read_text())
-        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
-        shim = folder / "theodore"
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)       # registration writes it (lane L3), no rule
+        claude_md, shim = self.box.user_home / ".claude" / "CLAUDE.md", folder / "theodore"
         self.assertTrue(shim.is_file() and os.access(shim, os.X_OK), "written into the per-user folder on PATH, executable")
         self.assertIn("run theodore uninstall.", claude_md.read_text(), "the routing line the model reads first names it too")
+        self.assertEqual(json.loads(settings.read_text())["permissions"]["allow"], ["Bash(git status)"])
+        self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         text = shim.read_text()
         self.assertIn(str(self.box.home / "bin" / "theodore"), text, "it runs only the stable launcher, by its path")
         self.assertIn("THEODORE_HOME=", text, "a home outside the default one goes with it")
@@ -2227,7 +2210,7 @@ class Hosts(ClientCase):
         allow = json.loads(settings.read_text())["permissions"]["allow"]
         self.assertEqual(allow, ["Bash(git status)"], "its rules and the workspace rule go too")
         _f, nxt, _t = self.assertStatus(self.client("hosts", "settings"), "OK", 0)
-        self.assertIn(f'"{self.box.home / "bin" / "theodore"}" hosts settings --remove', nxt, "without it, the full path again")
+        self.assertIn(f'"{self.box.home / "bin" / "theodore"}" hosts settings --apply', nxt, "without it, the full path again")
         self.assertStatus(self.client("hosts", "settings", "--apply"), "OK", 0)
         self.assertTrue(shim.is_file())
         self.assertStatus(self.client("hosts", "unregister"), "OK", 0)
@@ -2301,9 +2284,8 @@ class Hosts(ClientCase):
         rules = Path(self.box.env["CODEX_HOME"]) / "rules"
         rules.mkdir(parents=True)
         (rules / "default.rules").write_text('prefix_rule(pattern = ["git", "status"])\n')
-        shown = self.client("hosts", "settings")
-        first, _nxt, _tell = self.assertStatus(shown, "OK", 0)
-        self.assertIn("outside Codex's sandbox", first)
+        _first, nxt, _tell = self.assertStatus(self.client("hosts", "settings"), "OK", 0)
+        self.assertIn("outside Codex's sandbox", nxt, "what --apply would add, said only (lane L3)")
         self.assertFalse((rules / "theodore.rules").exists(), "showing them writes nothing")
         self.assertStatus(self.client("hosts", "register"), "OK", 0)
         self.assertFalse((rules / "theodore.rules").exists(), "a plain registration writes no rule")
@@ -2390,15 +2372,16 @@ class Hosts(ClientCase):
         reopen = "To use Theodore in the Claude app's chats, quit the app and open it again once."
         from theodore_client import chatbuild
         self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() - 3600)
-        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
-        self.assertIn(reopen + " " + chatbuild.INSTALL_TIP, tell, "and the sentence to say once the app is reopened (lane CHATASK)")
+        _first, nxt, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertIn("Only if they ask about the Claude app's chats: the app needs quitting and opening again once", nxt)
+        self.assertIn(chatbuild.USE_THEODORE_SENTENCE, nxt, "and the sentence to say once it is reopened (lanes CHATASK, L3)")
+        self.assertNotIn(reopen, tell)
         self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = str(time.time() + 60)       # opened after the entry
-        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
-        self.assertNotIn(reopen, tell)
-        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, tell)
+        _first, nxt, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertNotIn(chatbuild.USE_THEODORE_SENTENCE, nxt + tell)
         self.box.env["THEODORE_TEST_CLAUDE_APP_STARTED"] = ""                          # not running: it loads at its next start
-        _first, _next, tell = self.assertStatus(self.client("doctor"), "OK", 0)
-        self.assertNotIn(reopen, tell)
+        _first, nxt, tell = self.assertStatus(self.client("doctor"), "OK", 0)
+        self.assertNotIn("Claude app's chats", nxt)
 
     @unittest.skipIf(sys.platform.startswith("linux"), "Claude Desktop is published for macOS and Windows")
     def test_registering_the_claude_app_tells_the_person_the_sentence_to_say_once(self):

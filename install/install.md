@@ -22,8 +22,7 @@ decks there too, and that workspace is the computer this page means.
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    What it sets up: Theodore for the assistants on this computer (Claude Code, Codex and the Claude app where
    present), with one marked line in their global instructions naming Theodore for the user's presentations;
-   this computer signed in with the one-time code; Theodore's own commands allowed to run without asking each
-   time; automatic updates. `theodore uninstall` takes all of it back.
+   this computer signed in with the one-time code; automatic updates. `theodore uninstall` takes all of it back.
    If your host holds the line back (an automatic safety check, not an error of the command), do not change, split
    or disguise it and try no other route: tell the user in one or two plain sentences that their assistant held
    Theodore's installer for their approval, which they give where the app shows held commands (Claude Code:
@@ -31,7 +30,9 @@ decks there too, and that workspace is the computer this page means.
    installer"; then run the same line again.
 2. The installer ends with Theodore's own check and a short welcome for the user. Give the user that welcome (its
    TELL THE USER line) in this conversation and follow its NEXT line; run another command only when a NEXT line asks
-   for it, by the path the installer printed ("the stable launcher is ...").
+   for it, by the path the installer printed ("the stable launcher is ..."). When the installer ran outside this
+   conversation, ~/.theodore/bin/theodore status (Windows: "%USERPROFILE%\.theodore\bin\theodore.cmd" status) gives
+   that welcome.
 3. If the download in step 1 is blocked, register the plugin directly instead:
    Claude Code: claude plugin install theodore --marketplace https://theodoreand.ai/marketplace.json
      (if that flag is not recognised: `claude plugin marketplace add https://theodoreand.ai/marketplace.json`,
