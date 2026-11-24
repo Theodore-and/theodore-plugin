@@ -50,6 +50,11 @@ def run(service, call) -> tuple[int, list]:
     env = context.overlay(call.env)
     if "THEODORE_HOST" not in env and HOSTS.get(call.host):     # the host the hello named, when the call names none
         env["THEODORE_HOST"] = HOSTS[call.host]
+    # The reader has the plugin's tools: an MCP call, or a shell command from a session whose relay said hello (its
+    # session id is the one the host gives both). The texts then use the tool form of their bindings (lanes D, J).
+    session = env.get("CLAUDE_CODE_SESSION_ID") or env.get("CODEX_THREAD_ID") or call.session
+    if call.client_role == "relay" or service.sessions.get(session) is not None:
+        env["THEODORE_TOOLS"] = "1"
     ctx = context.CallContext(session=call.session, host=call.host, env=env, cwd=call.cwd,
                               call_id=call.id, tool=call.tool, progress=call.set_phase, cancelled=call.cancelled)
     core.begin_call()                   # this thread learns refusals afresh (core.scope_refusals_per_thread)
