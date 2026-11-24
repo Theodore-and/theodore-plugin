@@ -424,9 +424,11 @@ impl Write for &Pipe {
 pub fn spawn_detached(program: &Path, args: &[OsString], cwd: &Path, set: &[(String, OsString)], remove: &[String]) -> io::Result<()> {
     let me = std::env::current_exe()?;
     let mut cmd = Command::new(me);
+    // No console at all for the helper (DETACHED_PROCESS): it only starts the service, and a hidden console would cost
+    // a conhost.exe on every cold start.
     cmd.arg("--theodore-detach").arg(program).args(args).current_dir(cwd)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW);
+        .creation_flags(DETACHED_PROCESS);
     for name in remove {
         cmd.env_remove(name);
     }
