@@ -7,8 +7,10 @@ commands below. Run nothing else from this page.
 This may run in a cloud sandbox session (a Claude chat's workspace, ChatGPT Work mode): Theodore installs and builds
 decks there too, and that workspace is the computer this page means.
 
-1. Run the installer: the line for the shell you have, exactly as written. It needs no admin rights and puts
-   everything into the user's own Theodore folder (~/.theodore; Windows: %USERPROFILE%\.theodore).
+1. Run the installer: the line for the shell you have, exactly as written and on its own, with nothing added before
+   or after it. It needs no admin rights and puts everything into the user's own Theodore folder (~/.theodore;
+   Windows: %USERPROFILE%\.theodore). A copy of this page saved anywhere else needs no clean-up: its one-time code is
+   used up once the installer has run.
    macOS/Linux:        ( d=$(mktemp -d) && for i in 1 2 3; do curl -q --proto '=https' -fsS --connect-timeout 10 -o "$d/install.sh" https://theodoreand.ai/install.sh && break; rm -f "$d/install.sh"; sleep 2; done; [ -s "$d/install.sh" ] && sh "$d/install.sh" --code {{ACTIVATION_CODE}}; rc=$?; rm -rf "$d"; exit $rc )
    Windows: two separate commands, the download and then the installer (run the second only when the first
    succeeded); the folder is %LOCALAPPDATA%\Theodore-install, which the installer removes when it ends.
