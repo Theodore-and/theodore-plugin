@@ -182,6 +182,46 @@ class Front(FrontCase):
         self.assertEqual(answer["stdin"], {"encoding": "base64", "data": "//4A"})
         self.assertIsNone(self.answer(self.front("pptx", "echo", stdin=b"unread"))["stdin"])
 
+    def test_the_callers_streams_and_the_assistants_process(self):
+        """C1 "The caller's streams": THEODORE_STDIO says which of the front's streams is a terminal and whether stdout
+        and stderr are one (2>&1); CLAUDE_PID passes when set (C1's allow-list)."""
+        self.start_service()
+        env = {"CLAUDE_PID": "4242", "THEODORE_STDIO": "not from the environment"}
+        self.assertEqual(self.answer(self.front("pptx", "echo", env=env))["env"]["THEODORE_STDIO"], "")
+        self.assertEqual(self.answer(self.front("pptx", "echo", env=env))["env"]["CLAUDE_PID"], "4242")
+        done = subprocess.run([str(self.bin), "pptx", "echo"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              env={**self.env, **env}, cwd=str(self.work), timeout=30)
+        self.assertEqual(self.answer(done)["env"]["THEODORE_STDIO"], "shared")
+        if not IS_WINDOWS:
+            import pty
+            leader, follower = pty.openpty()
+            chunks: list[bytes] = []
+
+            def drain():                    # read while the program writes: a closed terminal's buffer may be dropped
+                while True:
+                    try:
+                        chunk = os.read(leader, 65536)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    chunks.append(chunk)
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            try:
+                proc = subprocess.run([str(self.bin), "pptx", "echo"], stdout=follower, stderr=subprocess.PIPE,
+                                      env={**self.env, **env}, cwd=str(self.work), timeout=30)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                deadline = time.monotonic() + 5
+                while b"THEODORE_STDIO" not in b"".join(chunks) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+            finally:
+                os.close(follower)
+                reader.join(timeout=5)
+                os.close(leader)
+            answer = json.loads(b"".join(chunks).decode().strip().splitlines()[-1])
+            self.assertEqual(answer["env"]["THEODORE_STDIO"], "stdout-tty")
+
     def test_deadline_under_an_assistant(self):
         self.start_service()
         self.assertEqual(self.answer(self.front("pptx", "echo", env={"CLAUDECODE": "1"}))["deadline_ms"], 570000)
@@ -501,7 +541,7 @@ class RelayTests(FrontCase):
 
     def test_mapping_of_tools_errors_progress_and_pictures(self):
         self.start_service()
-        relay = self.relay("--plugin-root", str(self.tmp))
+        relay = self.relay("--plugin-root", str(self.tmp), env={"CLAUDE_PID": "4242", "THEODORE_STDIO": "shared"})
         relay.initialize()
         failed = relay.call("pptx", args=["fail", "1"])
         self.assertTrue(failed["result"]["isError"])
@@ -522,6 +562,8 @@ class RelayTests(FrontCase):
         echo = json.loads(text_of(relay.call("theodore", args=["status"], cwd="sub")))
         self.assertEqual(Path(echo["cwd"]), self.work / "sub")
         self.assertEqual(echo["env"]["CLAUDE_PLUGIN_ROOT"], str(self.tmp))
+        self.assertEqual(echo["env"]["CLAUDE_PID"], "4242")
+        self.assertNotIn("THEODORE_STDIO", echo["env"], "the relay sends none")
         self.assertTrue(relay.call("nothing")["result"]["isError"])
         self.assertTrue(relay.call("pptx", args="slide list")["result"]["isError"])
         hello = self.events("hello")[0]

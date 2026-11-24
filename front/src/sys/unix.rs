@@ -113,6 +113,20 @@ pub fn on_interrupt<F: Fn() + Send + Sync + 'static>(cancel: F) {
     unsafe { signal(SIGINT, on_sigint as extern "C" fn(i32) as usize) };
 }
 
+/// Standard output and standard error are one pipe, file or terminal (the same device and inode).
+pub fn stdout_stderr_shared() -> bool {
+    use std::os::fd::AsFd;
+    let identity = |fd: std::os::fd::BorrowedFd<'_>| -> Option<(u64, u64)> {
+        let file = File::from(fd.try_clone_to_owned().ok()?);
+        let meta = file.metadata().ok()?;
+        Some((meta.dev(), meta.ino()))
+    };
+    match (identity(io::stdout().as_fd()), identity(io::stderr().as_fd())) {
+        (Some(out), Some(err)) => out == err,
+        _ => false,
+    }
+}
+
 /// The Windows start helper does not exist here.
 pub fn detach_main(_args: &[OsString]) -> i32 {
     eprintln!("theodore: --theodore-detach is for Windows only");
