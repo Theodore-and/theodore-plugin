@@ -309,6 +309,16 @@ class Lifecycle(ServiceCase):
         self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
         self.assertFalse((self.box.home / "state" / "run" / "service.json").exists())
 
+    def test_a_removed_home_ends_the_service_and_stays_removed(self):
+        record = self.service()
+        client, got = self.connect()
+        worker_pid = json.loads(Collector.stdout(self.call(client, got, "e", ["echo"])))["pid"]
+        shutil.rmtree(self.box.home)            # removed under a running service (its sessions still open)
+        self.assertTrue(wait_gone(record["pid"], 10), "the service ends once its home is gone")
+        self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
+        time.sleep(1.5)                          # a timer's second, and the service's last log line
+        self.assertFalse(self.box.home.exists(), "nothing the service wrote brought its home back")
+
     def test_theodore_stop_and_the_shell_route(self):
         record = self.service()
         env = dict(self.env)

@@ -57,6 +57,8 @@ class Timers:
 
     def _loop(self) -> None:
         while not self._stop.wait(1.0):
+            if not self.service.home_present():
+                continue                # removed (an uninstall): the service is stopping, and nothing writes it again
             now = time.monotonic()
             for job in self._jobs:
                 every, run, due = job

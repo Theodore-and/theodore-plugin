@@ -91,7 +91,7 @@ class Service:
         path = self.home / "logs" / "service.log"
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{self.pid}] {message.rstrip()}\n"
         with self.log_lock, contextlib.suppress(OSError):
-            path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.mkdir(exist_ok=True)        # never the home itself: a removed home stays removed
             if path.exists() and path.stat().st_size > LOG_MAX:
                 os.replace(path, path.with_suffix(".log.1"))
             with open(path, "a", encoding="utf-8") as handle:
@@ -358,8 +358,11 @@ class Service:
             marks.append(self.started_mono + (LINGER_S if self.relay_ever else IDLE_S))
         return max(marks)
 
+    def home_present(self) -> bool:
+        return (self.home / "state").is_dir()
+
     def _check_lifetime(self) -> None:
-        if not self.home.exists() or not (self.home / "state").exists():
+        if not self.home_present():
             self.stop("its home folder is gone")
             return
         record = endpoint.read_service_json(self.home)
