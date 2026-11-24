@@ -319,6 +319,8 @@ def require(feature: str, *, allow_refresh: bool = True) -> dict:
                 raise api.status_from(error, "licence check") from None
             except api.NetworkError as error:
                 if not token or now >= float(claims.get("exp") or 0):
+                    if error.cause == "LOCAL_FAULT":
+                        raise api.offline(error, "licence check") from None     # this computer's own fault: INTERNAL
                     days = "the offline period (7 days since the last successful check) has ended"
                     raise Status("OFFLINE", f"{days} and the Theodore service could not be reached ({error.detail}).",
                                  "ask the user to connect to the internet, then run the same command again.",
