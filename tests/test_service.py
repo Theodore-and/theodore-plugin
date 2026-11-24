@@ -5,6 +5,7 @@ hand-over to an updated client. macOS and Linux run these; the Windows rig runs 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import shutil
@@ -20,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
 from service_support import (Collector, alive, children_of, install_engine, make_runtime, start_service,  # noqa: E402
                              wait_gone)
-from support import CLIENT_DIR, ClientCase  # noqa: E402
+from support import CLIENT_DIR, ClientCase, sandbox_processes  # noqa: E402
 
 from theodore_client.service import client as service_client, endpoint, frames  # noqa: E402
 
@@ -81,10 +82,23 @@ class ServiceCase(ClientCase):
         return self.record
 
     def stop_service(self) -> None:
+        """SIGTERM ends every service of this home (a successor too) within 10 s, and their workers with them; the test
+        fails otherwise, and the sandbox's removal ends what is left."""
+        mine = sandbox_processes(self.box.tmp.name)
+        services = {pid for pid, line in mine if " service --home " in line}
         record = endpoint.read_service_json(self.box.home) or self.record
         if record and alive(record["pid"]):
-            os.kill(record["pid"], 15)
-            wait_gone(record["pid"], 10)
+            services.add(int(record["pid"]))
+        for pid in services:
+            with contextlib.suppress(OSError):
+                os.kill(pid, 15)
+        stuck = [pid for pid in sorted(services) if not wait_gone(pid, 10)]
+        self.assertEqual(stuck, [], "a service did not end within 10 s of SIGTERM")
+        deadline = time.monotonic() + 5
+        while (left := [p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]]) \
+                and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(left, [], "workers outlived their service")
 
     def connect(self, role: str = "relay", session: str = "s1") -> tuple[service_client.ServiceClient, Collector]:
         collector = Collector()
@@ -294,6 +308,16 @@ class Lifecycle(ServiceCase):
         self.assertTrue(wait_gone(record["pid"], 10), "the service exits after its linger")
         self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
         self.assertFalse((self.box.home / "state" / "run" / "service.json").exists())
+
+    def test_a_removed_home_ends_the_service_and_stays_removed(self):
+        record = self.service()
+        client, got = self.connect()
+        worker_pid = json.loads(Collector.stdout(self.call(client, got, "e", ["echo"])))["pid"]
+        shutil.rmtree(self.box.home)            # removed under a running service (its sessions still open)
+        self.assertTrue(wait_gone(record["pid"], 10), "the service ends once its home is gone")
+        self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
+        time.sleep(1.5)                          # a timer's second, and the service's last log line
+        self.assertFalse(self.box.home.exists(), "nothing the service wrote brought its home back")
 
     def test_theodore_stop_and_the_shell_route(self):
         record = self.service()

@@ -455,6 +455,9 @@ class Sandbox:
             time.sleep(0.2)
 
     def close(self) -> None:
+        # A service this home started (a relay's lingers after its test) and its workers end before the folder goes,
+        # whether the test passed or not. One that outlives SIGKILL fails the test: something in it is stuck.
+        left = stop_sandbox_processes(self.tmp, self.home)
         self.wait_jobs(20)
 
         def onerror(func, path, _exc):
@@ -465,6 +468,8 @@ class Sandbox:
                 pass
 
         shutil.rmtree(self.tmp, onerror=onerror)
+        if left:
+            raise AssertionError("processes started in this test's sandbox outlived SIGKILL:\n" + "\n".join(left))
 
 
 def cmd_command(script: str, *args: str) -> str:
@@ -476,6 +481,72 @@ def cmd_command(script: str, *args: str) -> str:
     def quote(arg: str) -> str:
         return f'"{arg}"' if not arg or any(c in arg for c in ' \t&|<>^()%!,;=') else arg
     return 'cmd /d /s /c "' + " ".join([f'"{script}"', *map(quote, args)]) + '"'
+
+
+def sandbox_processes(name: str) -> list[tuple[int, str]]:
+    """(pid, command line) of the live processes whose command line names `name`, a sandbox's own folder name: the
+    services, workers and engines started there. POSIX; a zombie is left out (its parent reaps it)."""
+    found = []
+    if sys.platform.startswith("linux") and os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit() or int(entry) == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as handle:
+                    line = handle.read().replace(b"\0", b" ").decode("utf-8", "replace")
+                with open(f"/proc/{entry}/stat", "rb") as handle:
+                    state = handle.read().rsplit(b")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                continue
+            if name in line and state != b"Z":
+                found.append((int(entry), line))
+        return found
+    out = subprocess.run(["ps", "-axww", "-o", "pid=,stat=,command="], capture_output=True, text=True, timeout=30).stdout
+    for row in out.splitlines():
+        parts = row.split(None, 2)
+        if len(parts) == 3 and name in parts[2] and not parts[1].startswith("Z") and int(parts[0]) != os.getpid():
+            found.append((int(parts[0]), parts[2]))
+    return found
+
+
+def stop_sandbox_processes(root: Path, home: Path, wait: float = 5.0) -> list[str]:
+    """End what a sandbox started, once a service ran in its home: each service by SIGTERM first (its own stop ends
+    its workers and removes its socket), then SIGKILL for anything left or started meanwhile. Windows: the service
+    named in service.json and its tree (its job object ends the workers). Returns what is alive after `wait` seconds."""
+    import signal
+    import time
+    if not (home / "state" / "run").exists():
+        return []                       # no service ever started here
+    if IS_WINDOWS:
+        try:
+            pid = int(json.loads((home / "state" / "run" / "service.json").read_text())["pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return []
+        image = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                               timeout=30).stdout.lower()
+        if "python" in image:           # not a number since given to another program
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=30)
+        return []
+    services = [pid for pid, line in sandbox_processes(root.name) if " service --home " in line]
+    for pid in services:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    end = time.monotonic() + 3.0
+    while time.monotonic() < end and any(_alive(pid) for pid in services):
+        time.sleep(0.05)
+    deadline = time.monotonic() + wait
+    while True:
+        found = sandbox_processes(root.name)
+        if not found or time.monotonic() >= deadline:
+            return [f"{pid} {line[:240]}" for pid, line in found]
+        for pid, _line in found:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.1)
 
 
 def _alive(pid: int) -> bool:
