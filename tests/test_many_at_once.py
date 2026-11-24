@@ -42,8 +42,9 @@ def fake_trust(outcomes: list):
     return types.SimpleNamespace(_verify_peercerts=check), calls
 
 
-class CertificateCheck(unittest.TestCase):
+class CertificateCheck(HomeCase):
     def setUp(self):
+        super().setUp()                 # a scratch home: the retries write their lines to its client.log
         sleeps = mock.patch.object(api.time, "sleep", lambda s: self.slept.append(s))
         self.slept = []
         sleeps.start()
@@ -55,6 +56,9 @@ class CertificateCheck(unittest.TestCase):
         self.assertEqual(trust._verify_peercerts(object(), "api.example"), "checked")
         self.assertEqual(len(calls), 3)
         self.assertEqual(self.slept, list(api.CERT_CHECK_WAITS[:2]))
+        lines = (self.home / "logs" / "client.log").read_text(encoding="utf-8-sig").splitlines()
+        self.assertEqual(len([line for line in lines if "certificate check failed" in line]), 2, "one line a retry")
+        self.assertIn("access violation", lines[-1])
 
     def test_a_fault_that_stays_is_a_local_fault_never_a_network_error(self):
         trust, calls = fake_trust([OSError(FAULT)] * 10)
