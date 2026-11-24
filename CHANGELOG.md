@@ -7,8 +7,11 @@ Every Theodore command starts faster, most of all on Windows, and the design gui
 - `theodore …` starts Theodore's client straight from its own Python: the short command and the launchers in the
   skill folders start no other program once Theodore is set up. In Git Bash a command started about twenty small
   programs before the client (about a second on a fast Windows computer, several seconds on a laptop whose security
-  software checks every program that starts); on a Mac, eighteen. The full launcher still runs whenever something it
+  software checks every program that starts); on a Mac, eighteen. The shell then hands over to the client instead of
+  waiting beside it, so in Git Bash no second copy of it starts. The full launcher still runs whenever something it
   needs is missing, and on first use.
+- A command to the engine loads only the parts of Theodore's client it uses: not the network, the archives, the
+  signature checks or the command table (tens of milliseconds a command on the Windows test computer).
 - A command on a deck no longer reads the deck's whole script to learn which icon, flag, map or background libraries
   it needs: once every library is installed (always, after the first minutes) it reads nothing. That read took most of
   a `slide list` on a large deck (1.4 s of 1.7 s on the Windows test computer).
@@ -23,7 +26,8 @@ Every Theodore command starts faster, most of all on Windows, and the design gui
   remembered for an hour; each command takes a fixed lock file instead of creating and deleting one; and specimen
   sheets older than an hour still go at the next command, without listing the temporary folder on every command.
 - The design guidance's tool server answers each call as it comes, side by side with the others (five designers'
-  calls used to wait for one another), over connections kept open between calls, with the sign-in read once. Every
+  calls used to wait for one another), over connections kept open between calls, with the sign-in read once. It opens
+  five at its start, each set up on its own, so calls made at once no longer wait for one another's connection. Every
   call still asks Theodore's service for its text or sheets, so a computer whose access ended is refused at its next
   call; an unchanged text or sheet costs one short exchange and no new connection.
 - The deck-design skill's description ends "... data or file mechanics alone.", as the engine's: a request that
