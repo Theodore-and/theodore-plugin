@@ -39,8 +39,8 @@ from . import account, core, install, usage
 from .core import Status
 
 # The engine's verbs (`pptx --help`). Nothing else can be run.
-VERBS = ("start", "apply", "finish", "render", "slide", "comments", "assets", "list", "doctor", "split", "rebase", "task",
-         "project", "cache")
+VERBS = ("start", "apply", "check", "finish", "render", "slide", "comments", "assets", "list", "doctor", "split", "rebase",
+         "task", "project", "cache")
 # Options that would make the engine drive another application (PowerPoint through AppleScript or COM).
 REFUSED_OPTIONS = ("--powerpoint", "--oracle")
 # Option values that are text, never paths: a brief with a slash in it is not a path.
