@@ -4,9 +4,9 @@
 #
 #   sh install.sh --code ABCD-1234        sign this computer in with a one-time code and set everything up
 #   sh install.sh                         the same, ending with a sign-in link instead of a code (no browser opens)
-#   sh install.sh --no-settings ...       leave out Theodore's host settings (on by default: plugin auto-update, and
-#                                         Theodore's own commands allowed in Claude Code and Codex); --accept-settings
-#                                         is still accepted and changes nothing
+#   sh install.sh --no-settings ...       still accepted and changes nothing, as --accept-settings: Theodore writes no
+#                                         permission rule into an assistant's settings (in Claude Code its skills carry
+#                                         the permissions they need)
 #   sh install.sh --uninstall             remove Theodore from this computer
 #
 # What it does, in order: prints its own SHA-256; redeems the one-time code (it lasts an hour); downloads
@@ -32,7 +32,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="b77f7d4ca2d43955"
 PIN_CLIENT_VERSION="0.4.34"
-PIN_CLIENT="client/client-0.4.34.tar 837f8425048d2bee1a2d149804e36f97af0a006355c833ef0eed301eb9de31aa"
+PIN_CLIENT="client/client-0.4.34.tar dccc345671956c43079aae781ad707f93befe8229c6b5981d10e42efbb5cb7ae"
 PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -45,7 +45,6 @@ HOME_DIR=${THEODORE_HOME:-${HOME:-}/.theodore}
 case "$HOME_DIR" in /*) ;; *) HOME_DIR="$(pwd -P)/$HOME_DIR" ;; esac
 CODE=
 UNINSTALL=
-NO_SETTINGS=
 
 say() { printf 'theodore-install: %s\n' "$*"; }
 status() { printf 'THEODORE %s: %s\nNEXT: %s\nTELL THE USER: %s\n' "$1" "$3" "$4" "$5"; exit "$2"; }
@@ -60,8 +59,7 @@ while [ $# -gt 0 ]; do
     --code) CODE=${2:-}; shift ;;
     --code=*) CODE=${1#--code=} ;;
     --uninstall) UNINSTALL=1 ;;
-    --accept-settings) ;;                   # the settings are on by default now
-    --no-settings) NO_SETTINGS=1 ;;
+    --accept-settings|--no-settings) ;;     # accepted, change nothing: no permission rule is written (lane L3)
     *) status USAGE 64 "unknown installer option $1." "run the installer with --code ABCD-1234, or with no option for a browser sign-in." \
          "I called the Theodore installer with a wrong option; I am correcting it." ;;
   esac
@@ -549,15 +547,9 @@ theodore() { THEODORE_HOME=$HOME_DIR sh "$T" "$@"; }
 say "registering Theodore in the assistants found on this computer"
 theodore hosts register
 HOSTS_RC=$?
-# The person asked their assistant to set Theodore up: its host settings come with it (Theodore's own commands run
-# without a prompt, the plugin updates itself); --no-settings leaves them out, and an organisation policy always wins.
-if [ -n "$NO_SETTINGS" ]; then
-  theodore hosts settings --remove >/dev/null 2>&1
-  say "Theodore's host settings were left out (--no-settings): Claude Code and Codex ask before each Theodore command"
-else
-  theodore hosts settings --apply
-  say "Theodore's own commands, and the assistant's edits of a deck's files in .theodore/workspaces, run without asking each time; to turn that off: \"$T\" hosts settings --remove"
-fi
+# No permission rule goes into an assistant's settings (lane L3, 24 November 2026: the assistant running this declined
+# an installer that changes its own permissions, in all three real set-ups). Theodore's skills carry the permissions
+# they need; `theodore hosts settings --apply` adds rules only when the user asks for it.
 if [ -n "$SETUP_FAILED_OUT" ]; then
   say "the stable launcher is \"$T\""
   printf '%s\n' "$SETUP_FAILED_OUT"
@@ -596,8 +588,9 @@ fi
 doctor_out=$(theodore doctor)
 rc=$?
 checks_only() { printf '%s\n' "$doctor_out" | sed -e :a -e '$d;N;2,3ba' -e 'P;D'; }
-# The last status is the client's welcome (lane ONBOARD): a few short lines for the assistant to give in this
-# conversation, the Studio question once, and what this host needs (a new session, the download still going on).
+# The last status is the client's welcome (lanes ONBOARD and L3): a few short lines for the assistant to give in this
+# conversation, with Studio's state and the asset packs' state, and what this host needs (a new session, the download
+# still going on); run by a person, plain words, and the welcome left owed for the assistant they go back to.
 # Its answer is 0 when ready, and 67 only for the still-downloading form. Any other answer (a launcher that says 67 for a
 # ready set-up included) leaves the ending as it was. The installer itself exits 0 for both: a download still going on in
 # the background, after every step of the installer succeeded, is not a failure (a host shows any other exit code as a
@@ -620,9 +613,10 @@ if [ "$rc" -eq 67 ] && printf '%s\n' "$doctor_out" | grep -q '^NEXT: run the sam
     "run \"$T\" status --wait 100 (it waits for the download and returns as soon as it is done), again while it says SETUP_IN_PROGRESS (not this installer), then report its last line." \
     "Theodore is installed and is finishing its download in the background. This takes a few minutes; I will check on it."
 fi
+[ "$rc" -eq 0 ] || { printf '%s\n' "$doctor_out"; exit "$rc"; }
+# Ready: doctor's checks, then the welcome as the only status (doctor's own ready line would come before it).
+if [ "$HOSTS_RC" -eq 0 ] && welcome; then checks_only; printf '%s\n' "$welcome_out"; exit "$welcome_rc"; fi
 printf '%s\n' "$doctor_out"
-[ "$rc" -eq 0 ] || exit "$rc"
-if [ "$HOSTS_RC" -eq 0 ] && welcome; then printf '%s\n' "$welcome_out"; exit "$welcome_rc"; fi
 if [ "$HOSTS_RC" -ne 0 ]; then
   status RETRY 75 "Theodore is installed, but it could not be added to every assistant on this computer (see the claude-code and codex lines above)." \
     "register by hand with the commands under 'Other ways' at https://theodoreand.ai/install, then start a new session." \

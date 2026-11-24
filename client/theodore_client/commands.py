@@ -1309,7 +1309,11 @@ def status(as_json: bool, wait: float) -> int:
     owed = welcome.owed(summary)
     if owed is not None:
         return core.emit(owed)
-    return core.emit(Status("OK", summary, f"run {quoted_launcher()} guide pptx for the instructions.", "Theodore is ready."))
+    # Every ready says Studio's state and the asset packs' state (lane L3).
+    said = " ".join(line for line in (welcome.studio_sentence(welcome.studio_state(timeout=DOCTOR_STUDIO_READ_S)),
+                                      welcome.packs_sentence()) if line)
+    return core.emit(Status("OK", summary, f"run {quoted_launcher()} guide pptx for the instructions.",
+                            "Theodore is ready." + (f" {said}" if said else "")))
 
 
 def doctor(as_json: bool) -> int:
@@ -1409,9 +1413,11 @@ def doctor(as_json: bool) -> int:
         add("warn", "engine update", f"engine {engine_failed['version']} is pending: it failed its check ({engine_failed.get('reason', 'unknown')}); "
             f"engine {snap.get('engine')} keeps working and the update is tried again after six hours")
     if core.host_executable("claude") or core.host_executable("codex"):
-        off = _host_record().get("settings") == "off"
-        add("ok", "host settings", f"off: Claude Code and Codex ask before each Theodore command (on: {quoted_launcher()} hosts settings --apply)"
-            if off else f"on: Theodore's own commands run without asking each time (to turn that off: {quoted_launcher()} hosts settings --remove)")
+        state = _host_record().get("settings")
+        off = state == "off"
+        add("ok", "host settings", f"on: rules in the assistants' settings let Theodore's own commands run without asking each time "
+            f"(to take them out: {quoted_launcher()} hosts settings --remove)" if state == "on" else
+            "none written: Theodore's skills carry the permissions they need, and Claude Code asks once to load each of them")
         note = claude_policy_note() if core.host_executable("claude") else None
         if note:
             add("ok", "claude policy", note)
@@ -1435,6 +1441,9 @@ def doctor(as_json: bool) -> int:
     if waiting:         # informational: Theodore sends them by itself; nothing for the assistant or the user to do
         add("ok", "reports waiting", f"{waiting} report(s) the Theodore service could not take yet; Theodore sends them by itself")
     final = _doctor_verdict(checks, snap, home)
+    if final.name == "OK" and not as_json:
+        from . import welcome          # the welcome an installer left owed (run by a person, or still downloading), once
+        final = welcome.owed(final.summary) or final
     if as_json:         # the same verdict, as the exit code and in the document
         print(json.dumps({"checks": [{"level": l, "name": n, "detail": d} for l, n, d in checks], "snapshot": snap,
                           "status": final.name}, indent=2, sort_keys=True))
@@ -1545,10 +1554,10 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
                                 f"file, passed with --details-file)",
                                 f"Theodore is installed but not working yet: {', '.join(n for n, _d in failed)} failed its check."))
     warned = {n for l, n, _d in checks if l == "warn"}
-    notes = []
-    if any(n.startswith("pack ") for n in warned):
-        notes.append("Its icon, flag, map and background libraries are still downloading in the background." if Job("packs").alive()
-                     else "Some of its icon, flag, map and background libraries are not installed yet.")
+    # Every ready says Studio's state and the asset packs' state (lane L3: the user of 24 November 2026 asked twice).
+    from . import welcome
+    notes = [line for line in (welcome.studio_sentence(welcome.studio_state(timeout=DOCTOR_STUDIO_READ_S)),
+                               welcome.packs_sentence()) if line]
     if "renderer" in warned:
         notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
                      else "Slide previews need LibreOffice, which is not installed.")
@@ -1557,9 +1566,6 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
                      "session once it is there." if _git_fetching() else
                      "Claude Code on this computer needs Git Bash to load Theodore's skills; I can fetch it into Theodore's folder, "
                      "or you can install Git for Windows (git-scm.com). Then start a new session.")
-    if desktop.reopen_needed(_host_record()):
-        from .chatbuild import INSTALL_TIP
-        notes.append("To use Theodore in the Claude app's chats, quit the app and open it again once. " + INSTALL_TIP)
     if "processor" in warned:
         notes.append("This computer runs Windows on ARM, so Theodore uses its x64 build through Windows' emulation, which is slower.")
     if "service" in warned:
@@ -1567,9 +1573,19 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     if "rasteriser" in warned or "launcher" in warned:
         notes.append("See the check list above for details.")
     note = (" " + " ".join(notes)) if notes else ""
+    from . import chatbuild
+    # "Start a new session" only where this session has not loaded Theodore's skills (Claude Code 2.1.330 picked them up
+    # in the middle of the set-up session of 24 November 2026); the Claude app's chats only when the user asks.
+    new_session = welcome._new_session_needed(welcome._host())
     return (Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
-                            "start a new session if Theodore is not listed yet, then ask for a deck.",
-                            f"Theodore is ready (engine {snap['engine']}).{note} Start a new session and ask for a deck."))
+                   ("tell the user the line below; it is the whole answer about Theodore's state. "
+                    + ("They start a new session, then ask for a deck there." if new_session else "Then go on with what they asked for.")
+                    + (" Only if they ask about the Claude app's chats: the app needs quitting and opening again once, then "
+                       f"in a chat: \"{chatbuild.USE_THEODORE_SENTENCE}\"" if desktop.reopen_needed(_host_record()) else "")),
+                   f"Theodore is ready (engine {snap['engine']}).{note}" + (" Start a new session and ask for a deck." if new_session else "")))
+
+
+DOCTOR_STUDIO_READ_S = 4.0
 
 
 def version() -> int:
@@ -2158,24 +2174,23 @@ HOSTS_RETRY_S = 3600
 
 
 def ensure_settings() -> None:
-    """Theodore's host settings are on by default (`hosts settings --apply`, which the installer runs). An installation
-    from before they were (no "settings" in the record) gets them once, at its first command after the update; one
-    whose settings are on gets rules for launchers that are new since (a new plugin version's folder), never again a
-    rule the user took out; `hosts settings --remove` or the installer's --no-settings ("off") stops both. Never fails
-    or prints."""
+    """Theodore writes no permission rule into an assistant's settings by itself (lane L3, 24 November 2026: the
+    assistant that runs the set-up declined an installer that changes its own permissions, in all three real set-ups;
+    Theodore's skills carry the permissions they need instead, see the skills' `allowed-tools`). Where a person turned
+    the host settings on (`hosts settings --apply`, or an installation from 0.4.1 to 0.4.33, whose installer did it),
+    they are kept up to date: rules for launchers that are new since (a new plugin version's folder), never again a rule
+    the user took out. Nothing else is ever applied here. Never fails or prints."""
     try:
         if not core.home().launcher().exists():
             return
-        record = _host_record()
-        state = record.get("settings")
-        if state == "off":
+        if _host_record().get("settings") != "on":
             return
         claude, codex = core.host_executable("claude"), core.host_executable("codex")
         if claude or codex:
-            core.log(f"settings: {_shim_apply(only_new=state == 'on')}")
+            core.log(f"settings: {_shim_apply(only_new=True)}")
         for host, apply in ((claude, _claude_settings_apply), (codex, _codex_rules_apply)):
             if host:
-                core.log(f"settings: {apply(only_new=state == 'on')}")
+                core.log(f"settings: {apply(only_new=True)}")
     except Exception as exc:  # a convenience: never the reason a guide or doctor fails
         core.log(f"settings: not applied ({exc.__class__.__name__}: {exc})")
 
@@ -2422,6 +2437,11 @@ def _register_hosts() -> list[str]:
     lines += routed
     if record:
         _save_host_record(record)
+    # Theodore's short command (a two-line script that runs the stable launcher, in a per-user folder on PATH): part of
+    # registering Theodore, not a permission setting. Written once; never again after the person removed it, and not
+    # while they turned the host settings off.
+    if (claude or codex) and _host_record().get("settings") != "off":
+        lines.append(_shim_apply(only_new=True))
     marker = _hosts_pending_path()
     if not any("FAILED" in line for line in lines):
         core.remove_tree(marker)
@@ -2498,10 +2518,14 @@ def hosts(action: str, apply: bool, remove: bool = False) -> int:
             if codex:
                 what.append(f"Codex runs Theodore's commands without asking each time ({_codex_rules_path()}, Theodore's launcher by "
                             f"its exact paths; they run outside Codex's sandbox)")
-            state = "off (hosts settings --remove or --no-settings)" if record.get("settings") == "off" else "on"
-            return core.emit(Status("OK", f"settings {state}: {'; '.join(what) or 'no assistant found'}.",
-                                    f"to turn them off: {quoted_launcher()} hosts settings --remove; on again: "
-                                    f"{quoted_launcher()} hosts settings --apply", None))
+            state = record.get("settings")
+            if state != "on":           # nothing was applied: say so, not what --apply would do
+                return core.emit(Status("OK", "settings not applied: Theodore wrote no permission rule into the assistants' "
+                                              "settings; in Claude Code its skills carry the permissions they need.",
+                                        f"nothing to do; only if the user asks for it: {quoted_launcher()} hosts settings --apply "
+                                        f"would add: {'; '.join(what) or 'nothing (no assistant found)'}.", None))
+            return core.emit(Status("OK", f"settings on: {'; '.join(what) or 'no assistant found'}.",
+                                    f"to turn them off: {quoted_launcher()} hosts settings --remove", None))
     else:
         raise core.usage(f"unknown hosts action '{action}'.")
     not_added: list[str] = []

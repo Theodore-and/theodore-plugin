@@ -939,11 +939,18 @@ def announce(kind: str, version: str, note: str | None = None) -> None:
 
 def take_announcement() -> str | None:
     """The one line saying what updated itself since the last one, then forgotten. After access came back, first the
-    line saying why Theodore downloads its engine again (withdraw.py)."""
-    from . import withdraw
+    line saying why Theodore downloads its engine again (withdraw.py). Before an update's line, the welcome an installer
+    run by a person left owed (welcome.owed_notice), once."""
+    from . import welcome, withdraw
     restored = withdraw.notice_line()
     if restored:
         return restored
+    owed = welcome.owed_notice()
+    updated = _update_announcement()
+    return "\n".join(line for line in (owed, updated) if line) or None
+
+
+def _update_announcement() -> str | None:
     try:
         with update_lock():                 # taken and cleared in one step: two sessions never both print it
             pending = update_state().get("announce") or {}
@@ -1738,16 +1745,26 @@ NO_PACKS = "no asset packs are published for this channel yet"
 
 
 def remember_published_packs(packs) -> None:
-    """Which packs the last verified channel manifest publishes, so no text promises a download that cannot come."""
+    """Which packs the last verified channel manifest publishes, so no text promises a download that cannot come, and
+    their sizes, so a welcome can say about how much is left to download."""
     ids = [str(p.get("id")) for p in packs or [] if isinstance(p, dict) and p.get("id")]
-    if update_state().get("published_packs") != ids:
-        save_update_state(published_packs=ids)
+    sizes = {str(p["id"]): int(p.get("size") or p.get("size_bytes") or 0) for p in packs or []
+             if isinstance(p, dict) and p.get("id") and str(p.get("size") or p.get("size_bytes") or "").isdigit()}
+    known = update_state()
+    if known.get("published_packs") != ids or known.get("published_pack_sizes") != sizes:
+        save_update_state(published_packs=ids, published_pack_sizes=sizes)
 
 
 def published_packs() -> list[str] | None:
     """The ids of the packs the channel publishes; None while no manifest has been read on this computer."""
     known = update_state().get("published_packs")
     return [str(p) for p in known] if isinstance(known, list) else None
+
+
+def published_pack_sizes() -> dict[str, int]:
+    """Each published pack's size in bytes, as the last verified channel manifest gave it ({} when not known)."""
+    known = update_state().get("published_pack_sizes")
+    return {str(k): int(v) for k, v in known.items() if isinstance(v, int) and v > 0} if isinstance(known, dict) else {}
 
 
 def _pack_folder(pack_id: str) -> Path:
