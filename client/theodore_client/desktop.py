@@ -157,7 +157,10 @@ def register(record: dict) -> list[str]:
             except OSError as exc:
                 lines.append(f"claude-desktop: FAILED ({path} could not be written: {exc.__class__.__name__})")
                 continue
-            lines.append("claude-desktop: registered (it loads when the Claude app is quit and opened again)")
+            # No step for the user here: read in the installer's output, "(it loads when the Claude app is quit and
+            # opened again)" became "quit and reopen the Claude app" in most set-ups by Opus from the app's Code tab
+            # (lane L3's rehearsals, 24 Nov 2026), where Theodore already works. doctor says it when the user asks.
+            lines.append("claude-desktop: registered for the Claude app's chats")
             mine = {"ours": True, "created_servers": bool(mine.get("created_servers")) or created_servers, "written_at": time.time()}
         mine.update({"ours": True, "entry": wanted})
         files[str(path)] = mine
