@@ -173,7 +173,7 @@ class RefusalFromOutput(HomeCase):
         sink = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         script = "import sys; sys.stdout.write('é' * 50000 + '\\nlast line'); sys.stdout.flush(); sys.exit(3)"
         with mock.patch.object(sys, "stdout", sink):
-            code, tail = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
+            code, tail, _whole = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
         self.assertEqual(code, 3)
         self.assertEqual(sink.buffer.getvalue().decode("utf-8"), "é" * 50000 + "\nlast line")
         self.assertTrue(tail.endswith(b"\nlast line"))
@@ -190,7 +190,7 @@ class RefusalFromOutput(HomeCase):
         holder.buffer = Closed()
         script = "import sys; [sys.stdout.write('x' * 65536) for _ in range(40)]; sys.stdout.flush()"
         with mock.patch.object(sys, "stdout", holder):
-            code, tail = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
+            code, tail, _whole = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
         self.assertEqual(code, 0, "2.5 MB written into a closed reader: drained, finished")
         self.assertEqual(len(tail), install.OUTPUT_TAIL_BYTES)
 

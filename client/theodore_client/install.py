@@ -1488,12 +1488,17 @@ def _run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
     # way), so a licence refusal is read from the engine's own last JSON object instead of starting the engine a second
     # time with --help to ask (0.25 s on the Windows test machine, 1 to 1.5 s on a laptop, per failing verb). A person's
     # terminal keeps the engine's own terminal output; there the second start stays. `theodore python` runs as it is.
+    help_file = None if python_passthrough else _help_file(directory, args)
+    if help_file is not None and help_file.is_file():
+        return _print_help(help_file)
     output = None
     try:
         if python_passthrough or _stdout_is_terminal():
             code = subprocess.call(command, env=engine_env(directory))
         else:
-            code, output = _call_passing_output(command, engine_env(directory))
+            code, output, whole = _call_passing_output(command, engine_env(directory))
+            if help_file is not None and code == 0 and whole and output:
+                _keep_help(help_file, output)
     except KeyboardInterrupt:
         return 130
     except OSError as exc:
@@ -1526,20 +1531,60 @@ def _stdout_is_terminal() -> bool:
         return False
 
 
-def _call_passing_output(command: list[str], env: dict) -> tuple[int, bytes]:
+# The engine's help (`pptx --help`, `pptx <verb> --help`) is the same for every call to one engine build: printed from
+# a file kept beside it (.theodore-help/) once the engine has printed it, with no engine start (1.7 s on the Windows
+# test machine through the launcher, the engine's start 0.3 s of it). Kept per engine version and build, removed with
+# the engine. Only plain words before the flag: nothing that names a file or a folder.
+HELP_FLAGS = ("--help", "-h")
+_HELP_WORD = re.compile(r"[a-z][a-z0-9-]{0,40}")
+
+
+def _help_file(directory: Path, args: list[str]) -> Path | None:
+    if not args or args[-1] not in HELP_FLAGS or len(args) > 4 or not all(_HELP_WORD.fullmatch(a) for a in args[:-1]):
+        return None
+    import hashlib
+    build = str(core.read_json(directory / ".theodore-engine.json").get("sha256") or "")
+    key = hashlib.sha256(("\0".join([build, *args[:-1]])).encode("utf-8")).hexdigest()[:16]
+    return directory / ".theodore-help" / f"{key}.txt"
+
+
+def _keep_help(path: Path, output: bytes) -> None:
+    with contextlib.suppress(OSError):
+        core.write_atomic(path, output, 0o644)
+
+
+def _print_help(path: Path) -> int:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 1
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    sink = getattr(sys.stdout, "buffer", None)
+    if sink is not None:
+        sink.write(data)
+        sink.flush()
+    else:
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        sys.stdout.flush()
+    return 0
+
+
+def _call_passing_output(command: list[str], env: dict) -> tuple[int, bytes, bool]:
     """Run the engine with its standard output passed on to ours as it arrives (standard input and error are its own,
-    as before). Returns the exit code and the output's last OUTPUT_TAIL_BYTES. An output nobody reads any more (a
-    closed pipe) is still drained, so the engine never blocks on it."""
+    as before). Returns the exit code, the output's last OUTPUT_TAIL_BYTES and whether that is the whole output. An
+    output nobody reads any more (a closed pipe) is still drained, so the engine never blocks on it."""
     with contextlib.suppress(Exception):
         sys.stdout.flush()
     sink = getattr(sys.stdout, "buffer", None)
     proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE)
-    tail = b""
+    tail, total = b"", 0
     try:
         while True:
             chunk = proc.stdout.read1(65536)
             if not chunk:
                 break
+            total += len(chunk)
             tail = (tail + chunk)[-OUTPUT_TAIL_BYTES:]
             if sink is not None:
                 try:
@@ -1547,7 +1592,7 @@ def _call_passing_output(command: list[str], env: dict) -> tuple[int, bytes]:
                     sink.flush()
                 except (OSError, ValueError):
                     sink = None                     # the reader went away: drain the rest unseen
-        return proc.wait(), tail
+        return proc.wait(), tail, total == len(tail)
     except BaseException:
         with contextlib.suppress(Exception):
             proc.wait(timeout=10)

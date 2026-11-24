@@ -1474,6 +1474,30 @@ class Engine(ClientCase):
         big = self.client("pptx", "env", env=env)
         self.assertEqual(json.loads(big.stdout)["home"], str(self.box.home), "the output arrives whole through the client")
 
+    def test_help_is_printed_from_a_file_after_the_first_time(self):
+        """0.4.34: `pptx --help` (and `pptx <verb> --help`) start the engine once per engine build; then the client prints
+        the kept text (1.7 s on the Windows test machine, the engine's start 0.3 s of it)."""
+        self.ready()
+        starts = self.box.tmp / "engine-starts.jsonl"
+        env = {"THEODORE_TEST_ENGINE_STARTS": str(starts)}
+        first = self.client("pptx", "--help", env=env)
+        again = self.client("pptx", "--help", env=env)
+        self.assertEqual((first.returncode, again.returncode), (0, 0))
+        self.assertEqual(again.stdout, first.stdout)
+        self.assertEqual(first.stdout, "usage: pptx <verb>\n")
+        self.client("pptx", "slide", "--help", env=env)
+        self.client("pptx", "slide", "--help", env=env)
+        self.assertEqual([json.loads(l) for l in starts.read_text().splitlines()], [["--help"], ["slide", "--help"]], "one start each")
+        workspace = self.box.tmp / "ws"
+        self.client("pptx", str(workspace), "--help", env=env)
+        self.client("pptx", str(workspace), "--help", env=env)
+        self.assertEqual(len(starts.read_text().splitlines()), 4, "a path before the flag is never answered from a file")
+        engine = self.box.home / "engines" / self.ENGINE_VERSION
+        record = json.loads((engine / ".theodore-engine.json").read_text())
+        (engine / ".theodore-engine.json").write_text(json.dumps({**record, "sha256": "f" * 64}))     # another build
+        self.client("pptx", "--help", env=env)
+        self.assertEqual(len(starts.read_text().splitlines()), 5, "another build of the engine prints its own help again")
+
     def test_engine_before_guide_says_what_to_run(self):
         self.sign_in()
         self.assertEqual(self.client("setup", "--job").returncode, 0)
