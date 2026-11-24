@@ -2284,9 +2284,8 @@ class Hosts(ClientCase):
         rules = Path(self.box.env["CODEX_HOME"]) / "rules"
         rules.mkdir(parents=True)
         (rules / "default.rules").write_text('prefix_rule(pattern = ["git", "status"])\n')
-        shown = self.client("hosts", "settings")
-        first, _nxt, _tell = self.assertStatus(shown, "OK", 0)
-        self.assertIn("outside Codex's sandbox", first)
+        _first, nxt, _tell = self.assertStatus(self.client("hosts", "settings"), "OK", 0)
+        self.assertIn("outside Codex's sandbox", nxt, "what --apply would add, said only (lane L3)")
         self.assertFalse((rules / "theodore.rules").exists(), "showing them writes nothing")
         self.assertStatus(self.client("hosts", "register"), "OK", 0)
         self.assertFalse((rules / "theodore.rules").exists(), "a plain registration writes no rule")
