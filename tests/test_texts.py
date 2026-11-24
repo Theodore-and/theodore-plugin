@@ -301,6 +301,23 @@ class PptxManualFromTexts(TextsCase):
         self.assertEqual(len(self.posts()), 1)
         self.assertEqual([(i["section"], i["bindings"]) for i in self.fake.batches[0]], [("", "launcher"), ("manual", "launcher")])
 
+    def test_a_reader_with_the_tools_gets_the_manuals_links_in_the_tool_form(self):
+        manual = ("# Manual\n\nRead [the charts](references/charts.md), [the API](pptxgenjs.md) and [this](../SKILL.md); "
+                  "see `references/tables.md`.\n")
+        self.fake.guides["pptx"] = {"": "DIRECTIONS.\n", "manual": manual}
+        with self.quiet(None):
+            tool = self.texts.guide("pptx", None, None, bindings="tool")[0]
+            designer = self.texts.guide("pptx", None, "slide", bindings="tool")[0]
+            shell = self.texts.guide("pptx", None, None, bindings="launcher")[0]
+        self.assertIn('[the charts](the Theodore tool guide with skill "pptx" and section "charts")', tool)
+        self.assertIn('[the API](the Theodore tool guide with skill "pptx" and section "pptxgenjs")', tool)
+        self.assertIn('[this](the Theodore tool guide with skill "pptx" and section "manual")', tool)
+        self.assertIn('see the Theodore tool guide with skill "pptx" and section "tables".', tool)
+        self.assertIn('[the charts](the Theodore tool guide with skill "pptx" and section "charts" and role "slide")', designer)
+        self.assertIn('see the Theodore tool guide with skill "pptx" and section "tables" and role "slide".', designer)
+        self.assertIn("[the charts](run: ", shell, "the launcher form unchanged")
+        self.assertIn(" guide pptx tables`", shell)
+
     def test_a_reader_with_the_tools_gets_the_header_in_the_tool_form(self):
         self.fake.guides["pptx"] = {"": "DIRECTIONS.\n", "manual": "# Manual\n\nServed manual text.\n"}
         with self.quiet(None):

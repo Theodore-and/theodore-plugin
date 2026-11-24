@@ -276,8 +276,19 @@ def _pptx_disk_names() -> list[str]:
     return names
 
 
-def _pptx_pointers(text: str, role: str | None = None) -> str:
-    """In a served pptx text, every pointer to a file of the manual becomes the command that prints that section."""
+def _pptx_pointers(text: str, role: str | None = None, bindings: str = "launcher") -> str:
+    """In a served pptx text, every pointer to a file of the manual becomes the command that prints that section; for
+    a reader with the plugin's tools (`bindings` "tool"), the guide tool's call in the header's own words, so no link
+    sends such a reader to a shell (lane J's J2 wording): a link's target and a code span's whole text, with
+    ` and role "slide"` for a designer."""
+    if bindings == "tool":
+        reader = ' and role "slide"' if role == "slide" else ""
+
+        def words(match: re.Match) -> str:
+            name = match.group(1) or match.group(2)
+            return f'the Theodore tool guide with skill "pptx" and section "{MANUAL_SECTION if name == "SKILL" else name}"{reader}'
+        text = _PPTX_LINK.sub(lambda m: f"]({words(m)})", text)
+        return _PPTX_SPAN.sub(words, text)
     launcher = quoted_launcher()
 
     def command(match: re.Match) -> str:
@@ -342,7 +353,7 @@ class PptxManual:
                 return None
             raise
 
-    def texts(self, got: dict | None, pointers: bool = True) -> tuple[str, bool, str]:
+    def texts(self, got: dict | None, pointers: bool = True, bindings: str = "launcher") -> tuple[str, bool, str]:
         """(the manual composed for the role, whether the engine brought it, the directions or a THEODORE OFFLINE line).
         Its pointers to the manual's other texts are the commands that print them; `pointers` False leaves an engine's
         own file as it is (a chat, which has no launcher and reads those files with its own tool)."""
@@ -357,16 +368,16 @@ class PptxManual:
             directions = answer.text() if answer.status == 200 else ""      # no entry for this account: nothing to add
         if self.on_disk is not None:
             text = compose_manual(self.on_disk, self.role)
-            return (_pptx_pointers(text, self.role) if pointers else text), True, directions
+            return (_pptx_pointers(text, self.role, bindings) if pointers else text), True, directions
         answer = got[items[1]]
         if answer.status != 200:
             raise core.internal(f"engine {self.version} has no manual, and the service serves none for it.")
-        return _pptx_pointers(answer.text(), self.role), False, directions
+        return _pptx_pointers(answer.text(), self.role, bindings), False, directions
 
     def document(self, got: dict | None, *, part: int = 1, whole: bool = True, opening: bool = True, notices: bool = True,
                  pointers: bool = True, bindings: str = "launcher") -> str:
         """The manual as `guide pptx` prints it: part `part` of it, or `whole`; `bindings` as _pptx_header takes it."""
-        text, on_disk, directions = self.texts(got, pointers)
+        text, on_disk, directions = self.texts(got, pointers, bindings)
         parts = [text] if whole else split_parts(text)
         if part > len(parts):
             raise core.usage(f"guide pptx has {len(parts)} part(s); there is no part {part}.")
@@ -605,7 +616,7 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     if not section:                           # before any paging here: the line on links opens the text (0.4.30)
         body = _links_first(body)
     if paged_here:                            # before its paging: a command must not be cut in two
-        body = _pptx_pointers(body, role)
+        body = _pptx_pointers(body, role, reader_bindings(None) or "launcher")
     if whole:
         pass                                          # the host keeps it whole: never cut here
     elif total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
@@ -746,7 +757,7 @@ def _pptx_body(texts, check: bool = False, bindings: str = "launcher") -> tuple[
     got = manual.fetch(texts)
     if check:
         _heartbeat(manual.version)
-    text, on_disk, directions = manual.texts(got)
+    text, on_disk, directions = manual.texts(got, bindings=bindings)
     if core.refused():
         raise api.sign_in_required()
     launcher = quoted_launcher()
