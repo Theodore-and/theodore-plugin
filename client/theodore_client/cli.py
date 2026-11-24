@@ -297,7 +297,9 @@ def _main(argv: list[str]) -> int:
         account.register_disk_secrets()     # before any server diagnostic can be printed
     except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run
         pass
-    specimens.sweep()       # specimen sheets older than an hour go before anything else is done
+    # Specimen sheets older than an hour go before anything else is done; an engine verb reads only the record unless
+    # one has expired (specimens.sweep, quick).
+    specimens.sweep(quick=bool(argv) and argv[0] in ("pptx", "python"))
     withdraw.resume()       # Theodore's files, when the service ended this computer's access and they are still here
     if argv[:1] and argv[0] not in _NO_USAGE_FLUSH:
         usage.send_in_background()      # a detached send when the oldest waiting line is 15 minutes old; never waits

@@ -500,7 +500,7 @@ def engine_env(directory: Path) -> dict:
     # page, the engine's lines then differ in encoding from the client's around them, and a letter outside it fails.
     env["PYTHONIOENCODING"] = "utf-8"
     usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
-    if not system_libreoffice():
+    if not known_libreoffice():
         local = libreoffice_binary()
         if local:
             env["SOFFICE_BIN"] = str(local)
@@ -2018,18 +2018,61 @@ def libreoffice_binary() -> Path | None:
     return None
 
 
-def system_libreoffice() -> str | None:
+def _given_libreoffice() -> tuple[bool, str | None]:
+    """(decided, what): what the environment itself says, before any lookup."""
     if os.environ.get("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE") and core.is_loopback_api():     # test seam: a computer without one
-        return None
+        return True, None
     if os.environ.get("SOFFICE_BIN") and Path(os.environ["SOFFICE_BIN"]).exists():
-        return os.environ["SOFFICE_BIN"]
+        return True, os.environ["SOFFICE_BIN"]
+    return False, None
+
+
+def system_libreoffice() -> str | None:
+    decided, given = _given_libreoffice()
+    if decided:
+        return given
     found = shutil.which("soffice")
-    if found:
-        return found
-    for candidate in ("/Applications/LibreOffice.app/Contents/MacOS/soffice", r"C:\Program Files\LibreOffice\program\soffice.exe"):
-        if Path(candidate).exists():
-            return candidate
-    return None
+    if not found:
+        for candidate in ("/Applications/LibreOffice.app/Contents/MacOS/soffice", r"C:\Program Files\LibreOffice\program\soffice.exe"):
+            if Path(candidate).exists():
+                found = candidate
+                break
+    _remember_libreoffice(found)
+    return found
+
+
+# Where the last lookup found the system's LibreOffice, for the commands' own path (state/renderer.json): a lookup walks
+# every PATH folder with every PATHEXT extension (about 400 file tests, 10 to 40 ms on Windows) and ran up to twice per
+# verb. A command reuses it while PATH is the same, for an hour, and while the program found is still there; doctor
+# and `tools install` look again (system_libreoffice), so a LibreOffice installed meanwhile is seen within the hour.
+RENDERER_FILE = "renderer.json"
+RENDERER_RECHECK_S = 3600
+
+
+def _path_key() -> str:
+    import hashlib
+    raw = "\0".join((os.environ.get("PATH") or "", os.environ.get("PATHEXT") or ""))
+    return hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def _remember_libreoffice(found: str | None) -> None:
+    with contextlib.suppress(Exception):
+        record = {"soffice": found, "key": _path_key(), "at": int(core.now())}
+        if core.read_json(core.home().state / RENDERER_FILE) != record and core.home().state.is_dir():
+            core.write_json(core.home().state / RENDERER_FILE, record, 0o600)
+
+
+def known_libreoffice() -> str | None:
+    """system_libreoffice for a command's path: the last lookup's answer while it holds (see above), else a lookup."""
+    decided, given = _given_libreoffice()
+    if decided:
+        return given
+    record = core.read_json(core.home().state / RENDERER_FILE)
+    if isinstance(record, dict) and record.get("key") == _path_key() and 0 <= core.now() - float(record.get("at") or 0) < RENDERER_RECHECK_S:
+        found = record.get("soffice")
+        if found is None or (isinstance(found, str) and Path(found).exists()):
+            return found
+    return system_libreoffice()
 
 
 def powerpoint_registered() -> bool:
@@ -2047,7 +2090,7 @@ def powerpoint_registered() -> bool:
 def needs_libreoffice() -> bool:
     """On Windows, nothing can turn a deck into slide images: no LibreOffice anywhere and no PowerPoint, and Theodore
     has a LibreOffice to fetch. (macOS fetches it at install; Linux uses the system's.)"""
-    return IS_WINDOWS and not system_libreoffice() and not libreoffice_binary() and not powerpoint_registered() \
+    return IS_WINDOWS and not known_libreoffice() and not libreoffice_binary() and not powerpoint_registered() \
         and libreoffice_pin() is not None
 
 

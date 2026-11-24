@@ -194,5 +194,162 @@ class RefusalFromOutput(HomeCase):
         self.assertEqual(code, 0, "2.5 MB written into a closed reader: drained, finished")
         self.assertEqual(len(tail), install.OUTPUT_TAIL_BYTES)
 
+class CredentialAndLookups(HomeCase):
+    """An engine command reads no credential while the licence holds, and finds LibreOffice from the last lookup."""
+
+    def token(self, exp_in: float) -> None:
+        import base64
+        b64 = lambda o: base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
+        now = int(time.time())
+        claims = {"aud": "theodore-engine", "feat": ["pptx"], "plan": "beta", "iat": now - 60, "rfa": now + exp_in / 2, "exp": now + exp_in}
+        core.write_json(self.home / "state" / "entitlement.json", {"entitlement_token": b64({"alg": "EdDSA"}) + "." + b64(claims) + ".c2ln"})
+
+    def test_a_valid_licence_needs_no_credential_on_the_verb_path(self):
+        from theodore_client import account, credentials
+        self.token(exp_in=86400)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("THEODORE_ENTITLEMENT", None)
+            with mock.patch.object(credentials, "load", side_effect=AssertionError("the keychain was read")):
+                self.assertEqual(account.require("pptx", allow_refresh=False)["plan"], "beta")
+            self.token(exp_in=-10)                      # expired: the credential is needed to renew it or to sign in
+            sign_in = core.Status("SIGN_IN_REQUIRED", "a", "b", "c")
+            with mock.patch.object(credentials, "load", return_value=None) as load, \
+                    mock.patch.object(account, "login_start", return_value=sign_in):
+                with self.assertRaises(core.Status) as refused:
+                    account.require("pptx", allow_refresh=False)
+            self.assertTrue(load.called)
+            self.assertEqual(refused.exception.name, "SIGN_IN_REQUIRED")
+            self.token(exp_in=86400)                    # a guide (allow_refresh True) still checks the sign-in
+            with mock.patch.object(credentials, "load", return_value=None), mock.patch.object(account, "login_start",
+                                                                                               return_value=core.Status("SIGN_IN_REQUIRED", "a", "b", "c")):
+                with self.assertRaises(core.Status):
+                    account.require("pptx")
+
+    def test_libreoffice_is_looked_up_once_an_hour_per_path(self):
+        office = self.tmp / "bin" / "soffice"
+        office.parent.mkdir()
+        office.write_text("", encoding="utf-8")
+        lookups = []
+        which = lambda name: lookups.append(name) or str(office)
+        with mock.patch.object(install.shutil, "which", side_effect=which), mock.patch.dict(os.environ, {"PATH": "/one"}):
+            os.environ.pop("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE", None)
+            os.environ.pop("SOFFICE_BIN", None)
+            self.assertEqual(install.known_libreoffice(), str(office))
+            self.assertEqual(install.known_libreoffice(), str(office))
+            self.assertEqual(len(lookups), 1, "the second command reuses the first lookup")
+            env = install.engine_env(self.home)
+            self.assertNotIn("SOFFICE_BIN", env)
+            self.assertEqual(len(lookups), 1, "the engine's environment too")
+            with mock.patch.dict(os.environ, {"PATH": "/two"}):
+                install.known_libreoffice()
+            self.assertEqual(len(lookups), 2, "another PATH: looked up again")
+            install.known_libreoffice()
+            with mock.patch.dict(os.environ, {"THEODORE_TEST_CLOCK_OFFSET": str(install.RENDERER_RECHECK_S + 5)}), \
+                    mock.patch.object(core, "is_loopback_api", return_value=True):
+                install.known_libreoffice()
+            self.assertEqual(len(lookups), 4, "an hour on: looked up again")
+            office.unlink()
+            install.known_libreoffice()
+            self.assertEqual(len(lookups), 5, "the program found is gone: looked up again")
+            install.system_libreoffice()
+            self.assertEqual(len(lookups), 6, "doctor and tools install always look")
+
+class RunLock(HomeCase):
+    """Each engine run held a lock file of its own (engine-run-<pid>-<thread>.lock), created and deleted per run: one more
+    new file per command for the antivirus to scan. Now a run takes the first free of a few fixed slot files."""
+
+    def test_a_run_creates_no_file_after_the_first(self):
+        from theodore_client import withdraw
+        with withdraw.engine_run():
+            pass
+        before = sorted(p.name for p in core.home().locks.iterdir())
+        import threading
+        for _ in range(3):
+            with withdraw.engine_run():
+                seen = []
+                other = threading.Thread(target=lambda: seen.append(withdraw._busy()))     # what another process sees
+                other.start()
+                other.join(10)
+                self.assertEqual(seen, ["an engine run is in progress"])
+        self.assertEqual(sorted(p.name for p in core.home().locks.iterdir()), before)
+        self.assertIn(f"{withdraw.RUN_SLOT}00.lock", before)
+        self.assertIsNone(withdraw._busy())
+        self.assertIn(f"{withdraw.RUN_SLOT}00.lock", [p.name for p in core.home().locks.iterdir()], "a free slot stays")
+
+    def test_runs_side_by_side_take_different_slots_and_a_leftover_is_cleared(self):
+        import threading
+        from theodore_client import withdraw
+        (core.home().locks).mkdir(parents=True, exist_ok=True)
+        leftover = core.home().locks / f"{withdraw.RUN_LOCK_PREFIX}99999-1.lock"      # left by a run before 0.4.34
+        leftover.write_text("", encoding="utf-8")
+        entered, release, slots = threading.Barrier(4), threading.Event(), []
+
+        def run():
+            with withdraw.engine_run():
+                entered.wait(10)
+                release.wait(10)
+        threads = [threading.Thread(target=run) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        entered.wait(10)
+        self.assertEqual(withdraw._busy(), "an engine run is in progress")
+        release.set()
+        for thread in threads:
+            thread.join(10)
+        names = sorted(p.name for p in core.home().locks.iterdir() if p.name.startswith(withdraw.RUN_SLOT))
+        self.assertEqual(names, [f"{withdraw.RUN_SLOT}{i:02d}.lock" for i in range(3)], "three runs at once, three slots")
+        self.assertIsNone(withdraw._busy())
+        self.assertFalse(leftover.exists(), "an earlier run's own lock file is removed once free")
+
+class QuickSweep(HomeCase):
+    """Specimen folders stay exactly as transient as before (a recorded one goes at the first command after its hour,
+    verbs included), but a verb no longer lists the temporary folder or rewrites the record every time."""
+
+    def setUp(self):
+        super().setUp()
+        import tempfile as tempmod
+        from theodore_client import specimens
+        self.specimens = specimens
+        self.temp = self.tmp / "temp"
+        self.temp.mkdir()
+        patch = mock.patch.object(tempmod, "tempdir", str(self.temp))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def folder(self, name: str, age: float, recorded: bool) -> Path:
+        folder = self.temp / f"theodore-specimens-{name}"
+        folder.mkdir()
+        made = time.time() - age
+        os.utime(folder, (made, made))
+        if recorded:
+            entries = self.specimens._read_registry() + [(made, folder)]
+            self.specimens._write_registry(entries)
+        return folder
+
+    def test_a_recorded_folder_goes_at_the_first_verb_after_its_hour(self):
+        fresh = self.folder("fresh", 60, recorded=True)
+        self.specimens.sweep()                                   # a guide: lists the roots, writes the scan time
+        listed = []
+        real = self.specimens._folders
+        with mock.patch.object(self.specimens, "_folders", side_effect=lambda: listed.append(1) or real()):
+            self.assertEqual(self.specimens.sweep(quick=True), [])
+            self.assertEqual(listed, [], "nothing expired and the roots were listed minutes ago: the record alone")
+            old = self.folder("old", 3700, recorded=True)
+            self.specimens.sweep(quick=True)
+            self.assertFalse(old.exists(), "past its hour: removed by the verb, as before")
+        self.assertTrue(fresh.exists())
+
+    def test_an_unrecorded_folder_goes_at_the_next_listing(self):
+        stray = self.folder("stray", 3700, recorded=False)
+        self.specimens.sweep()                                   # a non-verb command lists the roots, as before
+        self.assertFalse(stray.exists())
+        stray = self.folder("stray2", 3700, recorded=False)
+        self.specimens.sweep(quick=True)
+        self.assertTrue(stray.exists(), "a verb within ten minutes of the last listing does not list again")
+        with mock.patch.dict(os.environ, {"THEODORE_TEST_CLOCK_OFFSET": str(self.specimens.SCAN_EVERY_S + 5)}), \
+                mock.patch.object(core, "is_loopback_api", return_value=True):
+            self.specimens.sweep(quick=True)
+        self.assertFalse(stray.exists(), "ten minutes on, a verb lists them")
+
 if __name__ == "__main__":
     unittest.main()

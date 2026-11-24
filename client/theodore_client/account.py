@@ -296,9 +296,13 @@ def require(feature: str, *, allow_refresh: bool = True) -> dict:
     now = core.now()
     env_only = bool(os.environ.get(ENTITLEMENT_ENV))
     if not env_only:
-        if not credentials.load():
-            raise login_start()
         expired = not token or now >= float(claims.get("exp") or 0)
+        # An engine command (allow_refresh False) does not read the credential while the stored licence holds: on a Mac
+        # that read is a keychain process (21 to 62 ms, up to 10 s behind a keychain dialog), on Windows a DPAPI call,
+        # and the engine checks the licence itself. A credential removed meanwhile is learned at the next refresh (the
+        # hourly background check, or the next guide).
+        if (allow_refresh or expired) and not credentials.load():
+            raise login_start()
         stale = expired or now >= float(claims.get("rfa") or 0)
         if expired or (stale and allow_refresh):
             try:

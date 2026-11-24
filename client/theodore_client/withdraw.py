@@ -103,6 +103,33 @@ def pending() -> bool:
 _RUNS = threading.local()
 
 
+# A run holds one of RUN_SLOTS fixed lock files (engine-run-slot-NN.lock), the first one free: the files stay, so a run
+# creates and deletes none (each new file is one more for the antivirus to scan, on every command). Only when every slot
+# is taken does a run use a lock of its own, named by its process, removed after it, as every run did before 0.4.34.
+RUN_SLOT = RUN_LOCK_PREFIX + "slot-"
+RUN_SLOTS = 32
+
+
+@contextlib.contextmanager
+def _run_lock():
+    for slot in range(RUN_SLOTS):
+        held = core.lock(f"{RUN_SLOT}{slot:02d}", timeout=0)
+        try:
+            held.__enter__()
+        except core.Status:
+            continue                            # another run holds this slot
+        try:
+            yield
+        finally:
+            held.__exit__(None, None, None)
+        return
+    name = f"{RUN_LOCK_PREFIX}{os.getpid()}-{threading.get_ident()}"
+    with core.lock(name, timeout=30):
+        yield
+    with contextlib.suppress(OSError):
+        (core.home().locks / f"{name}.lock").unlink()
+
+
 @contextlib.contextmanager
 def engine_run():
     """Held around every engine run (install.run_engine, chatbuild): while any is held, nothing is removed. A run that
@@ -110,8 +137,7 @@ def engine_run():
     if getattr(_RUNS, "depth", 0):
         yield
         return
-    name = f"{RUN_LOCK_PREFIX}{os.getpid()}-{threading.get_ident()}"
-    with core.lock(name, timeout=30):
+    with _run_lock():
         with core.lock(LOCK, timeout=120):      # a removal in progress finishes first
             pass
         _RUNS.depth = 1
@@ -119,12 +145,11 @@ def engine_run():
             yield
         finally:
             _RUNS.depth = 0
-    with contextlib.suppress(OSError):
-        (core.home().locks / f"{name}.lock").unlink()
 
 
 def _busy() -> str | None:
-    """Why nothing may be removed now, or None. Lock files of runs that ended are cleared on the way."""
+    """Why nothing may be removed now, or None. Lock files of runs that ended are cleared on the way, except the fixed
+    slots: a slot file stays, since a run may open it at any moment (removed, a run could hold a lock nobody sees)."""
     locks = core.home().locks
     for path in sorted(locks.glob(f"{RUN_LOCK_PREFIX}*.lock")) if locks.is_dir() else []:
         try:
@@ -132,8 +157,9 @@ def _busy() -> str | None:
                 pass
         except core.Status:
             return "an engine run is in progress"
-        with contextlib.suppress(OSError):
-            path.unlink()
+        if not path.name.startswith(RUN_SLOT):
+            with contextlib.suppress(OSError):
+                path.unlink()
     for name in INSTALL_JOBS:
         job = core.Job(name)
         if int(job.read().get("pid") or 0) != os.getpid() and job.alive():
