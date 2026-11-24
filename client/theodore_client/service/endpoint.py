@@ -441,6 +441,19 @@ def spawn_detached(command: list[str], home: Path, env: dict | None = None) -> i
         stderr.close()
 
 
+START_FAILED = "start-failed"
+START_FAILED_S = 600.0
+
+
+def _start_failed_recently(home: Path) -> bool:
+    """A start that gave no service is remembered for 10 minutes (state/run/start-failed, as the native front does):
+    commands go one-shot meanwhile instead of each paying a start that does not come."""
+    try:
+        return time.time() - (Path(home) / "state" / "run" / START_FAILED).stat().st_mtime < START_FAILED_S
+    except OSError:
+        return False
+
+
 def ensure(home: Path, *, start: bool = True, wait: float | None = None) -> tuple[dict, object]:
     """(service.json, a connected stream): the running service, or one started under the start lock (C1 "Start").
     Raises Unreachable when none answers and none could be started within the wait."""
@@ -453,6 +466,8 @@ def ensure(home: Path, *, start: bool = True, wait: float | None = None) -> tupl
             pass
     if not start:
         raise Unreachable("no service is running")
+    if _start_failed_recently(home):
+        raise Unreachable("a start of the service failed less than 10 minutes ago")
     with StartLock(home):
         record = read_service_json(home)
         if record is not None and pid_alive(record.get("pid")):
@@ -467,8 +482,13 @@ def ensure(home: Path, *, start: bool = True, wait: float | None = None) -> tupl
             record = read_service_json(home)
             if record is not None and record != stale and pid_alive(record.get("pid")):
                 with contextlib.suppress(Unreachable):
-                    return record, connect(record)
+                    found = record, connect(record)
+                    with contextlib.suppress(OSError):
+                        (home / "state" / "run" / START_FAILED).unlink()
+                    return found
             time.sleep(START_POLL_S)
+        with contextlib.suppress(OSError):
+            (run_dir(home) / START_FAILED).write_text(str(int(time.time())))
     raise Unreachable("the service did not start in time")
 
 

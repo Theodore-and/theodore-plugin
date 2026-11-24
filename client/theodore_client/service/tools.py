@@ -31,8 +31,11 @@ IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 IMAGE_BYTES_MAX = 3 << 20
 IMAGES_BYTES_MAX = 12 << 20
 PICTURE_VERBS = ("apply", "render")
+# The MCP `theodore` tool (an agent's call) runs these; a shell's command line (role front) runs every command but
+# those that set up, remove or replace this installation, which the front runs in a client of its own (lane C).
 THEODORE_COMMANDS = ("status", "doctor", "report", "prefs", "studio", "packs", "update", "version", "whoami", "login",
                      "usage", "guide", "specimen", "skill", "stop", "help", "--help", "-h")
+SHELL_ONLY_HERE = ("uninstall", "setup", "python", "mcp", "service", "install-plugin", "__bootstrap", "pptx")
 KEEP_HELD_ON = ("OFFLINE", "RETRY")
 REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED", "BLOCKED_BY_POLICY", "CONNECTOR_REQUIRED")
 
@@ -207,7 +210,8 @@ def tool_theodore(service, call) -> int:
         from .. import cli
         call.out(cli.HELP)
         return 0
-    if args[0] not in THEODORE_COMMANDS:
+    allowed = args[0] not in SHELL_ONLY_HERE if call.client_role == "front" else args[0] in THEODORE_COMMANDS
+    if not allowed:
         raise core.usage(f"'{args[0]}' is not run through the Theodore tool; the tool runs: {', '.join(c for c in THEODORE_COMMANDS if not c.startswith('-') and c != 'help')}.",
                          f"run it in a shell: {core.quoted_launcher()} {args[0]}")
     if args[0] == "stop":
@@ -289,7 +293,10 @@ def tool_list(service, call) -> int:
     params = call.params
     skill = params.get("skill")
     if params.get("form") == "tools":               # the relay's names for its tool enums (requests-P A-4)
-        call.out(json.dumps(tool_names(service)) + "\n")
+        names = tool_names(service)
+        # The native relay (lane C) takes the whole list for its mode from here; the Python relay builds it itself.
+        names["tools"] = relay_tools(params.get("for"), params.get("client"), names.get("deck-design"))
+        call.out(json.dumps(names) + "\n")
         return 0
     if skill not in SKILLS:
         raise core.usage(f"unknown skill {skill!r}. The skills are: {', '.join(SKILLS)}.")
@@ -325,6 +332,22 @@ def held_index(service, skill: str = "deck-design") -> dict | None:
         return texts.index(skill, held_only=True)
     except TypeError:                               # the texts of a client before lane D's (the port of mcp.py)
         return getattr(texts, "_index", None) or texts.index(skill)
+
+
+def relay_tools(mode, client, index: dict | None) -> list[dict]:
+    """The tool list a relay serves: the plugin's (C1), or the chat's one tool for codex and the Claude app's chat,
+    or none for the plugin's server inside a Claude app that already starts Theodore's own entry."""
+    from .. import chatbuild, mcp
+    name = str((client or {}).get("name") or "") if isinstance(client, dict) else ""
+    if mode in (mcp.DESKTOP, mcp.CODEX):
+        return mcp.desktop_tools(index)
+    if chatbuild.is_claude_app(name):
+        from .. import desktop
+        with contextlib.suppress(Exception):
+            if desktop.entry_present():
+                return []
+        return mcp.desktop_tools(index)
+    return mcp._plugin_tools(index)              # noqa: SLF001
 
 
 def tool_names(service) -> dict:

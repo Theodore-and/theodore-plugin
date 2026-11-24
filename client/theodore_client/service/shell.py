@@ -19,7 +19,9 @@ from .. import core
 from . import client as service_client, context, endpoint
 
 FRONT_COMMANDS = ("pptx", "guide", "specimen", "skill")
-DEADLINE_MS = int(os.environ.get("THEODORE_DEADLINE_MS") or 570_000)     # 9.5 of the Bash tool's 10 minutes at most
+# The Bash tool's limit minus 30 s (Claude Code: BASH_MAX_TIMEOUT_MS, 10 minutes), as the native front reckons it.
+DEADLINE_MS = int(os.environ.get("THEODORE_DEADLINE_MS") or 0) or \
+    max(30_000, int(os.environ.get("BASH_MAX_TIMEOUT_MS") or 600_000) - 30_000)
 
 
 def resident() -> bool:
@@ -58,11 +60,13 @@ def run(argv: list[str]) -> int | None:
     out = getattr(sys.stdout, "buffer", None)
     err = getattr(sys.stderr, "buffer", None)
 
+    skill = argv[0] == "skill"              # a skill's injected command: everything on standard output, as the launcher
+
     def on_frame(frame: dict) -> None:
         kind = frame.get("t")
         if kind == "out":
             data = str(frame.get("data") or "").encode("utf-8")
-            stream = err if frame.get("stream") == "stderr" else out
+            stream = err if frame.get("stream") == "stderr" and not skill else out
             if stream is not None:
                 stream.write(data)
                 stream.flush()

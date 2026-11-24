@@ -120,11 +120,17 @@ class Spec:
         return self.serve_script.is_file()
 
     def python(self) -> str:
-        """The runtime's base interpreter (no venv redirector), as C2 says; the engine's own when there is none."""
+        """The runtime's base interpreter (no venv redirector), as C2 says; else the interpreter this service runs on
+        (the runtime's own when installed; a checkout's when run from source)."""
         runtime = core.home().runtime_python()
         if runtime is not None and runtime.is_file():
             return str(runtime)
-        return str(install.engine_python(self.directory))
+        return sys.executable
+
+    def oneshot_python(self) -> str:
+        """Today's interpreter for an engine run one-shot: the engine's venv, else the service's own."""
+        venv = install.engine_python(self.directory)
+        return str(venv) if venv.is_file() else sys.executable
 
 
 def _child_flags() -> dict:
@@ -578,6 +584,7 @@ class Pool:
                     self.cond.release()
                     try:
                         self._spawn(spec)
+                        call.count("spawned")       # a worker started for this call: a process start the harness counts
                     finally:
                         self.cond.acquire()
                     continue
@@ -676,6 +683,9 @@ class Pool:
                 if result.get("key") and key and result["key"] != key:
                     with self.cond:
                         self.affinity[result["key"]] = worker
+                for name, value in (result.get("counters") or {}).items():
+                    if isinstance(value, int):
+                        call.count(name, value)
                 return int(result.get("exit", 78)), list(result.get("pending") or [])
         return 75, []
 
@@ -706,6 +716,7 @@ def run_oneshot(service, call, spec: Spec, argv: list[str], env_overlay: dict, s
     """Today's engine process for one command, its output streamed into the call. Nothing of the engine is removed
     while it runs (withdraw.engine_run, as install.run_engine)."""
     from .. import withdraw
+    call.count("spawned")
     with withdraw.engine_run():
         return _run_oneshot(service, call, spec, argv, env_overlay, stdin)
 
@@ -718,7 +729,7 @@ def _run_oneshot(service, call, spec: Spec, argv: list[str], env_overlay: dict, 
             env.pop(name, None)
         else:
             env[name] = value
-    command = [str(install.engine_python(spec.directory)), str(spec.oneshot_script), *argv]
+    command = [spec.oneshot_python(), str(spec.oneshot_script), *argv]
     data = None
     if stdin is not None:
         data = base64.b64decode(stdin["data"]) if stdin.get("encoding") == "base64" else str(stdin.get("data") or "").encode("utf-8")

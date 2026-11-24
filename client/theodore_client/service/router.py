@@ -28,6 +28,8 @@ EXIT_INTERNAL = 78
 EXIT_STILL_RUNNING = 124
 EXIT_CANCELLED = 130
 TOOLS = ("pptx", "theodore", "guide", "specimen", "list", "chat")
+COUNTERS = ("spawned", "deck_hashes", "deckjs_full_parses", "packages_written", "files_written", "user_files_written",
+            "http_requests", "tls_handshakes")
 
 
 class Call:
@@ -67,6 +69,7 @@ class Call:
         self.fingerprint = self._fingerprint()
         self.detached_by_deadline = False
         self.worker_images = False         # a worker sent its own image frames
+        self.counters: dict = {}           # the proof harness's counts for this call (C1 done.counters, request K-1)
         self.stdout_kept: list[str] = []   # stdout, kept (up to KEEP_STDOUT) for the pictures it names
         self.stdout_kept_size = 0
 
@@ -145,9 +148,17 @@ class Call:
         frame = {"t": "done", "id": self.id, "exit": self.exit, "elapsed_ms": int((self.ended - self.started) * 1000)}
         if self.pending:
             frame["pending"] = self.pending
+        counters = {k: int(v) for k, v in self.counters.items() if k in COUNTERS and isinstance(v, int) and v >= 0}
+        if counters:
+            frame["counters"] = counters
         self._emit(frame)
         self.finished.set()
         self.router.call_ended(self)
+
+    def count(self, name: str, value: int = 1) -> None:
+        """Add to one of the harness's counters (the worker's own are added as its done gives them)."""
+        with self.lock:
+            self.counters[name] = int(self.counters.get(name, 0)) + int(value)
 
     # --- subscribers ---------------------------------------------------------------------------------------------------
 

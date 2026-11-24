@@ -464,6 +464,8 @@ class Relay:
         meta = {"exitCode": exit_code, "elapsedMs": int(frame.get("elapsed_ms") or 0)}
         if frame.get("pending"):
             meta["pending"] = frame["pending"]
+        if frame.get("counters"):
+            meta["counters"] = frame["counters"]
         if waiting.tool == "pptx":
             result["_meta"] = meta
         return result

@@ -392,6 +392,8 @@ class Relay(ServiceCase):
         self.assertNotIn("isError", quick["result"])
         slow = wait(3)
         self.assertEqual(slow["result"]["_meta"]["exitCode"], 0)
+        self.assertEqual(quick["result"]["_meta"]["counters"], {"files_written": 0, "deckjs_full_parses": 0},
+                         "the worker's counts reach the result (request K-1)")
         with lock:
             progress = [m for m in answers.values() if m.get("method") == "notifications/progress"]
         self.assertTrue(progress and progress[0]["params"]["progressToken"] == "tok")

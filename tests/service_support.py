@@ -153,7 +153,8 @@ while True:
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
-    send({"t": "done", "id": call, "exit": code, "elapsed_ms": int((time.monotonic() - started) * 1000), "key": run.get("key")})
+    send({"t": "done", "id": call, "exit": code, "elapsed_ms": int((time.monotonic() - started) * 1000), "key": run.get("key"),
+          "counters": {"files_written": 0, "deckjs_full_parses": 0}})
 '''
 
 FAKE_ONESHOT_PY = r'''
