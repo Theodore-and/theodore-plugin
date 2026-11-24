@@ -352,6 +352,10 @@ class Worker:
             self._call = None
             raise WorkerFailed(f"the worker could not take the call ({exc})") from None
         call.worker = self
+        if call.cancelled.is_set():
+            # Cancelled after the pool chose this worker and before the router could see it here: the cancel goes now
+            # (a second one, when the router's also went, is harmless).
+            self.cancel(call)
         self._result_ready.wait()
         call.worker = None
         self._call = None
@@ -684,6 +688,9 @@ class Pool:
                         return 130, []
                     self.service.log(f"no worker for engine {version} ({exc}); one-shot")
                     return run_oneshot(self.service, call, spec, argv, env, stdin), []
+                if call.cancelled.is_set():         # cancelled while a worker was being found: nothing starts
+                    self._release(worker)
+                    return 130, []
                 started = time.monotonic()
                 try:
                     result = worker.run(call, argv, env, stdin, key, priority)

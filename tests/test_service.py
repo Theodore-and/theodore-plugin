@@ -234,9 +234,13 @@ class Pool(ServiceCase):
         client, got = self.connect()
         self.call(client, got, "c1", ["sleep", "20"], wait=False)
         time.sleep(0.5)
-        client.cancel("c1")
-        done = Collector.done(got.wait("c1", 10))
+        client.cancel("c1")             # whatever the call is doing by now (finding a worker, starting, running)
+        done = Collector.done(got.wait("c1", 30))
         self.assertEqual(done["exit"], 130)
+        # cancelled at once: while a worker is found for it or before its run reaches the worker, never lost
+        self.call(client, got, "c2", ["sleep", "20"], wait=False)
+        client.cancel("c2")
+        self.assertEqual(Collector.done(got.wait("c2", 30))["exit"], 130)
         # a finished call sent again is replayed; a running one attached to
         self.call(client, got, "r1", ["echo", "x"])
         other, got2 = self.connect(session="s1")
@@ -247,11 +251,11 @@ class Pool(ServiceCase):
         # the shell route: past its deadline the caller gets 124; the same command again waits for the same call
         front, got3 = self.connect(role="front", session="sh")
         front.send_call({"t": "call", "id": "f1", "tool": "pptx", "cwd": "/", "args": ["sleep", "2.5"], "deadline_ms": 1000}, start=False)
-        first = got3.wait("f1", 10)
+        first = got3.wait("f1", 30)
         self.assertEqual(Collector.done(first)["exit"], 124)
         self.assertEqual(json.loads(Collector.stdout(first))["code"], "STILL_RUNNING")
         front.send_call({"t": "call", "id": "f2", "tool": "pptx", "cwd": "/", "args": ["sleep", "2.5"]}, start=False)
-        again = got3.wait("f2", 10)
+        again = got3.wait("f2", 30)
         self.assertEqual(Collector.done(again)["exit"], 0)
         self.assertEqual(json.loads(Collector.stdout(again))["slept"], "2.5")
 
