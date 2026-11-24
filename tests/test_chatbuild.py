@@ -87,6 +87,10 @@ class Paths(unittest.TestCase):
         self.assertEqual(out[6], "a/b")
         self.assertEqual(out[-1], "-")
         self.assertEqual(check("assets", "search", "icons", "electric bus"), ["assets", "search", "icons", "electric bus"])
+        # `pptx check` (engine rc.34): the deck's checks without finishing it; its workspace is a path in the folder.
+        ws = self.folder / ".theodore" / "workspaces" / "d"
+        self.assertEqual(check("check", ".theodore/workspaces/d"), ["check", str(ws)])
+        self.assertNotIn("check", chatbuild.CHANGING, "it reads the workspace: no started workspace needed")
 
     def test_every_step_names_the_next_one_through_to_the_file(self):
         ws = self.folder / ".theodore" / "workspaces" / "d"
