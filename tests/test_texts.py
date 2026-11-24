@@ -4,11 +4,9 @@ service without the batch route; the shell route's sheet files per session; noth
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shutil
-import socket
 import stat
 import sys
 import tempfile
@@ -148,17 +146,6 @@ class Sheets(TextsCase):
             self.texts.specimens(["a.jpg"])
         self.assertEqual(caught.exception.name, "RETRY")
 
-    def test_prefetched_sheets_are_then_answered_304(self):
-        self.texts.prefetch("sheets", ["a.jpg", "HC3"])
-        for _ in range(200):
-            if self.fake.served["specimen", "HC3.jpg", 200]:
-                break
-            time.sleep(0.01)
-        self.assertEqual(self.fake.served["specimen", "HC3.jpg", 200], 1)
-        self.texts.specimens(["HC3.jpg", "a.jpg"])
-        self.assertEqual(self.fake.served["specimen", "HC3.jpg", 304], 1)
-        self.assertEqual(self.fake.served["specimen", "a.jpg", 304], 1)
-
 
 class SheetFiles(TextsCase):
     def test_files_go_in_the_sessions_private_folder_and_go_with_it(self):
@@ -252,13 +239,16 @@ class Index(TextsCase):
         self.texts.index("deck-design")
         self.assertEqual(self.fake.served["index", "", 304], 1)
 
-    def test_changed_names_notify_the_relays(self):
+    def test_the_first_names_and_changed_names_notify_the_relays(self):
         told = []
         texts = texts_module.Texts(credential=lambda: "secret-1", require=lambda skill: {}, notify=lambda: told.append(1), pool=self.pool)
         texts.index("deck-design")
+        self.assertEqual(told, [1], "the names arrived: the relays learn them")
+        texts.index("deck-design")
+        self.assertEqual(told, [1], "the same names: nothing to say")
         self.fake.guide_index = {**self.fake.guide_index, "sections": [{"name": "critique"}, {"name": "craft"}]}
         texts.index("deck-design")
-        self.assertEqual(told, [1])
+        self.assertEqual(told, [1, 1])
 
 
 class SkillBodies(TextsCase):

@@ -495,7 +495,7 @@ class Texts:
         with self._lock:
             current, self._index = self._index, fresh
         names = lambda index: {k: v for k, v in (index or {}).items() if k not in ("etag", "version")}
-        if current is not None and names(current) != names(fresh) and self._notify is not None:
+        if (current is None or names(current) != names(fresh)) and self._notify is not None:     # first names, or new ones
             with contextlib.suppress(Exception):
                 self._notify()
 
@@ -581,8 +581,13 @@ class Texts:
         missing = [name for name in wanted if got[name].status != 200]
         listed = None
         if missing:
-            with contextlib.suppress(Status):       # the nearest names: the index, one request more, only for a miss
-                listed = (self.index("deck-design") or {}).get("specimens") or None
+            # The nearest names for the note: the index this process holds (names only, confirmed at session start),
+            # else one request more for it, only because a name was not found.
+            index = self.index("deck-design", held_only=True)
+            if index is None:
+                with contextlib.suppress(Status):
+                    index = self.index("deck-design")
+            listed = (index or {}).get("specimens") or None
         return [(name, got[name].body if got[name].status == 200 else None,
                  None if got[name].status == 200 else specimens.missing_note(name, listed)) for name in names]
 
@@ -728,27 +733,6 @@ class Texts:
         """A session ended: its shell sheet files go."""
         if session_id:
             self._remove_sheet_files(session_id)
-
-    def prefetch(self, kind: str, names: list[str], *, session: str | None = None, role: str | None = None) -> None:
-        """In the background, in one request: kind "sheets" (the sheet names the briefs of `prepare` give) or
-        "sections" (deck-design sections a step names). Each later call for them still sends its own request, which
-        the service then answers 304. Best effort: nothing is raised or printed."""
-        names = [name for name in dict.fromkeys(names or []) if isinstance(name, str)]
-        if not names or self._closed:
-            return
-
-        def run() -> None:
-            with contextlib.suppress(Exception):
-                if kind == "sheets":
-                    files = [specimens.file_name(name) for name in names]
-                    files = [name for name in files if specimens.valid_name(name)][:BATCH_MAX_SHEETS]
-                    self.fetch([Item("sheet", "deck-design", name) for name in files], "specimen")
-                elif kind == "sections":
-                    reader = commands._role(role) or "lead"
-                    sections = [commands._section_name(name) for name in names][:BATCH_MAX_ITEMS]
-                    self.fetch([Item("section", "deck-design", name, reader, "tool") for name in sections
-                                if commands.SECTION_NAME.fullmatch(name)], "guide deck-design")
-        threading.Thread(target=run, name=f"texts-prefetch-{kind}", daemon=True).start()
 
     # --- skill bodies ----------------------------------------------------------------------------------------------------
 
