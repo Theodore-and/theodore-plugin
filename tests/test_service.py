@@ -255,6 +255,9 @@ class Pool(ServiceCase):
         applied = self.call(client, got, "app", ["apply", *map(str, pages)], images=True)
         images = [f for f in applied if f["t"] == "image"]
         self.assertEqual([f["path"] for f in images], [str(pages[1])], "apply: the page drawn anew, not the cached ones")
+        v2 = self.call(client, got, "v2", ["render", "--v2", *map(str, pages[:2])], images=True)
+        self.assertEqual([f["path"] for f in v2 if f["t"] == "image"], [str(pages[0]), str(pages[1])], "2.0: pictures[].path")
+        self.assertEqual(Collector.done(v2).get("pending"), [{"kind": "picture", "slide": "s099"}], "2.0: pending slides")
         quiet = self.call(client, got, "img2", ["render", *map(str, pages)], images=False)
         self.assertFalse([f for f in quiet if f["t"] == "image" and f.get("data")])
         # an engine without engine.py runs one-shot from the service

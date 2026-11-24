@@ -150,6 +150,8 @@ def tool_pptx(service, call) -> tuple[int, list]:
         refusal = install.refusal_in_output("".join(call.stdout_kept), code)
         if refusal is not None:
             return _status(service, call, refusal), pending
+    if args[0] in PICTURE_VERBS and not pending:
+        pending = pending_of("".join(call.stdout_kept))         # a 2.0 answer's pictures still being drawn
     if call.images and args[0] in PICTURE_VERBS and not call.worker_images and code == 0:
         attach_pictures(call, "".join(call.stdout_kept))
     if args[0] == "finish":
@@ -185,28 +187,38 @@ _PAGE = re.compile(r"slide-0*(\d+)")
 
 
 def pictures_of(argv: list[str], output: str) -> list[str]:
-    """The pictures an answer is about (lane J's rule): for apply, the pages it drew anew
-    (render_summary.regenerated_pages, never the cached ones it also lists); for render, the grid it composed, the zoom
-    it drew, or the pages it was asked for. At most 12, in the engine's order."""
+    """The pictures an answer is about (lane J's rule), at most 12, in the engine's order. A 2.0 engine names them in
+    `pictures: [{slide, page, path | pending | error}]` (apply and render alike, lanes F and R), its grid in `grid`
+    and its zoom in `zoom`. Today's engine: apply's pages drawn anew (render_summary.regenerated_pages, never the
+    cached ones it also lists), render's `grid_files`, `zoom_images` or the pages asked for (`rendered_images`)."""
     payload = _last_json(output)
     verb = argv[0] if argv else ""
-    if verb == "apply":
-        images = [p for p in payload.get("rendered_images") or [] if isinstance(p, str)]
+    strings = lambda values: [v for v in values or [] if isinstance(v, str)]      # noqa: E731
+    if verb == "render" and "--grid" in argv:
+        chosen = strings(payload.get("grid") or payload.get("grid_files") or ([payload["grid_path"]] if payload.get("grid_path") else []))
+    elif verb == "render" and "--zoom" in argv:
+        chosen = strings(payload.get("zoom") or payload.get("zoom_images"))
+    elif isinstance(payload.get("pictures"), list):
+        chosen = [row["path"] for row in payload["pictures"] if isinstance(row, dict) and isinstance(row.get("path"), str)]
+    elif verb == "apply":
+        images = strings(payload.get("rendered_images"))
         drawn = {int(p) for p in (payload.get("render_summary") or {}).get("regenerated_pages") or [] if isinstance(p, int)}
         chosen = []
         for position, path in enumerate(images, 1):
             match = _PAGE.search(Path(path).name)
             if (int(match.group(1)) if match else position) in drawn:
                 chosen.append(path)
-    elif verb == "render" and "--grid" in argv:
-        chosen = [p for p in payload.get("grid_files") or ([payload["grid_path"]] if payload.get("grid_path") else []) if isinstance(p, str)]
-    elif verb == "render" and "--zoom" in argv:
-        chosen = [p for p in payload.get("zoom_images") or [] if isinstance(p, str)]
     elif verb == "render":
-        chosen = [p for p in payload.get("rendered_images") or [] if isinstance(p, str)]
+        chosen = strings(payload.get("rendered_images"))
     else:
         chosen = []
     return chosen[:12]
+
+
+def pending_of(output: str) -> list[dict]:
+    """The pictures a 2.0 answer says are still being drawn (`pending: [slide ids]`), as C1 `done.pending` items."""
+    pending = _last_json(output).get("pending")
+    return [{"kind": "picture", "slide": s} for s in pending if isinstance(s, str)] if isinstance(pending, list) else []
 
 
 def attach_pictures(call, output: str) -> None:
