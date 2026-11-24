@@ -301,6 +301,91 @@ class Fatal(ServiceCase):
         self.assertTrue(answer["oneshot"])
 
 
+class PoolSizing(unittest.TestCase):
+    def test_a_worker_per_core_within_the_memory_share(self):
+        from unittest import mock
+
+        from theodore_client.service import workers
+        gb = 1 << 30
+        for cores, ram, most in ((4, 16 * gb, 4), (12, 16 * gb, 10), (8, 8 * gb, 5), (2, 4 * gb, 2), (1, 2 * gb, 2),
+                                 (64, 256 * gb, 16)):
+            with self.subTest(cores=cores, ram=ram), mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": ""}), \
+                    mock.patch.object(workers.os, "cpu_count", return_value=cores), \
+                    mock.patch.object(workers, "_ram_bytes", return_value=ram):
+                self.assertEqual(workers.pool_sizes(), (1, most))
+        with mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": "3"}):
+            self.assertEqual(workers.pool_sizes(), (3, 3))
+
+    def test_the_queue_goes_by_expected_cost(self):
+        from theodore_client.service import workers
+        self.assertEqual(workers.rank(["slide", "list", "/w"], "/"), 0)
+        self.assertEqual(workers.rank(["apply", "/deck/parts/s03"], "/"), 1, "a Studio part's apply is short")
+        self.assertEqual(workers.rank(["apply", "parts/s03"], "/deck"), 1)
+        self.assertEqual(workers.rank(["slide", "set", "/w", "s1"], "/"), 1)
+        self.assertEqual(workers.rank(["apply", "/deck"], "/"), 2)
+        self.assertEqual(workers.rank(["render", "/deck"], "/"), 2)
+
+
+class Burst(ServiceCase):
+    """Many designers at once (lane G's 15 part applies; the coordinator's sizing, 25 Nov)."""
+
+    def answer(self, got, call_id: str) -> dict:
+        return json.loads(Collector.stdout(got.wait(call_id, 60)).splitlines()[0])
+
+    def test_long_calls_keep_a_worker_for_short_ones_and_the_queue_goes_by_cost(self):
+        self.env["THEODORE_SERVICE_WORKERS"] = "2"
+        self.service()
+        client, got = self.connect()
+        lead, other = self.box.tmp / "deck", self.box.tmp / "other deck"
+        (lead / "parts" / "s01").mkdir(parents=True)
+        other.mkdir()
+        for i in range(2):                      # two warm workers
+            self.call(client, got, f"w{i}", ["echo", "--hold", "0.3"], wait=False)
+        for i in range(2):
+            got.wait(f"w{i}", 60)
+        self.call(client, got, "long1", ["apply", str(lead), "--hold", "2"], wait=False)
+        time.sleep(0.2)
+        self.call(client, got, "long2", ["render", str(other), "--hold", "0.5"], wait=False)
+        time.sleep(0.2)
+        self.call(client, got, "part", ["apply", str(lead / "parts" / "s01"), "--hold", "0.3"], wait=False)
+        self.call(client, got, "read", ["slide", "list", str(lead), "--hold", "0.1"], wait=False)
+        done = {name: self.answer(got, name) for name in ("long1", "long2", "part", "read")}
+        self.assertLess(done["part"]["t1"], done["long1"]["t1"], "a part's apply did not wait behind a long call")
+        self.assertLess(done["read"]["t1"], done["long1"]["t1"])
+        self.assertLess(done["read"]["t0"], done["long2"]["t0"], "the read went before the long call waiting longer")
+        self.assertGreaterEqual(done["long2"]["t0"], done["long1"]["t1"] - 0.05,
+                                "long calls never held both workers: one stayed for short calls")
+
+    def test_a_burst_starts_its_workers_side_by_side(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "4", "FAKE_WORKER_START_S": "1"})
+        self.service()
+        client, got = self.connect()
+        for i in range(4):
+            self.call(client, got, f"b{i}", ["echo", "--hold", "1.5"], wait=False)
+        pids = {self.answer(got, f"b{i}")["pid"] for i in range(4)}
+        self.assertEqual(len(pids), 4, "four workers started at once, one a call (one after another, the first would "
+                                       "have served several before the last was up)")
+
+    def test_prepare_warms_the_workers_its_parts_will_need(self):
+        self.env["THEODORE_SERVICE_WORKERS"] = "3"
+        self.service()
+        client, got = self.connect()
+        deck = self.box.tmp / "deck"
+        deck.mkdir()
+        self.call(client, got, "prep", ["prepare", str(deck)])
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and \
+                len([p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]]) < 3:
+            time.sleep(0.1)
+        time.sleep(0.5)                         # their warm-up (the stand-in's is quick)
+        for i in range(3):
+            self.call(client, got, f"p{i}", ["apply", str(deck / "parts" / f"s0{i}"), "--hold", "0.5"], wait=False)
+        frames_ = [got.wait(f"p{i}", 60) for i in range(3)]
+        spawned = sum(int((Collector.done(f).get("counters") or {}).get("spawned") or 0) for f in frames_)
+        self.assertEqual(spawned, 0, "no part's apply waited for a worker to start")
+        self.assertEqual(len({json.loads(Collector.stdout(f).splitlines()[0])["pid"] for f in frames_}), 3)
+
+
 class Lifecycle(ServiceCase):
     def test_nothing_runs_after_the_last_relay_detaches(self):
         record = self.service()
