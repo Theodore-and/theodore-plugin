@@ -152,6 +152,57 @@ class KeptAliveCase(unittest.TestCase):
         self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
         self.assertEqual(self.pool.opened, 1)
 
+    def test_warm_opens_as_many_as_asked_side_by_side(self):
+        """The tool server opens KEPT_WARM at its start, so the calls of a lead and its designers at once each find one."""
+        self.pool.warm(3)
+        for _ in range(300):
+            if len(self.pool._idle) >= 3:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(self.pool.opened, 3)
+        self.pool.warm(3)                               # three are idle: nothing more
+        threading.Event().wait(0.2)
+        self.assertEqual(self.pool.opened, 3)
+        start, results = threading.Barrier(3), []
+
+        def one():
+            start.wait()
+            results.append(self.pool.request("GET", self.keys)[0])
+        threads = [threading.Thread(target=one) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual((results, self.pool.opened), ([200] * 3, 3), "three at once, on the three kept")
+
+    def test_each_tls_connection_has_its_own_context(self):
+        """truststore holds a lock through each handshake and certificate check of one context: connections opened at
+        once on a shared one were set up one after another (about 150 ms apart on the Windows test machine)."""
+        made, used = [], []
+
+        def context():
+            made.append(object())
+            return made[-1]
+
+        class Connection:
+            def __init__(self, host, port, context=None, timeout=None):
+                used.append(context)
+
+            def connect(self):
+                pass
+
+            def close(self):
+                pass
+        route = ("https", "api.example", 443, None)
+        with mock.patch.object(api, "_ssl_context", context), mock.patch.object(api, "_AnyAddressHTTPS", Connection):
+            threads = [threading.Thread(target=self.pool._open, args=(route, 5.0)) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(len(used), 4)
+        self.assertEqual(len({id(c) for c in used}), 4, "one context per connection")
+
     def test_call_takes_the_pool(self):
         self.signed()
         self.fake.guides["deck-design"]["critique"] = "# Critique\n"

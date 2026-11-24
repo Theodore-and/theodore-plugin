@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import contextlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tarfile
 import time
-import zipfile
 from pathlib import Path
-from urllib.parse import urlparse
 
-from . import __version__, account, api, core, credentials, usage
+from . import __version__, account, core, credentials, usage
 from .contract import (CHANNEL_MANIFEST_SCHEMA, ENGINE_KEEP_MAX, ENGINE_KEEP_PINNED_DAYS, ENGINE_KEEP_USED_DAYS, ENGINE_REFUSALS,
                        PACK_ORDER, RUNTIME_MANIFEST_SCHEMA, RUNTIME_PARTS, UPDATE_CHECK_INTERVAL_S, UPDATE_CHECK_TIMEOUT_S)
 from .core import IS_WINDOWS, Job, Status, quoted_launcher
+
+# Loaded when first used: an engine command's path needs neither the network nor the archives (core.LazyModule).
+api = core.LazyModule(__package__ + ".api")
+tarfile = core.LazyModule("tarfile")
+zipfile = core.LazyModule("zipfile")
+concurrent = core.LazyModule("concurrent.futures")
+shutil = core.LazyModule("shutil")
+urlparse = core.urlparse
 
 DAY = 86400
 
@@ -114,7 +117,7 @@ class _Writers:
     a later call, by drain or at the end of the with block."""
 
     def __init__(self, workers: int):
-        self.pool = concurrent.futures.ThreadPoolExecutor(workers)
+        self.pool = concurrent.ThreadPoolExecutor(workers)
         self.pending: list = []
         self.names: set[str] = set()
         self.bytes = 0
@@ -1457,8 +1460,7 @@ def _pin_record(version: str) -> dict:
 
 
 def _pin_key(workspace: Path) -> str:
-    import hashlib
-    return hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]     # a hash: no folder name is stored
+    return core.sha256_hex(str(workspace).encode("utf-8"))[:16]     # a hash: no folder name is stored
 
 
 def _pin_workspaces(args: list[str], version: str) -> None:
@@ -1545,18 +1547,34 @@ def _stdout_is_terminal() -> bool:
 # The engine's help (`pptx --help`, `pptx <verb> --help`) is the same for every call to one engine build: printed from
 # a file kept beside it (.theodore-help/) once the engine has printed it, with no engine start (1.7 s on the Windows
 # test machine through the launcher, the engine's start 0.3 s of it). Kept per engine version and build, removed with
-# the engine. Only plain words before the flag: nothing that names a file or a folder.
+# the engine. Only plain words before the flag: nothing that names a file or a folder. The file is named by the build's
+# digest and the words themselves (no hash to compute: hashlib loads OpenSSL's library on Windows).
 HELP_FLAGS = ("--help", "-h")
-_HELP_WORD = re.compile(r"[a-z][a-z0-9-]{0,40}")
+_HELP_WORD = re.compile(r"[a-z][a-z0-9-]{0,24}")
+_BUILD = re.compile(r"[0-9a-f]{16,128}")
 
 
 def _help_file(directory: Path, args: list[str]) -> Path | None:
     if not args or args[-1] not in HELP_FLAGS or len(args) > 4 or not all(_HELP_WORD.fullmatch(a) for a in args[:-1]):
         return None
-    import hashlib
     build = str(core.read_json(directory / ".theodore-engine.json").get("sha256") or "")
-    key = hashlib.sha256(("\0".join([build, *args[:-1]])).encode("utf-8")).hexdigest()[:16]
-    return directory / ".theodore-help" / f"{key}.txt"
+    build = build[:16] if _BUILD.fullmatch(build) else "build"
+    return directory / ".theodore-help" / (".".join([build, "pptx", *args[:-1]]) + ".txt")
+
+
+def kept_help(args: list[str]) -> int | None:
+    """`pptx --help` (or `pptx <verb> --help`) printed from the engine's kept text, before anything else of an engine
+    command (no lock, no pack or renderer check): its exit code, or None when no text is kept yet (the engine then
+    prints it once and it is kept, _run_engine)."""
+    if not args or args[-1] not in HELP_FLAGS:
+        return None
+    enforce_restrictions()
+    version = engine_for(args)
+    enforce_restrictions(version)
+    path = _help_file(engine_dir(version), args)
+    if path is None or not path.is_file():
+        return None
+    return _print_help(path)
 
 
 def _keep_help(path: Path, output: bytes) -> None:
@@ -1847,12 +1865,14 @@ PACK_HELPERS = {
 # The loose patterns start at a word boundary: a search then tries each word once instead of every position inside it
 # (2.5 times faster on a 2.3 MB deck.js), and finds the same calls, since a match inside a word extends to its start.
 _PACK_LOOSE = {"icons": r"\b\w*[iI]con\w*\(", "flags": r"\b\w*[fF]lag\w*\(", "maps": r"\b[a-z]\w*Map\w*\(", "backgrounds": r"\b\w*[bB]ackground\w*\("}
-_PACK_PATTERNS = {pack: (re.compile(r"\b(?:" + "|".join(names) + r")\s*\("), re.compile(_PACK_LOOSE[pack]))
-                  for pack, names in PACK_HELPERS.items()}
+_PACK_PATTERNS: dict = {}       # compiled at the first scan: an engine command with every pack ready makes none
 
 
 def packs_in_script(text: str) -> set[str]:
     """The packs a deck script calls into, judged from the helper names in its text."""
+    if not _PACK_PATTERNS:
+        _PACK_PATTERNS.update({pack: (re.compile(r"\b(?:" + "|".join(names) + r")\s*\("), re.compile(_PACK_LOOSE[pack]))
+                               for pack, names in PACK_HELPERS.items()})
     return {pack for pack, (named, loose) in _PACK_PATTERNS.items() if named.search(text) or loose.search(text)}
 
 
@@ -1871,9 +1891,8 @@ PACK_SCAN_MAX = 256
 
 
 def _script_packs(script: Path, memo: dict) -> set[str]:
-    import hashlib
     info = script.stat()
-    key = hashlib.sha256(str(script).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    key = core.sha256_hex(str(script).encode("utf-8", "surrogateescape"))[:16]
     stamp = [info.st_size, info.st_mtime_ns]
     held = memo.get(key)
     if isinstance(held, dict) and held.get("stamp") == stamp and isinstance(held.get("packs"), list):
@@ -2116,9 +2135,8 @@ RENDERER_RECHECK_S = 3600
 
 
 def _path_key() -> str:
-    import hashlib
     raw = "\0".join((os.environ.get("PATH") or "", os.environ.get("PATHEXT") or ""))
-    return hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return core.sha256_hex(raw.encode("utf-8", "surrogateescape"))[:16]
 
 
 def _remember_libreoffice(found: str | None) -> None:

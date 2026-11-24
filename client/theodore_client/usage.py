@@ -17,12 +17,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import platform
 import re
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
 
 from . import __version__, core
@@ -30,6 +28,9 @@ from .contract import (CLIENT_COMMANDS, EXIT, USAGE_BATCH_MAX_BYTES, USAGE_BATCH
                        USAGE_DROPPED_MAX, USAGE_FLUSH_AGE_S, USAGE_KINDS, USAGE_LEDGER_MAX_BYTES, USAGE_LEDGER_MAX_LINES,
                        USAGE_MAX_AGE_S, USAGE_OS_PATTERN, USAGE_OUTCOMES, USAGE_TIMEOUT_S, USAGE_TS_MAX, USAGE_TS_MIN,
                        USAGE_VERBS, USAGE_WORKSPACES)
+
+platform = core.LazyModule("platform")         # only for a batch or an event to send
+uuid = core.LazyModule("uuid")
 
 LEDGER = "usage-ledger.jsonl"
 STATE = "usage.json"

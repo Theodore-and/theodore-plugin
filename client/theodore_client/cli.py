@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import os
 import sys
 from pathlib import Path
 
-from . import account, api, commands, core, specimens, usage, withdraw
+from . import account, core, specimens, usage, withdraw
 from .core import Status
+
+# An engine command (`pptx`, `python`) goes to verbs.py: the command table, the argument parser and the network stack
+# load only for the client's other commands (0.4.34; core.LazyModule).
+api = core.LazyModule(__package__ + ".api")
+commands = core.LazyModule(__package__ + ".commands")
 
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license] [--role lead|slide]   print the skill instructions
@@ -33,12 +37,13 @@ HELP = """Theodore client commands (run through the launcher):
 """
 
 
-class _Parser(argparse.ArgumentParser):
-    def error(self, message):  # argparse would print its own text and exit 2
-        raise core.usage(f"{self.prog}: {message}")
+def _parser():
+    import argparse
 
+    class _Parser(argparse.ArgumentParser):
+        def error(self, message):  # argparse would print its own text and exit 2
+            raise core.usage(f"{self.prog}: {message}")
 
-def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="theodore", add_help=False)
     sub = parser.add_subparsers(dest="command", parser_class=_Parser)
     g = sub.add_parser("guide", add_help=False)
@@ -141,10 +146,9 @@ def _dispatch(argv: list[str]) -> int:
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(HELP, end="")
         return 0
-    if argv[0] == "pptx":
-        return commands.run_pptx(argv[1:])
-    if argv[0] == "python":
-        return commands.run_python(argv[1:])
+    if argv[0] in ("pptx", "python"):
+        from . import verbs
+        return verbs.run_pptx(argv[1:]) if argv[0] == "pptx" else verbs.run_python(argv[1:])
     args = _parser().parse_args(argv)
     cmd = args.command
     if cmd == "guide":
