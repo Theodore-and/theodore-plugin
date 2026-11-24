@@ -1448,6 +1448,32 @@ class Engine(ClientCase):
         marker.unlink()
         self.assertEqual(self.client("pptx", "exit", "1").returncode, 1, "a plain engine failure with code 1 still passes through")
 
+    def test_a_failing_verb_starts_the_engine_once(self):
+        """0.4.34: a licence refusal is read from the engine's own output (its last JSON object, exit code 1, or 77 from
+        engine rc.34), never by starting the engine again with --help (0.25 s on the Windows test machine, 1 to 1.5 s on a
+        laptop, per failing verb)."""
+        self.ready()
+        starts = self.box.tmp / "engine-starts.jsonl"
+        env = {"THEODORE_TEST_ENGINE_STARTS": str(starts)}
+        engine = self.box.home / "engines" / self.ENGINE_VERSION
+        (engine / "REFUSE").write_text("entitlement_clock_rollback")
+        for exit_code in ("1", "77"):
+            (engine / "REFUSE_EXIT").write_text(exit_code)
+            first, nxt, _t = self.assertStatus(self.client("pptx", "slide", "list", "x", env=env), "NO_ENTITLEMENT", 70)
+            self.assertIn("date and time", nxt, exit_code)
+        (engine / "REFUSE").write_text("not_a_licence_code")
+        (engine / "REFUSE_EXIT").write_text("1")
+        failed = self.client("pptx", "slide", "list", "x", env=env)
+        self.assertEqual(failed.returncode, 1, "a verb's own refusal passes through")
+        self.assertEqual(json.loads(failed.stdout)["code"], "not_a_licence_code", "its output whole, as the engine wrote it")
+        (engine / "REFUSE").unlink()
+        self.assertEqual(self.client("pptx", "exit", "1", env=env).returncode, 1)
+        lines = [json.loads(line) for line in starts.read_text().splitlines()]
+        self.assertEqual(len(lines), 4, f"one engine start per command: {lines}")
+        self.assertNotIn(["--help"], lines)
+        big = self.client("pptx", "env", env=env)
+        self.assertEqual(json.loads(big.stdout)["home"], str(self.box.home), "the output arrives whole through the client")
+
     def test_engine_before_guide_says_what_to_run(self):
         self.sign_in()
         self.assertEqual(self.client("setup", "--job").returncode, 0)

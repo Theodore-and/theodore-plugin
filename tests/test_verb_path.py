@@ -152,5 +152,47 @@ class EnginePython(HomeCase):
         directory = self.engine("gone", self.tmp / "nowhere")
         self.assertEqual(install.engine_python(directory), directory / ".venv" / ("Scripts/python.exe" if core.IS_WINDOWS else "bin/python"))
 
+class RefusalFromOutput(HomeCase):
+    """No second engine start with --help after a failing verb: the refusal is the engine's own last JSON object."""
+
+    def test_one_line_a_whole_payload_and_none(self):
+        line = b'{"ok": false, "error": "x", "code": "entitlement_clock_rollback"}\n'
+        cases = ((b"progress\n" + line, 1, "entitlement_clock_rollback"), (line, install.LICENCE_EXIT, "entitlement_clock_rollback"),
+                 (b'{\n  "ok": false,\n  "code": "entitlement_untrusted"\n}\n', 1, "entitlement_untrusted"))
+        for output, exit_code, cause in cases:
+            status = install.refusal_in_output(output, exit_code)
+            self.assertEqual((status.name, status.cause), ("NO_ENTITLEMENT", cause), output)
+        self.assertIsNone(install.refusal_in_output(b'{"ok": false, "code": "slide_not_found"}\n', 1), "a verb's own refusal")
+        self.assertIsNone(install.refusal_in_output(b"Traceback ...\n", 1))
+        self.assertIsNone(install.refusal_in_output(b"", 1))
+        unread = install.refusal_in_output(b"garbled", install.LICENCE_EXIT)
+        self.assertEqual((unread.name, unread.cause), ("NO_ENTITLEMENT", "entitlement_refused"), "77 is a refusal all the same")
+
+    def test_the_output_passes_through_whole_and_the_tail_is_kept(self):
+        import io
+        sink = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        script = "import sys; sys.stdout.write('é' * 50000 + '\\nlast line'); sys.stdout.flush(); sys.exit(3)"
+        with mock.patch.object(sys, "stdout", sink):
+            code, tail = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
+        self.assertEqual(code, 3)
+        self.assertEqual(sink.buffer.getvalue().decode("utf-8"), "é" * 50000 + "\nlast line")
+        self.assertTrue(tail.endswith(b"\nlast line"))
+        self.assertLessEqual(len(tail), install.OUTPUT_TAIL_BYTES)
+
+    def test_a_reader_that_went_away_never_blocks_the_engine(self):
+        class Closed:
+            def write(self, data):
+                raise BrokenPipeError()
+
+            def flush(self):
+                pass
+        holder = mock.Mock()
+        holder.buffer = Closed()
+        script = "import sys; [sys.stdout.write('x' * 65536) for _ in range(40)]; sys.stdout.flush()"
+        with mock.patch.object(sys, "stdout", holder):
+            code, tail = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
+        self.assertEqual(code, 0, "2.5 MB written into a closed reader: drained, finished")
+        self.assertEqual(len(tail), install.OUTPUT_TAIL_BYTES)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1484,8 +1484,16 @@ def _run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
     touch_used(version)
     python = engine_python(directory)
     command = [str(python), *args] if python_passthrough else [str(python), str(directory / "skills" / "pptx" / "scripts" / "pptx.py"), *args]
+    # The engine's standard output passes through this process as it comes (an assistant's shell reads a pipe either
+    # way), so a licence refusal is read from the engine's own last JSON object instead of starting the engine a second
+    # time with --help to ask (0.25 s on the Windows test machine, 1 to 1.5 s on a laptop, per failing verb). A person's
+    # terminal keeps the engine's own terminal output; there the second start stays. `theodore python` runs as it is.
+    output = None
     try:
-        code = subprocess.call(command, env=engine_env(directory))
+        if python_passthrough or _stdout_is_terminal():
+            code = subprocess.call(command, env=engine_env(directory))
+        else:
+            code, output = _call_passing_output(command, engine_env(directory))
     except KeyboardInterrupt:
         return 130
     except OSError as exc:
@@ -1495,18 +1503,92 @@ def _run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
                      else f"run {quoted_launcher()} doctor.",
                      "This computer's security policy blocked Theodore's engine. Your IT team can allow it, or you can use Theodore through its connector." if blocked
                      else "Theodore's engine could not start. I am checking why.") from None
-    if not python_passthrough:
-        _pin_workspaces(args, version)
-    if code == 1:
-        refusal = _engine_refusal(directory)
+    if python_passthrough:
+        return code
+    _pin_workspaces(args, version)
+    if code in (1, LICENCE_EXIT):
+        refusal = refusal_in_output(output, code) if output is not None else _engine_refusal(directory)
         if refusal is not None:
             raise refusal
     return code
 
 
+# The engine's reserved exit code for a licence refusal (contracts/README "Exit codes": 77, with today's licence JSON on
+# standard output; engines from rc.34). Earlier engines refuse with exit code 1 and the same JSON; both are read here.
+LICENCE_EXIT = 77
+OUTPUT_TAIL_BYTES = 64 << 10
+
+
+def _stdout_is_terminal() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _call_passing_output(command: list[str], env: dict) -> tuple[int, bytes]:
+    """Run the engine with its standard output passed on to ours as it arrives (standard input and error are its own,
+    as before). Returns the exit code and the output's last OUTPUT_TAIL_BYTES. An output nobody reads any more (a
+    closed pipe) is still drained, so the engine never blocks on it."""
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    sink = getattr(sys.stdout, "buffer", None)
+    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE)
+    tail = b""
+    try:
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                break
+            tail = (tail + chunk)[-OUTPUT_TAIL_BYTES:]
+            if sink is not None:
+                try:
+                    sink.write(chunk)
+                    sink.flush()
+                except (OSError, ValueError):
+                    sink = None                     # the reader went away: drain the rest unseen
+        return proc.wait(), tail
+    except BaseException:
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=10)
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            proc.stdout.close()
+
+
+def refusal_in_output(output: bytes | str | None, exit_code: int) -> Status | None:
+    """The status for a licence refusal the engine printed: its last JSON object (one line, or a whole payload printed on
+    several lines) whose code is one of the engine's refusal codes. Exit code LICENCE_EXIT without a readable code is
+    a refusal all the same. None when the engine refused nothing."""
+    text = core.child_text(output).rstrip() if output is not None else ""
+    candidates = []
+    if text:
+        candidates.append(text.splitlines()[-1])
+        start = text.rfind("\n{")
+        candidates.append(text[start + 1:] if start >= 0 else text)
+    code = None
+    for candidate in candidates:
+        try:
+            answer = json.loads(candidate)
+        except ValueError:
+            continue
+        found = answer.get("code") if isinstance(answer, dict) else None
+        if isinstance(found, str) and ENGINE_REFUSALS.get(found):
+            code = found
+            break
+    if code is None and exit_code == LICENCE_EXIT:
+        code = "entitlement_refused"
+    if code is None:
+        return None
+    status = _refusal_status(code)
+    status.cause = code         # the engine's refusal code, for the usage counts
+    return status
+
+
 def _engine_refusal(directory: Path) -> Status | None:
-    """After an exit code 1: ask the engine's own licence check why (it answers one JSON object, offline) and turn
-    a refusal into a status the assistant can act on. Returns None when the engine is not refusing."""
+    """After a failing verb whose output went to a person's terminal: ask the engine's own licence check why (it answers
+    one JSON object, offline) and turn a refusal into a status the assistant can act on. None when it is not refusing."""
     script = directory / "skills" / "pptx" / "scripts" / "pptx.py"
     try:
         probe = subprocess.run([str(engine_python(directory)), str(script), "--help"], env=engine_env(directory),

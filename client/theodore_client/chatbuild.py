@@ -648,8 +648,8 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
             note.unlink()
     output = b"".join(chunks).decode("utf-8", errors="replace")
     install._pin_workspaces(args, version)
-    if code == 1:
-        refusal = install._engine_refusal(directory)
+    if code in (1, install.LICENCE_EXIT):        # a licence refusal is the engine's last JSON object: no second start to ask
+        refusal = install.refusal_in_output(output, code)
         if refusal is not None:
             raise refusal
     if args[0] == "finish":

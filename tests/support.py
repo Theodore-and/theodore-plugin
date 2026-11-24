@@ -49,6 +49,9 @@ HERE = Path(__file__).resolve()
 ROOT = HERE.parents[3]
 VERSION = (ROOT / "VERSION").read_text().strip()
 args = sys.argv[1:]
+if os.environ.get("THEODORE_TEST_ENGINE_STARTS"):      # every start of this engine, one line each (a test counts them)
+    with open(os.environ["THEODORE_TEST_ENGINE_STARTS"], "a", encoding="utf-8") as starts:
+        starts.write(json.dumps(args) + "\n")
 LEDGER = os.environ.get("THEODORE_USAGE_LEDGER")
 if LEDGER and args and args[0] in ("start", "apply", "finish", "render"):      # one usage line per command, as the engine
     import time, uuid
@@ -57,7 +60,8 @@ if LEDGER and args and args[0] in ("start", "apply", "finish", "render"):      #
                                  "deck_id": None, "workspace": "task", "kind": "blank", "outcome": "ok", "code": None,
                                  "duration_ms": 5}) + "\n")
 if (ROOT / "REFUSE").exists():          # stands in for the real engine's licence check: one JSON object, exit code 1
-    print(json.dumps({"ok": False, "error": "refused for the test", "code": (ROOT / "REFUSE").read_text().strip()})); sys.exit(1)
+    print(json.dumps({"ok": False, "error": "refused for the test", "code": (ROOT / "REFUSE").read_text().strip()}))
+    sys.exit(int((ROOT / "REFUSE_EXIT").read_text()) if (ROOT / "REFUSE_EXIT").exists() else 1)   # 77 from engine rc.34
 if "--help" in args or not args:
     if (ROOT / "BROKEN").exists():
         print("engine is broken", file=sys.stderr); sys.exit(3)
