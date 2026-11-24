@@ -36,7 +36,10 @@ def client_home(**config):
     saved = (core._HOME, core._CONFIG)
     core._HOME, core._CONFIG = core.Home(tmp), None
     try:
-        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(tmp), "THEODORE_CREDENTIAL_STORE": "file"}):
+        # THEODORE_SERVICE=0: a shell command run in this process (cli._main) runs here, where the test's mocks are,
+        # and starts no service in the scratch home (as in the Sandbox's environment).
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(tmp), "THEODORE_CREDENTIAL_STORE": "file",
+                                          "THEODORE_SERVICE": "0"}):
             yield tmp
     finally:
         core._HOME, core._CONFIG = saved
