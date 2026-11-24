@@ -450,9 +450,13 @@ class ClientStatus(InProcess):
             self.assertNotIn("retry_at", self.state(), "an answer ends the wait")
             self.assertNotIn("failures", self.state())
         state, waits = {}, []
-        for _ in range(20):                            # doubling from 15 minutes, never past 6 hours
-            usage._backoff(state)
-            waits.append(round(state["retry_at"] - core.now()))
+        # A clock on a whole second: _backoff keeps whole seconds (int), so against a running clock this read one
+        # second short whenever the clock stood past the half second (about one run in two).
+        frozen = float(int(core.now()))
+        with mock.patch.object(core, "now", return_value=frozen):
+            for _ in range(20):                        # doubling from 15 minutes, never past 6 hours
+                usage._backoff(state)
+                waits.append(state["retry_at"] - frozen)
         self.assertEqual(waits[:3], [usage.RETRY_FIRST_S, 2 * usage.RETRY_FIRST_S, 4 * usage.RETRY_FIRST_S])
         self.assertEqual(max(waits), usage.RETRY_MAX_S)
 
