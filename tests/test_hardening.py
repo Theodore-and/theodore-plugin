@@ -402,8 +402,9 @@ class Round6(unittest.TestCase):
 
 
 class Specimens(unittest.TestCase):
-    """Deck-design specimen sheets: fetched on demand into a private temporary folder, never into Theodore's folder.
-    In process, so it also runs on Windows (the client suite against the fake server runs on macOS and Linux)."""
+    """Deck-design specimen sheets: online on every call (contract C6), as files only for a shell, in the session's own
+    private folder in Theodore's work folder (<home>/work/scratch/sheets/<session>/). In process, so it also runs on
+    Windows (the client suite against the fake server runs on macOS and Linux)."""
 
     JPEG = b"\xff\xd8\xff\xe0 sheet \xff\xd9"
 
@@ -422,37 +423,51 @@ class Specimens(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(work, ignore_errors=True)
 
-    def answer(self, body: bytes, sha: str | None = None, kind: str = "image/jpeg"):
-        import email.message
-        headers = email.message.Message()
-        headers["Content-Type"] = kind
-        headers["X-Theodore-Sha256"] = sha or hashlib.sha256(body).hexdigest()
-        return 200, headers, body
+    def batch(self, sheets: dict, sha: str | None = None, kind: str = "image/jpeg"):
+        """A Texts whose one request is answered by a batch zip of these sheets, as the service sends it."""
+        import io
+        import zipfile
+        from theodore_client.service import texts
+
+        def send(_self, method, url, what, **kwargs):
+            sent.append((method, url, kwargs.get("body")))
+            entries, buffer = [], io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+                members = []
+                for item in kwargs["body"]["items"]:
+                    data = sheets.get(item["file"])
+                    if data is None:
+                        entries.append({"id": item["id"], "status": 404})
+                        continue
+                    entries.append({"id": item["id"], "status": 200, "etag": '"b1-' + "a" * 32 + '"', "member": f"{item['id']}.jpg",
+                                    "sha256": sha or hashlib.sha256(data).hexdigest(), "content_type": kind})
+                    members.append((f"{item['id']}.jpg", data))
+                archive.writestr("index.json", json.dumps({"v": 1, "version": "g1", "items": entries}))
+                for name, data in members:
+                    archive.writestr(name, data)
+            return 200, {}, buffer.getvalue()
+        sent: list = []
+        store = texts.Texts(credential=lambda: "secret", require=lambda skill: {"plan": "beta"})
+        return store, sent, mock.patch.object(texts.Texts, "_send", send)
 
     def test_the_folder_and_the_files_are_the_current_users_alone(self):
         from theodore_client import commands, specimens
-        with client_home() as home, self.temp() as root:
+        from theodore_client.service import texts
+        with client_home() as home, self.temp():
             core.home().ensure()
-            calls = []
-
-            def fake(route, what, **kwargs):
-                calls.append((route, kwargs))
-                return self.answer(self.JPEG)
+            store, sent, patched = self.batch({"cover-01.jpg": self.JPEG, "b.jpg": self.JPEG + b"b"})
             out = []
-            with mock.patch.object(account, "require", return_value={"plan": "beta"}), mock.patch.object(commands, "_api", side_effect=fake), \
+            with patched, mock.patch.object(texts, "current", return_value=store), \
                     mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
                 self.assertEqual(commands.specimen(["cover-01.jpg", "cover-01.jpg", "b.jpg"]), 0)
-            self.assertEqual([c[0] for c in calls], ["guide_specimen", "guide_specimen"], "a name given twice is fetched once")
-            for _route, kwargs in calls:
-                self.assertEqual((kwargs["query"], kwargs["redirects"], kwargs["limit"]), ({"skill": "deck-design"}, False, 1 << 20))
+            self.assertEqual(len(sent), 1, "one request for the call")
+            self.assertEqual([item["file"] for item in sent[0][2]["items"]], ["cover-01.jpg", "b.jpg"], "a name given twice is asked once")
             self.assertEqual(len(out), 3)
             self.assertEqual(out[0], out[1])
             self.assertNotIn("\\", out[0], "forward slashes on every system")
             path = Path(out[0])
             self.assertTrue(path.is_absolute() and path.read_bytes() == self.JPEG)
-            self.assertEqual(path.parent.parent, root)
-            self.assertTrue(path.parent.name.startswith("theodore-specimens-"))
-            self.assertNotIn(home.resolve(), path.resolve().parents)
+            self.assertEqual(path.parent.parent, (home / "work" / "scratch" / "sheets").resolve())
             if sys.platform == "win32":
                 import subprocess
                 for target in (path.parent, path):
@@ -470,45 +485,55 @@ class Specimens(unittest.TestCase):
 
     def test_a_folder_that_cannot_be_made_private_is_not_used(self):
         from theodore_client import specimens
-        with client_home(), self.temp() as root:
+        with client_home(), self.temp():
             core.home().ensure()
-            with mock.patch.object(specimens, "_make_private", side_effect=OSError("icacls failed")):
+            store, _sent, patched = self.batch({"a.jpg": self.JPEG})
+            with patched, mock.patch.object(specimens, "_make_private", side_effect=OSError("icacls failed")):
                 with self.assertRaises(core.Status) as raised:
-                    specimens.make_folder()
+                    store.sheet_files(["a.jpg"])
             self.assertEqual(raised.exception.name, "INTERNAL")
-            self.assertEqual(list(root.iterdir()), [])
+            self.assertEqual(list(specimens.sheets_root().rglob("*")), [], "no folder, no file")
 
     def test_a_refused_sheet_leaves_nothing(self):
-        from theodore_client import commands
-        for answer, status in ((lambda: self.answer(self.JPEG, sha="1" * 64), "RETRY"), (lambda: self.answer(self.JPEG, kind="text/html"), "INTERNAL"),
-                               (lambda: (_ for _ in ()).throw(api.TooLarge(1 << 20)), "INTERNAL")):
-            with client_home(), self.temp() as root:
+        from theodore_client import specimens
+        for answer, status in ((dict(sha="1" * 64), "RETRY"), (dict(kind="text/html"), "INTERNAL")):
+            with client_home(), self.temp():
                 core.home().ensure()
-                with mock.patch.object(account, "require", return_value={}), mock.patch.object(commands, "_api", side_effect=lambda *a, **k: answer()):
+                store, _sent, patched = self.batch({"a.jpg": self.JPEG}, **answer)
+                with patched:
                     with self.assertRaises(core.Status) as raised:
-                        commands.specimen(["a.jpg"])
+                        store.sheet_files(["a.jpg"])
                 self.assertEqual(raised.exception.name, status)
-                self.assertEqual(list(root.iterdir()), [])
-
-    def test_a_folder_removed_while_the_sheets_arrive_is_a_retry(self):
-        """The folder of a run can go under it (an uninstall, a sign-out in another window): the next sheet then has
-        nowhere to go. That is said as a retry, not as an internal error that sends the assistant to doctor."""
-        from theodore_client import commands
-        with client_home(), self.temp() as root:
+                self.assertEqual(list(specimens.sheets_root().rglob("*.jpg")), [])
+        with client_home(), self.temp():
             core.home().ensure()
-            made = []
-
-            def fake(route, what, **kwargs):
-                if made:                # the second sheet: the folder has gone meanwhile
-                    core.remove_tree(made[0])
-                made.extend(root.glob("theodore-specimens-*"))
-                return self.answer(self.JPEG)
-            with mock.patch.object(account, "require", return_value={}), mock.patch.object(commands, "_api", side_effect=fake):
+            store, _sent, patched = self.batch({"big.jpg": b"\xff\xd8" + b"x" * (1 << 20)})
+            with patched:
                 with self.assertRaises(core.Status) as raised:
-                    commands.specimen(["a.jpg", "b.jpg"])
+                    store.sheet_files(["big.jpg"])
+            self.assertEqual(raised.exception.name, "INTERNAL")
+            self.assertIn("1 MiB", raised.exception.summary)
+
+    def test_a_folder_removed_while_the_sheets_are_written_is_a_retry(self):
+        """The session's folder can go under a call (an uninstall, a sign-out in another window): the next sheet then has
+        nowhere to go. That is said as a retry, not as an internal error that sends the assistant to doctor."""
+        from theodore_client.service import texts
+        with client_home(), self.temp():
+            core.home().ensure()
+            store, _sent, patched = self.batch({"a.jpg": self.JPEG, "b.jpg": self.JPEG + b"b"})
+            real = texts.Texts._write_sheet
+
+            def write(path, raw):
+                written = real(path, raw)
+                core.remove_tree(path.parent)       # the folder goes after the first sheet
+                return written
+            with patched, mock.patch.object(texts.Texts, "_write_sheet", staticmethod(write)), \
+                    mock.patch.object(texts.Texts, "_private_folder", lambda self, session: texts.specimens.sheets_root() / "shell"):
+                (texts.specimens.sheets_root() / "shell").mkdir(parents=True)
+                with self.assertRaises(core.Status) as raised:
+                    store.sheet_files(["a.jpg", "b.jpg"])
             self.assertEqual(raised.exception.name, "RETRY")
-            self.assertIn("specimen b.jpg", raised.exception.summary)
-            self.assertEqual(list(root.iterdir()), [])
+            self.assertIn("b.jpg", raised.exception.summary)
 
     def test_a_response_is_read_up_to_its_limit_and_no_further(self):
         import io

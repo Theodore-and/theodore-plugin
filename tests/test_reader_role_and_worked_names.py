@@ -61,11 +61,11 @@ class SectionListForTheReader(ClientCase):
     def test_the_pptx_index_is_asked_with_the_readers_role(self):
         self.ready()
         self.api.guide_index = index()
-        for args, expected in ((("--role", "slide"), {"form": "index", "role": "slide"}), ((), {"form": "index"})):
-            before = len(self.api.requests)
+        for args, expected in ((("--role", "slide"), {"skill": "pptx", "role": "slide"}), ((), {"skill": "pptx", "role": "lead"})):
+            before = len(self.api.batches)
             self.assertStatus(self.client("guide", "pptx", "helpers", *args), "USAGE", 64)
-            asked = [r["query"] for r in self.api.requests[before:]
-                     if r["path"].startswith("/v1/guide/pptx") and r["query"].get("form") == "index"]
+            asked = [{"skill": item["skill"], "role": item.get("role")} for items in self.api.batches[before:] for item in items
+                     if item["type"] == "index"]
             self.assertEqual(asked, [expected], args)
 
 
@@ -90,9 +90,13 @@ class BindingsLineInTheToolServer(McpCase):
         self.ready()
         server = self.server()
         slide = server.call("guide", skill="pptx", role="slide")["content"][0]["text"]
-        self.assertIn("guide pptx <name> --role slide   (a name that is not one lists them)", slide)
+        # the guide tool's reader has the plugin's tools: the line in the tool form (lane J's J2 wording)
+        self.assertIn('a text this manual names  ->  the Theodore tool guide with skill "pptx" and section "<name>" and role "slide"'
+                      "   (a name that is not one lists them)", slide)
         lead = server.call("guide", skill="pptx")["content"][0]["text"]
-        self.assertIn("guide pptx <name>   (a name that is not one lists them)", lead)
+        self.assertIn('a text this manual names  ->  the Theodore tool guide with skill "pptx" and section "<name>"'
+                      "   (a name that is not one lists them)", lead)
+        self.assertNotIn('and role "slide"', lead)
         server.close()
 
 
@@ -135,10 +139,10 @@ class WorkedNamesFromTheLauncher(ClientCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             lines = result.stdout.splitlines()
             self.assertEqual(len(lines), 1, lines)
-            self.assertTrue(lines[0].endswith("/" + WORKED_SHEET), lines[0])
+            self.assertTrue(lines[0].endswith("-" + WORKED_SHEET), lines[0])
         linked = self.client("specimen", "specimens/cover-01.jpg")
         self.assertEqual(linked.returncode, 0, linked.stdout + linked.stderr)
-        self.assertTrue(linked.stdout.strip().endswith("/cover-01.jpg"))
+        self.assertTrue(linked.stdout.strip().endswith("-cover-01.jpg"))
 
     def test_a_mistyped_worked_sheet_and_an_unlisted_ordinary_one_are_refused(self):
         first, _nxt, _tell = self.assertStatus(self.client("specimen", "worked-02-sumary-chain.jpg"), "USAGE", 64)

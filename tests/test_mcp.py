@@ -240,8 +240,8 @@ class Guide(McpCase):
         be reached after every attempt is named first, never dropped silently."""
         self.ready()
         self.api.guides["pptx"][""] = "SERVED-POINTER.\n"
-        self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]
-        text = self.server(env={"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}).call("guide", skill="pptx")["content"][0]["text"]
+        self.api.guide_delays["pptx"] = [2.0]
+        text = self.server(env={"THEODORE_TEST_TEXTS_TIMEOUT": "1.0"}).call("guide", skill="pptx")["content"][0]["text"]
         self.assertTrue(text.splitlines()[1].startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), text[:400])
         self.assertNotIn("SERVED-POINTER", text)
         self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
@@ -477,15 +477,15 @@ class Specimen(McpCase):
         self.api.specimens = {name: JPEG + name.encode() for name in names}
         server = self.server()
         asked = [names[3], names[0], names[5], names[1], names[4], names[2]]
-        before = len([r for r in self.api.requests if r["path"].startswith("/v1/guide/specimens/")])
+        before = len(self.api.batches)
         content = server.call("specimen", file=asked)["content"]
         self.assertEqual(len(content), 12)
         for i, name in enumerate(asked):
             self.assertEqual(content[2 * i], {"type": "text", "text": name})
             self.assertEqual((content[2 * i + 1]["type"], content[2 * i + 1]["mimeType"]), ("image", "image/jpeg"))
             self.assertEqual(base64.b64decode(content[2 * i + 1]["data"]), JPEG + name.encode())
-        fetched = [r for r in self.api.requests if r["path"].startswith("/v1/guide/specimens/")][before:]
-        self.assertEqual(len(fetched), 6, "each sheet is one fetch")
+        sheets = [[item["file"] for item in items if item["type"] == "sheet"] for items in self.api.batches[before:]]
+        self.assertEqual([one for one in sheets if one], [asked], "the six sheets in one request (contract C6)")
         # one file, as before: the image alone
         self.assertEqual([b["type"] for b in server.call("specimen", file=names[0])["content"]], ["image"])
         # a list of one is the list form
@@ -692,48 +692,30 @@ class ReuseBounds(McpCase):
 
 
 class HeldBounds(unittest.TestCase):
-    """The two stores of the service's texts (service/texts.py), in-process: count and byte bounds, oldest evicted
-    first, a version change drops everything of the old version."""
+    """What the service's texts hold (service/texts.py, contract C6): bodies in memory only, bounded in bytes, least
+    recently used first; an item larger than the bound is not held; a refusal empties it (tests/test_texts.py)."""
 
     def setUp(self):
         sys.path.insert(0, str(CLIENT_DIR))
         from theodore_client.service import texts
         self.texts_module = texts
-        self.texts = texts.Texts()
 
-    def test_sheets_are_bounded_in_count_oldest_first(self):
-        held, most = self.texts._sheets, self.texts_module.HELD_SHEETS_MAX
-        for i in range(most + 5):
-            self.texts._hold_sheet(f"s{i}.jpg", ("h", b"x", None))
-        self.assertEqual(len(held), most)
-        self.assertNotIn("s0.jpg", held)
-        self.assertIn(f"s{most + 4}.jpg", held)
-
-    def test_sheets_are_bounded_in_bytes(self):
-        limit = self.texts_module.HELD_SHEET_BYTES_MAX
-        big = b"x" * (limit // 4 + 1)
+    def test_bodies_are_bounded_in_bytes_least_recently_used_first(self):
+        held = self.texts_module._Held(limit=1000)
         for i in range(5):
-            self.texts._hold_sheet(f"b{i}.jpg", ("h", big, None))
-        self.assertLessEqual(sum(len(v[1]) for v in self.texts._sheets.values()), limit)
-        self.assertEqual(list(self.texts._sheets), ["b2.jpg", "b3.jpg", "b4.jpg"])
+            held.put(("sheet", f"s{i}.jpg"), f'"e{i}"', b"x" * 300, "")
+        self.assertEqual(len(held), 3)
+        self.assertIsNone(held.get(("sheet", "s0.jpg")))
+        self.assertIsNotNone(held.get(("sheet", "s2.jpg")))          # used: the newest now
+        held.put(("sheet", "s5.jpg"), '"e5"', b"x" * 300, "")
+        self.assertIsNotNone(held.get(("sheet", "s2.jpg")), "the one used last stays")
+        self.assertIsNone(held.get(("sheet", "s3.jpg")), "the least recently used goes first")
 
-    def test_references_are_bounded_in_count_and_characters(self):
-        for i in range(self.texts_module.HELD_GUIDES_MAX + 3):
-            self.texts._hold_guide(("deck-design", f"r{i}", ""), ("e", "t"))
-        self.assertEqual(len(self.texts._guides), self.texts_module.HELD_GUIDES_MAX)
-        huge = "t" * (self.texts_module.HELD_GUIDE_CHARS_MAX + 1)
-        self.texts._hold_guide(("deck-design", "huge", ""), ("e", huge))
-        self.assertNotIn(("deck-design", "huge", ""), self.texts._guides, "an item larger than the bound is not held")
-
-    def test_a_new_version_drops_everything_of_the_old_one(self):
-        told = []
-        self.texts._notify = lambda: told.append(1)
-        self.texts._index = {"version": "g1", "sections": [], "specimens": ["a.jpg"], "etag": '"v1"'}
-        self.texts._hold_sheet("a.jpg", ("h", b"x", '"v1"'))
-        self.texts._hold_guide(("deck-design", "craft", ""), ("e", "t"))
-        self.texts._adopt({"version": "g2", "sections": [], "specimens": ["a.jpg"], "etag": '"v2"'})
-        self.assertEqual((self.texts._sheets, self.texts._guides), ({}, {}))
-        self.assertEqual(told, [1], "the relays are told the names changed")
+    def test_an_item_larger_than_the_bound_is_not_held(self):
+        held = self.texts_module._Held(limit=100)
+        held.put(("section", "deck-design", "huge", "lead", "tool"), '"e"', b"t" * 101, "")
+        self.assertEqual(len(held), 0)
+        self.assertEqual(self.texts_module.HELD_MAX_BYTES, 64 << 20)
 
 
 class SkillBody(ClientCase):
