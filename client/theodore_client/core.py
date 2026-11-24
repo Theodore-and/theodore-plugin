@@ -951,7 +951,7 @@ def read_json(path: Path, default=None):
 
 def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")    # per thread: the service writes from many
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(tmp, flags, 0o600 if mode is None else mode)
     with os.fdopen(fd, "wb") as handle:
