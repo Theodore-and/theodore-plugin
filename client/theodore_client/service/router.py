@@ -266,8 +266,9 @@ class Router:
 
     def call_ended(self, call: Call) -> None:
         with self.lock:
-            self.running = max(0, self.running - 1)
-            self.last_request = time.monotonic()
+            if self.calls.get((call.session, call.id)) is call:
+                self.running = max(0, self.running - 1)
+                self.last_request = time.monotonic()
         self.service.call_ended(call)
 
     def cancel(self, client, call_id: str) -> None:

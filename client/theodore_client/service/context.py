@@ -4,7 +4,7 @@ The client's modules learn the assistant they serve from the environment (core.h
 command learns refusals into process globals (core.mark_refused). One service answers many sessions at once, so:
 
 - `install_environ()` makes `os.environ` read the current call's overlay first (C1's allow-list: CLAUDECODE,
-  CLAUDE_CODE_SESSION_ID, CLAUDE_PLUGIN_ROOT, CODEX_THREAD_ID, THEODORE_*), over the service's own environment, from
+  CLAUDE_CODE_SESSION_ID, CLAUDE_PID, CLAUDE_PLUGIN_ROOT, CODEX_THREAD_ID, THEODORE_*), over the service's own environment, from
   which the host markers are removed at start. A value of None in the overlay hides a variable for the call.
 - `entered(ctx)` sets the call for this thread. Its refusal facts are core's per-thread scope (core.begin_call).
 """
@@ -19,7 +19,7 @@ import threading
 
 _LOCAL = threading.local()
 
-ALLOWED = re.compile(r"^(CLAUDECODE|CLAUDE_CODE_SESSION_ID|CLAUDE_PLUGIN_ROOT|CODEX_THREAD_ID|THEODORE_[A-Z0-9_]+)$")
+ALLOWED = re.compile(r"^(CLAUDECODE|CLAUDE_CODE_SESSION_ID|CLAUDE_PID|CLAUDE_PLUGIN_ROOT|CODEX_THREAD_ID|THEODORE_[A-Z0-9_]+)$")
 # Never taken from a call: they name the service's own home and its service, which one call cannot change.
 FIXED = ("THEODORE_HOME", "THEODORE_API_BASE", "THEODORE_CREDENTIAL_STORE", "THEODORE_WORK_DIR", "THEODORE_RESIDENT")
 HOST_MARKERS = ("CLAUDECODE", "CLAUDE_PID", "THEODORE_HOST")

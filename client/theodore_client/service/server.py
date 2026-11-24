@@ -310,6 +310,23 @@ class Service:
         for client in relays:
             client.send(frame)
 
+    def internal_call(self, tool: str, args: list[str]) -> int:
+        """A call the service makes for itself (the daily prune): run as a client's would, its frames discarded."""
+        client = Client(self, None)
+        client.alive = False                # nothing is sent anywhere
+        client.role, client.session_id, client.host = "probe", f"service-{self.pid}", "unknown"
+        frame = {"t": "call", "id": f"internal-{secrets.token_hex(4)}", "tool": tool, "args": list(args), "cwd": str(self.home),
+                 "images": False}
+        call = routing.Call(self.router, client, frame)
+        from . import tools
+        try:
+            code, _pending = tools.run(self, call)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"internal {tool} {args[:2]}: {exc.__class__.__name__}: {exc}")
+            return 78
+        self.log(f"internal {tool} {' '.join(args[:2])}: exit {code}")
+        return code
+
     def broadcast(self, frame: dict) -> None:
         with self.clients_lock:
             clients = list(self.clients)

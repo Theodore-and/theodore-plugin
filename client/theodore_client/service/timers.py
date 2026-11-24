@@ -27,6 +27,7 @@ UPDATE_EVERY_S = 6 * 3600.0
 HEARTBEAT_EVERY_S = 600.0
 POOL_EVERY_S = 10.0
 MARKERS_EVERY_S = 86400.0
+PRUNE_EVERY_S = 86400.0            # the engine's store and caches (`pptx cache prune`; lane E's store.prune), daily
 
 
 class Timers:
@@ -45,6 +46,7 @@ class Timers:
             [UPDATE_EVERY_S, self._updates, now + UPDATE_EVERY_S],
             [SWEEP_EVERY_S, self._sweep, now + 10.0],
             [MARKERS_EVERY_S, self._markers, now + 15.0],
+            [PRUNE_EVERY_S, self._prune, now + 3600.0],
         ]
 
     def start(self) -> None:
@@ -125,6 +127,13 @@ class Timers:
     def _sweep(self) -> None:
         from .. import specimens
         specimens.sweep()
+
+    def _prune(self) -> None:
+        """Once a day, when nothing runs: `pptx cache prune` on a warm worker (fragments, pages and emits no record
+        names after 7 days, archives after 30, the store under its cap: C3 "Finish, restore, prune")."""
+        if self.service.router.running or self.service.draining:
+            return
+        self.service.internal_call("pptx", ["cache", "prune"])
 
     def _markers(self) -> None:
         """state/servers/<pid>: the markers today's MCP servers left; one naming a dead process goes."""
