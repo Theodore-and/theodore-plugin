@@ -29,6 +29,8 @@ from . import endpoint, frames, router as routing, sessions as sessions_mod
 LINGER_S = float(os.environ.get("THEODORE_SERVICE_LINGER_S") or 100.0)
 IDLE_S = float(os.environ.get("THEODORE_SERVICE_IDLE_S") or 600.0)       # with no relay attached, after the last request
 TICK_S = 0.5
+API_WARM_WAIT_S = 1.5             # a session's first request waits this long at most for the connections opened at start
+API_FRESH_S = 60.0                # a session opening later than this after them tops the kept connections up again
 HANDOVER_CAP_S = 900.0             # a hand-over waits for calls in flight at most this long (a stuck call)
 LOG_MAX = 1 << 20
 
@@ -86,6 +88,8 @@ class Service:
         self.licence = None
         self.timers = None
         self.client_stamp = None
+        self.api_warm = threading.Event()     # set once the connections opened at start are up (or after API_WARM_WAIT_S)
+        self.api_warm_at = time.monotonic()
 
     # --- log ------------------------------------------------------------------------------------------------------
 
@@ -127,6 +131,9 @@ class Service:
         credentials.keep_in_memory()            # read once, again when the files that change with it change
         if getattr(api, "KEPT", None) is not None and hasattr(api, "DEFAULT_POOL"):
             api.DEFAULT_POOL = api.KEPT         # every request of this process over the kept-alive connections
+            self._warm_api()
+        else:
+            self.api_warm.set()
         chat.install(self)
         self.licence = licence.Licence(self)
         self.texts = texts.Texts(credential=self.licence.credential, require=self.licence.require_texts,
@@ -136,6 +143,23 @@ class Service:
             use(self.texts)
         self.pool = workers.Pool(self)
         self.timers = timers.Timers(self)
+
+    def _warm_api(self) -> None:
+        """api.KEPT_WARM connections to the API, opened side by side now, each with its TCP and TLS set-up done (lane
+        L1, IR1's line 4: the guide calls of a lead and four designers at once each find one). `api_warm` is set once
+        they are up, or after API_WARM_WAIT_S (offline, a slow network)."""
+        from .. import api
+        pool, count = api.KEPT, max(1, int(getattr(api, "KEPT_WARM", 1)))
+        before = pool.opened
+        pool.warm(count)
+
+        def watch() -> None:
+            deadline = time.monotonic() + API_WARM_WAIT_S
+            while time.monotonic() < deadline and pool.opened - before < count:
+                time.sleep(0.02)
+            self.api_warm_at = time.monotonic()
+            self.api_warm.set()
+        threading.Thread(target=watch, name="service-api-warm", daemon=True).start()
 
     def serve_forever(self) -> int:
         threading.Thread(target=self._tick_loop, name="service-tick", daemon=True).start()
@@ -277,8 +301,19 @@ class Service:
 
     def _session_opened(self, session) -> None:
         self.log(f"session opened ({session.host})")
-        with contextlib.suppress(Exception):
-            self.texts.session_open(session.id, session.host)
+
+        def texts_open() -> None:
+            # The session's cheap first request (lane D) goes on a connection the start opened, not one of its own. A
+            # session opening after a quiet while first tops the kept connections up to api.KEPT_WARM for its burst
+            # (an idle connection is dropped after 4 minutes).
+            self.api_warm.wait(API_WARM_WAIT_S)
+            if time.monotonic() - self.api_warm_at > API_FRESH_S:
+                with contextlib.suppress(Exception):
+                    from .. import api
+                    api.KEPT.warm(api.KEPT_WARM)
+            with contextlib.suppress(Exception):
+                self.texts.session_open(session.id, session.host)
+        threading.Thread(target=texts_open, name="service-session-open", daemon=True).start()
         with contextlib.suppress(Exception):
             self.pool.warm_current()
         with contextlib.suppress(Exception):
