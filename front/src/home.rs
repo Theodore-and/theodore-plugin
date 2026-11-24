@@ -53,7 +53,7 @@ pub fn default_home() -> PathBuf {
     new
 }
 
-/// The plugin folder this program was shipped in (`<plugin>/scripts/<this>`, or `<plugin>/scripts/Windows_NT/<this>`),
+/// The plugin folder this program was shipped in (`<plugin>/scripts/<this>`),
 /// when it was: the relay's `--plugin-root` when the host gave none, and where the set-up launcher is found.
 pub fn plugin_root_of_exe() -> Option<PathBuf> {
     let exe = sys::simplify(fs::canonicalize(env::current_exe().ok()?).ok()?);

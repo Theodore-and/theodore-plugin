@@ -3218,9 +3218,9 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
 
 # Codex's server entry on Windows, by the published `sh` form it replaces: the plugin's command (scripts/, which runs
 # the native front when the plugin carries it, else the launcher), or the launcher itself in a plugin before it.
-CODEX_MCP_WINDOWS_COMMANDS = {"./scripts/unix/theodore": "./scripts/Windows_NT/theodore.cmd",
+CODEX_MCP_WINDOWS_COMMANDS = {"./scripts/theodore": "./scripts/theodore.cmd",
                               "./skills/pptx/scripts/theodore": "./skills/pptx/scripts/theodore.cmd"}
-CODEX_MCP_WINDOWS_COMMAND = CODEX_MCP_WINDOWS_COMMANDS["./scripts/unix/theodore"]
+CODEX_MCP_WINDOWS_COMMAND = CODEX_MCP_WINDOWS_COMMANDS["./scripts/theodore"]
 
 
 def _codex_mcp_for_windows(path: Path) -> None:
@@ -3307,8 +3307,7 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
     else:
         plugin = home.plugin / "plugins" / "theodore"
         for program in [plugin / "skills" / name / "scripts" / "theodore" for name in ("pptx", "deck-design")] + \
-                [plugin / "scripts" / name for name in ("unix/theodore", "Darwin/theodore", "Linux/theodore", "theodore-darwin",
-                                                        "theodore-linux-x64", "theodore-linux-arm64")]:
+                [plugin / "scripts" / name for name in ("theodore", "theodore-darwin", "theodore-linux-x64", "theodore-linux-arm64")]:
             if program.exists():
                 program.chmod(0o755)
     front.refresh()                     # the native front this plugin carries, and launch.json (front.py)

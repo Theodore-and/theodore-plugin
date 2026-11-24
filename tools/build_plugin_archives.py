@@ -19,10 +19,10 @@ manifest-unset or an all-zero key): such a plugin would refuse to start for ever
 (tools/sync_launchers.py --env ... --keys ...). The release step always passes --release.
 
 --front <dir> adds the native front's builds from <dir> to the plugin's scripts/ folder (theodore-darwin,
-theodore-linux-x64, theodore-linux-arm64, and theodore.exe into scripts/Windows_NT/: ci/front-build.sh makes them,
-.github/workflows/front.yml signs them). They are never in the repository. A release refuses a theodore.exe without an
-Authenticode signature: until the front is signed, Windows keeps the launcher and the client's own MCP server
-(scripts/Windows_NT/theodore.cmd falls back to them).
+theodore-linux-x64, theodore-linux-arm64, theodore.exe: ci/front-build.sh makes them, .github/workflows/front.yml
+signs them). They are never in the repository. A release refuses a theodore.exe without an Authenticode signature:
+until the front is signed, Windows keeps the launcher and the client's own MCP server (scripts/theodore.cmd falls back
+to them).
 """
 
 from __future__ import annotations
@@ -39,10 +39,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EPOCH = (2024, 1, 1, 0, 0, 0)
 EXECUTABLE = {"theodore", "theodore-darwin", "theodore-linux-x64", "theodore-linux-arm64"}
-# The front's builds, by file name, and where each goes in the plugin (the Windows one beside the command its MCP entry
-# names there, scripts/Windows_NT/: contract C0-2).
+# The front's builds, by file name, and where each goes in the plugin: beside the command its MCP entry names, whose
+# .exe the Windows host starts by its extension (contract C0-2, W2m).
 FRONT_FILES = {"theodore-darwin": "scripts/theodore-darwin", "theodore-linux-x64": "scripts/theodore-linux-x64",
-               "theodore-linux-arm64": "scripts/theodore-linux-arm64", "theodore.exe": "scripts/Windows_NT/theodore.exe"}
+               "theodore-linux-arm64": "scripts/theodore-linux-arm64", "theodore.exe": "scripts/theodore.exe"}
 
 
 def tree_files(root: Path) -> list[Path]:

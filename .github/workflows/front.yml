@@ -13,7 +13,7 @@
 # (base64 of the App Store Connect API key); AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (an app with the
 # "Trusted Signing Certificate Profile Signer" role), AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
 # AZURE_SIGNING_PROFILE. Without them the jobs build and test, and the signing steps are skipped (an unsigned
-# theodore.exe is then left out of the archives: Windows keeps the launcher, scripts/Windows_NT/theodore.cmd).
+# theodore.exe is then left out of the archives: Windows keeps the launcher, scripts/theodore.cmd).
 name: front
 
 on:
