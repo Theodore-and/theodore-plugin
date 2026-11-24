@@ -880,8 +880,8 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None, for_host: str 
     sys.stdout = _ThreadOutput(sys.stderr)  # a call's prints go to its own capture; anything else to standard error
     core.scope_refusals_per_thread()        # calls run side by side: each learns its own refusals
     credentials.keep_in_memory()            # read once (a keychain process on a Mac), again when it changes
-    api.DEFAULT_POOL = api.KEPT             # every call over kept-alive connections; one opened now, in the background
-    api.KEPT.warm()
+    api.DEFAULT_POOL = api.KEPT             # every call over kept-alive connections; a few opened now, in the background,
+    api.KEPT.warm(api.KEPT_WARM)            # so the calls of a lead and its designers at once each find one
     # Named by its process id while it runs, so `theodore uninstall` can stop it (Windows cannot delete the runtime a
     # running server uses). Removed at exit; one left by a killed server names a dead process, which is ignored.
     marker = None
