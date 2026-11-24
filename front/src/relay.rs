@@ -237,7 +237,8 @@ pub fn main(opts: Opts) -> i32 {
         child_in: Mutex::new(None),
         child: Mutex::new(None),
     });
-    if relay.launch.oneshot || home::env_value("THEODORE_RESIDENT").is_some_and(|v| v.trim() == "0") {
+    let resident_off = home::env_value("THEODORE_RESIDENT").is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"));
+    if relay.launch.oneshot || resident_off {
         // No service on this installation: the client's server from the first message on.
         relay.fallback(None);
     }
@@ -618,7 +619,7 @@ impl Relay {
                 self.fallback(Some("the connection to the service could not be shared".into()));
                 return;
             };
-            let flush: Vec<u64> = {
+            let gen = {
                 let mut st = lock(&self.st);
                 if st.closing {
                     return;
@@ -632,13 +633,17 @@ impl Relay {
                     return;
                 }
                 st.gen += 1;
-                *lock(&self.writer) = Some((st.gen, writer));
+                st.gen
+            };
+            // The writing half is put in place with no other lock held (a write in progress elsewhere holds it).
+            *lock(&self.writer) = Some((gen, writer));
+            let flush: Vec<u64> = {
+                let mut st = lock(&self.st);
                 st.mode = Mode::Connected;
                 st.draining = false;
                 st.calls.retain(|_, c| !c.cancelled && !c.internal);
                 st.calls.keys().copied().collect()
             };
-            let gen = lock(&self.st).gen;
             for n in flush {
                 self.send(n, gen);
             }
