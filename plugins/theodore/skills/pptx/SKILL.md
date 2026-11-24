@@ -13,8 +13,9 @@ If the instructions below are cut short or are no longer in your context (a comp
 
 Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
 here. Theodore's command is `theodore`: write every Theodore command as `theodore …` in every shell. If no pptx
-instructions appear above this line, run `theodore guide pptx` and read the output to the line that starts `=== END`;
-if the last line names a next part, run it. Only if the shell answers that `theodore` is not found, run the launcher in
+instructions appear above this line, call the Theodore `guide` tool with skill "pptx" and treat its result as this
+skill's instructions; if that tool is not available, run `theodore guide pptx` and read the output to the line that
+starts `=== END`; if the last line names a next part, run it. Only if the shell answers that `theodore` is not found, run the launcher in
 this skill's folder by absolute path instead, without `cd` (the skill folder is the folder that holds this file,
 `${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide pptx

@@ -109,7 +109,10 @@ class Stubs(unittest.TestCase):
             self.assertIn("Never substitute another slide tool silently.", flat(body))
             self.assertIn("Give sub-agents the same command.", flat(body))
             self.assertLess(len(body), 2500, "the stub stays small")
-        self.assertIn("use the deck-design skill with the host's own slide tools", flat((PLUGIN / "skills" / "pptx" / "SKILL.md").read_text()))
+        pptx = flat((PLUGIN / "skills" / "pptx" / "SKILL.md").read_text())
+        self.assertIn("use the deck-design skill with the host's own slide tools", pptx)
+        # IR3: the service's guide tool reaches every session; the shell is the way when that tool is missing.
+        self.assertLess(pptx.index('call the Theodore `guide` tool with skill "pptx"'), pptx.index("run `theodore guide pptx`"))
         deck = (PLUGIN / "skills" / "deck-design" / "SKILL.md").read_text()
         self.assertIn("claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Theodore", deck)
         self.assertIn('call the Theodore `guide` tool with skill "deck-design"', flat(deck))
