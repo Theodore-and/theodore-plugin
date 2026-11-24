@@ -422,8 +422,6 @@ class StudioParts(ServiceCase):
             answer = json.loads(Collector.stdout(frames_[name]).splitlines()[0])
             self.assertEqual(Path(answer["argv"][1]).name, name, "each designer got its own part's answer")
             batches.append(answer.get("batch", 1))
-            if answer.get("batch"):
-                self.assertEqual((done.get("counters") or {}).get("files_written"), 1, "its own part's counts")
         self.assertIn(1, batches, "the first to arrive ran alone, at once")
         self.assertGreaterEqual(max(batches), 2, "those that followed went in one build")
         self.assertLessEqual(len(set(batches)), 3, f"few builds for seven parts: {batches}")
@@ -438,6 +436,17 @@ class StudioParts(ServiceCase):
         answer = json.loads(Collector.stdout(frames_["s02"]).splitlines()[0])
         self.assertNotIn("batch", answer, "alone: the plain apply, no window, no batch")
         self.assertEqual(answer["argv"][:2], ["apply", str(lead / "parts" / "s02")])
+
+    def test_a_run_refused_as_a_whole_answers_every_designer(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1", "FAKE_PARTS_REFUSED": "1"})
+        self.service()
+        lead = self.prepared(5)
+        frames_ = self.burst(lead, [f"s{i:02d}" for i in range(1, 6)])
+        exits = sorted(Collector.done(got)["exit"] for got in frames_.values())
+        self.assertIn(2, exits, "those gathered got the run's own refusal")
+        refused = [got for got in frames_.values() if Collector.done(got)["exit"] == 2]
+        self.assertTrue(all('"ok": false' in Collector.stdout(got) for got in refused))
+        self.assertIn(0, exits, "the one that ran alone, as a plain apply, was not refused")
 
     def test_parts_that_come_in_turn_are_never_gathered(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})

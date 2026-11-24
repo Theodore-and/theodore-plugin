@@ -160,12 +160,15 @@ while True:
         for row in rows:
             os.makedirs(row["workspace"], exist_ok=True)
         say(json.dumps({"ok": True, "prepared": "parts", "in_turn": "--in-turn" in argv, "parts": rows}) + "\n")
+    elif verb == "apply" and FEATURES and len(targets) > 1 and os.environ.get("FAKE_PARTS_REFUSED"):
+        code = 2                            # the call itself refused (lane G): one object, no parts
+        say(json.dumps({"ok": False, "summary": "refused", "error": "parts of two decks"}) + "\n")
     elif verb == "apply" and FEATURES and len(targets) > 1:
-        parts = targets
-        for part in parts:                  # lane G's several parts in one build: one JSON line per part
-            say(json.dumps({"part": part, "exit": 0, "answer": {"argv": ["apply", part], "pid": os.getpid(),
-                                                                 "batch": len(parts), "t0": t0, "t1": time.time()},
-                            "counters": {"files_written": 1}}) + "\n")
+        # lane G's several parts in one build: one object, each part's own exit and stdout (what it alone prints)
+        rows = [{"part": part, "exit": 0, "stdout": json.dumps({"argv": ["apply", part], "pid": os.getpid(),
+                                                                "batch": len(targets), "t0": t0, "t1": time.time()}) + "\n"}
+                for part in targets]
+        say(json.dumps({"ok": True, "summary": f"{len(rows)} parts applied in 1 build(s)", "builds": 1, "parts": rows}) + "\n")
     elif verb == "write":
         path = argv[1]
         try:

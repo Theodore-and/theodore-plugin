@@ -5,10 +5,10 @@ of the same lead that arrive while others of it are waiting or were dispatched l
 (at most GATHER_S), divided over the free workers of the engine (about four parts a worker on 4 vCPU: lane F), and
 sent as one call per worker, `pptx apply <part> <part> ...` (lane G): one build for its parts. When no worker is
 free, they wait here, so the parts that arrive meanwhile join them, and each worker that comes free takes an equal
-share. The engine answers one JSON line per part (`part`, `exit`, `answer` or `stdout`, optional `counters` and
-`pending`); each designer's call gets its own part's answer and exit as if it had run alone, and its pictures attach
-from that answer. A run that fails as a whole (usage, licence, internal) answers every designer with its exit and
-output.
+share. The engine answers one JSON object whose `parts` rows hold each part's `exit` and `stdout`, exactly what an
+apply of that part alone prints (lane G); each designer's call gets those as its own, and its pictures attach from
+them. A run refused as a whole (exit 2: not parts of one deck; licence 77; internal 78) answers every designer with
+its exit and output. A part already waiting in the gathering is never named twice: a second apply of it runs after.
 
 Only for a lead whose `prepare` answered that its parts come at once (`in_turn` false), and only when a ready worker
 of the engine lists "apply-parts" in `ready.features` (C2); otherwise each part's apply runs alone, as before.
@@ -137,9 +137,15 @@ class Gatherer:
         alone = False
         with self.lock:
             lead = self.leads.setdefault(shape, _Lead())
+            if any(other.part == part for other in lead.pending):
+                twice = True                    # the same part already waits: a run names each part once (lane G)
+            else:
+                twice = False
             lead.argv, lead.env = list(argv), dict(env)
             now = time.monotonic()
-            if not lead.pending and now - lead.last_dispatch > GATHER_S and self._free(version) > 0:
+            if twice:
+                pass
+            elif not lead.pending and now - lead.last_dispatch > GATHER_S and self._free(version) > 0:
                 alone = True                            # a lone part apply: at once, never a window
                 lead.last_dispatch = now
                 self._claim(version)
@@ -149,6 +155,8 @@ class Gatherer:
                     lead.timer = threading.Timer(GATHER_S, self._cut, args=(shape,))
                     lead.timer.daemon = True
                     lead.timer.start()
+        if twice:                               # after the waiting one: the part's key lock keeps them in turn
+            return self.pool.run(call, version, argv, env, None)
         if alone:
             return self._alone(call, version, argv, env)
         waited_since = time.monotonic()
@@ -261,31 +269,24 @@ class Gatherer:
         output = "".join(call.stdout)
         rows: dict[str, dict] = {}
         if code == 0:
-            for line in output.splitlines():
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
+            try:
+                answer = json.loads(output)
+            except ValueError:
+                answer = {}
+            for row in (answer.get("parts") if isinstance(answer, dict) else None) or []:
                 if isinstance(row, dict) and isinstance(row.get("part"), str):
-                    rows[os.path.realpath(row["part"])] = row
+                    rows[os.path.realpath(os.path.join(call.cwd or ".", row["part"]))] = row
         for position, member in enumerate(batch):
             row = rows.get(member.part)
-            if code != 0:
+            if code != 0:                       # the call itself refused (2), licence (77), internal (78): everyone
                 member.exit, member.output = code, output
-            elif row is None:
+            elif row is None or not isinstance(row.get("stdout"), str):
                 member.exit = 78
                 member.output = ("THEODORE INTERNAL: the engine's answer for this part was missing from the parts "
                                  "applied together.\nNEXT: run the same apply again.\n")
             else:
                 member.exit = int(row.get("exit") or 0)
-                text = row.get("stdout")
-                member.output = text if isinstance(text, str) else json.dumps(row.get("answer"), ensure_ascii=False) + "\n"
-                member.pending = list(row.get("pending") or [])
-            own = row.get("counters") if row else None
-            if isinstance(own, dict):
-                member.counters = dict(own)
-            elif position == 0:
-                member.counters = dict(call.counters)   # the batch's own counts, once
-            if position == 0 and call.counters.get("spawned"):
-                member.counters["spawned"] = call.counters["spawned"]
+                member.output = row["stdout"]   # exactly what `pptx apply <that part>` alone prints (lane G)
+            if position == 0:
+                member.counters = dict(call.counters)   # the run's own counts, once
             member.done.set()
