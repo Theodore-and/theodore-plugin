@@ -90,9 +90,13 @@ class BindingsLineInTheToolServer(McpCase):
         self.ready()
         server = self.server()
         slide = server.call("guide", skill="pptx", role="slide")["content"][0]["text"]
-        self.assertIn("guide pptx <name> --role slide   (a name that is not one lists them)", slide)
+        # the guide tool's reader has the plugin's tools: the line in the tool form (lane J's J2 wording)
+        self.assertIn('a text this manual names  ->  the Theodore tool guide with skill "pptx" and section "<name>" and role "slide"'
+                      "   (a name that is not one lists them)", slide)
         lead = server.call("guide", skill="pptx")["content"][0]["text"]
-        self.assertIn("guide pptx <name>   (a name that is not one lists them)", lead)
+        self.assertIn('a text this manual names  ->  the Theodore tool guide with skill "pptx" and section "<name>"'
+                      "   (a name that is not one lists them)", lead)
+        self.assertNotIn('and role "slide"', lead)
         server.close()
 
 

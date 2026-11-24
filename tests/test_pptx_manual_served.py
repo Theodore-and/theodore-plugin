@@ -183,7 +183,9 @@ class ServedManual(ClientCase):
         self.assertFalse(answer.get("isError"), answer)
         self.assertEqual(answer["content"][0]["text"], self.BUILD_API, "a tool result is not cut by the host: the text comes whole")
         manual = server.call("guide", skill="pptx")["content"][0]["text"]
-        self.assertIn("guide pptx pptxgenjs", manual, "in a coding assistant the manual's pointers are the commands")
+        self.assertIn('[pptxgenjs.md](the Theodore tool guide with skill "pptx" and section "pptxgenjs")', manual,
+                      "a reader with the plugin's tools: the manual's pointers name the guide tool")
+        self.assertNotIn("guide pptx pptxgenjs", manual, "never a shell command where the tool is there")
         missing = server.call("guide", skill="pptx", section="helpers")
         self.assertTrue(missing["isError"])
         self.assertIn("pptxgenjs", missing["content"][0]["text"].splitlines()[0])
