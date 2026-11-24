@@ -148,6 +148,37 @@ class Platform(PlatformCase):
         again = json.loads(Collector.stdout(self.call(client2, got2, "b", ["echo"])).splitlines()[0])
         self.assertEqual(again["argv"], ["echo"])
 
+    def test_a_client_update_hands_over_without_losing_the_call_in_flight(self):
+        client, got = self.client()
+        record = endpoint.read_service_json(self.home)
+        self.call(client, got, "inflight", ["sleep", "2"], wait=False)
+        time.sleep(0.4)
+        # a newer client installed beside it, named by launch.json (C1) and client/current.txt
+        new = self.home / "client" / "9.9.9"
+        shutil.copytree(CLIENT_DIR, new, ignore=shutil.ignore_patterns("__pycache__"))
+        init = new / "theodore_client" / "__init__.py"
+        import theodore_client
+        init.write_text(init.read_text().replace(f'"{theodore_client.__version__}"', '"9.9.9"'))
+        (self.home / "bin").mkdir(exist_ok=True)
+        (self.home / "bin" / "launch.json").write_text(json.dumps({
+            "v": 1, "home": str(self.home), "runtime_python": sys.executable, "client_dir": str(new), "client_version": "9.9.9",
+            "engine_dir": str(self.home / "engines" / ENGINE), "engine_version": ENGINE}))
+        (self.home / "client" / "current.txt").write_text("9.9.9")
+        self.assertEqual(Collector.done(got.wait("inflight", 60))["exit"], 0, "the call in flight finished")
+        deadline = time.monotonic() + 30
+        successor = None
+        while time.monotonic() < deadline:
+            successor = endpoint.read_service_json(self.home)
+            if successor and successor["pid"] != record["pid"]:
+                break
+            time.sleep(0.1)
+        self.assertEqual((successor or {}).get("version"), "9.9.9")
+        if IS_WINDOWS:          # the old service's pipe instances may still hold the plain name: then its own (A-3)
+            self.assertTrue(successor["endpoint"]["address"].startswith("\\.\pipe\theodore-"))
+        after = json.loads(Collector.stdout(self.call(client, got, "after", ["echo", "new"])).splitlines()[0])
+        self.assertEqual(after["argv"], ["echo", "new"])
+        self.assertTrue(self.gone(record["pid"], 15), "the old service left")
+
     def test_the_relay_and_the_lifecycle(self):
         proc = subprocess.Popen([sys.executable, "-I", str(CLIENT_DIR), "mcp"], env=self.env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(self.work))
