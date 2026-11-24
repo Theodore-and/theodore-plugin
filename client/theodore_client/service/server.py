@@ -24,7 +24,9 @@ from pathlib import Path
 from .. import __version__
 from . import endpoint, frames, router as routing, sessions as sessions_mod
 
-LINGER_S = float(os.environ.get("THEODORE_SERVICE_LINGER_S") or 120.0)   # after the last relay detaches
+# After the last relay detaches: 100 s, so that the service, its workers and what they started (a warm office, which
+# takes up to 10 s to stop) have all ended 2 minutes after it (PLAN §3 A; DESIGN §3.5 "after 2 minutes").
+LINGER_S = float(os.environ.get("THEODORE_SERVICE_LINGER_S") or 100.0)
 IDLE_S = float(os.environ.get("THEODORE_SERVICE_IDLE_S") or 600.0)       # with no relay attached, after the last request
 TICK_S = 0.5
 HANDOVER_CAP_S = 900.0             # a hand-over waits for calls in flight at most this long (a stuck call)
