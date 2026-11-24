@@ -351,5 +351,36 @@ class QuickSweep(HomeCase):
             self.specimens.sweep(quick=True)
         self.assertFalse(stray.exists(), "ten minutes on, a verb lists them")
 
+class CredentialKept(HomeCase):
+    """The tool server keeps the credential in memory: one keychain or DPAPI read per change, not two per guide call."""
+
+    def setUp(self):
+        super().setUp()
+        from theodore_client import credentials
+        self.credentials = credentials
+        patches = [mock.patch.object(credentials, "_KEEP", True), mock.patch.object(credentials, "_KEPT", None),
+                   mock.patch.dict(os.environ, {"THEODORE_CREDENTIAL_STORE": "file"}),
+                   mock.patch.object(core, "_CONFIG", {"api_base": "https://api.example.test"})]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_read_once_and_again_when_it_changes(self):
+        reads = []
+        real = self.credentials._load
+        with mock.patch.object(self.credentials, "_load", side_effect=lambda: reads.append(1) or real()):
+            self.assertIsNone(self.credentials.load())
+            self.credentials.store("iid-1", "sec-0123456789abcdef0123")
+            self.assertEqual(self.credentials.load()["installation_id"], "iid-1")
+            self.assertEqual(self.credentials.load()["installation_id"], "iid-1")
+            self.assertEqual(len(reads), 2, "after a store, read once, then from memory")
+            other = json.loads((self.home / "state" / "credentials").read_text())     # another process signs in again
+            other["installation_id"] = "iid-2"
+            time.sleep(0.01)
+            (self.home / "state" / "credentials").write_text(json.dumps(other))
+            self.assertEqual(self.credentials.load()["installation_id"], "iid-2", "a change on disk is seen")
+            self.credentials.delete()
+            self.assertIsNone(self.credentials.load(), "deleted: gone from memory too")
+
 if __name__ == "__main__":
     unittest.main()

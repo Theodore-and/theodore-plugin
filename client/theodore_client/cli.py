@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
+from pathlib import Path
 
 from . import account, api, commands, core, specimens, usage, withdraw
 from .core import Status
@@ -270,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         blocked = None
         try:
             core.check_environment("mcp")
+            _newest_launcher()
         except Status as status:
             blocked = status
         with contextlib.suppress(Exception):
@@ -288,11 +291,21 @@ def main(argv: list[str] | None = None) -> int:
     return _main(argv)
 
 
+def _newest_launcher() -> None:
+    """A launcher in a skill folder (THEODORE_SKILL_DIR) that is newer than <home>/bin's stable copy replaces it, as the
+    launcher's own step 2 did before its hot path (0.4.34) went straight to this client: a few small reads, and the
+    three files written only when that copy is older (core.refresh_stable_launcher, which never raises)."""
+    skill = os.environ.get("THEODORE_SKILL_DIR")
+    if skill:
+        core.refresh_stable_launcher([Path(skill) / "scripts"])
+
+
 def _main(argv: list[str]) -> int:
     try:
         core.check_environment(argv[0] if argv else None)      # before anything touches the folder
     except Status as status:
         return core.emit(status)
+    _newest_launcher()
     try:
         account.register_disk_secrets()     # before any server diagnostic can be printed
     except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run

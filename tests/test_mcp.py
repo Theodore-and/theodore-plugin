@@ -487,8 +487,9 @@ SHEETS = [f"sheet-{i:02d}.jpg" for i in range(14)]
 
 
 class Reuse(McpCase):
-    """One server for a session (Claude Code's sub-agents call the same process): each sheet is fetched once per guide
-    version; held sheets are confirmed by one conditional index request per interval; a refusal drops everything."""
+    """One server for a session (Claude Code's sub-agents call the same process). Served online on every call (C6, 24
+    November 2026): each held sheet is asked for again in every call that returns it, conditionally, and the service
+    answers 304; its bytes stay in memory only; a refusal drops everything."""
 
     def setUp(self):
         super().setUp()
@@ -499,7 +500,7 @@ class Reuse(McpCase):
     def sheet_answers(self, status: int) -> int:
         return sum(v for (route, _n, code), v in self.api.served.items() if route == "specimen" and code == status)
 
-    def test_several_callers_fetch_each_sheet_once(self):
+    def test_several_callers_fetch_each_sheet_once_and_every_call_asks_again(self):
         server = self.server()
         server.send("tools/list")
         calls = [SHEETS[0:6], SHEETS[3:9], SHEETS[6:12], SHEETS[8:14], SHEETS[0:3] + SHEETS[10:13], SHEETS[1:7], [SHEETS[5]]]
@@ -509,27 +510,24 @@ class Reuse(McpCase):
             self.assertEqual(images, [JPEG + name.encode() for name in asked])
         for name in SHEETS:
             self.assertEqual(self.api.served["specimen", name, 200], 1, name)
-        self.assertEqual(self.sheet_answers(304), 0, "within the interval nothing is asked again")
+        asked = sum(len(c) for c in calls * 3)
+        self.assertEqual(self.sheet_answers(304), asked - len(SHEETS), "every later call asks again: 304, served from memory")
         self.assertEqual(self.api.served["index", "", 200], 1)
-        self.assertEqual(self.api.served["index", "", 304], 0)
 
-    def test_after_the_interval_one_index_check_confirms_every_held_sheet(self):
-        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+    def test_a_held_sheet_is_asked_for_in_every_call_that_returns_it(self):
+        server = self.server()
         server.send("tools/list")
         server.call("specimen", file=SHEETS[0:6])
-        time.sleep(1.2)
         server.call("specimen", file=SHEETS[0:6])
         server.call("specimen", file=SHEETS[0:3])
-        self.assertEqual(self.api.served["index", "", 304], 1, "one conditional index request")
         self.assertEqual(self.sheet_answers(200), 6)
-        self.assertEqual(self.sheet_answers(304), 0)
+        self.assertEqual(self.sheet_answers(304), 9, "no window in which a held sheet is served without the service")
 
-    def test_a_revoked_device_is_refused_after_the_interval_and_nothing_held_is_served(self):
-        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+    def test_a_revoked_device_is_refused_at_its_next_call_and_nothing_held_is_served(self):
+        server = self.server()
         server.send("tools/list")
         server.call("specimen", file=SHEETS[0:2])
         self.api.revoke_all()
-        time.sleep(1.2)
         result = server.call("specimen", file=SHEETS[0])
         self.assertTrue(result["content"][0]["text"].startswith("THEODORE SIGN_IN_REQUIRED: "), result)
         self.assertNotIn("image", [b["type"] for b in result["content"]])
@@ -539,18 +537,15 @@ class Reuse(McpCase):
         self.assertEqual([b["type"] for b in server.call("specimen", file=SHEETS[0])["content"]], ["image"])
         self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2)
 
-    def test_a_new_guide_version_drops_the_held_sheets(self):
-        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+    def test_a_changed_sheet_comes_new_at_the_next_call(self):
+        server = self.server()
         server.send("tools/list")
         server.call("specimen", file=SHEETS[0:2])
         self.api.specimens[SHEETS[0]] = JPEG + b"v2"
-        self.api.guide_index = {**self.api.guide_index, "version": "g2"}
-        time.sleep(1.2)
         content = server.call("specimen", file=SHEETS[0:2])["content"]
         self.assertEqual(base64.b64decode(content[1]["data"]), JPEG + b"v2")
-        self.assertEqual(self.api.served["index", "", 200], 2)
-        self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2)
-        self.assertEqual(self.api.served["specimen", SHEETS[1], 200], 2, "nothing of the old version is kept: fetched again")
+        self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2, "its ETag no longer matches: sent again")
+        self.assertEqual(self.api.served["specimen", SHEETS[1], 304], 1, "the unchanged one: 304")
 
     def test_without_the_index_each_held_sheet_is_checked_on_its_own(self):
         self.api.guide_index = None
@@ -571,6 +566,71 @@ class Reuse(McpCase):
         self.assertTrue(result["content"][0]["text"].startswith("THEODORE SIGN_IN_REQUIRED: "), "refused at once")
 
 
+class SideBySide(McpCase):
+    """0.4.34: every tools/call runs in a thread of its own and answers when it is done, over kept-alive connections; a
+    lead and its designers no longer queue behind each other's network waits (five calls sent at once finished 0.84 to
+    3.8 s, one after another, on 24 November)."""
+
+    def setUp(self):
+        super().setUp()
+        self.api.bundle_usage = False           # the log-in answer says the usage switch: no first refresh in a call
+        self.sign_in()
+        for i in range(5):
+            self.api.guides["deck-design"][f"part{i}"] = f"TEXT {i}\n"
+
+    def send_at_once(self, server: Server, calls: list[dict]) -> dict[int, tuple[float, dict]]:
+        ids = []
+        for arguments in calls:
+            server.next_id += 1
+            ids.append(server.next_id)
+            message = {"jsonrpc": "2.0", "id": server.next_id, "method": "tools/call", "params": {"name": "guide", "arguments": arguments}}
+            server.proc.stdin.write(json.dumps(message).encode() + b"\n")
+        server.proc.stdin.flush()
+        started, done = time.monotonic(), {}
+        while len(done) < len(ids):
+            answer = json.loads(server.proc.stdout.readline())
+            if "id" in answer:
+                done[answer["id"]] = (time.monotonic() - started, answer)
+        return done
+
+    def test_five_calls_sent_at_once_finish_together(self):
+        self.api.latency = 1.0                  # every request waits a second, as a slow network would
+        server = self.server()
+        done = self.send_at_once(server, [{"skill": "deck-design", "section": f"part{i}"} for i in range(5)])
+        times = sorted(at for at, _answer in done.values())
+        self.assertLess(times[-1] - times[0], 0.6, f"side by side, not one second apart: {times}")
+        self.assertLess(times[-1], 4.0, times)
+        texts = {answer["result"]["content"][0]["text"] for _at, answer in done.values()}
+        self.assertEqual(texts, {f"TEXT {i}\n" for i in range(5)}, "each answer under its own id")
+        self.assertEqual(server.close(), b"", "nothing but answers on standard output")
+
+    def test_a_repeat_call_asks_again_on_a_kept_connection(self):
+        accepted = []
+        accept = self.api.server.get_request
+
+        def counting():
+            connection = accept()
+            accepted.append(connection)
+            return connection
+        self.api.server.get_request = counting
+        server = self.server()
+        for _ in range(6):
+            self.assertEqual(server.call("guide", skill="deck-design", section="part0")["content"][0]["text"], "TEXT 0\n")
+        self.assertEqual((self.api.served["guide", "part0", 200], self.api.served["guide", "part0", 304]), (1, 5),
+                         "every call goes to the service; a repeat is a 304")
+        self.assertLessEqual(len(accepted), 2, "one kept-alive connection (and the one opened at start), not one per call")
+        server.close()
+
+    def test_answers_written_side_by_side_never_interleave(self):
+        self.api.latency = 0.2
+        server = self.server()
+        big = "y" * 200_000 + "\n"
+        self.api.guides["deck-design"]["big"] = big
+        done = self.send_at_once(server, [{"skill": "deck-design", "section": "big"}] * 6)
+        self.assertEqual({answer["result"]["content"][0]["text"] for _at, answer in done.values()}, {big})
+        self.assertEqual(server.close(), b"")
+
+
 class ReuseBounds(McpCase):
     """Lane SERVE review: every refusal empties what is held, the 60-second bound holds per sheet, and what is held is
     bounded in count and bytes."""
@@ -582,23 +642,25 @@ class ReuseBounds(McpCase):
         self.api.guide_index = {"version": "g1", "sections": [{"name": "craft"}], "specimens": [{"file": n} for n in SHEETS]}
 
     def test_the_kill_switch_empties_what_is_held(self):
-        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+        server = self.server()
         server.send("tools/list")
         server.call("specimen", file=SHEETS[0:2])
         self.api.guide_kill = True
-        time.sleep(1.2)
         result = server.call("specimen", file=SHEETS[0])
         self.assertTrue(result["content"][0]["text"].startswith("THEODORE UPDATE_REQUIRED: "), result)
         self.api.guide_kill = False
         self.assertEqual([b["type"] for b in server.call("specimen", file=SHEETS[0])["content"]], ["image"])
         self.assertEqual(self.api.served["specimen", SHEETS[0], 200], 2, "nothing held survived the refusal")
 
-    def test_a_long_batch_checks_the_confirmation_for_every_sheet(self):
-        self.api.specimen_delay = 0.6        # each sheet takes 0.6 s to arrive
-        server = self.server(env={"THEODORE_TEST_REVALIDATE_SECONDS": "1"})
+    def test_the_sheets_of_one_call_are_asked_for_side_by_side(self):
+        self.api.latency = 0.8               # every request waits 0.8 s, as a slow network's round trip
+        server = self.server()
         server.send("tools/list")
-        server.call("specimen", file=SHEETS[0:4])                   # 2.4 s: the confirmation is renewed during the batch
-        self.assertGreaterEqual(self.api.served["index", "", 304], 1, "the age is checked per sheet, not once per call")
+        started = time.monotonic()
+        content = server.call("specimen", file=SHEETS[0:4])["content"]
+        elapsed = time.monotonic() - started
+        self.assertEqual(len([b for b in content if b["type"] == "image"]), 4)
+        self.assertLess(elapsed, 4 * 0.8, "four requests at once, not one after another")
 
 
 class HeldBounds(unittest.TestCase):
