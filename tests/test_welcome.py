@@ -60,52 +60,104 @@ class Studio(ClientCase):
         self.assertEqual(self.api.studio_puts, [])
 
 
+# The words every ready says (lane L3): the welcome's opening, Studio's state, the asset packs' state.
+WELCOME = ("Welcome to Theodore: it is set up and signed in on this computer, and from now on I build your presentations "
+           "with it, as PowerPoint files.")
+STUDIO_ON = "Studio is on: each slide gets a deeper design pass, which uses more of your AI plan."
+STUDIO_OFF = "Studio is off: slides get a simpler design pass that uses less of your AI plan."
+PACKS_READY = "Its icon, flag, map and background libraries are ready."
+# An assistant runs the installer (Claude Code sets these for the commands it runs); a person's terminal has neither.
+ASSISTANT = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s-loaded"}
+
+
 class Welcome(ClientCase):
     def setUp(self):
         super().setUp()
         self.ready()
+        # the assistant's session already loaded Theodore (Claude Code 2.1.330 picks a new plugin up mid-session)
+        (self.box.home / "state").mkdir(parents=True, exist_ok=True)
+        (self.box.home / "state" / "sessions.json").write_text(json.dumps(
+            {"sessions": {"s-loaded": {"at": 4102444800, "loaded": {"pptx": {"version": "1.0.0", "at": 4102444800}}}}}))
 
-    def welcome(self, *args, env=None):
+    def welcome(self, *args, env=ASSISTANT):
         return self.client("welcome", *args, env=env)
 
-    def test_asks_about_studio_once_in_five_short_lines_at_most(self):
+    def test_states_studio_and_the_packs_in_five_short_lines_and_asks_nothing(self):
         _f, nxt, tell = self.assertStatus(self.welcome(), "OK", 0)
         text = tell.removeprefix("TELL THE USER: ")
-        self.assertTrue(text.startswith("Welcome to Theodore. It is set up and signed in on this computer."), text)
-        self.assertIn("From now on, when you ask me for a presentation, I build it as a PowerPoint file with Theodore.", text)
-        self.assertIn("Studio is on, so each slide gets a deeper design pass, which uses more of your AI plan. "
-                      "Would you like it off, for simpler slides that use less of it?", text)
-        self.assertNotIn("new session", text)                  # not run by an assistant that needs one
+        self.assertTrue(text.startswith(WELCOME), text)
+        self.assertIn(STUDIO_ON, text)
+        self.assertIn(PACKS_READY, text)
+        self.assertNotIn("?", text, "a state, never a question (24 Nov: he asked 'can you turn studio on?' 10 s later)")
+        self.assertNotIn("new session", text)
+        self.assertNotIn("quit the app", text, "the app's chats only when the user asks")
         self.assertNotRegex(text, MECHANISM)
         self.assertNotRegex(text, NO_TIME_CLAIM)
-        self.assertLessEqual(len(text), 520)
+        self.assertLessEqual(len(text), 600)
         self.assertIn("at most five short lines", nxt)
-        self.assertIn("if they answer that they want Studio off, run", nxt)
+        self.assertIn("if they say they want Studio off, run", nxt)
         self.assertIn("studio off", nxt)
-        self.assertIn("do not ask again", nxt)
         self.assertTrue(nxt.endswith(". This welcome is your whole closing message: say nothing about permissions, settings or "
                                      "uninstalling unless the user asks."), nxt)
-        self.assertTrue(json.loads((self.box.home / "state" / "welcome.json").read_text())["studio_asked"])
+        _f, _n, again = self.assertStatus(self.welcome(), "OK", 0)       # set up again: the state is said again
+        self.assertIn(STUDIO_ON, again)
 
-        _f, nxt, tell = self.assertStatus(self.welcome(), "OK", 0)       # set up again: the question is not repeated
-        self.assertNotIn("Studio", tell + nxt)
-        self.assertIn("Welcome to Theodore.", tell)
-
-    def test_no_studio_question_when_it_is_off_not_in_the_plan_not_honoured_or_not_readable(self):
-        for answer in ({"studio_enabled": False, "included": True, "available": True},
-                       {"studio_enabled": True, "included": False, "available": True},
-                       {"studio_enabled": True, "included": True, "available": False},
-                       None):
+    def test_studio_off_not_in_the_plan_or_not_readable(self):
+        for answer, said in (({"studio_enabled": False, "included": True, "available": True}, STUDIO_OFF),
+                             ({"studio_enabled": True, "included": False, "available": True},
+                              "Studio, a deeper design pass for each slide, is not part of your Theodore plan."),
+                             ({"studio_enabled": True, "included": True, "available": False}, None),
+                             (None, None)):
             self.api.studio = answer
             _f, nxt, tell = self.assertStatus(self.welcome(), "OK", 0)
-            self.assertNotIn("Studio", tell + nxt, answer)
-            self.assertNotIn("studio_asked", self.state("state/welcome.json"), answer)
+            if said:
+                self.assertIn(said, tell, answer)
+            else:
+                self.assertNotIn("Studio", tell, answer)
+            self.assertEqual("studio off" in nxt, bool(answer and answer["included"] and answer["available"]), (answer, nxt))
+            self.assertIn(PACKS_READY, tell)
 
-    def test_a_studio_answer_made_elsewhere_counts_as_asked(self):
-        self.assertStatus(self.client("studio", "off"), "OK", 0)
-        self.api.studio = {"studio_enabled": True, "included": True, "available": True}
-        _f, nxt, tell = self.assertStatus(self.welcome(), "OK", 0)
-        self.assertNotIn("Studio", tell + nxt)
+    def test_packs_still_downloading_say_about_how_much_is_left(self):
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], stdin=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        (self.box.home / "state" / "jobs" / "packs.json").write_text(json.dumps({"pid": proc.pid, "phase": "packs"}))
+        packs = json.loads((self.box.home / "packs" / "state.json").read_text())
+        packs["maps"].update(status="downloading", percent=50)
+        (self.box.home / "packs" / "state.json").write_text(json.dumps(packs))
+        update = self.state("state/update.json")
+        update["published_pack_sizes"] = {"icons": 30_000_000, "flags": 10_000_000, "maps": 40_000_000, "backgrounds": 15_000_000}
+        (self.box.home / "state" / "update.json").write_text(json.dumps(update))
+        _f, _n, tell = self.assertStatus(self.welcome(), "OK", 0)
+        self.assertIn("Its icon, flag, map and background libraries are finishing their download by themselves (about 20 MB "
+                      "left); a deck can start meanwhile.", tell)
+
+    def test_run_by_a_person_it_ends_in_plain_words_and_the_assistant_gives_the_welcome_later(self):
+        result = self.welcome(env={})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("THEODORE ", result.stdout, "no block written for an assistant")
+        self.assertNotIn("NEXT:", result.stdout)
+        self.assertEqual(result.stdout.splitlines(), ["Theodore is set up and signed in on this computer.", STUDIO_ON, PACKS_READY,
+                                                      "Go back to your assistant (Claude or Codex) and ask for your presentation there."])
+        self.assertTrue(self.state("state/welcome.json")["owed"])
+        # the person goes back to Claude and asks "now is it installed?": Theodore's check gives the welcome, once
+        first, nxt, tell = self.assertStatus(self.client("doctor", env=ASSISTANT), "OK", 0)
+        self.assertIn("Set-up is finished.", first)
+        self.assertTrue(tell.startswith("TELL THE USER: " + WELCOME), tell)
+        self.assertIn(STUDIO_ON, tell)
+        self.assertFalse(self.state("state/welcome.json")["owed"])
+        _f, _n, tell = self.assertStatus(self.client("status", env=ASSISTANT), "OK", 0)
+        self.assertEqual(tell, f"TELL THE USER: Theodore is ready. {STUDIO_ON} {PACKS_READY}")
+
+    def test_owed_to_an_assistant_that_never_checked_it_heads_its_first_instructions(self):
+        self.assertEqual(self.welcome(env={}).returncode, 0)
+        body = self.client("skill", "pptx", env=ASSISTANT).stdout
+        self.assertTrue(body.startswith(f"THEODORE NOTICE: Theodore is set up and signed in on this computer. {STUDIO_ON} "
+                                        f"{PACKS_READY} Tell the user once, in one or two lines; it does not stop this task.\n"),
+                        body[:400])
+        self.assertFalse(self.state("state/welcome.json")["owed"])
+        self.assertNotIn("THEODORE NOTICE: Theodore is set up", self.client("skill", "pptx", env=ASSISTANT).stdout, "once")
 
     def test_codex_needs_a_new_session_and_runs_nothing_else(self):
         _f, nxt, tell = self.assertStatus(self.welcome(env={"CODEX_THREAD_ID": "t-1"}), "OK", 0)
@@ -114,12 +166,8 @@ class Welcome(ClientCase):
         self.assertIn("ask them to start a new session first", nxt)
 
     def test_claude_code_needs_a_new_session_unless_this_session_already_loaded_theodore(self):
-        env = {"CLAUDE_CODE_SESSION_ID": "s-new"}
-        _f, _n, tell = self.assertStatus(self.welcome(env=env), "OK", 0)
+        _f, _n, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": "s-new"}), "OK", 0)
         self.assertIn("Start a new session, then ask for your first deck.", tell)
-        (self.box.home / "state").mkdir(parents=True, exist_ok=True)
-        (self.box.home / "state" / "sessions.json").write_text(json.dumps(
-            {"sessions": {"s-loaded": {"at": 4102444800, "loaded": {"pptx": {"version": "1.0.0", "at": 4102444800}}}}}))
         _f, _n, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": "s-loaded"}), "OK", 0)
         self.assertNotIn("new session", tell)
 
@@ -134,32 +182,35 @@ class Welcome(ClientCase):
                       "SETUP_IN_PROGRESS; when it says OK, its answer holds a short welcome for the user.", nxt)
         self.assertNotIn("Welcome", tell + nxt)
         self.assertTrue(self.state("state/welcome.json")["owed"])
-        self.assertNotIn("studio_asked", self.state("state/welcome.json"), "not asked yet")
 
-        first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5"), "OK", 0)
+        first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5", env=ASSISTANT), "OK", 0)
         self.assertIn("Set-up is finished.", first)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
-        self.assertIn("Studio is on, so each slide gets a deeper design pass", tell)
+        self.assertTrue(tell.startswith("TELL THE USER: " + WELCOME), tell)
+        self.assertIn(STUDIO_ON, tell)
         self.assertNotIn("A last download", tell)
         self.assertTrue(nxt.startswith("NEXT: give the user this welcome now, in this conversation, in at most five short lines"), nxt)
         self.assertIn("studio off", nxt)
-        self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
-                                     "uninstalling unless the user asks."), nxt)
         state = self.state("state/welcome.json")
         self.assertFalse(state["owed"])
-        self.assertTrue(state["given"] and state["studio_asked"])
+        self.assertTrue(state["given"])
 
-        _f, nxt, tell = self.assertStatus(self.client("status"), "OK", 0)             # given: later statuses as before
-        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+        _f, nxt, tell = self.assertStatus(self.client("status", env=ASSISTANT), "OK", 0)    # given: later statuses as before
+        self.assertEqual(tell, f"TELL THE USER: Theodore is ready. {STUDIO_ON} {PACKS_READY}")
         self.assertNotIn("welcome", nxt)
+
+    def test_run_by_a_person_while_it_downloads(self):
+        result = self.welcome("--downloading", env={})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0],
+                         "Theodore is installed on this computer and finishes a download by itself in the next few minutes.")
+        self.assertNotIn("THEODORE ", result.stdout)
+        self.assertTrue(self.state("state/welcome.json")["owed"])
 
     def test_a_status_with_no_welcome_owed_answers_as_before(self):
         _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
-        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+        self.assertEqual(tell, f"TELL THE USER: Theodore is ready. {STUDIO_ON} {PACKS_READY}")
         self.assertStatus(self.welcome(), "OK", 0)                                   # the ready form leaves nothing owed
         self.assertFalse(self.state("state/welcome.json")["owed"])
-        _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
-        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
 
     def test_in_codex_still_downloading_the_installer_gives_it_at_once(self):
         _f, nxt, tell = self.assertStatus(self.welcome("--downloading", env={"CODEX_THREAD_ID": "t-1"}), "OK", 0)
@@ -199,14 +250,14 @@ class WelcomeAfterSignInByLink(ClientCase):
         self.assertEqual((self.box.home / "state" / "jobs" / "setup.json").read_text(), setup_record,
                          "the engine is installed: no set-up job is started")
         self.assertIn("this computer is signed in to Theodore", first)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
-        self.assertIn("Studio is on, so each slide gets a deeper design pass", tell)
+        self.assertTrue(tell.startswith("TELL THE USER: " + WELCOME), tell)
+        self.assertIn(STUDIO_ON, tell)
         self.assertNotIn("A last download", tell)
         self.assertTrue(nxt.startswith("NEXT: give the user this welcome now, in this conversation, in at most five short lines"), nxt)
         self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
                                      "uninstalling unless the user asks."), nxt)
         state = self.state("state/welcome.json")
-        self.assertTrue(state["given"] and state["studio_asked"])
+        self.assertTrue(state["given"])
         self.assertFalse(state["owed"])
 
     def test_with_a_download_running_it_is_owed_and_the_first_status_that_says_ok_gives_it(self):
@@ -221,14 +272,14 @@ class WelcomeAfterSignInByLink(ClientCase):
         job.write_text(json.dumps({"pid": 0, "phase": "done", "percent": 100, "done": True}))
         first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5"), "OK", 0)
         self.assertIn("Set-up is finished.", first)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertTrue(tell.startswith("TELL THE USER: " + WELCOME), tell)
         self.assertNotIn("A last download", tell)
         self.assertTrue(nxt.startswith("NEXT: give the user this welcome now"), nxt)
         state = self.state("state/welcome.json")
         self.assertTrue(state["given"])
         self.assertFalse(state["owed"])
         _f, _n, tell = self.assertStatus(self.client("status"), "OK", 0)
-        self.assertEqual(tell, "TELL THE USER: Theodore is ready.")
+        self.assertEqual(tell, f"TELL THE USER: Theodore is ready. {STUDIO_ON} {PACKS_READY}")
 
     def test_with_no_engine_the_sign_in_starts_the_set_up_job_and_leaves_the_welcome_owed(self):
         """Staging run of 0.4.8: after a sign-in by link the engine was not installed and nothing was fetching it."""
@@ -241,7 +292,7 @@ class WelcomeAfterSignInByLink(ClientCase):
         self.box.wait_jobs()
         first, nxt, tell = self.assertStatus(self.client("status", "--wait", "5"), "OK", 0)
         self.assertIn(f"engine {self.ENGINE_VERSION}", first)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertTrue(tell.startswith("TELL THE USER: " + WELCOME), tell)
         self.assertTrue(self.state("state/welcome.json")["given"])
 
     def test_with_no_engine_in_codex_the_job_starts_and_the_welcome_comes_at_once(self):
@@ -259,7 +310,7 @@ class WelcomeAfterSignInByLink(ClientCase):
         self.addCleanup(jobs.chmod, 0o700)
         first, nxt, tell = self.assertStatus(self.sign_in_by_link(), "OK", 0)
         self.assertIn("this computer is signed in to Theodore", first)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore. It is set up and signed in on this computer."), tell)
+        self.assertTrue(tell.startswith("TELL THE USER: " + WELCOME), tell)
         self.assertNotIn("A last download", tell)
         self.assertTrue(self.state("state/welcome.json")["given"])
         self.assertIn("welcome: the set-up job did not start", (self.box.home / "logs" / "client.log").read_text())
@@ -277,7 +328,7 @@ class WelcomeAfterSignInByLink(ClientCase):
     def test_in_codex_with_a_download_running_it_is_given_at_once(self):
         self.setup_job_running()
         _f, nxt, tell = self.assertStatus(self.sign_in_by_link(env={"CODEX_THREAD_ID": "t-1"}), "OK", 0)
-        self.assertIn("Welcome to Theodore.", tell)
+        self.assertIn(WELCOME, tell)
         self.assertIn("A last download finishes by itself in the next few minutes. Start a new session, then ask for your first deck.", tell)
         self.assertIn("Apart from that, run no Theodore command in this session", nxt)
         self.assertNotIn("status --wait", nxt)

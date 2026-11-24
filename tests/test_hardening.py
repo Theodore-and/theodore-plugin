@@ -823,7 +823,11 @@ class WindowsRenderer(unittest.TestCase):
                     verdict = commands._doctor_verdict([check], snap, core.home())
                     return check, missing, verdict
 
-        with client_home(), mock.patch.object(commands, "needs_git_bash", return_value=False):
+        from theodore_client import welcome     # the ready line's Studio and pack sentences are test_welcome's subject
+        with client_home(), mock.patch.object(commands, "needs_git_bash", return_value=False), \
+                mock.patch.object(welcome, "studio_state", return_value=None), \
+                mock.patch.object(welcome, "packs_sentence", return_value=None), \
+                mock.patch.object(welcome, "_new_session_needed", return_value=True):
             check, missing, verdict = answer(powerpoint=True)
             self.assertEqual(check, ("ok", "renderer", "Microsoft PowerPoint, installed on this computer, turns decks into slide images; LibreOffice is not needed"))
             self.assertEqual(missing, [], "nothing missing: LibreOffice is not listed")
