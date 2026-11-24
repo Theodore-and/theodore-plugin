@@ -1,0 +1,779 @@
+"""Engine workers (DESIGN §3.2, §3.5, §4.4, §4.6; contract C2) and the one-shot path.
+
+A worker is `<runtime python> -I <engine>/skills/pptx/scripts/engine.py serve --protocol 1`, warm, one engine version,
+one call at a time, spoken to in C2 frames over its stdin and stdout. The pool keeps workers per engine version:
+1 on machines with 8 GB of RAM or less, else min(3, cores - 1), growing on demand (to MAX) and shrinking to 1 after
+5 idle minutes. A workspace key goes to the worker that served it last when that one is free; writes on one key run
+one at a time in arrival order; a read never waits behind a long call when another worker is free (the disk is the
+truth). A worker that dies answers its call with 75 (RETRY), or re-runs it once when that is safe (C2 "Crashes"); one
+past 800 MB or 2,000 calls is replaced by a spare.
+
+An engine without `engine.py` (up to rc.34), or a worker that cannot start, runs each command one-shot, as the client
+runs it today, but started from the warm service (no launcher, no client start).
+"""
+
+from __future__ import annotations
+
+import base64
+import codecs
+import contextlib
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+from .. import core, install
+from . import frames
+
+IS_WINDOWS = os.name == "nt"
+READY_WAIT_S = 90.0
+IDLE_SHRINK_S = 300.0
+RECYCLE_RSS_MB = 800.0
+RECYCLE_CALLS = 2000
+EXIT_GRACE_MS = 30000
+STATS_AFTER_S = 5.0
+CREATE_NO_WINDOW = 0x08000000
+RETRY_TEXT = ("THEODORE RETRY: Theodore's engine restarted during this command; nothing of it was written.\n"
+              "NEXT: run the same command again.\n"
+              "TELL THE USER: nothing; do not mention this to the user.\n")
+
+# --- what a call is -----------------------------------------------------------------------------------------------------
+
+LONG_VERBS = ("start", "apply", "finish", "render", "prepare", "split", "check", "rebase", "project", "task")
+READ_VERBS = ("list", "assets", "doctor", "cache", "--help", "-h", "help", "--version", "version")
+
+
+def classify(argv: list[str]) -> str:
+    """read, write or long (C2 `priority`)."""
+    verb = argv[0] if argv else "--help"
+    if verb in ("--help", "-h", "help") or "--help" in argv[:3] or "-h" in argv[:2]:
+        return "read"
+    if verb == "slide":
+        sub = argv[1] if len(argv) > 1 else ""
+        if sub in ("list", "show", "open"):
+            return "read"
+        return "long" if sub == "import" else "write"
+    if verb == "comments":
+        return "long" if "--translate" in argv else ("read" if len(argv) < 2 or argv[1] in ("list", "show") else "write")
+    if verb == "doctor":
+        return "long" if "--powerpoint" in argv else "read"
+    if verb == "cache":
+        return "write" if len(argv) > 1 and argv[1] == "prune" else "read"
+    if verb in READ_VERBS:
+        return "read"
+    if verb in LONG_VERBS:
+        return "long"
+    return "write"
+
+
+def _is_workspace(folder: Path) -> str | None:
+    """The workspace key of a folder (C3 marker key, or the 1.x key: sha256 of the real path), or None."""
+    try:
+        marker = folder / ".theodore.json"
+        if marker.is_file():
+            key = json.loads(marker.read_text(encoding="utf-8")).get("key")
+            if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{16}", key):
+                return key
+        if (folder / ".pptx-state").is_dir() or (folder / "task.json").is_file():
+            return hashlib.sha256(os.path.realpath(str(folder)).encode("utf-8")).hexdigest()[:16]
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def workspace_key(argv: list[str], cwd: str | None) -> str | None:
+    """The workspace a call works on: the first argument that is a workspace folder (absolute or under cwd), else None."""
+    for arg in argv[1:]:
+        if not arg or arg.startswith("-"):
+            continue
+        try:
+            path = Path(arg)
+            if not path.is_absolute() and cwd:
+                path = Path(cwd) / path
+            if path.is_dir():
+                key = _is_workspace(path)
+                if key:
+                    return key
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+# --- one engine version ---------------------------------------------------------------------------------------------------
+
+class Spec:
+    def __init__(self, version: str):
+        self.version = version
+        self.directory = install.engine_dir(version)
+        scripts = self.directory / "skills" / "pptx" / "scripts"
+        self.serve_script = scripts / "engine.py"
+        self.oneshot_script = scripts / "pptx.py"
+
+    def resident(self) -> bool:
+        if (os.environ.get("THEODORE_RESIDENT") or "").strip() == "0":
+            return False
+        return self.serve_script.is_file()
+
+    def python(self) -> str:
+        """The runtime's base interpreter (no venv redirector), as C2 says; else the interpreter this service runs on
+        (the runtime's own when installed; a checkout's when run from source)."""
+        runtime = core.home().runtime_python()
+        if runtime is not None and runtime.is_file():
+            return str(runtime)
+        return sys.executable
+
+    def oneshot_python(self) -> str:
+        """Today's interpreter for an engine run one-shot: the engine's venv, else the service's own."""
+        venv = install.engine_python(self.directory)
+        return str(venv) if venv.is_file() else sys.executable
+
+
+def _child_flags() -> dict:
+    return {"creationflags": CREATE_NO_WINDOW} if IS_WINDOWS else {}
+
+
+class _Job:
+    """A Windows job object with KILL_ON_JOB_CLOSE: every worker, and what it starts, ends with the service."""
+
+    def __init__(self):
+        self.handle = None
+        if not IS_WINDOWS:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+            class Basic(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+            class Extended(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_uint64 * 6),
+                            ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+            kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+            kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            job = kernel32.CreateJobObjectW(None, None)
+            if not job:
+                return
+            info = Extended()
+            info.BasicLimitInformation.LimitFlags = 0x2000 | 0x800     # KILL_ON_JOB_CLOSE, BREAKAWAY_OK (Office stays out)
+            if kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                self.handle = job
+                self._kernel32 = kernel32
+        except Exception:       # noqa: BLE001  without a job the workers still end on their stdin's EOF
+            self.handle = None
+
+    def assign(self, process: subprocess.Popen) -> None:
+        if self.handle is None:
+            return
+        with contextlib.suppress(Exception):
+            self._kernel32.AssignProcessToJobObject(self.handle, int(process._handle))      # noqa: SLF001
+
+
+class WorkerFailed(Exception):
+    """The worker died, or never became ready."""
+
+
+class Worker:
+    _counter = 0
+    _counter_lock = threading.Lock()
+
+    def __init__(self, pool: "Pool", spec: Spec):
+        self.pool = pool
+        self.spec = spec
+        self.process: subprocess.Popen | None = None
+        self.channel: frames.Channel | None = None
+        self.ready = threading.Event()
+        self.dead = threading.Event()
+        self.fatal: dict | None = None
+        self.info: dict = {}
+        self.busy = False
+        self.retiring = False
+        self.calls = 0
+        self.rss_mb = 0.0
+        self.last_used = time.monotonic()
+        self.keys: set[str] = set()
+        self._run_id = None
+        self._result: dict | None = None
+        self._result_ready = threading.Event()
+        self._call = None
+        self._inputs: list | None = None
+        self._committed = False
+        self._lock = threading.Lock()
+
+    @classmethod
+    def _next_id(cls) -> str:
+        with cls._counter_lock:
+            cls._counter += 1
+            return f"w{cls._counter}"
+
+    # --- life ---------------------------------------------------------------------------------------------------------
+
+    def start(self) -> None:
+        env = install.engine_env(self.spec.directory)
+        env["THEODORE_RESIDENT"] = "1"
+        env["THEODORE_WORK_DIR"] = str(core.home().root / "work")
+        env["PYTHONUNBUFFERED"] = "1"
+        command = [self.spec.python(), "-I", str(self.spec.serve_script), "serve", "--protocol", str(frames.PROTOCOL)]
+        work = core.home().root / "work"            # its own folder between calls (lane B: B-A-worker.md, 1)
+        work.mkdir(parents=True, exist_ok=True)
+        # Unbuffered pipes: no buffer lock a reader thread could hold when the service exits (Python aborts at
+        # shutdown on a daemon thread blocked inside a buffered read).
+        self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        env=env, cwd=str(work), close_fds=True, bufsize=0, **_child_flags())
+        self.pool.job.assign(self.process)
+        self.channel = frames.Channel(self.process.stdout, writer=self.process.stdin, name=f"worker {self.spec.version}")
+        threading.Thread(target=self._read_loop, name=f"worker-read-{self.process.pid}", daemon=True).start()
+        threading.Thread(target=self._stderr_loop, name=f"worker-err-{self.process.pid}", daemon=True).start()
+
+    def wait_ready(self, timeout: float = READY_WAIT_S) -> bool:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self.ready.wait(0.05):
+                return True
+            if self.dead.is_set():
+                return False
+        return self.ready.is_set()
+
+    def _stderr_loop(self) -> None:
+        stream = self.process.stderr
+        pid = self.process.pid
+        pending = b""
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                pending += chunk
+                *lines, pending = pending.split(b"\n")
+                for raw in lines:
+                    line = raw.decode("utf-8", "replace").rstrip()
+                    if line:
+                        self.pool.service.log(f"[worker {self.spec.version} {pid}] {line}")
+        except (OSError, ValueError):
+            pass
+        if pending.strip():
+            self.pool.service.log(f"[worker {self.spec.version} {pid}] {pending.decode('utf-8', 'replace').rstrip()}")
+
+    def _read_loop(self) -> None:
+        try:
+            while True:
+                frame = self.channel.read()
+                if frame is None:
+                    break
+                self._on_frame(frame)
+        except (frames.FrameError, OSError, ValueError) as exc:
+            self.pool.service.log(f"[worker {self.spec.version}] frames ended: {exc}")
+        finally:
+            self.dead.set()
+            with contextlib.suppress(Exception):
+                self.process.wait(timeout=5)
+            if not self.ready.is_set() and self.fatal is None and self.process.returncode == 77:
+                # A release build refuses the licence as its compiled container loads, before any frame: today's
+                # licence JSON line and exit 77 (lane B, B-A-worker.md 3).
+                self.fatal = {"t": "fatal", "code": "LICENCE", "message": "the engine refused the licence", "exit": 77}
+            for stream in (self.process.stdin, self.process.stdout):
+                with contextlib.suppress(Exception):
+                    stream.close()
+            self._result_ready.set()        # a call waiting for its done learns the worker is gone
+            self.pool.worker_died(self)
+
+    def _on_frame(self, frame: dict) -> None:
+        kind = frame.get("t")
+        if kind == "ready":
+            self.info = frame
+            self.rss_mb = float(frame.get("rss_mb") or 0)
+            self.ready.set()
+            return
+        if kind == "fatal":
+            self.fatal = frame
+            self.pool.service.log(f"[worker {self.spec.version}] fatal {frame.get('code')}: {frame.get('message')}")
+            return
+        if kind == "stats":
+            self.rss_mb = float(frame.get("rss_mb") or self.rss_mb)
+            return
+        if kind == "log":
+            self.pool.service.log(f"[worker {self.spec.version} {frame.get('level')}] {frame.get('message')}")
+            return
+        call = self._call
+        if call is None or frame.get("id") != self._run_id:
+            return
+        if kind == "out":
+            call.out(str(frame.get("data") or ""), "stderr" if frame.get("stream") == "stderr" else "stdout")
+        elif kind == "progress":
+            call.set_phase(str(frame.get("phase") or call.phase), frame.get("done"), frame.get("total"))
+        elif kind == "image":
+            call.image(str(frame.get("mime") or "image/jpeg"), str(frame.get("path") or ""), frame.get("data"),
+                       frame.get("slide"), frame.get("page"), frame.get("key"))
+            call.worker_images = True
+        elif kind == "inputs":
+            self._inputs = list(frame.get("files") or [])
+        elif kind == "committed":
+            self._committed = True
+        elif kind == "done":
+            self._result = frame
+            self._result_ready.set()
+
+    # --- calls ----------------------------------------------------------------------------------------------------------
+
+    def run(self, call, argv: list[str], env: dict, stdin: dict | None, key: str | None, priority: str) -> dict:
+        """Send one `run` and wait for its `done`. Returns the done frame plus `inputs` and `committed`; raises
+        WorkerFailed when the worker died before its done."""
+        with self._lock:
+            self._run_id = self._next_id()
+            self._result, self._inputs, self._committed = None, None, False
+            self._result_ready.clear()
+            self._call = call
+        frame = {"t": "run", "id": self._run_id, "argv": argv, "cwd": call.cwd, "env": env, "key": key,
+                 "priority": priority, "images": bool(call.images)}
+        if stdin is not None:
+            frame["stdin"] = stdin
+        if call.deadline_ms:
+            frame["deadline_ms"] = int(call.deadline_ms)
+        try:
+            self.channel.send(frame)
+        except (OSError, ValueError, frames.FrameError) as exc:
+            self._call = None
+            raise WorkerFailed(f"the worker could not take the call ({exc})") from None
+        call.worker = self
+        self._result_ready.wait()
+        call.worker = None
+        self._call = None
+        result = self._result
+        if result is None:
+            raise WorkerFailed("the worker ended during the call")
+        self.calls += 1
+        self.last_used = time.monotonic()
+        if result.get("key"):
+            self.keys.add(result["key"])
+        return {**result, "inputs": self._inputs, "committed": self._committed}
+
+    def cancel(self, call) -> None:
+        if self._call is call and self._run_id:
+            with contextlib.suppress(Exception):
+                self.channel.send({"t": "cancel", "id": self._run_id})
+
+    def ask_stats(self) -> None:
+        with contextlib.suppress(Exception):
+            self.channel.send({"t": "stats"})
+
+    def drop(self, key: str | None) -> None:
+        with contextlib.suppress(Exception):
+            self.channel.send({"t": "drop", "key": key})
+
+    def retire(self, grace_ms: int = EXIT_GRACE_MS) -> None:
+        self.retiring = True
+        with contextlib.suppress(Exception):
+            self.channel.send({"t": "exit", "grace_ms": int(grace_ms)})
+
+    def kill(self) -> None:
+        """End the process; its reader thread then sees the end of its stdout and closes it (a buffered stream closed
+        from another thread while one reads it would wait for that read forever)."""
+        with contextlib.suppress(Exception):
+            if self.process and self.process.poll() is None:
+                self.process.kill()
+        with contextlib.suppress(Exception):
+            self.process.stdin.close()
+
+
+# --- the pool -------------------------------------------------------------------------------------------------------------
+
+def _ram_bytes() -> int:
+    try:
+        if IS_WINDOWS:
+            import ctypes
+
+            class Memory(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong), ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong), ("sullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            memory = Memory()
+            memory.dwLength = ctypes.sizeof(Memory)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory))
+            return int(memory.ullTotalPhys)
+        if sys.platform == "darwin":
+            out = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, timeout=5)
+            return int(out.stdout.strip() or 0)
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except Exception:       # noqa: BLE001
+        return 8 << 30
+
+
+def pool_sizes() -> tuple[int, int]:
+    """(base, most) workers per engine version."""
+    forced = os.environ.get("THEODORE_SERVICE_WORKERS")
+    if forced and forced.isdigit() and int(forced) > 0:
+        return int(forced), int(forced)
+    cores = os.cpu_count() or 2
+    if _ram_bytes() <= (8 << 30) + (512 << 20):
+        return 1, 2
+    base = min(3, max(1, cores - 1))
+    return base, max(base, min(6, cores))
+
+
+class _KeyLock:
+    """Writes on one workspace key run one at a time, in arrival order."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._held: dict[str, list[threading.Event]] = {}
+
+    @contextlib.contextmanager
+    def held(self, key: str | None):
+        if not key:
+            yield
+            return
+        mine = threading.Event()
+        with self._lock:
+            queue = self._held.setdefault(key, [])
+            queue.append(mine)
+            before = queue[-2] if len(queue) > 1 else None
+        if before is not None:
+            while not before.wait(0.5):
+                with self._lock:
+                    if before not in self._held.get(key, []):
+                        break
+        try:
+            yield
+        finally:
+            with self._lock:
+                queue = self._held.get(key, [])
+                if mine in queue:
+                    queue.remove(mine)
+                if not queue:
+                    self._held.pop(key, None)
+            mine.set()
+
+
+class Pool:
+    def __init__(self, service):
+        self.service = service
+        self.job = _Job()
+        self.base, self.most = pool_sizes()
+        self.workers: dict[str, list[Worker]] = {}
+        self.affinity: dict[str, Worker] = {}
+        self.cond = threading.Condition()
+        self.keys = _KeyLock()
+        self.closed = False
+        self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
+        self._engine_run = None
+
+    # --- facts ------------------------------------------------------------------------------------------------------
+
+    def engines_summary(self) -> list[dict]:
+        current = install.current_engine()
+        with self.cond:
+            warm = {v for v, ws in self.workers.items() if any(w.ready.is_set() and not w.dead.is_set() for w in ws)}
+        versions = sorted(set(install.installed_versions()) | warm) if current else sorted(warm)
+        return [{"version": v, "current": v == current, "warm": v in warm} for v in versions[-8:]]
+
+    # --- workers ----------------------------------------------------------------------------------------------------
+
+    def _hold_engine_run(self) -> None:
+        """While any worker lives, the service holds one engine-run lock (withdraw.engine_run): nothing of the engine
+        is removed under a warm worker."""
+        if self._engine_run is not None:
+            return
+        from .. import withdraw
+        try:
+            run = withdraw.engine_run()
+            run.__enter__()
+            self._engine_run = run
+        except Exception as exc:        # noqa: BLE001
+            self.service.log(f"engine-run lock not taken: {exc}")
+
+    def _release_engine_run(self) -> None:
+        run, self._engine_run = self._engine_run, None
+        if run is not None:
+            with contextlib.suppress(Exception):
+                run.__exit__(None, None, None)
+
+    def _spawn(self, spec: Spec) -> Worker:
+        worker = Worker(self, spec)
+        with self.cond:
+            self.workers.setdefault(spec.version, []).append(worker)
+        self._hold_engine_run()
+        try:
+            worker.start()
+        except OSError as exc:
+            with self.cond:
+                self.workers[spec.version].remove(worker)
+                self.cond.notify_all()
+            raise WorkerFailed(f"the worker could not start ({exc})") from None
+        threading.Thread(target=self._watch_start, args=(worker,), name="worker-start", daemon=True).start()
+        return worker
+
+    def _watch_start(self, worker: Worker) -> None:
+        ok = worker.wait_ready(READY_WAIT_S)
+        with self.cond:
+            if not ok or worker.fatal:
+                self.service.log(f"worker {worker.spec.version} did not become ready"
+                                 f"{': ' + str(worker.fatal.get('code')) if worker.fatal else ''}")
+                # One-shot for a while: a licence refusal answers through the one-shot engine's own JSON (and a new
+                # sign-in brings workers back within a minute); anything else is tried again after 10 minutes.
+                wait = 60.0 if worker.fatal and worker.fatal.get("code") == "LICENCE" else 600.0
+                self.oneshot_until[worker.spec.version] = time.monotonic() + wait
+                worker.kill()
+            self.cond.notify_all()
+
+    def warm_current(self) -> None:
+        """At session open: a worker of the current engine, started in the background, so the first command finds it."""
+        def warm() -> None:
+            with contextlib.suppress(Exception):
+                version = install.selected_engine()
+                if not version:
+                    return
+                spec = Spec(version)
+                if not spec.resident() or self._oneshot(version):
+                    return
+                with self.cond:
+                    live = [w for w in self.workers.get(version, []) if not w.dead.is_set() and not w.retiring]
+                if not live:
+                    self._spawn(spec)
+        threading.Thread(target=warm, name="pool-warm", daemon=True).start()
+
+    def _oneshot(self, version: str) -> bool:
+        until = self.oneshot_until.get(version)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self.oneshot_until.pop(version, None)
+            return False
+        return True
+
+    def _live(self, version: str) -> list[Worker]:
+        return [w for w in self.workers.get(version, []) if not w.dead.is_set() and not w.retiring]
+
+    def _acquire(self, spec: Spec, key: str | None, priority: str, call) -> Worker:
+        """A ready, idle worker of the version for this call; starts one when none is free and the pool may grow."""
+        started_one = False
+        with self.cond:
+            while True:
+                if self.closed:
+                    raise WorkerFailed("the service is stopping")
+                if self._oneshot(spec.version):
+                    raise WorkerFailed("workers of this engine do not start")
+                live = self._live(spec.version)
+                idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
+                chosen = None
+                if key and self.affinity.get(key) in idle:
+                    chosen = self.affinity[key]
+                elif idle:
+                    chosen = min(idle, key=lambda w: (len(w.keys), w.calls))
+                if chosen is not None:
+                    chosen.busy = True
+                    if key:
+                        self.affinity[key] = chosen
+                    return chosen
+                starting = [w for w in live if not w.ready.is_set()]
+                if not starting and (len(live) < self.most) and not started_one:
+                    started_one = True
+                    self.cond.release()
+                    try:
+                        self._spawn(spec)
+                        call.count("spawned")       # a worker started for this call: a process start the harness counts
+                    finally:
+                        self.cond.acquire()
+                    continue
+                if call.cancelled.is_set():
+                    raise WorkerFailed("cancelled while waiting for a worker")
+                self.cond.wait(0.25)
+
+    def _release(self, worker: Worker) -> None:
+        with self.cond:
+            worker.busy = False
+            self.cond.notify_all()
+        if worker.calls >= RECYCLE_CALLS or worker.rss_mb >= RECYCLE_RSS_MB:
+            self.service.log(f"worker {worker.spec.version} recycled after {worker.calls} calls, {worker.rss_mb:.0f} MB")
+            threading.Thread(target=self._replace, args=(worker,), daemon=True).start()
+
+    def _replace(self, old: Worker) -> None:
+        with contextlib.suppress(Exception):
+            spare = self._spawn(old.spec)
+            spare.wait_ready(READY_WAIT_S)
+        old.retire()
+
+    def worker_died(self, worker: Worker) -> None:
+        with self.cond:
+            for key, owner in list(self.affinity.items()):
+                if owner is worker:
+                    self.affinity.pop(key, None)
+            versions = self.workers.get(worker.spec.version, [])
+            if worker in versions:
+                versions.remove(worker)
+            empty = not any(self.workers.values())
+            self.cond.notify_all()
+        if empty:
+            self._release_engine_run()
+
+    def tick(self) -> None:
+        """Shrink to one worker per version after IDLE_SHRINK_S; stats from busy workers; versions no longer used go."""
+        now = time.monotonic()
+        current = install.selected_engine()
+        with self.cond:
+            for version, workers in list(self.workers.items()):
+                live = [w for w in workers if not w.dead.is_set() and not w.retiring]
+                idle = sorted([w for w in live if not w.busy and w.ready.is_set()], key=lambda w: w.last_used)
+                keep = 1 if version == current else 0
+                for worker in idle[:max(0, len(live) - keep)]:
+                    if now - worker.last_used > IDLE_SHRINK_S:
+                        worker.retire(0)
+                for worker in live:
+                    if worker.busy and now - worker.last_used > 60:
+                        worker.ask_stats()
+
+    def close(self) -> None:
+        with self.cond:
+            self.closed = True
+            workers = [w for ws in self.workers.values() for w in ws]
+            self.cond.notify_all()
+        for worker in workers:
+            worker.retire(2000)
+        end = time.monotonic() + 3.0
+        for worker in workers:
+            with contextlib.suppress(Exception):
+                worker.process.wait(timeout=max(0.05, end - time.monotonic()))
+            worker.kill()
+        self._release_engine_run()
+
+    # --- running a call ------------------------------------------------------------------------------------------------
+
+    def run(self, call, version: str, argv: list[str], env: dict, stdin: dict | None) -> tuple[int, list]:
+        """Run one engine command for `call`. Returns (exit code, pending)."""
+        spec = Spec(version)
+        priority = classify(argv)
+        key = workspace_key(argv, call.cwd)
+        if not spec.resident() or self._oneshot(version):
+            return run_oneshot(self.service, call, spec, argv, env, stdin), []
+        with self.keys.held(key if priority != "read" else None):
+            for attempt in (1, 2):
+                try:
+                    worker = self._acquire(spec, key, priority, call)
+                except WorkerFailed as exc:
+                    if call.cancelled.is_set():
+                        return 130, []
+                    self.service.log(f"no worker for engine {version} ({exc}); one-shot")
+                    return run_oneshot(self.service, call, spec, argv, env, stdin), []
+                started = time.monotonic()
+                try:
+                    result = worker.run(call, argv, env, stdin, key, priority)
+                except WorkerFailed as exc:
+                    self.service.log(f"worker {version} failed during {argv[:2]}: {exc}")
+                    self._release(worker)
+                    if attempt == 1 and _may_rerun(priority, getattr(worker, "_inputs", None), getattr(worker, "_committed", False)):
+                        continue
+                    call.out(RETRY_TEXT)
+                    return 75, []
+                self._release(worker)
+                if time.monotonic() - started > STATS_AFTER_S:
+                    worker.ask_stats()
+                if result.get("key") and key and result["key"] != key:
+                    with self.cond:
+                        self.affinity[result["key"]] = worker
+                for name, value in (result.get("counters") or {}).items():
+                    if isinstance(value, int):
+                        call.count(name, value)
+                return int(result.get("exit", 78)), list(result.get("pending") or [])
+        return 75, []
+
+
+def _may_rerun(priority: str, inputs, committed: bool) -> bool:
+    """C2: a read is re-run once; a write only with no `committed` and every `inputs` stat tuple unchanged."""
+    if priority == "read":
+        return True
+    if committed or not inputs:
+        return False
+    for entry in inputs:
+        try:
+            path, size, mtime_ns, ctime_ns, file_id = entry
+            info = os.stat(path)
+            if (info.st_size, info.st_mtime_ns, info.st_ctime_ns, str(info.st_ino)) != (size, mtime_ns, ctime_ns, str(file_id)):
+                return False
+        except FileNotFoundError:
+            if entry[1] != -1:
+                return False
+        except (OSError, ValueError, TypeError):
+            return False
+    return True
+
+
+# --- one-shot ---------------------------------------------------------------------------------------------------------------
+
+def run_oneshot(service, call, spec: Spec, argv: list[str], env_overlay: dict, stdin: dict | None) -> int:
+    """Today's engine process for one command, its output streamed into the call. Nothing of the engine is removed
+    while it runs (withdraw.engine_run, as install.run_engine)."""
+    from .. import withdraw
+    call.count("spawned")
+    with withdraw.engine_run():
+        return _run_oneshot(service, call, spec, argv, env_overlay, stdin)
+
+
+def _run_oneshot(service, call, spec: Spec, argv: list[str], env_overlay: dict, stdin: dict | None) -> int:
+    del service
+    env = install.engine_env(spec.directory)
+    for name, value in env_overlay.items():
+        if value in (None, ""):
+            env.pop(name, None)
+        else:
+            env[name] = value
+    command = [spec.oneshot_python(), str(spec.oneshot_script), *argv]
+    data = None
+    if stdin is not None:
+        data = base64.b64decode(stdin["data"]) if stdin.get("encoding") == "base64" else str(stdin.get("data") or "").encode("utf-8")
+    try:
+        proc = subprocess.Popen(command, cwd=call.cwd if call.cwd and os.path.isdir(call.cwd) else None, env=env,
+                                stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, bufsize=0, **_child_flags())
+    except OSError as exc:
+        blocked = isinstance(exc, PermissionError)
+        call.out(("THEODORE BLOCKED_BY_POLICY: " if blocked else "THEODORE INTERNAL: ")
+                 + f"the engine could not be started: {exc}\n"
+                 + ("NEXT: do not retry. Tell the user; a security policy on this computer may block programs in the user folder.\n"
+                    "TELL THE USER: This computer's security policy blocked Theodore's engine.\n" if blocked else
+                    "NEXT: run theodore doctor.\nTELL THE USER: Theodore's engine could not start. I am checking why.\n"))
+        return 73 if blocked else 78
+    def pump(stream, name: str) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                text = decoder.decode(chunk)
+                if text:
+                    call.out(text, name)
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                call.out(tail, name)
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=pump, args=(proc.stdout, "stdout"), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "stderr"), daemon=True)]
+    for reader in readers:
+        reader.start()
+    if data is not None:
+        with contextlib.suppress(OSError):
+            view = memoryview(data)
+            while view:
+                view = view[proc.stdin.write(view) or 0:]
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+    call.set_phase(f"pptx {argv[0] if argv else ''} running")
+    code = proc.wait()
+    for reader in readers:
+        reader.join(timeout=10)
+    return code if code >= 0 else 78

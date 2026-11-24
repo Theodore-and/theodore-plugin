@@ -524,13 +524,13 @@ class PluginServerInTheApp(McpCase):
         without = self.start("Claude Desktop", False)
         self.assertEqual(names(without), ["theodore"], "no entry: the plugin's server is the chat's one tool")
         code = self.start("claude-code", True)
-        self.assertEqual(sorted(names(code)), ["guide", "list", "specimen"], "Claude Code keeps the plugin's tools")
+        self.assertEqual(sorted(names(code)), ["guide", "list", "pptx", "specimen", "theodore"], "Claude Code keeps the plugin's tools")
         agent = self.start("local-agent-mode-plugin:theodore:theodore", True)      # as the app names the plugin's server
         self.assertEqual(names(agent), [], "the app's agent mode is the app too: silent beside Theodore's entry")
         agent_alone = self.start("local-agent-mode-theodore", False)
         self.assertEqual(names(agent_alone), ["theodore"])
         codex = self.start("codex-mcp-client", True)
-        self.assertEqual(sorted(names(codex)), ["guide", "list", "specimen"], "Codex keeps the plugin's tools")
+        self.assertEqual(sorted(names(codex)), ["guide", "list", "pptx", "specimen", "theodore"], "Codex keeps the plugin's tools")
         for server in (with_entry, without, code, agent, agent_alone, codex):
             server.close()
         log = (self.box.home / "logs" / "client.log").read_text(encoding="utf-8")

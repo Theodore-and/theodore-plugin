@@ -49,6 +49,30 @@ class Server:
     def call(self, name: str, **arguments) -> dict:
         return self.send("tools/call", {"name": name, "arguments": arguments})["result"]
 
+    def wait_notification(self, method: str, timeout: float = 20.0) -> dict | None:
+        """The next notification `method` (already received, or arriving within `timeout`)."""
+        import select
+        deadline = time.monotonic() + timeout
+        while True:
+            for note in self.notifications:
+                if note.get("method") == method:
+                    self.notifications.remove(note)
+                    return note
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([self.proc.stdout], [], [], left)[0]:
+                return None
+            self.notifications.append(json.loads(self.proc.stdout.readline()))
+
+    def tools_with_names(self) -> list[dict]:
+        """tools/list once the names are in: the relay answers at once, and when the service's names come later it
+        says tools/list_changed (contract C1, tools/list)."""
+        tools = self.send("tools/list")["result"]["tools"]
+        named = any("enum" in (((t.get("inputSchema") or {}).get("properties") or {}).get("section", {}).get("anyOf") or [{}])[0]
+                    for t in tools)
+        if named or self.wait_notification("notifications/tools/list_changed") is None:
+            return tools
+        return self.send("tools/list")["result"]["tools"]
+
     def close(self) -> bytes:
         self.proc.stdin.close()
         rest = self.proc.stdout.read()
@@ -78,10 +102,12 @@ class Handshake(McpCase):
         server.send("notifications/initialized", notify=True)
         self.assertEqual(server.send("ping")["result"], {})
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertEqual(sorted(tools), ["guide", "list", "specimen"])
+        self.assertEqual(sorted(tools), ["guide", "list", "pptx", "specimen", "theodore"])       # contracts/C1-mcp-tools.json
         self.assertEqual(init["result"]["capabilities"]["tools"], {"listChanged": True})
         self.assertNotIn("enum", tools["guide"]["inputSchema"]["properties"]["section"], "signed out: no index, any name")
-        self.assertEqual(tools["guide"]["_meta"], {"anthropic/maxResultSizeChars": 400000})
+        self.assertEqual(tools["guide"]["_meta"], {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": 400000})
+        self.assertEqual(tools["pptx"]["_meta"], {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": 500000})
+        self.assertEqual(tools["pptx"]["inputSchema"]["required"], ["args"])
         self.assertEqual(tools["guide"]["inputSchema"]["required"], ["skill"])
         for tool in tools.values():
             self.assertEqual(tool["description"].count("."), 1, "one neutral sentence")
@@ -100,7 +126,7 @@ class Listing(McpCase):
         self.sign_in()
         self.api.guide_index = INDEX
         server = self.server()
-        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
+        tools = {t["name"]: t for t in server.tools_with_names()}
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
         one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
         code = {"type": "string", "pattern": "^[A-Z]{2}[0-9]{1,3}$"}         # a close-up's bare code (P042b)
@@ -110,9 +136,9 @@ class Listing(McpCase):
                          ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], code, 1, 6))
         self.assertEqual(many["items"]["anyOf"][2], worked)
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["role"],
-                         {"type": "string", "enum": ["lead", "slide"], "description": '"slide" for an agent given one slide.'})
-        self.assertEqual([t["description"] for t in tools.values()],
-                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.",
+                         {"type": "string", "enum": ["slide"], "description": '"slide" for an agent given one slide.'})
+        self.assertEqual([tools[n]["description"] for n in ("list", "guide", "specimen")],
+                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole, or several files in one answer.",
                           "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name)."])
         listing = server.call("list", skill="deck-design")["content"][0]["text"]
         self.assertEqual(listing, "SKILL.md\nreferences/craft.md\nreferences/forms.md\nspecimens/cover-01.jpg\nspecimens/rules-and-ledgers.jpg\n")
@@ -121,7 +147,7 @@ class Listing(McpCase):
         self.sign_in()
         self.api.guide_index = dict(INDEX)
         server = self.server()
-        server.send("tools/list")
+        server.tools_with_names()
         server.call("guide", skill="deck-design")
         self.assertEqual(server.notifications, [])
         self.api.guide_version = "g2"
@@ -169,8 +195,9 @@ class Guide(McpCase):
         self.assertGreater(len(result["content"][0]["text"]), 60000)
         section = server.call("guide", skill="deck-design", section="references/craft.md")
         self.assertEqual(section["content"][0]["text"], "CRAFT " * 9000 + "\nLICENCE LINE.\n")
-        self.assertEqual([q.get("form") for q in self.api.guide_queries], ["whole", "whole"])
-        self.assertEqual({q.get("bindings") for q in self.api.guide_queries}, {"tool"})
+        texts = [q for q in self.api.guide_queries if q.get("form") != "index"]     # the service's index at session open aside
+        self.assertEqual([q.get("form") for q in texts], ["whole", "whole"])
+        self.assertEqual({q.get("bindings") for q in texts}, {"tool"})
         missing = server.call("guide", skill="deck-design", section="nosuch")
         self.assertTrue(missing["content"][0]["text"].startswith("THEODORE USAGE: "))
 
@@ -183,10 +210,10 @@ class Guide(McpCase):
         slide = server.call("guide", skill="deck-design", section="craft", role="slide")["content"][0]["text"]
         self.assertEqual(lead, "Intro.\nLEAD ONLY.\nShared.\n")
         self.assertEqual(slide, "Intro.\nShared.\n")
-        self.assertEqual([q.get("role") for q in self.api.guide_queries], [None, "slide"])
+        self.assertEqual([q.get("role") for q in self.api.guide_queries if q.get("form") != "index"], [None, "slide"])
         again = server.call("guide", skill="deck-design", section="craft", role="lead")["content"][0]["text"]
         self.assertEqual(again, lead)
-        self.assertNotIn("role", self.api.guide_queries[-1], "lead is the default: nothing is sent")
+        self.assertNotIn("role", [q for q in self.api.guide_queries if q.get("form") != "index"][-1], "lead is the default: nothing is sent")
         wrong = server.call("guide", skill="deck-design", section="craft", role="boss")
         self.assertTrue(wrong["content"][0]["text"].startswith("THEODORE USAGE: "), wrong)
 
@@ -197,7 +224,7 @@ class Guide(McpCase):
         server = self.server()
         text = server.call("guide", skill="deck-design", section="craft")["content"][0]["text"]
         self.assertEqual(text, ENTRY)
-        self.assertEqual([q.get("part") for q in self.api.guide_queries], [None, "2", "3"])
+        self.assertEqual([q.get("part") for q in self.api.guide_queries if q.get("form") != "index"], [None, "2", "3"])
 
     def test_revoked_device_gets_the_status_and_the_server_keeps_running(self):
         self.sign_in()
@@ -247,7 +274,7 @@ class Guide(McpCase):
         server = self.server()
         text = server.call("guide", skill="pptx", section="served-part")["content"][0]["text"]
         self.assertEqual(text, "SERVED PPTX SECTION, see [charts](references/pptxgenjs-charts.md)\n")
-        self.assertEqual(self.api.guide_queries[-1], {"form": "whole", "bindings": "tool"})
+        self.assertEqual([q for q in self.api.guide_queries if q.get("form") != "index"][-1], {"form": "whole", "bindings": "tool"})
         missing = server.call("guide", skill="pptx", section="not-served")
         self.assertTrue(missing["isError"])
         first = missing["content"][0]["text"].splitlines()[0]
@@ -325,7 +352,7 @@ class ClaudeDesktop(McpCase):
                                                     "or call the `theodore_preference_add` tool.\n")
         self.api.specimens = {"cover-01.jpg": JPEG}
         server = self.server(args=("--for", "claude-desktop"))
-        tools = server.send("tools/list")["result"]["tools"]
+        tools = server.tools_with_names()
         self.assertEqual([t["name"] for t in tools], ["theodore"])
         tool = tools[0]
         self.assertTrue(tool["title"])
@@ -405,7 +432,8 @@ class ClaudeDesktop(McpCase):
 
     def test_without_the_flag_the_plugin_server_is_unchanged(self):
         server = self.server(args=("--for", "something-else"))
-        self.assertEqual(sorted(t["name"] for t in server.send("tools/list")["result"]["tools"]), ["guide", "list", "specimen"])
+        self.assertEqual(sorted(t["name"] for t in server.send("tools/list")["result"]["tools"]),
+                         ["guide", "list", "pptx", "specimen", "theodore"])
 
 
 class Specimen(McpCase):
@@ -664,47 +692,48 @@ class ReuseBounds(McpCase):
 
 
 class HeldBounds(unittest.TestCase):
-    """The two stores of `theodore mcp`, in-process: count and byte bounds, oldest evicted first, a version change drops
-    everything of the old version."""
+    """The two stores of the service's texts (service/texts.py), in-process: count and byte bounds, oldest evicted
+    first, a version change drops everything of the old version."""
 
     def setUp(self):
         sys.path.insert(0, str(CLIENT_DIR))
-        from theodore_client import mcp
-        self.mcp = mcp
-        mcp.SHEETS.clear()
-        mcp.GUIDES.clear()
-        self.addCleanup(mcp.SHEETS.clear)
-        self.addCleanup(mcp.GUIDES.clear)
+        from theodore_client.service import texts
+        self.texts_module = texts
+        self.texts = texts.Texts()
 
     def test_sheets_are_bounded_in_count_oldest_first(self):
-        for i in range(self.mcp.HELD_SHEETS_MAX + 5):
-            self.mcp._hold_sheet(f"s{i}.jpg", ("h", b"x", None))
-        self.assertEqual(len(self.mcp.SHEETS), self.mcp.HELD_SHEETS_MAX)
-        self.assertNotIn("s0.jpg", self.mcp.SHEETS)
-        self.assertIn(f"s{self.mcp.HELD_SHEETS_MAX + 4}.jpg", self.mcp.SHEETS)
+        held, most = self.texts._sheets, self.texts_module.HELD_SHEETS_MAX
+        for i in range(most + 5):
+            self.texts._hold_sheet(f"s{i}.jpg", ("h", b"x", None))
+        self.assertEqual(len(held), most)
+        self.assertNotIn("s0.jpg", held)
+        self.assertIn(f"s{most + 4}.jpg", held)
 
     def test_sheets_are_bounded_in_bytes(self):
-        big = b"x" * (self.mcp.HELD_SHEET_BYTES_MAX // 4 + 1)
+        limit = self.texts_module.HELD_SHEET_BYTES_MAX
+        big = b"x" * (limit // 4 + 1)
         for i in range(5):
-            self.mcp._hold_sheet(f"b{i}.jpg", ("h", big, None))
-        self.assertLessEqual(sum(len(v[1]) for v in self.mcp.SHEETS.values()), self.mcp.HELD_SHEET_BYTES_MAX)
-        self.assertEqual(list(self.mcp.SHEETS), ["b2.jpg", "b3.jpg", "b4.jpg"])
+            self.texts._hold_sheet(f"b{i}.jpg", ("h", big, None))
+        self.assertLessEqual(sum(len(v[1]) for v in self.texts._sheets.values()), limit)
+        self.assertEqual(list(self.texts._sheets), ["b2.jpg", "b3.jpg", "b4.jpg"])
 
     def test_references_are_bounded_in_count_and_characters(self):
-        for i in range(self.mcp.HELD_GUIDES_MAX + 3):
-            self.mcp._hold_guide(("deck-design", f"r{i}"), ("e", "t"))
-        self.assertEqual(len(self.mcp.GUIDES), self.mcp.HELD_GUIDES_MAX)
-        huge = "t" * (self.mcp.HELD_GUIDE_CHARS_MAX + 1)
-        self.mcp._hold_guide(("deck-design", "huge"), ("e", huge))
-        self.assertNotIn(("deck-design", "huge"), self.mcp.GUIDES, "an item larger than the bound is not held")
+        for i in range(self.texts_module.HELD_GUIDES_MAX + 3):
+            self.texts._hold_guide(("deck-design", f"r{i}", ""), ("e", "t"))
+        self.assertEqual(len(self.texts._guides), self.texts_module.HELD_GUIDES_MAX)
+        huge = "t" * (self.texts_module.HELD_GUIDE_CHARS_MAX + 1)
+        self.texts._hold_guide(("deck-design", "huge", ""), ("e", huge))
+        self.assertNotIn(("deck-design", "huge", ""), self.texts._guides, "an item larger than the bound is not held")
 
     def test_a_new_version_drops_everything_of_the_old_one(self):
-        self.mcp.INDEX = {"version": "g1", "sections": [], "specimens": ["a.jpg"], "etag": '"v1"'}
-        self.mcp._hold_sheet("a.jpg", ("h", b"x", '"v1"'))
-        self.mcp._hold_guide(("deck-design", "craft"), ("e", "t"))
-        self.mcp._adopt({"version": "g2", "sections": [], "specimens": ["a.jpg"], "etag": '"v2"'})
-        self.assertEqual((self.mcp.SHEETS, self.mcp.GUIDES), ({}, {}))
-        self.mcp.INDEX, self.mcp.NOTIFY[:] = None, []
+        told = []
+        self.texts._notify = lambda: told.append(1)
+        self.texts._index = {"version": "g1", "sections": [], "specimens": ["a.jpg"], "etag": '"v1"'}
+        self.texts._hold_sheet("a.jpg", ("h", b"x", '"v1"'))
+        self.texts._hold_guide(("deck-design", "craft", ""), ("e", "t"))
+        self.texts._adopt({"version": "g2", "sections": [], "specimens": ["a.jpg"], "etag": '"v2"'})
+        self.assertEqual((self.texts._sheets, self.texts._guides), ({}, {}))
+        self.assertEqual(told, [1], "the relays are told the names changed")
 
 
 class SkillBody(ClientCase):
@@ -849,7 +878,7 @@ class WindowsLauncher(unittest.TestCase):
         answers = [json.loads(line) for line in out.decode().splitlines() if line.strip()]
         self.assertEqual([a["id"] for a in answers], [1, 2], out)
         self.assertEqual(answers[0]["result"]["serverInfo"]["name"], "theodore")
-        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "list", "specimen"])
+        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "list", "pptx", "specimen", "theodore"])
 
 
 if __name__ == "__main__":

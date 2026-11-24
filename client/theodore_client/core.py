@@ -76,12 +76,18 @@ def emit(status: Status) -> int:
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
     if getattr(status, "refusal", False):
-        if _REFUSAL_EMITTED:
+        if (getattr(_SCOPE, "emitted", False) if _SCOPED else _REFUSAL_EMITTED):
             return status.code
-        _REFUSAL_EMITTED = True
+        if _SCOPED:                     # the service: once per call, each call learning afresh (begin_call)
+            _SCOPE.emitted = True
+        else:
+            _REFUSAL_EMITTED = True
     print(status.render(), flush=True)
     global _LAST_EMITTED
-    _LAST_EMITTED = status
+    if _SCOPED:
+        _SCOPE.last = status
+    else:
+        _LAST_EMITTED = status
     return status.code
 
 
@@ -89,8 +95,8 @@ _LAST_EMITTED: Status | None = None
 
 
 def last_emitted() -> Status | None:
-    """The last status this process printed (the usage counts record a non-OK one)."""
-    return _LAST_EMITTED
+    """The last status this process (with per-thread scope: this call) printed (the usage counts record a non-OK one)."""
+    return getattr(_SCOPE, "last", None) if _SCOPED else _LAST_EMITTED
 
 
 # --- refusals: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------
@@ -116,7 +122,7 @@ def begin_call() -> None:
     """A tool call starts: nothing refused yet in this thread (with per-thread scope), else in this process."""
     global _REFUSAL, _REFUSAL_EMITTED
     if _SCOPED:
-        _SCOPE.refusal, _SCOPE.status = None, None
+        _SCOPE.refusal, _SCOPE.status, _SCOPE.emitted, _SCOPE.last = None, None, False, None
     else:
         _REFUSAL, _REFUSAL_EMITTED = None, False
 
@@ -951,7 +957,7 @@ def read_json(path: Path, default=None):
 
 def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")    # per thread: the service writes from many
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(tmp, flags, 0o600 if mode is None else mode)
     with os.fdopen(fd, "wb") as handle:

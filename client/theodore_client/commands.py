@@ -3551,6 +3551,9 @@ def _theodore_pids() -> dict[int, float | None]:
     for path in (servers.iterdir() if servers.is_dir() else []):
         with contextlib.suppress(ValueError):
             records.append((int(path.name), path, None))
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        service_record = home.state / "run" / "service.json"         # the resident service (service/server.py)
+        records.append((int(json.loads(service_record.read_text(encoding="utf-8")).get("pid") or 0), service_record, None))
     mine = core.ancestors()
     found: dict[int, float | None] = {}
     for pid, record, job_word in records:
@@ -3798,6 +3801,9 @@ def _uninstall(keep_hosts: bool) -> int:
         notes = _unregister_hosts(core.host_executable("claude"), core.host_executable("codex"), left, edits)
     else:
         _take_back_instructions(left)           # its record goes with state/: the block cannot be left without it
+    from .service import control            # the service and its workers first: they hold the runtime and engines
+    with contextlib.suppress(Exception):
+        core.log(f"uninstall: Theodore's service: {control.stop_service()}")
     stopped = _stop_theodore_processes()
     if stopped:
         core.log(f"uninstall: stopped Theodore's own processes {stopped}")

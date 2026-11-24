@@ -328,6 +328,10 @@ class Sandbox:
             "XDG_CACHE_HOME": str(self.user_home / ".cache"), "TMPDIR": str(self.tmp / "tmp"),
             "THEODORE_CREDENTIAL_STORE": "file", "THEODORE_NO_BROWSER": "1", "THEODORE_BOOTSTRAP_WAIT": "60",
             "THEODORE_TEST_POLL_INTERVAL": "0.2",
+            # Shell commands run in their own process here, as they do when no service can start; the relay still
+            # reaches a real service (test_mcp, test_chatbuild), and test_service covers the shell route through it.
+            # A service this home started ends within a second of the sandbox's removal (its home is gone).
+            "THEODORE_SERVICE": "0", "THEODORE_SERVICE_LINGER_S": "5",
             "PATH": os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin"]) if not IS_WINDOWS else os.environ["PATH"],
             "LANG": "en_US.UTF-8",
         }
