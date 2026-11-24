@@ -653,7 +653,7 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
         if refusal is not None:
             raise refusal
     if args[0] == "finish":
-        usage.flush(force=True)
+        usage.send_in_background(force=True)
     if args[0] == "start":
         _remember(output)
         opened = _field(output, "WORKSPACE") or next((a for a in reversed(args[1:]) if not a.startswith("-") and _is_dir(a)), None)

@@ -124,6 +124,9 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("licence-check", add_help=False)        # the detached refresh an engine command starts: not for assistants
     us = sub.add_parser("usage", add_help=False)
     us.add_argument("--show", action="store_true")
+    us.add_argument("--send", action="store_true", help=argparse.SUPPRESS)       # the detached send a command starts
+    us.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    us.add_argument("--reports", action="store_true", help=argparse.SUPPRESS)
     so = sub.add_parser("studio", add_help=False)
     so.add_argument("action", nargs="?", choices=("on", "off"))
     we = sub.add_parser("welcome", add_help=False)              # the installers' last status: not for assistants
@@ -199,6 +202,8 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "install-plugin":
         return commands.install_plugin(args.dl_base, args.keys)
     if cmd == "usage":
+        if args.send:
+            return usage.send_job(args.force, args.reports)
         return usage.show(args.show)
     if cmd == "licence-check":
         return account.licence_check_job()
@@ -295,7 +300,7 @@ def _main(argv: list[str]) -> int:
     specimens.sweep()       # specimen sheets older than an hour go before anything else is done
     withdraw.resume()       # Theodore's files, when the service ended this computer's access and they are still here
     if argv[:1] and argv[0] not in _NO_USAGE_FLUSH:
-        usage.flush()           # only when the oldest waiting usage event is older than 15 minutes; never raises
+        usage.send_in_background()      # a detached send when the oldest waiting line is 15 minutes old; never waits
     code = _run(argv)
     withdraw.resume()       # learned by this command: removed now that it is done (never while an engine runs)
     last = core.last_emitted()

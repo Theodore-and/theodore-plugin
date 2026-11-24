@@ -139,9 +139,11 @@ counted.
 The client sends what is waiting to `api.theodoreand.ai/v1/usage` with the installation credential, in batches of at
 most 200 lines, together with the client, plugin and engine versions, the assistant's name, the operating system's
 family and major version (for example `macos-15`), the processor type and the number of lines dropped. It sends at the
-end of a deck (`pptx finish`), and otherwise at the start of a Theodore command when the oldest waiting line is 15
-minutes old. It waits two seconds at most, tries once, never prints anything about it and never changes the outcome of
-your command; nothing runs in the background. Sent lines are deleted once the service confirms them.
+end of a deck (`pptx finish`), and otherwise when a Theodore command finds the oldest waiting line 15 minutes old: the
+command starts one send in a background process of Theodore's own and goes on without waiting for it. A send waits two
+seconds at most for the answer and tries once; after a send that met no answer (or a "try later"), the next one waits
+15 minutes, then twice as long each time, at most 6 hours. It never prints anything about it and never changes the
+outcome of your command. Sent lines are deleted once the service confirms them.
 
 `theodore usage --show` prints the next batch exactly as it would be sent, and `theodore usage` says whether the counts
 are on and how many lines are waiting. To switch usage counts off, write to support@theodoreand.ai: the service then

@@ -873,8 +873,9 @@ def run_pptx(args: list[str]) -> int:
     sessions.engine_notice(args[0] if args else "")
     code = install.run_engine(args)
     if args[:1] == ["finish"]:
-        usage.flush(force=True)         # the usage counts go at the end of a deck (never raises, never prints)
-        outbox.flush()                  # and the reports kept for later (a few seconds at most; never raises, never prints)
+        # The usage counts and the reports kept for later go at the end of a deck, in a detached send (never on the
+        # command's own time; never raises, never prints).
+        usage.send_in_background(force=True, reports=True)
     return code
 
 
