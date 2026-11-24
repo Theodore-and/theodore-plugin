@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import http.client
@@ -463,24 +464,29 @@ def request(method: str, url: str, *, bearer: str | None = None, body=None, head
             return 304, exc.headers, b""
         if exc.code == 407:
             raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH") from None
-        raw = _read_bounded(exc, ERROR_LIMIT)
-        code, message, reason, err = f"http_{exc.code}", "", "", None
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-            err = parsed.get("error")
-            if isinstance(err, dict):
-                code, message = str(err.get("code") or code), str(err.get("message") or "")
-                details = err.get("details")
-                reason = str(details.get("reason") or "") if isinstance(details, dict) else ""
-            elif isinstance(err, str):
-                code, message = err, str(parsed.get("error_description") or "")
-        except (ValueError, AttributeError):
-            pass
-        if "Authorization" in hdrs and learn_refusals:
-            _signed_out(exc.code, code, url, isinstance(err, dict))
-        raise ApiError(exc.code, code, message, exc.headers.get("Retry-After"), reason) from None
+        raise _api_error(exc.code, _read_bounded(exc, ERROR_LIMIT), exc.headers, "Authorization" in hdrs and learn_refusals, url) from None
     except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError, OSError) as exc:
         raise _network_error(exc) from None
+
+
+def _api_error(http_status: int, raw: bytes, headers, signed: bool, url: str) -> ApiError:
+    """The error an answer of `http_status` (not 304 or 407) with body `raw` stands for; `signed`: the request carried
+    this installation's bearer (and may learn a refusal), so a refusal of it changes this computer at once."""
+    code, message, reason, err = f"http_{http_status}", "", "", None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            code, message = str(err.get("code") or code), str(err.get("message") or "")
+            details = err.get("details")
+            reason = str(details.get("reason") or "") if isinstance(details, dict) else ""
+        elif isinstance(err, str):
+            code, message = err, str(parsed.get("error_description") or "")
+    except (ValueError, AttributeError):
+        pass
+    if signed:
+        _signed_out(http_status, code, url, isinstance(err, dict))
+    return ApiError(http_status, code, message, headers.get("Retry-After") if headers is not None else None, reason)
 
 
 def _signed_out(http_status: int, code: str, url: str = "", well_formed: bool = False) -> None:
@@ -517,13 +523,15 @@ def url_for(route: str, query: dict | None = None, **params) -> str:
 
 def call(route: str, *, bearer: str | None = None, body=None, query: dict | None = None, headers: dict | None = None,
          timeout: float = 20.0, redirects: bool = True, limit: int | None = None, exact_timeout: bool = False,
-         learn_refusals: bool = True, **params):
+         learn_refusals: bool = True, pool: "KeptAlive | None" = None, **params):
+    """`pool`: send it on one of the pool's kept-alive connections (KeptAlive), with the same answers and failures."""
     method, _template, needs_auth = ROUTES[route]
     if needs_auth and not bearer:
         raise sign_in_required()
-    return request(method, url_for(route, query, **params), bearer=bearer if needs_auth else None, body=body,
-                   headers=headers, timeout=timeout, redirects=redirects, limit=limit, exact_timeout=exact_timeout,
-                   learn_refusals=learn_refusals)
+    send = request if pool is None else pool.request
+    return send(method, url_for(route, query, **params), bearer=bearer if needs_auth else None, body=body,
+                headers=headers, timeout=timeout, redirects=redirects, limit=limit, exact_timeout=exact_timeout,
+                learn_refusals=learn_refusals)
 
 
 def call_json(route: str, **kwargs):
@@ -534,6 +542,227 @@ def call_json(route: str, **kwargs):
         return json.loads(raw.decode("utf-8"))
     except ValueError:
         raise core.internal(f"the Theodore API answered {route} with something that is not JSON (HTTP {status}).") from None
+
+
+# --- kept-alive connections to the API ------------------------------------------------------------------------------
+# Texts and sheets are served online and authorised on every call (contract C6, Carl, 24 November 2026), so what a call
+# must not pay is a new TCP and TLS set-up: 0.26 to 0.4 s from a desk, 7 to 10 s behind a TLS-inspecting proxy (P33).
+# urllib cannot keep a connection (it sends Connection: close), so a KeptAlive pool speaks HTTP/1.1 itself through
+# http.client: it keeps up to `idle_max` connections to the API origin open between calls and gives each request an
+# idle one, or a new one when none is idle, so concurrent calls (one thread each: a lead and its designers) run side by
+# side. It reaches the API as request() does (the address race for Theodore's hosts, the system's certificate store, the
+# proxy the system names, through CONNECT with the proxy URL's basic credentials) and answers as request() does (the
+# same statuses, bounds, errors and refusals). An idle connection that the server or a proxy closed shows when it is
+# used: the request goes once more on a new connection, only when no byte of an answer arrived and the request may be
+# sent twice (a GET; a caller says so for anything else). A redirect is answered by request(), with its own rules.
+# Nothing is written to disk.
+
+KEPT_IDLE_MAX = 4               # connections kept open while idle; more may be open at once, and close when done
+KEPT_IDLE_SECONDS = 240.0       # an idle connection older than this is closed rather than tried (proxies drop them)
+KEPT_PROXY_SECONDS = 60.0       # the system's proxy setting is read again after this
+_REUSED_LOST = (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+                ssl.SSLEOFError, ssl.SSLZeroReturnError)
+
+
+class KeptAlive:
+    """A pool of kept-alive connections to the API origin. Thread-safe; one per process (KEPT)."""
+
+    def __init__(self, idle_max: int = KEPT_IDLE_MAX):
+        self.idle_max = idle_max
+        self.opened = 0                 # connections opened by this pool (tests; doctor)
+        self._lock = threading.Lock()
+        self._idle: list[tuple[tuple, http.client.HTTPConnection, float]] = []   # (route, connection, idle since)
+        self._proxies: dict[tuple[str, str], tuple[str | None, float]] = {}
+        self._context: ssl.SSLContext | None = None
+
+    def _proxy(self, scheme: str, host: str) -> str | None:
+        now = time.monotonic()
+        with self._lock:
+            known = self._proxies.get((scheme, host))
+            if known and 0 <= now - known[1] < KEPT_PROXY_SECONDS:
+                return known[0]
+        try:
+            proxy = urllib.request.getproxies().get(scheme) or None
+            if proxy and urllib.request.proxy_bypass(host):
+                proxy = None
+        except Exception:       # noqa: BLE001  a malformed setting: request() reports it for the call
+            proxy = "unreadable"
+        with self._lock:
+            self._proxies[(scheme, host)] = (proxy, now)
+        return proxy
+
+    def _route(self, url: str) -> tuple | None:
+        """(scheme, host, port, proxy) of a request this pool carries; None for one request() carries instead: another
+        origin than the API's, plain HTTP other than the tests' loopback API, or a proxy that is not plain HTTP."""
+        scheme, host, port = _origin(url)
+        if not host or (scheme, host, port) != _origin(str(core.config().get("api_base") or "")):
+            return None
+        proxy = self._proxy(scheme, host)
+        if scheme == "http":
+            return (scheme, host, port, None) if proxy is None and core.is_loopback_api() else None
+        if scheme != "https" or (proxy is not None and urllib.parse.urlsplit(proxy).scheme.lower() != "http"):
+            return None
+        return scheme, host, port, proxy
+
+    def _open(self, route: tuple, timeout: float) -> http.client.HTTPConnection:
+        scheme, host, port, proxy = route
+        if scheme == "http":
+            connection: http.client.HTTPConnection = http.client.HTTPConnection(host, port, timeout=timeout)
+        else:
+            with self._lock:
+                if self._context is None:
+                    self._context = _ssl_context()
+                context = self._context
+            if proxy:
+                parts = urllib.parse.urlsplit(proxy)
+                connection = _AnyAddressHTTPS(parts.hostname, parts.port or 80, context=context, timeout=timeout)
+                tunnel = {}
+                if parts.username is not None:
+                    pair = f"{urllib.parse.unquote(parts.username)}:{urllib.parse.unquote(parts.password or '')}"
+                    tunnel["Proxy-Authorization"] = "Basic " + base64.b64encode(pair.encode("utf-8")).decode("ascii")
+                connection.set_tunnel(host, port, headers=tunnel)
+            else:
+                connection = _AnyAddressHTTPS(host, port, context=context, timeout=timeout)
+        try:
+            connection.connect()
+        except BaseException:
+            connection.close()
+            raise
+        with self._lock:
+            self.opened += 1
+        return connection
+
+    def _take(self, route: tuple, timeout: float) -> tuple[http.client.HTTPConnection, bool]:
+        """An idle connection of this route (True), else a new one (False); connections gone stale, or of another
+        route (the API base changed), are closed."""
+        now, found, dropped = time.monotonic(), None, []
+        with self._lock:
+            kept = []
+            for item in self._idle:
+                if item[0] != route or not 0 <= now - item[2] <= KEPT_IDLE_SECONDS:
+                    dropped.append(item[1])
+                else:
+                    kept.append(item)
+            if kept:
+                found = kept.pop()[1]             # the most recently used: the least likely to be closed by now
+            self._idle = kept
+        for connection in dropped:
+            connection.close()
+        if found is not None:
+            found.timeout = timeout
+            if found.sock is not None:
+                found.sock.settimeout(timeout)
+            return found, True
+        try:
+            return self._open(route, timeout), False
+        except (OSError, http.client.HTTPException) as exc:
+            raise _network_error(exc) from None
+
+    def _give(self, route: tuple, connection: http.client.HTTPConnection, response: http.client.HTTPResponse) -> None:
+        """Keep the connection for the next request when its answer was read to the end and it may stay open."""
+        if response.will_close or not response.isclosed():
+            connection.close()
+            return
+        with self._lock:
+            if len(self._idle) < self.idle_max:
+                self._idle.append((route, connection, time.monotonic()))
+                return
+        connection.close()
+
+    def warm(self) -> None:
+        """Open one connection to the API in the background (TCP and TLS done), unless one is idle already, so the
+        next request finds it. Never raises, never waits."""
+        def run() -> None:
+            try:
+                route = self._route(str(core.config().get("api_base") or "").rstrip("/") + "/")
+                if route is None:
+                    return
+                with self._lock:
+                    if any(item[0] == route for item in self._idle):
+                        return
+                connection = self._open(route, _timeout(core.config()["api_base"], 20.0))
+                with self._lock:
+                    if len(self._idle) < self.idle_max:
+                        self._idle.append((route, connection, time.monotonic()))
+                        return
+                connection.close()
+            except Exception:       # noqa: BLE001  warming is a courtesy: the request opens its own connection
+                pass
+        threading.Thread(target=run, name="theodore-warm", daemon=True).start()
+
+    def close(self) -> None:
+        with self._lock:
+            idle, self._idle = self._idle, []
+        for _route, connection, _since in idle:
+            connection.close()
+
+    def request(self, method: str, url: str, *, bearer: str | None = None, body=None, headers: dict | None = None,
+                timeout: float = 20.0, redirects: bool = True, limit: int | None = None, exact_timeout: bool = False,
+                learn_refusals: bool = True, again: bool | None = None):
+        """request() on a kept-alive connection: the same arguments, answers and failures. `again`: the request may
+        be sent a second time when a reused connection turns out closed (default: GET and HEAD only)."""
+        route = self._route(url)
+        if route is None:
+            return request(method, url, bearer=bearer, body=body, headers=headers, timeout=timeout, redirects=redirects,
+                           limit=limit, exact_timeout=exact_timeout, learn_refusals=learn_refusals)
+        data = None
+        hdrs = {"User-Agent": core.user_agent(), "Accept": "application/json, text/markdown;q=0.9, */*;q=0.1"}
+        if body is not None:
+            data = body if isinstance(body, bytes) else json.dumps(body, separators=(",", ":")).encode("utf-8")
+            hdrs["Content-Type"] = "application/json"
+        if bearer and may_carry_bearer(url):
+            hdrs["Authorization"] = f"Bearer {bearer}"
+        hdrs.update(headers or {})
+        wait = timeout if exact_timeout else _timeout(url, timeout)
+        parts = urllib.parse.urlsplit(url)
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        twice = method in ("GET", "HEAD") if again is None else again
+        for attempt in (1, 2):
+            connection, reused = self._take(route, wait)
+            try:
+                connection.request(method, target, body=data, headers=hdrs)
+                response = connection.getresponse()
+            except _REUSED_LOST as exc:
+                connection.close()
+                if reused and twice and attempt == 1:
+                    continue                    # the server closed it while it was idle: once more, on a new one
+                raise _network_error(exc) from None
+            except (OSError, http.client.HTTPException) as exc:
+                connection.close()
+                raise _network_error(exc) from None
+            break
+        return self._answer(route, connection, response, method, url, hdrs, redirects, limit, timeout, exact_timeout,
+                            learn_refusals, bearer, body, headers)
+
+    def _answer(self, route, connection, response, method, url, hdrs, redirects, limit, timeout, exact_timeout,
+                learn_refusals, bearer, body, headers):
+        status = response.status
+        try:
+            if status == 304:
+                response.read()
+                self._give(route, connection, response)
+                return 304, response.headers, b""
+            if 300 <= status < 400:             # not followed here: request() answers it, with its redirect rules
+                connection.close()
+                return request(method, url, bearer=bearer, body=body, headers=headers, timeout=timeout, redirects=redirects,
+                               limit=limit, exact_timeout=exact_timeout, learn_refusals=learn_refusals)
+            if status == 407:
+                connection.close()
+                raise NetworkError("the proxy asks for authentication (HTTP 407)", "PROXY_AUTH")
+            raw = _read_bounded(response, (DEFAULT_LIMIT if limit is None else limit) if 200 <= status < 300 else ERROR_LIMIT)
+        except TooLarge:
+            connection.close()
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise _network_error(exc) from None
+        self._give(route, connection, response)
+        if 200 <= status < 300:
+            return status, response.headers, raw
+        raise _api_error(status, raw, response.headers, "Authorization" in hdrs and learn_refusals, url)
+
+
+KEPT = KeptAlive()              # this process's pool: the tool server's calls and the service's
 
 
 DOWNLOAD_ATTEMPTS = 3
