@@ -639,14 +639,21 @@ class CodexServerOnWindows(unittest.TestCase):
     def setUp(self):
         self.path = Path(tempfile.mkdtemp()) / "mcp.json"
 
-    def test_the_sh_entry_becomes_the_batch_launcher(self):
+    def test_the_sh_entry_becomes_the_batch_command(self):
         published = json.loads((Path(support.PLUGIN) / "mcp.json").read_text())
         self.path.write_text(json.dumps(published))
         commands._codex_mcp_for_windows(self.path)
         entry = json.loads(self.path.read_text())["mcpServers"]["theodore"]
-        self.assertEqual(entry["command"], "./skills/pptx/scripts/theodore.cmd", "the form lane WINDOWS saw Codex start")
+        self.assertEqual(entry["command"], "./scripts/theodore.cmd", "the plugin's command: the front, else the launcher")
         self.assertEqual(entry["args"], ["mcp", "--for", "codex"])
         self.assertEqual(entry["type"], "stdio")
+        self.assertTrue((Path(support.PLUGIN) / "scripts" / "theodore.cmd").is_file())
+        # A plugin from before the front: its launcher, the form lane WINDOWS saw Codex start.
+        published["mcpServers"]["theodore"]["args"] = ["./skills/pptx/scripts/theodore", "mcp", "--for", "codex"]
+        self.path.write_text(json.dumps(published))
+        commands._codex_mcp_for_windows(self.path)
+        entry = json.loads(self.path.read_text())["mcpServers"]["theodore"]
+        self.assertEqual(entry["command"], "./skills/pptx/scripts/theodore.cmd")
         self.assertTrue((Path(support.PLUGIN) / "skills" / "pptx" / "scripts" / "theodore.cmd").is_file())
 
     def test_any_other_entry_is_left_as_it_is(self):

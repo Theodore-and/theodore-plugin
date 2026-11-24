@@ -1,0 +1,3 @@
+# Builds land in the repository's .cache/ (ignored, and skipped by the repository checks), never in front/target.
+[build]
+target-dir = "../.cache/front-target"

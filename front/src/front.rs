@@ -345,6 +345,8 @@ pub fn diagnostics(args: &[OsString]) -> i32 {
     let launch = home::read_launch(&home);
     let service = home::read_service(&home);
     let doc = Json::obj()
+        // The client knows its own copy of this program by these words (commands._shim_ours).
+        .with("what", "Theodore's own short command, and the plugin's MCP relay".into())
         .with("front", crate::VERSION.into())
         .with("protocol", Json::int(service::PROTOCOL))
         .with("home", Json::str(home.to_string_lossy()))

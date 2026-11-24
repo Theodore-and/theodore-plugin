@@ -659,6 +659,8 @@ def activate_engine(version: str) -> None:
             return
         core.write_json(core.home().engines / "current.json", {"version": version, "previous": old if old and engine_installed(old) else state.get("previous")})
     collect_garbage()
+    from . import front
+    front.refresh()             # launch.json names the engine now current
 
 
 def touch_used(version: str) -> None:
@@ -1250,6 +1252,8 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None, issu
             return
         previous = core.read_text(home.client / "current.txt")
         core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
+    from . import front
+    front.refresh()             # launch.json names the client now current (the service then hands over to it)
     if previous and previous != version:
         announce("client", version, update_state().get("client_notes"))
     for child in home.client.iterdir():

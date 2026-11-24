@@ -1,0 +1,18 @@
+#!/bin/sh
+# Theodore's command in the plugin; the plugin's MCP entry (.mcp.json, mcp.json) runs it with `mcp`. It hands over to
+# the native front built for this system, which relays to Theodore's service (DESIGN.md §2). Without a front for this
+# system (a development tree, or Windows before its front is signed) the skill's launcher serves, as before the front.
+# A plugin may not have a top-level bin/ folder (claude.ai and Cowork refuse it): the programs are here.
+case "$0" in */*) d=${0%/*} ;; *) d=. ;; esac
+if [ -n "${MSYSTEM:-}" ] || [ "${OS:-}" = Windows_NT ]; then
+  f=$d/theodore.exe
+elif [ -d /System/Library/CoreServices ]; then
+  f=$d/theodore-darwin
+else
+  case "$(uname -m 2>/dev/null)" in
+    aarch64|arm64) f=$d/theodore-linux-arm64 ;;
+    *) f=$d/theodore-linux-x64 ;;
+  esac
+fi
+[ -f "$f" ] && [ -x "$f" ] && exec "$f" "$@"
+exec sh "$d/../skills/pptx/scripts/theodore" "$@"

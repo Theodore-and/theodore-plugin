@@ -5,3 +5,8 @@ __pycache__/
 /.cache/
 /.scratch/
 /ci/out/
+# The native front's builds: release outputs added to the plugin archives, never committed (front/, ci/front-build.sh)
+/front/target/
+/plugins/theodore/scripts/theodore.exe
+/plugins/theodore/scripts/theodore-darwin
+/plugins/theodore/scripts/theodore-linux-*
