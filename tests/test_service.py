@@ -412,6 +412,33 @@ class ShellTexts(ServiceCase):
         self.assertNotIn("front: no Theodore service", client_log.read_text() if client_log.exists() else "")
         self.assertTrue(alive(record["pid"]))
 
+    def test_fifteen_first_guides_at_once_start_one_service_and_all_answer(self):
+        """ISSUES row 37 on the shell route through the service: fifteen designers' first `theodore guide` at the same
+        moment, with no service running. One service starts (the start lock), and every front gets the same text."""
+        self.api.guides["deck-design"][""] = "# Deck design\n\nENTRY BODY FOR A BURST\n"
+        starts = 15
+        barrier, results = threading.Barrier(starts), [None] * starts
+
+        def one(i: int) -> None:
+            barrier.wait()
+            results[i] = subprocess.run([sys.executable, "-I", str(CLIENT_DIR), "guide", "deck-design"], env=self.env,
+                                        cwd=str(self.box.tmp), capture_output=True, text=True, timeout=120,
+                                        stdin=subprocess.DEVNULL)
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(starts)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(150)
+        failed = [(r.returncode, r.stdout[:200], r.stderr[-300:]) for r in results if r is None or r.returncode != 0]
+        self.assertEqual(failed, [], f"{len(failed)} of {starts} failed")
+        self.assertEqual({r.stdout for r in results}, {results[0].stdout})
+        self.assertIn("ENTRY BODY FOR A BURST", results[0].stdout)
+        services = [pid for pid, line in sandbox_processes(self.box.tmp.name) if " service --home " in line]
+        self.assertEqual(len(services), 1, "one service for the home")
+        client_log = self.box.home / "logs" / "client.log"
+        self.assertNotIn("front: no Theodore service", client_log.read_text() if client_log.exists() else "",
+                         "every front reached the service")
+
 
 class Relay(ServiceCase):
     """`theodore mcp` against the real service: the plugin's tools and calls answered out of order."""
