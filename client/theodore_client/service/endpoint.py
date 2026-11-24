@@ -95,7 +95,14 @@ def write_service_json(home: Path, record: dict) -> None:
         os.close(fd)
     with contextlib.suppress(OSError):
         os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    for attempt in range(40):           # Windows: a reader holding the file for a moment refuses the replace
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if not IS_WINDOWS or attempt == 39:
+                raise
+            time.sleep(0.025)
 
 
 def remove_service_json(home: Path, pid: int) -> None:
@@ -502,6 +509,12 @@ def _windows_user_sid() -> str | None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         token = wintypes.HANDLE()
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                                 ctypes.POINTER(wintypes.DWORD)]
+        advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):     # TOKEN_QUERY
             return None
         try:
@@ -517,7 +530,7 @@ def _windows_user_sid() -> str | None:
             try:
                 return text.value
             finally:
-                kernel32.LocalFree(text)
+                kernel32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
         finally:
             kernel32.CloseHandle(token)
     except Exception:       # noqa: BLE001  the user name stands in
@@ -530,6 +543,9 @@ def _windows_mutex(name: str, timeout: float):
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.restype = wintypes.HANDLE
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel32.CreateMutexW(None, False, name)
     if not handle:
         return None
@@ -542,7 +558,10 @@ def _windows_mutex(name: str, timeout: float):
 
 def _windows_release_mutex(handle) -> None:
     import ctypes
-    kernel32 = ctypes.windll.kernel32
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     with contextlib.suppress(Exception):
         kernel32.ReleaseMutex(handle)
         kernel32.CloseHandle(handle)
@@ -684,7 +703,7 @@ class PipeListener:
             self.address = base
             self._next = self._create(first=True)
         except OSError as exc:
-            if getattr(exc, "winerror", exc.errno) not in (_ERROR_ACCESS_DENIED, 231):
+            if (getattr(exc, "winerror", None) or exc.errno) not in (_ERROR_ACCESS_DENIED, _ERROR_PIPE_BUSY):
                 raise
             # The name is held: by a predecessor still draining its calls (hand-over), or by someone else. A name of
             # our own (the pid makes it unique) is never another user's (requests-P A-3).
@@ -709,30 +728,34 @@ class PipeListener:
         return int(handle)
 
     def accept(self):
+        """A connected pipe instance, or None after the poll interval. The pending connect of the waiting instance
+        is kept across calls (a second ConnectNamedPipe on it would fail)."""
         import _winapi
         if self._closed:
             return None
         handle = self._next
-        try:
-            overlapped = _winapi.ConnectNamedPipe(handle, overlapped=True)
-        except OSError as exc:
-            if getattr(exc, "winerror", None) == _ERROR_PIPE_CONNECTED:
-                overlapped = None
-            else:
-                raise
-        if overlapped is not None:
-            self._waiting = overlapped
-            result = _winapi.WaitForMultipleObjects([overlapped.event], False, 500)
-            if result == 0x102:     # WAIT_TIMEOUT: poll again (the caller checks whether to stop)
-                return None
-            self._waiting = None
+        if self._waiting is None:
             try:
-                overlapped.GetOverlappedResult(True)
-            except OSError:
+                self._waiting = _winapi.ConnectNamedPipe(handle, overlapped=True)   # ERROR_PIPE_CONNECTED sets its event
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != _ERROR_NO_DATA:
+                    raise
+                # a client connected, wrote and left before the connect: this instance is spent
                 with contextlib.suppress(OSError):
                     _winapi.CloseHandle(handle)
                 self._next = self._create(first=False)
                 return None
+        overlapped = self._waiting
+        if _winapi.WaitForMultipleObjects([overlapped.event], False, 500) == 0x102:      # WAIT_TIMEOUT: poll again
+            return None
+        self._waiting = None
+        try:
+            overlapped.GetOverlappedResult(True)
+        except OSError:
+            with contextlib.suppress(OSError):
+                _winapi.CloseHandle(handle)
+            self._next = self._create(first=False)
+            return None
         self._next = self._create(first=False)
         return PipeConn(handle, server=True)
 
