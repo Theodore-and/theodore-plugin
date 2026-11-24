@@ -1550,8 +1550,8 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
         notes.append("See the check list above for details.")
     note = (" " + " ".join(notes)) if notes else ""
     from . import chatbuild
-    # "Start a new session" only where this session has not loaded Theodore's skills (Claude Code 2.1.330 picked them up
-    # in the middle of the set-up session of 24 November 2026); the Claude app's chats only when the user asks.
+    # "Start a new session" only in Codex (welcome._new_session_needed: in Claude Code the first deck works in the
+    # conversation that installed Theodore); the Claude app's chats only when the user asks.
     new_session = welcome._new_session_needed(welcome._host())
     return (Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
                    ("tell the user the line below; it is the whole answer about Theodore's state. "
