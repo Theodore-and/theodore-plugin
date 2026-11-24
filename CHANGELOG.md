@@ -30,6 +30,12 @@ Every Theodore command starts faster, most of all on Windows, and the design gui
   five at its start, each set up on its own, so calls made at once no longer wait for one another's connection. Every
   call still asks Theodore's service for its text or sheets, so a computer whose access ended is refused at its next
   call; an unchanged text or sheet costs one short exchange and no new connection.
+- Many designers starting at once on Windows no longer get "THEODORE OFFLINE" when the connection is fine. Windows'
+  certificate check could fail under that load, and the code that freed its result then crashed, which was read as a
+  network failure (two of nine designers in a session on 24 November). Now the check is tried again; if it still
+  fails, the same check runs through Python's own TLS against Windows' certificate store; a failure that is this
+  computer's own is answered as an internal error, which Theodore reports to itself, never as a lost connection. The
+  design guidance's tool server also writes its files safely when its calls run side by side.
 - The deck-design skill's description ends "... data or file mechanics alone.", as the engine's: a request that
   mixes figures with new slides is design work too.
 

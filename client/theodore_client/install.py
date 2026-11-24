@@ -1689,6 +1689,8 @@ def _refusal_status(code: str) -> Status:
         try:
             account.refresh()
         except api.NetworkError as error:
+            if error.cause == "LOCAL_FAULT":
+                return api.offline(error, "licence check")        # this computer's own fault: INTERNAL
             return Status("OFFLINE", f"the licence on this computer has expired and the Theodore service could not be reached ({error.detail}).",
                           "ask the user to connect to the internet, then run the same command again.",
                           "Theodore has been offline for more than 7 days and needs a connection to confirm your licence.")

@@ -50,12 +50,96 @@ class NetworkError(Exception):
         self.detail, self.cause = detail, cause
 
 
+class LocalFault(NetworkError):
+    """No answer from the service because of this computer's own code, not the network: the system's certificate check
+    failing in itself, or an error that is not the network's answer. A NetworkError (cause LOCAL_FAULT), so a step that
+    may do without the service still does; where an answer was needed it is INTERNAL (offline()), which the client
+    reports to Theodore itself, never OFFLINE: that sent the person to check a connection that was fine."""
+
+    def __init__(self, detail: str):
+        super().__init__(detail, "LOCAL_FAULT")
+
+
 def _ssl_context() -> ssl.SSLContext:
     try:  # the operating system's certificate store, so TLS-inspecting proxies with an installed root work
         import truststore
-        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     except Exception:
         return ssl.create_default_context()
+    _guard_certificate_check()
+    return context
+
+
+# The system's certificate check (truststore) when many Theodore processes start at once. A real session on Windows
+# (24 Nov 2026, nine designers started together; lanes/L1.md) had two of them told THEODORE OFFLINE: "access violation
+# writing 0x0000000000000048". truststore's Windows check frees the certificate chain it asked crypt32 for even when
+# crypt32 built none (CertFreeCertificateChain on NULL), so a failure of crypt32's own became a native fault, and the
+# address race counted it as a dead address. Now: a chain that was not built is not freed (the system's own error
+# shows); a check that fails in itself (not a certificate it refuses) is tried again, CERT_CHECK_WAITS apart; then the
+# address race tries OpenSSL against the same system store (Windows); and what still fails is a LocalFault.
+CERT_CHECK_WAITS = (0.25, 0.5, 1.0, 2.0)
+_GUARD_LOCK = threading.Lock()
+_GUARDED: list[bool] = []
+
+
+def _guard_certificate_check(trust=None, windows=None) -> None:
+    """Wrap truststore's check (its module `_api`, and on Windows `_windows`) once per process; given modules (tests)
+    are wrapped as given."""
+    with _GUARD_LOCK:
+        if trust is None:
+            if _GUARDED:
+                return
+            _GUARDED.append(True)
+            try:
+                from truststore import _api as trust
+            except Exception:       # noqa: BLE001  no truststore: Python's own check, which has no such path
+                return
+            if sys.platform == "win32":
+                with contextlib.suppress(Exception):
+                    from truststore import _windows as windows
+        check = trust._verify_peercerts
+
+        def verify(sock_or_sslobj, server_hostname):
+            fault = None
+            for wait in (0.0, *CERT_CHECK_WAITS):
+                if wait:
+                    time.sleep(wait)
+                try:
+                    return check(sock_or_sslobj, server_hostname)
+                except (ssl.SSLError, ValueError):
+                    raise           # the certificate refused (a TLS-inspecting network), or a wrong call: as they are
+                except Exception as exc:        # noqa: BLE001  the check failed in itself
+                    fault = exc
+            raise LocalFault(f"the system's certificate check failed {len(CERT_CHECK_WAITS) + 1} times "
+                             f"({fault.__class__.__name__}: {fault})") from fault
+        trust._verify_peercerts = verify
+        if windows is not None and hasattr(windows, "CertFreeCertificateChain"):
+            free = windows.CertFreeCertificateChain
+
+            def free_built(chain):
+                if chain:           # a NULL chain context: crypt32 built none, and freeing it is a native fault
+                    free(chain)
+            windows.CertFreeCertificateChain = free_built
+
+
+_SYSTEM_STORE: list[ssl.SSLContext] = []
+
+
+def _system_store_context() -> ssl.SSLContext:
+    """OpenSSL checking against the system's store, as Python loads it (Windows: its ROOT and CA stores): the address
+    race's second way when the system's own check fails in itself. Made once."""
+    with _GUARD_LOCK:
+        if not _SYSTEM_STORE:
+            _SYSTEM_STORE.append(ssl.create_default_context())
+        return _SYSTEM_STORE[0]
+
+
+def _local_fault(exc: BaseException) -> bool:
+    """Whether an attempt's failure is this computer's own and not the network's answer: a LocalFault, anything that is
+    not an OSError, or a native fault that ctypes reports as an OSError "exception: ..." with no error number."""
+    if isinstance(exc, LocalFault) or not isinstance(exc, OSError):
+        return True
+    return exc.errno is None and getattr(exc, "winerror", None) is None and str(exc).startswith("exception: ")
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -257,7 +341,7 @@ def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSL
     def left():
         return None if budget is None else budget - (time.monotonic() - began)
 
-    def attempt(entry, each):
+    def attempt(entry, each, tls_context=None):
         family, kind, proto, address = entry
         deadline = time.monotonic() + each
         sock = socket.socket(family, kind, proto)
@@ -271,10 +355,27 @@ def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSL
             except OSError:
                 pass
             sock.settimeout(max(deadline - time.monotonic(), 0.05))
-            return context.wrap_socket(sock, server_hostname=host)
+            return (tls_context or context).wrap_socket(sock, server_hostname=host)
         except BaseException:
             sock.close()
             raise
+
+    def local(entry, exc):
+        """This computer's own failure on this address: on Windows once more through OpenSSL and the system's store
+        (the system's check failed in itself: the network answered); else, or failing that, a LocalFault."""
+        decided.set()
+        drain()
+        if core.IS_WINDOWS and isinstance(exc, LocalFault):
+            core.log(f"network: {host}: {exc}; the same address once more, checked by OpenSSL against the system's store")
+            try:
+                return won(entry, attempt(entry, max(left() or 0, CONNECT_EACH), _system_store_context()))
+            except ssl.SSLCertVerificationError:
+                raise
+            except Exception as again:          # noqa: BLE001
+                raise LocalFault(f"{exc}; then through OpenSSL: {again.__class__.__name__}: {again}") from exc
+        if isinstance(exc, LocalFault):
+            raise exc
+        raise LocalFault(f"connecting to {host}: {exc.__class__.__name__}: {exc}") from exc
 
     def won(entry, tls):
         tls.settimeout(timeout if budget is not None else socket.getdefaulttimeout())
@@ -285,6 +386,16 @@ def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSL
 
     results: queue.Queue = queue.Queue()
     decided = threading.Event()
+
+    def drain():
+        while True:                             # another handshake that finished before this point is not used
+            try:
+                _entry, other, _exc = results.get_nowait()
+            except queue.Empty:
+                break
+            if other is not None:
+                with contextlib.suppress(Exception):
+                    other.close()
 
     def racer(entry, each):
         try:
@@ -320,20 +431,15 @@ def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSL
         running -= 1
         if tls is not None:
             decided.set()
-            while True:                         # another handshake that finished before this point is not used
-                try:
-                    _entry, other, _exc = results.get_nowait()
-                except queue.Empty:
-                    break
-                if other is not None:
-                    with contextlib.suppress(Exception):
-                        other.close()
+            drain()
             if remembered and entry[3][:2] != remembered and remembered in [e[3][:2] for e in order]:
                 core.log(f"network: {host} answered on another address than the one remembered")
             return won(entry, tls)
         if isinstance(exc, ssl.SSLCertVerificationError):
             decided.set()
             raise exc                           # the same on every address: a TLS-inspecting network
+        if _local_fault(exc):
+            return local(entry, exc)            # never counted as an address that did not answer ("offline")
         failures.append(f"{entry[3][0]}: {str(exc) or exc.__class__.__name__}")
         if isinstance(exc, TimeoutError) or "timed out" in str(exc):
             slow.append(entry)
@@ -348,7 +454,9 @@ def _connect_any(host: str, port: int, timeout, source_address, context: ssl.SSL
                 return won(entry, attempt(entry, remaining if remaining is not None else 3 * CONNECT_EACH))
             except ssl.SSLCertVerificationError:
                 raise
-            except OSError:
+            except Exception as exc:            # noqa: BLE001
+                if _local_fault(exc):
+                    return local(entry, exc)
                 continue
     if remembered and tried == started == len(order):
         _keep_address(host, port, remembered, drop=True)    # nothing answered: the next process starts afresh
@@ -912,6 +1020,8 @@ def offline(error: NetworkError, what: str) -> Status:
 
 
 def _offline(error: NetworkError, what: str) -> Status:
+    if error.cause == "LOCAL_FAULT":
+        return core.internal(f"{what}: {error.detail}")
     if error.cause in ("TLS_INTERCEPT", "PROXY_AUTH"):
         failed = setup_failed(error.cause, f"{what}: {error.detail}")
         return Status("OFFLINE", failed.summary, failed.next_step, failed.tell_user)
