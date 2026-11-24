@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import ExitStack
 import shutil
 import stat
 import sys
@@ -19,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
 import support  # noqa: E402,F401  (puts the client on the path)
 from fake_api import FakeApi, mark_like_the_service, sha256_hex  # noqa: E402
-from theodore_client import api, core, specimens  # noqa: E402
+from theodore_client import api, commands, core, install, specimens  # noqa: E402
 from theodore_client.service import texts as texts_module  # noqa: E402
 
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + b"sheet bytes " * 50 + b"\xff\xd9"
@@ -260,6 +261,44 @@ class SkillBodies(TextsCase):
         self.assertIn("ENTRY", body)
         self.assertEqual(len(self.posts()), 1)
         self.assertEqual(self.fake.batches[0][0]["bindings"], "launcher" if core.IS_WINDOWS else "tool")
+
+
+class PptxManualFromTexts(TextsCase):
+    """The pptx manual through the service's Texts: the account's directions and the served manual in one request;
+    offline, an engine's own manual is still given, with the line that says the directions could not be reached."""
+
+    def manual(self, on_disk):
+        return commands.PptxManual(None, "beta", "1.0.0-rc.33", self.home / "engines" / "1.0.0-rc.33", on_disk)
+
+    def quiet(self, on_disk):
+        """The engine (its manual on disk or not) without an installed one; no notices, no engine record."""
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(commands.PptxManual, "prepare", return_value=self.manual(on_disk)))
+        stack.enter_context(mock.patch.object(install, "touch_used"))
+        stack.enter_context(mock.patch.object(install, "take_announcement", return_value=None))
+        stack.enter_context(mock.patch.object(install, "plugin_notice", return_value=None))
+        return stack
+
+    def test_the_directions_and_the_served_manual_come_in_one_request(self):
+        self.fake.guides["pptx"] = {"": "DIRECTIONS FOR THIS ACCOUNT.\n", "manual": "# Manual\n\nServed manual text.\n"}
+        with self.quiet(None):
+            text = self.texts.guide("pptx", None, None)[0]
+        self.assertIn("DIRECTIONS FOR THIS ACCOUNT.", text)
+        self.assertIn("Served manual text.", text)
+        self.assertLess(text.index("DIRECTIONS FOR THIS ACCOUNT."), text.index("Served manual text."))
+        self.assertEqual(len(self.posts()), 1)
+        self.assertEqual([(i["section"], i["bindings"]) for i in self.fake.batches[0]], [("", "launcher"), ("manual", "launcher")])
+
+    def test_offline_the_engines_own_manual_comes_with_the_line_that_says_so(self):
+        self.fake.down = True
+        with self.quiet("# Manual on disk\n"):
+            text = self.texts.guide("pptx", None, None)[0]
+        self.assertIn("THEODORE OFFLINE: Theodore's online part for pptx could not be reached (", text)
+        self.assertIn("# Manual on disk", text)
+        with self.quiet(None):
+            with self.assertRaises(core.Status) as caught:
+                self.texts.guide("pptx", None, None)
+        self.assertEqual(caught.exception.name, "OFFLINE", "a served manual is never given without its request")
 
 
 if __name__ == "__main__":

@@ -310,6 +310,7 @@ class Texts:
                 raise damaged
             version = str(index.get("version") or "")
             got: list[Got] = []
+            keep: list = []                     # what memory takes, once the whole answer has been read and checked
             for number, item in enumerate(items):
                 entry = answers.get(f"i{number}")
                 if not isinstance(entry, dict):
@@ -319,7 +320,7 @@ class Texts:
                     kept = held[item]
                     if kept is None or kept[0] != etag:
                         raise damaged               # a 304 for something this call did not hold
-                    self._held.put(item.key, kept[0], kept[1], kept[2])
+                    keep.append((item.key, kept[0], kept[1], kept[2]))
                     got.append(Got(200, kept[1], kept[0], kept[2] or version))
                 elif status == 200:
                     member = str(entry.get("member") or "")
@@ -340,13 +341,18 @@ class Texts:
                                      "A design specimen arrived damaged. I am trying once more.")
                     if item.kind == "sheet" and data[:2] != b"\xff\xd8":
                         raise core.internal(f"specimen {item.name}: the answer is not a JPEG image; it was refused.")
-                    self._held.put(item.key, etag, data, version)
+                    keep.append((item.key, etag, data, version))
                     got.append(Got(200, data, etag, version, fresh=True))
                 elif status in (403, 404):
-                    self._held.drop(item.key)
+                    keep.append((item.key, None, None, None))
                     got.append(Got(status, code=str(entry.get("code") or "")))
                 else:
                     raise damaged
+            for key, etag, data, version in keep:
+                if data is None:
+                    self._held.drop(key)
+                else:
+                    self._held.put(key, etag, data, version)
             return got
         except (zipfile.BadZipFile, KeyError, ValueError, TypeError, AttributeError, OSError):
             raise damaged from None
@@ -543,11 +549,17 @@ class Texts:
         if any(kind == "manual" for kind, _n in plan):
             manual = commands.PptxManual.prepare(role)       # the engine, its manual on disk or not, the items it needs
             items += [item for item in manual.items() if item not in items]
-        got = dict(zip(items, self.fetch(items, f"guide {skill}"))) if items else {}
+        if manual is not None and len(items) == len(manual.items()):
+            # The manual alone: offline, an engine's own manual is still printed, with the line that says what is missing.
+            manual_got = manual.fetch(self)
+            got = manual_got or {}
+        else:
+            got = dict(zip(items, self.fetch(items, f"guide {skill}"))) if items else {}
+            manual_got = got
         out = []
         for kind, name in plan:
             if kind == "manual":
-                out.append(manual.document(got, opening=False, notices=bindings != "chat", pointers=bindings != "chat"))
+                out.append(manual.document(manual_got, opening=False, notices=bindings != "chat", pointers=bindings != "chat"))
                 continue
             answer = got[Item("section", skill, name, reader, self._bindings_sent(bindings))]
             if answer.status == 404:
