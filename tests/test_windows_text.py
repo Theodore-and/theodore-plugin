@@ -439,9 +439,40 @@ class WindowsShortCommand(unittest.TestCase):
         self.assertNotIn(STRANGE, batch, "no path baked in")
         self.assertIn('h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n', texts["theodore"])
         self.assertIn('[ ! -f "$h/bin/launcher.json" ] && [ -f "$o/bin/launcher.json" ] && h=$o\n', texts["theodore"])
-        self.assertNotIn("call ", batch.lower(), "no CALL: it doubles carets and expands % again")
+        self.assertEqual(batch.lower().count("call "), 1, "no CALL of a program: it doubles carets and expands % again")
+        self.assertIn(" else call exit /b %%ERRORLEVEL%%\r\n", batch, "the one CALL: cmd's exit code is the client's")
         self.assertIn('exec sh "$b/theodore" "$@"', texts["theodore"], "Git Bash: the sh launcher, which carries every argument exactly")
         self.assertTrue(texts["theodore"].startswith("#!/bin/sh\n"))
+        # 0.4.34: straight to the client's python.exe by cmd's own reads of the folder's records, else the launcher.
+        lines = batch.split("\r\n")
+        self.assertIn('if exist "%THEODORE_SHIM_HOME%\\runtime\\current.txt" set /p THEODORE_SHIM_RT=<"%THEODORE_SHIM_HOME%\\runtime\\current.txt"', lines)
+        self.assertIn('if exist "%THEODORE_SHIM_HOME%\\client\\current.txt" set /p THEODORE_SHIM_CV=<"%THEODORE_SHIM_HOME%\\client\\current.txt"', lines)
+        run = next(line for line in lines if line.startswith('"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I '))
+        self.assertTrue(run.endswith(core.RUN_LINE_TAIL), "the launcher's own end of the run line")
+        self.assertEqual(lines[lines.index(run) + 1:], [":launcher", '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*', ""],
+                         "nothing after the run line but the launcher's label: the file may be rewritten while the client runs")
+        for program in ("findstr", "cygpath", "powershell", "where "):
+            self.assertNotIn(program, batch.lower())
+
+    def test_the_git_bash_short_command_bakes_the_folder_and_keeps_the_rule_after(self):
+        with mock.patch.object(core, "_msys_path", lambda path: "/c/Users/T/.theodore"):
+            text = core.shim_texts()["theodore"]
+        hot, rest = text.split('h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n', 1)
+        self.assertNotIn("cygpath", hot, "the hot path starts no program before the client")
+        self.assertIn(f"w={core._sh_quote(str(core.home().root))} h='/c/Users/T/.theodore'\n", hot)
+        self.assertIn('"$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n', hot, "the client gets Windows paths")
+        self.assertIn('[ "$x" -eq 126 ] || exit "$x"', hot, "a refused start falls through to the launcher, which says so")
+        self.assertIn('exec sh "$b/theodore" "$@"', rest)
+        self.assertEqual((core._msys_path("C:\\Users\\Théo\\.theodore"), core._msys_path("\\\\srv\\share\\x"), core._msys_path("rel")),
+                         ("/c/Users/Théo/.theodore", None, None))
+
+    def test_the_launchers_run_line_ends_as_the_short_commands(self):
+        from theodore_client import cli
+        for skill in ("pptx", "deck-design"):
+            lines = (Path(support.PLUGIN) / "skills" / skill / "scripts" / "theodore.cmd").read_bytes().decode("utf-8").split("\r\n")
+            run = next(line for line in lines[lines.index(":run_client"):] if line.startswith('"%PY%" -I "%HOME_DIR%\\client\\%CV%" %*'))
+            self.assertTrue(run.endswith(core.RUN_LINE_TAIL), skill)
+        self.assertTrue(core.RUN_LINE_TAIL.startswith(" " + cli.LAUNCHER_TAIL))
 
     def test_the_written_batch_file_is_recognised_as_theodores(self):
         """WINDOWS's recount: read as text, the batch file's CRLF became LF, so it never matched what Theodore writes:

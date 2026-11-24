@@ -539,28 +539,96 @@ def _sh_quote(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+# The run line's end in the batch launcher (theodore.cmd, :run_client) and in the batch short command: an error level
+# of 131 or more, or below 0, is Windows refusing to start the interpreter (a policy such as AppLocker), never the
+# client's (its codes end at 130); `call exit /b` gives cmd's own exit code the client's. The client tells an argument of
+# several lines by this text (cli.LAUNCHER_TAIL), which cmd then carries into the last argument.
+_BLOCKED = ("echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may "
+            "block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in "
+            "Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security "
+            "policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73")
+RUN_LINE_TAIL = f" & if not errorlevel 0 ({_BLOCKED}) else if errorlevel 131 ({_BLOCKED}) else call exit /b %%ERRORLEVEL%%"
+
+
+def _msys_path(path: str) -> str | None:
+    """C:\\Users\\x as Git Bash names it (/c/Users/x); None for a path it names otherwise (a share, a relative path)."""
+    if len(path) < 3 or not path[0].isascii() or not path[0].isalpha() or path[1] != ":" or path[2] not in "\\/":
+        return None
+    return "/" + path[0].lower() + path[2:].replace("\\", "/")
+
+
 def shim_texts() -> dict[str, str] | None:
     """{file name: content} of the short command for this installation, or None when it cannot be written safely. On
     Windows only for a default folder (the one windows_default_home finds): the batch file finds it by the same rule,
-    from %USERPROFILE% and %LOCALAPPDATA% (no path baked in, so no code page question), and the Git Bash script runs
-    Theodore's sh launcher, which carries every argument exactly."""
+    from %USERPROFILE% and %LOCALAPPDATA% (no path baked in, so no code page question), and the Git Bash script by the
+    folder's paths baked in, with that rule's own lines when they no longer hold.
+
+    Since 0.4.34 each starts Theodore's client straight from its Python, with no other program (the launcher before it
+    started about 20 in Git Bash: 1.14 s on the Windows test machine, 4.5 to 7 s on a laptop): the runtime and client
+    are read from the folder's records (runtime/current.txt, client/current.txt) by the shell itself, so an update needs
+    no new short command. When anything is missing or not a plain name, it runs the full launcher, as before."""
     head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
+    # The records hold plain names; a carriage return (a record written on Windows) is dropped, anything else is refused.
+    read = ('r= c= ok=1\n'
+            '{ IFS= read -r r || [ -n "$r" ]; } 2>/dev/null <"$h/runtime/current.txt"\n'
+            '{ IFS= read -r c || [ -n "$c" ]; } 2>/dev/null <"$h/client/current.txt"\n'
+            'case $r in *[!A-Za-z0-9._+-]) r=${r%?} ;; esac\n'
+            'case $c in *[!A-Za-z0-9._+-]) c=${c%?} ;; esac\n'
+            'case $r in ""|*[!A-Za-z0-9._+-]*) ok= ;; esac\n'
+            'case $c in ""|*[!A-Za-z0-9._+-]*) ok= ;; esac\n')
     if IS_WINDOWS:
         new, old = windows_homes()
         root = os.path.normcase(os.path.abspath(home().root))
         same = lambda path: root == os.path.normcase(os.path.abspath(path))     # noqa: E731
         if not (same(new) or (same(old) and same(windows_default_home()))):
             return None
+        windows = str(home().root)
+        msys, msys_new = _msys_path(windows), _msys_path(str(new))
         # The rule of windows_default_home, as the batch file and the Git Bash script read it.
+        batch = (f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
+                 "setlocal EnableExtensions DisableDelayedExpansion\r\n"
+                 'set "THEODORE_SHIM_HOME=%USERPROFILE%\\.theodore"\r\n'
+                 'if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" '
+                 'set "THEODORE_SHIM_HOME=%LOCALAPPDATA%\\Theodore"\r\n'
+                 'if defined THEODORE_HOME set "THEODORE_SHIM_HOME=%THEODORE_HOME%"\r\n'
+                 "rem Theodore's client straight from its Python, by cmd's own reads of the folder's records; else the launcher.\r\n"
+                 'set "THEODORE_SHIM_RT="\r\n'
+                 'set "THEODORE_SHIM_CV="\r\n'
+                 'if exist "%THEODORE_SHIM_HOME%\\runtime\\current.txt" set /p THEODORE_SHIM_RT=<"%THEODORE_SHIM_HOME%\\runtime\\current.txt"\r\n'
+                 'if exist "%THEODORE_SHIM_HOME%\\client\\current.txt" set /p THEODORE_SHIM_CV=<"%THEODORE_SHIM_HOME%\\client\\current.txt"\r\n'
+                 "if not defined THEODORE_SHIM_RT goto :launcher\r\n"
+                 "if not defined THEODORE_SHIM_CV goto :launcher\r\n"
+                 'if not exist "%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" goto :launcher\r\n'
+                 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" goto :launcher\r\n'
+                 'if not exist "%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" goto :launcher\r\n'
+                 'set "THEODORE_HOME=%THEODORE_SHIM_HOME%"\r\n'
+                 'set "THEODORE_LAUNCHER=%THEODORE_SHIM_HOME%\\bin\\theodore.cmd"\r\n'
+                 # One line, then the batch ends: this file may be replaced while the client runs (an update rewrites it).
+                 '"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%" %*'
+                 + RUN_LINE_TAIL + "\r\n"
+                 ":launcher\r\n"
+                 '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n')
+        hot = ""
+        if msys and msys_new:
+            # Only this folder, found by the rule: THEODORE_HOME unset (or naming it), and for a folder of 0.4.14 or earlier,
+            # none in %USERPROFILE%\.theodore. The client gets the Windows forms; MSYS converts each argument as before.
+            claim = ('[ -z "${THEODORE_HOME:-}" ] || [ "$THEODORE_HOME" = "$w" ] || [ "$THEODORE_HOME" = "$h" ]' if same(new) else
+                     f'{{ [ -z "${{THEODORE_HOME:-}}" ] && [ ! -f {_sh_quote(msys_new + "/bin/launcher.json")} ]; }} || '
+                     '[ "$THEODORE_HOME" = "$w" ] || [ "$THEODORE_HOME" = "$h" ]')
+            hot = (f"w={_sh_quote(windows)} h={_sh_quote(msys)}\n"
+                   f"if {claim}; then\n"
+                   + "".join("  " + line + "\n" for line in read.splitlines()) +
+                   '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
+                   '    THEODORE_HOME=$w THEODORE_LAUNCHER="$w\\\\bin\\\\theodore.cmd"\n'
+                   '    export THEODORE_HOME THEODORE_LAUNCHER\n'
+                   '    "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n'
+                   '    x=$?\n'
+                   '    [ "$x" -eq 126 ] || exit "$x"        # 126: the system refused to start it; the launcher says so\n'
+                   '  fi\n'
+                   'fi\n')
         return {
-            "theodore.cmd": f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
-                            "setlocal\r\n"
-                            'set "THEODORE_SHIM_HOME=%USERPROFILE%\\.theodore"\r\n'
-                            'if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" '
-                            'set "THEODORE_SHIM_HOME=%LOCALAPPDATA%\\Theodore"\r\n'
-                            'if defined THEODORE_HOME set "THEODORE_SHIM_HOME=%THEODORE_HOME%"\r\n'
-                            '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n',
-            "theodore": "#!/bin/sh\n" + head
+            "theodore.cmd": batch,
+            "theodore": "#!/bin/sh\n" + head + hot
                         + 'h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n'
                         + 'o=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null)/Theodore\n'
                         + '[ ! -f "$h/bin/launcher.json" ] && [ -f "$o/bin/launcher.json" ] && h=$o\n'
@@ -569,9 +637,22 @@ def shim_texts() -> dict[str, str] | None:
                         + '[ -f "$b/theodore" ] && exec sh "$b/theodore" "$@"\n'
                         + 'exec "$b/theodore.cmd" "$@"\n',
         }
-    lines = "#!/bin/sh\n" + head
-    if os.path.abspath(home().root) != os.path.abspath(Path.home() / ".theodore"):     # the launchers set THEODORE_HOME always
-        lines += f"THEODORE_HOME={_sh_quote(str(home().root))}\nexport THEODORE_HOME\n"
+    root = str(home().root)
+    default = os.path.abspath(root) == os.path.abspath(Path.home() / ".theodore")
+    lines = "#!/bin/sh\n" + head + f"h={_sh_quote(root)}\n"
+    # A folder elsewhere is this short command's own (THEODORE_HOME set always); the default one yields to another.
+    body = (read + 'p=$h/runtime/$r/python/bin/python3\n'
+            'if [ -n "$ok" ] && [ -f "$p" ] && [ -x "$p" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore" ]; then\n'
+            '  THEODORE_HOME=$h THEODORE_LAUNCHER=$h/bin/theodore\n'
+            '  export THEODORE_HOME THEODORE_LAUNCHER\n'
+            '  exec "$p" -I "$h/client/$c" "$@"\n'
+            'fi\n')
+    if default:
+        lines += 'if [ "${THEODORE_HOME:-$h}" = "$h" ]; then\n' + "".join("  " + line + "\n" for line in body.splitlines()) + "fi\n"
+    else:
+        lines += body
+    if not default:                 # the launchers set THEODORE_HOME always
+        lines += "THEODORE_HOME=$h\nexport THEODORE_HOME\n"
     return {"theodore": lines + f'exec {_sh_quote(str(home().launcher()))} "$@"\n'}
 
 
