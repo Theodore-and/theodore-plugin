@@ -85,20 +85,19 @@ In Theodore's own places:
 
 At its first use it also **sets Theodore up in your assistant**, so that it works without further steps:
 
-- Theodore's own commands, and the assistant's edits of a deck's working files, run without a prompt: permission
-  rules for exactly those in Claude Code's `settings.json`, a rules file in Codex with which Theodore's commands run
-  outside Codex's sandbox, and the short command `theodore` in a per-user folder on your PATH;
-- automatic updates are turned on for Theodore's marketplace;
 - one marked line is written into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` saying that you chose Theodore for
   presentations, so that a request for a deck goes to Theodore.
 
-`theodore hosts settings --remove` takes the rules back and keeps them off, a line you delete is not written again,
-and an organisation's managed policy always wins.
+It writes no permission rule into your assistant's settings (Claude Code's `settings.json`, Codex's rules): Theodore's two skills carry the permissions their work
+needs (Theodore's own commands, the plugin's tools, a deck's working files in `.theodore/workspaces`, and reads of
+Theodore's own folders), which Claude Code applies while a Theodore skill is active; in its default permission mode it
+asks once to load each skill. A line you delete is not written again, and an organisation's managed policy always wins.
 
 The sentence on your Theodore page ("Set up Theodore and use it for all my presentations"), or its installer, does the
 same and prints what it wrote. It also registers the plugin in every assistant it finds, adds one entry to Claude
 Desktop's configuration, and on Windows fetches Git Bash for Claude Code when it has none and names it in Claude
-Code's settings. Its `--no-settings` leaves the rules out.
+Code's settings. Rules for Theodore's commands in your assistants' settings come only when you ask for them:
+`theodore hosts settings --apply` (and `--remove` takes them back).
 
 ## What it needs, and how to remove it
 
