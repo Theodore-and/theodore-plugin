@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when run as tests.<module>
 from service_support import FAKE_ENGINE_PY, FAKE_ONESHOT_PY, Collector  # noqa: E402
-from support import CLIENT_DIR  # noqa: E402
+from support import CLIENT_DIR, sandbox_processes, stop_sandbox_processes  # noqa: E402
 
 from theodore_client.service import client as service_client, endpoint  # noqa: E402
 
@@ -73,12 +73,25 @@ class PlatformCase(unittest.TestCase):
         self.addCleanup(self._stop)
 
     def _stop(self):
+        """The service ends within 10 s of its stop and its workers with it (on Windows its job object ends them); the
+        test fails otherwise, after what is left is ended."""
         record = endpoint.read_service_json(self.home)
+        gone = True
         if record and endpoint.pid_alive(record["pid"]):
             from theodore_client.service import control
             os.environ["THEODORE_HOME"] = str(self.home)
             control._terminate(record["pid"])            # noqa: SLF001
-            self.gone(record["pid"], 10)
+            gone = self.gone(record["pid"], 10)
+        workers = []
+        if not IS_WINDOWS:
+            deadline = time.monotonic() + 5
+            while (workers := [p for p in sandbox_processes(self.tmp.name) if "engine.py serve" in p[1]]) \
+                    and time.monotonic() < deadline:
+                time.sleep(0.05)
+        left = stop_sandbox_processes(self.tmp, self.home)
+        self.assertTrue(gone, "the service did not end within 10 s of its stop")
+        self.assertEqual(workers, [], "workers outlived their service")
+        self.assertEqual(left, [], "processes outlived SIGKILL")
 
     @staticmethod
     def gone(pid, timeout: float) -> bool:
