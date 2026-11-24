@@ -1287,7 +1287,7 @@ class Engine(ClientCase):
         engine_requests = [r for r in self.api.requests if r["path"].endswith("/engine")]
         self.assertTrue(all(set(r["query"]) == {"platform", "arch"} for r in engine_requests), "the client asks for its own platform's artifact")
         old = self.box.home / "engines" / self.ENGINE_VERSION
-        running = json.loads(self.client("pptx", "env").stdout)["exe"]           # a build in progress uses this folder
+        running = json.loads(self.client("pptx", "env").stdout)["engine"]        # a build in progress uses this folder
         self.assertTrue(running.startswith(str(old)), running)
         # The compiled build of the same version passes parity later: it installs beside the source build under a new
         # folder name and the pointer moves; the folder a running build uses is not touched.
@@ -1302,7 +1302,7 @@ class Engine(ClientCase):
         self.assertNotEqual(self.state(f"engines/{new.name}/.theodore-engine.json")["sha256"], source_sha)
         self.assertTrue((old / "skills" / "pptx" / "scripts" / "pptx.py").exists(), "the source build stays until it is collected")
         self.assertEqual(self.state("engines/current.json"), {"version": self.ENGINE_VERSION, "previous": None})
-        self.assertTrue(json.loads(self.client("pptx", "env").stdout)["exe"].startswith(str(new)))
+        self.assertTrue(json.loads(self.client("pptx", "env").stdout)["engine"].startswith(str(new)))
         self.assertEqual(self.client("pptx", "version").stdout.strip(), self.ENGINE_VERSION)
         self.assertIn("(engine-native)", self.client("doctor").stdout)
         # Collected later: a superseded folder unused for a day goes at the next check.
@@ -1323,7 +1323,7 @@ class Engine(ClientCase):
             offset = (step + 1) * 600
             self.api.clock_offset = offset
             self.assertStatus(self.client("update", "--apply", env={"THEODORE_TEST_CLOCK_OFFSET": str(offset)}), "OK", 0)
-            used = Path(json.loads(self.client("pptx", "env").stdout)["exe"]).parents[2]
+            used = Path(json.loads(self.client("pptx", "env").stdout)["engine"])     # the folder its script runs from
             if label not in folders:
                 folders[label] = used
                 (used / "a running build's file").write_text("in use")        # what a build in progress would lose
