@@ -171,13 +171,13 @@ class RefusalFromOutput(HomeCase):
     def test_the_output_passes_through_whole_and_the_tail_is_kept(self):
         import io
         sink = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
-        script = "import sys; sys.stdout.write('é' * 50000 + '\\nlast line'); sys.stdout.flush(); sys.exit(3)"
-        # The engine writes UTF-8 everywhere (engine_env's PYTHONIOENCODING; on Windows a pipe otherwise gets the ANSI
-        # code page), and its bytes pass through unchanged.
+        # The child writes bytes, as they reach the client whatever its platform's text mode (Windows writes a line
+        # break as CR LF): the test is about the client passing them through unchanged, not about the child's text.
+        script = "import sys; sys.stdout.buffer.write(('é' * 50000 + '\\nlast line').encode('utf-8')); sys.stdout.flush(); sys.exit(3)"
         with mock.patch.object(sys, "stdout", sink):
-            code, tail, _whole = install._call_passing_output([sys.executable, "-c", script], {**os.environ, "PYTHONIOENCODING": "utf-8"})
+            code, tail, _whole = install._call_passing_output([sys.executable, "-c", script], dict(os.environ))
         self.assertEqual(code, 3)
-        self.assertEqual(sink.buffer.getvalue().decode("utf-8"), "é" * 50000 + "\nlast line")
+        self.assertEqual(sink.buffer.getvalue(), ("é" * 50000 + "\nlast line").encode("utf-8"), "every byte, unchanged")
         self.assertTrue(tail.endswith(b"\nlast line"))
         self.assertLessEqual(len(tail), install.OUTPUT_TAIL_BYTES)
 
