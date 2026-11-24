@@ -2922,11 +2922,14 @@ class HostTest(ClientCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn(" guide pptx pptxgenjs-charts)", result.stdout)
         self.assertEqual(result.stdout.splitlines()[4], "--- served-part ---")     # after the title and the three opening lines
-        before = len(self.api.requests)
+        before, batches = len(self.api.requests), len(self.api.batches)
         first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
         self.assertIn("guide pptx has no section 'not-served'.", first)
         self.assertIn("guide pptx for the manual", nxt)
-        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/pptx/not-served", "/v1/guide/pptx"])
+        # contract C6: one request for the section (404), then one for the names offered instead (the index)
+        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/batch", "/v1/guide/batch"])
+        self.assertEqual([[(item["type"], item["skill"], item.get("section")) for item in items] for items in self.api.batches[batches:]],
+                         [[("section", "pptx", "not-served")], [("index", "pptx", None)]])
         self.assertStatus(self.client("guide", "pptx", "--license"), "USAGE", 64)
 
     # --- 5: uninstall with an assistant that never had Theodore ------------------------------------------------------------------
