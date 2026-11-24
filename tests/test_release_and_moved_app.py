@@ -106,7 +106,7 @@ class TheClaudeAppMovedItsData(unittest.TestCase):
         self.config(self.old, {"preferences": {}})
         self.assertEqual(desktop.config_dirs(), [self.old])
         record: dict = {}
-        self.assertEqual(desktop.register(record), ["claude-desktop: registered (it loads when the Claude app is quit and opened again)"])
+        self.assertEqual(desktop.register(record), ["claude-desktop: registered for the Claude app's chats"])
         self.assertIn("theodore", self.servers(self.old / "claude_desktop_config.json"))
 
     def test_after_the_move_the_entry_goes_where_the_app_reads_and_not_where_it_was(self):
@@ -115,7 +115,7 @@ class TheClaudeAppMovedItsData(unittest.TestCase):
         self.assertEqual(desktop.config_dirs(), [self.new], "the folder the app left is not one of its folders")
         record: dict = {}
         lines = desktop.register(record)
-        self.assertEqual(lines, ["claude-desktop: registered (it loads when the Claude app is quit and opened again)"])
+        self.assertEqual(lines, ["claude-desktop: registered for the Claude app's chats"])
         self.assertEqual(sorted(self.servers(new)), ["files", "theodore"])
         self.assertEqual(json.loads(new.read_text(encoding="utf-8"))["preferences"], {"sidebarMode": "chat"}, "nothing else in the file changed")
         self.assertFalse((self.old / "claude_desktop_config.json").exists(), "nothing is written into the folder the app left")
@@ -163,7 +163,7 @@ class TheClaudeAppMovedItsData(unittest.TestCase):
         record = {desktop.RECORD_KEY: {str(stale): {"ours": True, "created_servers": True, "entry": desktop.entry(), "written_at": 1.0}}}
         self.assertTrue(desktop.left_behind(record))
         lines = desktop.follow(record)
-        self.assertEqual(lines, ["claude-desktop: registered (it loads when the Claude app is quit and opened again)"])
+        self.assertEqual(lines, ["claude-desktop: registered for the Claude app's chats"])
         self.assertEqual(self.servers(new), {"theodore": desktop.entry()})
         self.assertFalse(stale.exists(), "the file Theodore alone had made in the folder nothing reads is gone")
         self.assertEqual(list(record[desktop.RECORD_KEY]), [str(new)])
@@ -196,7 +196,7 @@ class TheClaudeAppMovedItsData(unittest.TestCase):
         new = self.config(self.new)
         new.write_bytes(b"\xef\xbb\xbf" + json.dumps({"preferences": {"sidebarMode": "chat"}}).encode("utf-8"))
         record: dict = {}
-        self.assertEqual(desktop.register(record), ["claude-desktop: registered (it loads when the Claude app is quit and opened again)"])
+        self.assertEqual(desktop.register(record), ["claude-desktop: registered for the Claude app's chats"])
         raw = new.read_bytes()
         self.assertFalse(raw.startswith(b"\xef\xbb\xbf"), "written back as plain JSON")
         written = json.loads(raw.decode("utf-8"))
