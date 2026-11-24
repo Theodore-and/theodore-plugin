@@ -862,30 +862,6 @@ def _heartbeat(engine_version: str) -> None:
     outbox.flush()          # the service answered: reports kept for later go now (a few seconds at most; never raises)
 
 
-# --- engine pass-through -----------------------------------------------------------------------------------------------------
-
-def run_pptx(args: list[str]) -> int:
-    account.require("pptx", allow_refresh=False)
-    account.check_in_background()      # at most one detached licence refresh an hour; never waited for
-    install.require_runtime()
-    install.wait_for_packs(args)
-    install.wait_for_renderer(args)
-    sessions.engine_notice(args[0] if args else "")
-    code = install.run_engine(args)
-    if args[:1] == ["finish"]:
-        # The usage counts and the reports kept for later go at the end of a deck, in a detached send (never on the
-        # command's own time; never raises, never prints).
-        usage.send_in_background(force=True, reports=True)
-    return code
-
-
-def run_python(args: list[str]) -> int:
-    account.require("pptx", allow_refresh=False)
-    account.check_in_background()
-    install.require_runtime()
-    return install.run_engine(args, python_passthrough=True)
-
-
 # --- reports and preferences -------------------------------------------------------------------------------------------------
 
 # Text in quotes is what an assistant copies from a slide, a note or a file: it goes as a whole, whatever it says.

@@ -379,14 +379,14 @@ class ClientStatus(InProcess):
 
     def test_blocked_by_policy_and_an_engine_refusal(self):
         blocked = core.Status("BLOCKED_BY_POLICY", "the engine could not be started", "x", "y")
-        with mock.patch("theodore_client.commands.run_pptx", side_effect=blocked):
+        with mock.patch("theodore_client.verbs.run_pptx", side_effect=blocked):
             self.assertEqual(self.run_cli("pptx", "render", "/Users/someone/Acme Confidential Board"), 73)
         for code, status in contract.ENGINE_REFUSALS.items():
             if code in ("entitlement_missing", "entitlement_expired"):
                 continue        # these sign in or refresh first; their status is covered by the launcher suite
             refusal = install._refusal_status(code)
             refusal.cause = code
-            with mock.patch("theodore_client.commands.run_pptx", side_effect=refusal):
+            with mock.patch("theodore_client.verbs.run_pptx", side_effect=refusal):
                 self.run_cli("pptx", "apply", "x")
         events = self.lines()
         self.assertEqual((events[0]["status"], events[0]["cause"]), ("BLOCKED_BY_POLICY", None))

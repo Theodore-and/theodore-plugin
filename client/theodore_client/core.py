@@ -3,25 +3,71 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
-import locale
 import os
 import re
-import platform as _platform
-import shutil
 import stat
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 from . import __version__
 from .contract import CLIENT_STATUSES, EXIT
 
 IS_WINDOWS = os.name == "nt"
+
+
+class LazyModule:
+    """A module imported at its first use (any attribute read): an engine command's path then never loads what only the
+    network and the archives need (ssl, http, email, tarfile, zipfile: about 100 ms of the client's start on the
+    Windows test machine). Attribute writes and deletions go to the module itself, so a test that patches the module
+    through this name patches the module."""
+
+    def __init__(self, name: str):
+        object.__setattr__(self, "_lazy_name", name)
+
+    def _lazy_module(self):
+        import importlib
+        return importlib.import_module(object.__getattribute__(self, "_lazy_name"))
+
+    def __getattr__(self, attr):
+        return getattr(self._lazy_module(), attr)
+
+    def __setattr__(self, attr, value):
+        setattr(self._lazy_module(), attr, value)
+
+    def __delattr__(self, attr):
+        delattr(self._lazy_module(), attr)
+
+    def __repr__(self) -> str:
+        return f"<lazy module {object.__getattribute__(self, '_lazy_name')}>"
+
+
+# Used here only off an engine command's path (each loads more modules, some of them DLLs on Windows).
+hashlib = LazyModule("hashlib")
+locale = LazyModule("locale")
+_platform = LazyModule("platform")
+shutil = LazyModule("shutil")
+
+
+def urlparse(url: str):
+    from urllib.parse import urlparse as parse
+    return parse(url)
+
+
+def sha256_hex(data: bytes) -> str:
+    """A sha256 digest without hashlib, whose first import loads OpenSSL's library (several MB on Windows): CPython's
+    own implementation, the same digest."""
+    try:
+        from _sha2 import sha256        # CPython 3.12 and later
+    except ImportError:
+        try:
+            from _sha256 import sha256  # CPython 3.11 and earlier
+        except ImportError:
+            from hashlib import sha256
+    return sha256(data).hexdigest()
 
 
 # --- statuses ---------------------------------------------------------------------------------------------------------
