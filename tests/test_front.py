@@ -45,6 +45,26 @@ def front_binary() -> Path | None:
     return _BINARY[0]
 
 
+def alive(pid: int) -> bool:
+    """Whether the process runs (os.kill(pid, 0) would end it on Windows)."""
+    if not IS_WINDOWS:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32")
+    handle = kernel32.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    code = ctypes.c_ulong()
+    try:
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259     # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def plugin_version() -> str:
     return json.loads((ROOT / "plugins" / "theodore" / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
 
@@ -199,7 +219,7 @@ class Front(FrontCase):
         if not IS_WINDOWS:
             self.assertEqual(started[0]["ppid"], 1, "the service is nobody's child")
         self.assertFalse(self.events("oneshot"))
-        os.kill(started[0]["pid"], 0)       # still running after the front ended
+        self.assertTrue(alive(started[0]["pid"]), "still running after the front ended")
         done = self.front("pptx", "echo", "second")
         self.assertEqual(len(self.events("service-started")), 1)
         self.assertEqual(self.answer(done)["args"], ["echo", "second"])
@@ -252,6 +272,7 @@ class Front(FrontCase):
             self.assertEqual(self.answer(done)["oneshot"], [command, "--x"])
         self.assertFalse(self.events("call"))
 
+    @unittest.skipIf(IS_WINDOWS, "a copy of python.exe runs only beside its DLLs")
     def test_an_installation_without_launch_json_runs_one_shot(self):
         (self.home / "bin" / "launch.json").unlink()
         runtime = self.home / "runtime" / "rt1" / "python" / ("python.exe" if IS_WINDOWS else "bin/python3")

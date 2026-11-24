@@ -3,7 +3,8 @@
 The front's tests point `<home>/bin/launch.json` at this interpreter and at a client folder whose `__main__.py` calls
 main() here, so the front starts this as it would start the real service:
 
-  service --home H        the C1 service: listens (a Unix socket, or loopback TCP with FAKE_TCP=1), writes
+  service --home H        the C1 service: listens (a Unix socket; on Windows a named pipe, as C1 says; loopback TCP
+                          with FAKE_TCP=1), writes
                           state/run/service.json, answers hello and calls; every event goes to state/run/events.jsonl
   mcp [--for X]           a stand-in for the client's own MCP server (the relay's fallback)
   anything else           a one-shot command: prints {"oneshot": argv, ...} and exits 0 (or the code `exitN` asks)
@@ -51,6 +52,74 @@ def read_frame(sock) -> dict | None:
             return None
         body += chunk
     return json.loads(body.decode("utf-8"))
+
+
+class WindowsPipe:
+    """One connection of a named-pipe server, opened for overlapped I/O (multiprocessing.connection's way): a call's
+    thread writes while the connection's thread waits in a read, as the real service's do."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def _wait(self, ov, err):
+        import _winapi
+        try:
+            if err == _winapi.ERROR_IO_PENDING:
+                _winapi.WaitForMultipleObjects([ov.event], False, _winapi.INFINITE)
+        except BaseException:
+            ov.cancel()
+            raise
+        return ov.GetOverlappedResult(True)
+
+    def recv(self, n: int) -> bytes:
+        import _winapi
+        try:
+            ov, err = _winapi.ReadFile(self.handle, n, overlapped=True)
+            done, err = self._wait(ov, err)
+        except OSError:
+            return b""                      # the client went away
+        return bytes(ov.getbuffer()[:done]) if err in (0, _winapi.ERROR_MORE_DATA) else b""
+
+    def sendall(self, data: bytes) -> None:
+        import _winapi
+        ov, err = _winapi.WriteFile(self.handle, data, overlapped=True)
+        done, err = self._wait(ov, err)
+        if err or done != len(data):
+            raise OSError(f"pipe write: {err}")
+
+    def shutdown(self, _how=None) -> None:
+        self.close()
+
+    def close(self) -> None:
+        import _winapi
+        if self.handle is not None:
+            handle, self.handle = self.handle, None
+            try:
+                _winapi.CloseHandle(handle)
+            except OSError:
+                pass
+
+
+class WindowsPipeServer:
+    PIPE_REJECT_REMOTE_CLIENTS = 0x8
+
+    def __init__(self, name: str):
+        self.name, self.first = name, True
+
+    def accept(self, timeout: float):
+        import _winapi
+        mode = _winapi.PIPE_ACCESS_DUPLEX | _winapi.FILE_FLAG_OVERLAPPED | (_winapi.FILE_FLAG_FIRST_PIPE_INSTANCE if self.first else 0)
+        self.first = False
+        handle = _winapi.CreateNamedPipe(self.name, mode, _winapi.PIPE_WAIT | self.PIPE_REJECT_REMOTE_CLIENTS,
+                                         _winapi.PIPE_UNLIMITED_INSTANCES, 65536, 65536, _winapi.NMPWAIT_WAIT_FOREVER, _winapi.NULL)
+        ov = _winapi.ConnectNamedPipe(handle, overlapped=True)
+        waited = _winapi.WaitForMultipleObjects([ov.event], False, int(timeout * 1000))
+        if waited != _winapi.WAIT_OBJECT_0:
+            ov.cancel()
+            _winapi.CloseHandle(handle)
+            raise socket.timeout()
+        ov.GetOverlappedResult(True)
+        return WindowsPipe(handle)
 
 
 class Connection:
@@ -178,7 +247,7 @@ class Connection:
                 self.service.seen.add(key)
                 try:
                     self.sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
+                except (OSError, AttributeError):
                     pass
                 return
             out(json.dumps({"resent": frame.get("resend", False)}))
@@ -208,10 +277,15 @@ class Service:
         delay = float(os.environ.get("FAKE_SERVICE_DELAY", "0") or 0)
         if delay:
             time.sleep(delay)
-        if os.environ.get("FAKE_TCP") or not hasattr(socket, "AF_UNIX"):
+        pipe = None
+        if os.environ.get("FAKE_TCP"):
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.bind(("127.0.0.1", 0))
             endpoint = {"kind": "tcp", "address": "127.0.0.1", "port": server.getsockname()[1]}
+        elif os.name == "nt":
+            name = rf"\\.\pipe\theodore-fake-{os.getpid()}-{secrets.token_hex(4)}"
+            pipe = WindowsPipeServer(name)
+            endpoint = {"kind": "pipe", "address": name}
         else:
             path = run / "s.sock"
             try:
@@ -221,7 +295,8 @@ class Service:
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             server.bind(str(path))
             endpoint = {"kind": "unix", "address": str(path)}
-        server.listen(64)
+        if pipe is None:
+            server.listen(64)
         doc = {"v": 1, "pid": os.getpid(), "started": "2026-11-24T00:00:00Z", "protocol": 1, "version": "0.0.0-fake",
                "endpoint": endpoint, "secret": self.secret, "home": str(self.home)}
         tmp = run / f"service.json.{os.getpid()}.tmp"
@@ -230,11 +305,12 @@ class Service:
         os.replace(tmp, run / "service.json")
         log(self.home, {"e": "service-started", "ppid": os.getppid(), "sid": os.getsid(0) if hasattr(os, "getsid") else None})
         idle = float(os.environ.get("FAKE_SERVICE_IDLE", "20"))
-        server.settimeout(idle)
+        if pipe is None:
+            server.settimeout(idle)
         try:
             while True:
                 try:
-                    sock, _ = server.accept()
+                    sock = pipe.accept(idle) if pipe is not None else server.accept()[0]
                 except socket.timeout:
                     break
                 threading.Thread(target=Connection(self, sock).serve, daemon=True).start()
