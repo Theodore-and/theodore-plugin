@@ -107,6 +107,9 @@ extern "system" {
     fn LocalFree(mem: *mut c_void) -> *mut c_void;
     fn ExitProcess(code: u32) -> !;
     fn GetNamedPipeServerProcessId(pipe: HANDLE, pid: *mut u32) -> BOOL;
+    fn GetConsoleMode(console: HANDLE, mode: *mut u32) -> BOOL;
+    fn GetModuleHandleW(name: *const u16) -> HANDLE;
+    fn GetProcAddress(module: HANDLE, name: *const u8) -> *mut c_void;
 }
 
 #[link(name = "advapi32")]
@@ -193,6 +196,33 @@ pub fn user_id() -> String {
 
 pub fn parent_pid() -> Option<u32> {
     None
+}
+
+/// Standard output and standard error are one pipe or file (CompareObjectHandles, Windows 10 1607 and later, looked up
+/// at run time), or both on one console.
+pub fn stdout_stderr_shared() -> bool {
+    use std::os::windows::io::AsRawHandle;
+    let out = io::stdout().as_raw_handle() as HANDLE;
+    let err = io::stderr().as_raw_handle() as HANDLE;
+    if invalid(out) || invalid(err) {
+        return false;
+    }
+    unsafe {
+        let mut mode = 0u32;
+        if GetConsoleMode(out, &mut mode) != 0 && GetConsoleMode(err, &mut mode) != 0 {
+            return true;
+        }
+        let module = GetModuleHandleW(wide(OsStr::new("kernelbase.dll")).as_ptr());
+        if module.is_null() {
+            return false;
+        }
+        let found = GetProcAddress(module, b"CompareObjectHandles\0".as_ptr());
+        if found.is_null() {
+            return false;
+        }
+        let compare: unsafe extern "system" fn(HANDLE, HANDLE) -> BOOL = std::mem::transmute(found);
+        compare(out, err) != 0
+    }
 }
 
 /// A canonical path as Python's os.path.realpath writes it: `C:\…`, `\\server\share\…`, never `\\?\`.

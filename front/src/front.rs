@@ -50,15 +50,17 @@ pub fn host_of_env() -> &'static str {
     "shell"
 }
 
-/// The environment overlay every call carries (C1's allow-list).
+/// The environment overlay every call carries (C1's allow-list), each name that is set here. THEODORE_STDIO is never
+/// taken from the environment: the front measures its own streams (`stdio_flags`), the relay sends none.
 pub fn overlay(plugin_root: Option<&Path>) -> Json {
     let mut env = Json::obj();
     let mut names: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .filter(|(k, _)| {
-            matches!(k.as_str(), "CLAUDECODE" | "CLAUDE_CODE_SESSION_ID" | "CLAUDE_PLUGIN_ROOT" | "CODEX_THREAD_ID")
+            matches!(k.as_str(), "CLAUDECODE" | "CLAUDE_CODE_SESSION_ID" | "CLAUDE_PID" | "CLAUDE_PLUGIN_ROOT" | "CODEX_THREAD_ID")
                 || (k.starts_with("THEODORE_") && k.len() > 9 && k[9..].bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'))
         })
+        .filter(|(k, _)| k != "THEODORE_STDIO")
         .collect();
     names.sort();
     for (k, v) in names {
@@ -104,6 +106,23 @@ fn deadline_ms() -> Option<i64> {
     Some((max - 30_000).max(1000))
 }
 
+/// C1 "The caller's streams": `stdout-tty`, `stderr-tty` (that stream is a terminal) and `shared` (stdout and stderr are
+/// one pipe, file or console), comma-separated; empty when none applies.
+pub fn stdio_flags() -> String {
+    use std::io::IsTerminal;
+    let mut flags = Vec::new();
+    if io::stdout().is_terminal() {
+        flags.push("stdout-tty");
+    }
+    if io::stderr().is_terminal() {
+        flags.push("stderr-tty");
+    }
+    if sys::stdout_stderr_shared() {
+        flags.push("shared");
+    }
+    flags.join(",")
+}
+
 struct Call {
     tool: &'static str,
     args: Vec<String>,
@@ -141,7 +160,7 @@ impl Call {
             .with("tool", self.tool.into())
             .with("args", Json::Arr(self.args.iter().map(|a| Json::str(&**a)).collect()))
             .with("cwd", Json::str(cwd.to_string_lossy()))
-            .with("env", overlay(home::plugin_root_of_exe().as_deref()))
+            .with("env", overlay(home::plugin_root_of_exe().as_deref()).with("THEODORE_STDIO", Json::str(stdio_flags())))
             .with("images", Json::Bool(false));
         if let Some(stdin) = &self.stdin {
             call.set("stdin", stdin.clone());
