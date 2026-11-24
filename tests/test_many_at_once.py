@@ -96,6 +96,29 @@ class CertificateCheck(unittest.TestCase):
                             "_guard_certificate_check.<locals>.verify", "wrapped once, not twice")
 
 
+class OneFileManyThreads(HomeCase):
+    def test_threads_writing_one_state_file_at_once_each_land_whole(self):
+        """The tool server's calls run side by side: their writes of one file must not share a temporary name."""
+        path = self.home / "state" / "shared.json"
+        start, errors = threading.Barrier(12), []
+
+        def one(i):
+            start.wait()
+            try:
+                for _ in range(20):
+                    core.write_json(path, {"writer": i, "pad": "x" * 20000})
+            except Exception as exc:        # noqa: BLE001  reported below
+                errors.append(exc)
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(errors, [])
+        self.assertIn(core.read_json(path).get("writer"), range(12), "a whole file from one writer")
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir()), ["shared.json"], "no temporary file left")
+
+
 class Listener:
     """A local TCP port that accepts and holds connections: the network answers."""
 
