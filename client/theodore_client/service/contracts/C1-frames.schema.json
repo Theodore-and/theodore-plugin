@@ -1,0 +1,663 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theodoreand.ai/contracts/C1-frames.schema.json",
+  "title": "C1 frames: relay and front <-> service, protocol 1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "#/$defs/call"
+    },
+    {
+      "$ref": "#/$defs/cancel"
+    },
+    {
+      "$ref": "#/$defs/bye"
+    },
+    {
+      "$ref": "#/$defs/welcome"
+    },
+    {
+      "$ref": "#/$defs/progress"
+    },
+    {
+      "$ref": "#/$defs/out"
+    },
+    {
+      "$ref": "#/$defs/image"
+    },
+    {
+      "$ref": "#/$defs/done"
+    },
+    {
+      "$ref": "#/$defs/notify"
+    },
+    {
+      "$ref": "#/$defs/error"
+    }
+  ],
+  "$defs": {
+    "callId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "hello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "v",
+        "secret",
+        "role",
+        "protocol",
+        "client"
+      ],
+      "properties": {
+        "t": {
+          "const": "hello"
+        },
+        "v": {
+          "const": 1
+        },
+        "secret": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "role": {
+          "enum": [
+            "relay",
+            "front",
+            "probe"
+          ]
+        },
+        "protocol": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "client": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "version"
+          ],
+          "properties": {
+            "name": {
+              "enum": [
+                "theodore-relay",
+                "theodore-front",
+                "theodore-relay-py",
+                "theodore-front-py",
+                "theodore-probe"
+              ]
+            },
+            "version": {
+              "$ref": "#/$defs/version"
+            }
+          }
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "host"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "host": {
+              "enum": [
+                "claude-code",
+                "codex",
+                "claude-desktop",
+                "cowork",
+                "shell",
+                "unknown"
+              ]
+            },
+            "host_version": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "plugin_root": {
+          "$ref": "#/$defs/absPath"
+        }
+      }
+    },
+    "call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "tool",
+        "cwd"
+      ],
+      "properties": {
+        "t": {
+          "const": "call"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "tool": {
+          "enum": [
+            "pptx",
+            "theodore",
+            "guide",
+            "specimen",
+            "list",
+            "chat"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4096
+        },
+        "params": {
+          "type": "object"
+        },
+        "cwd": {
+          "$ref": "#/$defs/absPath"
+        },
+        "env": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(CLAUDECODE|CLAUDE_CODE_SESSION_ID|CLAUDE_PLUGIN_ROOT|CODEX_THREAD_ID|THEODORE_[A-Z0-9_]+)$"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "stdin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "properties": {
+            "encoding": {
+              "enum": [
+                "utf-8",
+                "base64"
+              ]
+            },
+            "data": {
+              "type": "string"
+            }
+          }
+        },
+        "images": {
+          "type": "boolean"
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "resend": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "enum": [
+                  "pptx",
+                  "theodore"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "args"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "enum": [
+                  "guide",
+                  "specimen",
+                  "list",
+                  "chat"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "params"
+            ]
+          }
+        }
+      ]
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id"
+      ],
+      "properties": {
+        "t": {
+          "const": "cancel"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        }
+      }
+    },
+    "bye": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t"
+      ],
+      "properties": {
+        "t": {
+          "const": "bye"
+        }
+      }
+    },
+    "welcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "v",
+        "protocol",
+        "service",
+        "engines",
+        "new_session"
+      ],
+      "properties": {
+        "t": {
+          "const": "welcome"
+        },
+        "v": {
+          "const": 1
+        },
+        "protocol": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "pid",
+            "started"
+          ],
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/version"
+            },
+            "pid": {
+              "type": "integer"
+            },
+            "started": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "engines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "current",
+              "warm"
+            ],
+            "properties": {
+              "version": {
+                "$ref": "#/$defs/version"
+              },
+              "current": {
+                "type": "boolean"
+              },
+              "warm": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "new_session": {
+          "type": "boolean"
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "elapsed_ms",
+        "phase"
+      ],
+      "properties": {
+        "t": {
+          "const": "progress"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "phase": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "done": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "out": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "stream",
+        "data"
+      ],
+      "properties": {
+        "t": {
+          "const": "out"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        },
+        "data": {
+          "type": "string",
+          "maxLength": 1048576
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "index",
+        "mime",
+        "path"
+      ],
+      "properties": {
+        "t": {
+          "const": "image"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 11
+        },
+        "mime": {
+          "enum": [
+            "image/jpeg",
+            "image/png"
+          ]
+        },
+        "slide": {
+          "type": "string",
+          "pattern": "^s[0-9]{3,4}[a-z]{0,3}$"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "key": {
+          "$ref": "#/$defs/sha256"
+        },
+        "path": {
+          "$ref": "#/$defs/absPath"
+        },
+        "data": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "maxLength": 12582912
+        }
+      }
+    },
+    "pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "picture",
+            "build",
+            "copy",
+            "files"
+          ]
+        },
+        "slide": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "eta_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tier": {
+          "enum": [
+            "native",
+            "exact"
+          ]
+        }
+      }
+    },
+    "done": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "exit",
+        "elapsed_ms"
+      ],
+      "properties": {
+        "t": {
+          "const": "done"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "exit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "description": "0-63 the engine verb's own code; 64-78 the client's statuses (contract.EXIT) with their THEODORE lines; the service's own outcomes: 75 RETRY (the engine restarted, nothing committed), 78 INTERNAL, 124 still running, 130 cancelled"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pending"
+          }
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "counters": {
+          "$ref": "#/$defs/counters"
+        }
+      }
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "method"
+      ],
+      "properties": {
+        "t": {
+          "const": "notify"
+        },
+        "method": {
+          "enum": [
+            "tools/list_changed",
+            "theodore/reconnect"
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "t": {
+          "const": "error"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "code": {
+          "enum": [
+            "BAD_SECRET",
+            "PROTOCOL",
+            "BAD_FRAME",
+            "UNKNOWN_TOOL",
+            "BAD_CALL",
+            "BUSY",
+            "SHUTTING_DOWN"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "retry_after_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "protocol": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "optional per-call counts for the proof harness (PLAN 5.1, request K-1); absent means not measured",
+      "properties": {
+        "spawned": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "processes started for this call (Node, LibreOffice, PowerPoint, Python, any)"
+        },
+        "deck_hashes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "whole-package SHA-256 passes over a deck (source, output, imported deck)"
+        },
+        "deckjs_full_parses": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "parses of the whole deck.js (one block's parse does not count)"
+        },
+        "packages_written": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "whole .pptx or .potx packages written, render subsets included"
+        },
+        "files_written": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "every file the call wrote, the store included"
+        },
+        "user_files_written": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "of those, files in the user's folder (the visible workspace and the delivered deck)"
+        },
+        "http_requests": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "requests to the API (texts, sheets, licence)"
+        },
+        "tls_handshakes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "new TLS connections opened for this call (0 on a warm connection)"
+        }
+      }
+    }
+  }
+}
