@@ -232,6 +232,29 @@ class Front(FrontCase):
         self.assertEqual(len(self.events("service-started")), 1)
         self.assertEqual(sorted(json.loads(o[0])["args"][1] for o in outs), sorted(str(i) for i in range(8)))
 
+    def test_the_start_lock_is_the_one_the_service_side_takes(self):
+        """C1's start lock is state/run/start.lock (flock; on Windows LockFileEx, which msvcrt.locking also takes, after
+        the named mutex): while another process holds it, the front waits, then starts the service."""
+        run = self.home / "state" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        holder = open(run / "start.lock", "a+b")
+        if IS_WINDOWS:
+            import msvcrt
+            holder.seek(0)
+            msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        release = threading.Timer(1.5, holder.close)
+        release.start()
+        started = time.monotonic()
+        done = self.front("pptx", "echo", "after the lock")
+        release.join()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertGreaterEqual(time.monotonic() - started, 1.4, "it waited for the lock")
+        self.assertEqual(self.answer(done)["args"], ["echo", "after the lock"])
+        self.assertEqual(len(self.events("service-started")), 1)
+
     def test_one_shot_when_the_service_cannot_start(self):
         env = {"FAKE_SERVICE_FAIL": "1"}
         started = time.monotonic()

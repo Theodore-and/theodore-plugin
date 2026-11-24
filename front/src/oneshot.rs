@@ -126,8 +126,8 @@ fn run_launcher(launcher: &Path, args: &[OsString]) -> i32 {
     match status {
         Ok(s) if plain || !s.success() => s.code().unwrap_or(1),
         Ok(_) => {
-            // Set up now: the command itself, through the front again.
-            match std::env::current_exe().and_then(|me| Command::new(me).args(args).status()) {
+            // Set up now: the command itself, through the front again (which never hands over to set-up twice).
+            match std::env::current_exe().and_then(|me| Command::new(me).args(args).env("THEODORE_FRONT_SETUP", "1").status()) {
                 Ok(s) => s.code().unwrap_or(1),
                 Err(err) => {
                     eprintln!("theodore: {err}");
