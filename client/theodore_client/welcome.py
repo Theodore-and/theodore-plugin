@@ -162,18 +162,13 @@ def _host() -> str | None:
 
 
 def _new_session_needed(host: str | None) -> bool:
-    """Codex loads plugins, tools and rules only when a session starts. Claude Code loads the plugin's skills and the
-    instructions line at session start too, unless this very session already loaded Theodore (a set-up run again)."""
-    if host == "codex":
-        return True
-    if host != "claude-code":
-        return False
-    try:
-        from . import sessions
-        sid = sessions.session()
-        return not (sid and sessions._loaded(sessions._entry(sessions._sessions(), sid)))
-    except Exception:  # noqa: BLE001  unknown: say it, a new session never hurts
-        return True
+    """Only Codex, which loads plugins, tools and rules only when a session starts, so there each Theodore command of
+    the set-up session would ask for approval. In Claude Code the first deck works in the conversation that installed
+    Theodore: the assistant there may not have the plugin's skills and agents yet (Claude Code 2.1.330 loads them when
+    its process starts, and the Claude app's Code tab keeps one process for a conversation), and it builds the deck
+    with Theodore's launcher and the same texts (lane L3's rehearsal of 25 November 2026). A new session was one more
+    step for the person, and whether it was said depended on the installer's own `guide pptx` running in time."""
+    return host == "codex"
 
 
 def _downloading() -> bool:
