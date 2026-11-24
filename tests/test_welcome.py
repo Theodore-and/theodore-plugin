@@ -165,11 +165,13 @@ class Welcome(ClientCase):
         self.assertIn("Apart from that, run no Theodore command in this session", nxt)
         self.assertIn("ask them to start a new session first", nxt)
 
-    def test_claude_code_needs_a_new_session_unless_this_session_already_loaded_theodore(self):
-        _f, _n, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": "s-new"}), "OK", 0)
-        self.assertIn("Start a new session, then ask for your first deck.", tell)
-        _f, _n, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": "s-loaded"}), "OK", 0)
-        self.assertNotIn("new session", tell)
+    def test_claude_code_never_needs_a_new_session(self):
+        """Lane L3 (25 Nov): in Claude Code the first deck works in the conversation that installed Theodore, whether or
+        not the installer's own `guide pptx` was recorded for it; a new session was a step the person did not need."""
+        for sid in ("s-new", "s-loaded"):
+            _f, nxt, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": sid}), "OK", 0)
+            self.assertNotIn("new session", tell, sid)
+            self.assertNotIn("new session", nxt, sid)
 
     def test_still_downloading_the_welcome_waits_for_the_first_status_that_says_ok(self):
         """Lead's staging run (2026-11-19): an assistant finishes its tool work before it speaks, so a welcome given with

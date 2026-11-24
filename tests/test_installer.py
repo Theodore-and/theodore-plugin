@@ -467,14 +467,18 @@ class Installer(unittest.TestCase):
         result = self.install("--code", "ABCD-1234")          # no assistant's variables: a person's terminal
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         tail = result.stdout.strip().splitlines()[-4:]
-        self.assertEqual(tail[0], "Theodore is set up and signed in on this computer.", result.stdout)
+        # The first line says whether a download still goes on after the installer: on Windows the rest of the runtime
+        # (or LibreOffice) is often still downloading in the background when it ends; elsewhere here it is done.
+        self.assertIn(tail[0], ("Theodore is set up and signed in on this computer.",
+                                "Theodore is installed on this computer and finishes a download by itself in the next few minutes."),
+                      result.stdout)
         self.assertTrue(tail[1].startswith("Studio is on: "), tail)
         self.assertEqual(tail[-1], "Go back to your assistant (Claude or Codex) and ask for your presentation there.")
         self.assertNotIn("TELL THE USER:", "\n".join(tail))
         self.assertTrue(json.loads((self.box.home / "state" / "welcome.json").read_text())["owed"])
+        self.box.wait_jobs()                       # the welcome is given by the first status that says OK
         given = self.box.run_launcher("status", launcher=self.box.home / "bin" / STABLE)
         self.assertTrue(status_lines(given.stdout)[2].startswith("TELL THE USER: Welcome to Theodore:"), given.stdout)
-        self.box.wait_jobs()
 
     def test_install_uninstall_install_again_at_once_stays_signed_in(self):
         # ACCEPT-LOCAL2 observation (b): a second install on the same profile right after an uninstall said "signed in"
