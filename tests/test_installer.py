@@ -385,7 +385,7 @@ class Installer(unittest.TestCase):
         again = self.install("--code", "ABCD-1234", installer=self.box.installer(**broken))
         self.assertIn("the login that run saved is kept", again.stdout)
         self.assertEqual(pending.read_bytes(), saved, "a refused code leaves the saved sign-in as it was")
-        done = self.install("--code", "ABCD-1234")
+        done = self.install("--code", "ABCD-1234", env=ASSISTANT)       # as an assistant runs it: its ending is a status
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertTrue(status_lines(done.stdout)[0].startswith("THEODORE OK: Theodore is set up and signed in"), done.stdout)
         self.assertEqual(len(self.api.activations), 1, "one code, one installation")
@@ -459,6 +459,23 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
+    def test_run_by_a_person_the_installer_ends_in_plain_words_and_leaves_the_welcome_owed(self):
+        """Lane L3: the set-up of 24 November 2026 was run by the person in a terminal; its ending, written for an
+        assistant, never reached the conversation. A person now gets plain words, and the welcome is owed to the
+        assistant they go back to (status, doctor or its first instructions give it)."""
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")          # no assistant's variables: a person's terminal
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tail = result.stdout.strip().splitlines()[-4:]
+        self.assertEqual(tail[0], "Theodore is set up and signed in on this computer.", result.stdout)
+        self.assertTrue(tail[1].startswith("Studio is on: "), tail)
+        self.assertEqual(tail[-1], "Go back to your assistant (Claude or Codex) and ask for your presentation there.")
+        self.assertNotIn("TELL THE USER:", "\n".join(tail))
+        self.assertTrue(json.loads((self.box.home / "state" / "welcome.json").read_text())["owed"])
+        given = self.box.run_launcher("status", launcher=self.box.home / "bin" / STABLE)
+        self.assertTrue(status_lines(given.stdout)[2].startswith("TELL THE USER: Welcome to Theodore:"), given.stdout)
+        self.box.wait_jobs()
+
     def test_install_uninstall_install_again_at_once_stays_signed_in(self):
         # ACCEPT-LOCAL2 observation (b): a second install on the same profile right after an uninstall said "signed in"
         # and ended with SIGN_IN_REQUIRED. On Windows the first uninstall's cleanup was still running and removed the new
@@ -469,7 +486,7 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
         self.assertEqual(self.install("--uninstall").returncode, 0)
         self.api.issue_activation_code("ABCD-2345")
-        again = self.install("--code", "ABCD-2345")
+        again = self.install("--code", "ABCD-2345", env=ASSISTANT)     # as an assistant runs it: its ending is a status
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertTrue(status_lines(again.stdout)[0].startswith("THEODORE OK: Theodore is set up and signed in"), again.stdout)
         self.box.wait_jobs()
