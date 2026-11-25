@@ -53,6 +53,8 @@ class _Member:
         self.counters: dict = {}
         self.pending: list = []
         self.timing: dict = {}
+        self.entered = time.perf_counter()    # into the gathering
+        self.sent: float | None = None        # its build went out (the timing line's "gathering")
 
 
 class _BatchCall:
@@ -211,7 +213,11 @@ class Gatherer:
         if twice:                               # after the waiting one: the part's key lock keeps them in turn
             return self.pool.run(call, version, argv, env, None)
         if alone:
-            return self._alone(call, version, argv, env)
+            answer = self._alone(call, version, argv, env)
+            with contextlib.suppress(Exception):
+                if isinstance(getattr(call, "timing", None), dict):
+                    call.timing["gathering_ms"] = 0     # a lone part apply: at once
+            return answer
         waited_since = time.monotonic()
         while not member.done.wait(0.25):
             with self.lock:
@@ -303,7 +309,10 @@ class Gatherer:
         with contextlib.suppress(Exception):     # what the proof reads: a burst's parts, in how many builds
             self.pool.service.log(f"parts: {sum(len(b) for b in launch)} of a deck in {len(launch)} build(s) "
                                   f"({', '.join(str(len(b)) for b in launch)}){f', {left} waiting' if left else ''}")
+        sent = time.perf_counter()
         for batch in launch:
+            for member in batch:
+                member.sent = sent
             threading.Thread(target=self._run_batch, args=(version, argv, env, batch), name="parts-batch",
                              daemon=True).start()
 
@@ -340,6 +349,9 @@ class Gatherer:
                                                           env, keys=[member.key] if member.key else [])
             except Exception as exc:  # noqa: BLE001
                 member.exit, member.output = 78, f"THEODORE INTERNAL: the Studio part's apply failed: {exc}\n"
+            with contextlib.suppress(Exception):
+                if member.sent is not None and isinstance(getattr(member.call, "timing", None), dict):
+                    member.call.timing["gathering_ms"] = int((member.sent - member.entered) * 1000)
             member.done.set()
             return
         call = _BatchCall(batch)
@@ -383,6 +395,8 @@ class Gatherer:
             if position == 0:
                 member.counters = dict(call.counters)   # the run's own counts, once
             member.timing = dict(getattr(call, "timing", None) or {}, batch=len(batch))
+            if member.sent is not None:
+                member.timing["gathering_ms"] = int((member.sent - member.entered) * 1000)
             # the run's own line (`timings: apply-parts ...`); each part's phases are in its own answer (`timings`)
             member.timing["engine_lines"] = [line for line in call.engine_timings if line.startswith("timings: apply-parts")]
             member.done.set()

@@ -627,14 +627,22 @@ class Burst(ServiceCase):
 
 class Timings(ServiceCase):
     def test_with_timings_on_each_pptx_call_and_each_worker_say_their_time_in_the_log(self):
-        self.env["THEODORE_SERVICE_TIMINGS"] = "1"
+        self.env.update({"THEODORE_SERVICE_TIMINGS": "1", "FAKE_APPLY_PARTS": "1"})
         self.service()
         client, got = self.connect()
         self.call(client, got, "t", ["echo"], env={"THEODORE_TIMINGS": "1"})
         log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
-        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: none\)")
-        self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own")
+        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: apply-parts\)")
+        self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own"
+                              r"[^)]*\) \+ after \d+;")
         self.assertIn("timings: echo 5 ms (fake.step 5)", log, "the engine's own line, under the call's")
+        # A Studio part's apply: what it waited in the gathering, as its own term (lane S2)
+        (self.box.tmp / "deck").mkdir()
+        self.call(client, got, "prep", ["prepare", str(self.box.tmp / "deck"), "--parts", "2"])
+        self.call(client, got, "p1", ["apply", str(self.box.tmp / "deck" / "parts" / "s01")])
+        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(log, r"timing: pptx apply s01: \d+ ms = admission \d+ \+ gathering \d+ \(1 part\(s\) in its "
+                              r"build\) \+ queue")
 
 
 class StudioParts(ServiceCase):
@@ -719,8 +727,10 @@ class StudioParts(ServiceCase):
         lead = self.prepared(5)
         frames_ = self.burst(lead, [f"s{i:02d}" for i in range(1, 6)])
         exits = sorted(Collector.done(got)["exit"] for got in frames_.values())
-        self.assertIn(exits, ([2] * 5, [0] + [2] * 4), "every designer gathered got the run's own refusal (the first "
-                                                         "may have run alone, before the others came)")
+        # Every designer in a build of several parts gets the run's own refusal. A part in a build alone runs as a plain
+        # apply (exit 0): the first, when it came before the others, and one the cap of ceil(5 parts / 2 workers) = 3
+        # left over when one worker was free.
+        self.assertTrue(set(exits) <= {0, 2} and exits.count(0) <= 2 and exits.count(2) >= 3, exits)
         refused = [got for got in frames_.values() if Collector.done(got)["exit"] == 2]
         self.assertTrue(all('"ok": false' in Collector.stdout(got) for got in refused))
 

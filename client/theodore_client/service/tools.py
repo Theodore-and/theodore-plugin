@@ -166,13 +166,16 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
             service.parts.arrived(coming)
             call.arrived = True
     if args[0] == "apply":                  # a part's own build-ahead: dropped, waited for or cancelled (ahead.py);
-        service.ahead.before_apply(args, call.cwd, on_wait=not_coming)  # waiting, it holds no ready part back
+        waiting = time.perf_counter()       # waiting, it holds no ready part back
+        service.ahead.before_apply(args, call.cwd, on_wait=not_coming)
+        call.ahead_wait_ms = int((time.perf_counter() - waiting) * 1000)
     wanted = service.parts.wants(version, args, call)
     not_coming()                            # here now
     if wanted is not None:                  # a Studio part arriving with the others: one build for several (parts.py)
         code, pending = service.parts.run(call, version, args, env, wanted)
     else:
         code, pending = service.pool.run(call, version, args, env, call.stdin)
+    call.ran_until = time.perf_counter()    # the timing line's "after": its answer read, its pictures attached
     if args[0] == "prepare" and code == 0:
         _parts_coming(service, version, args, call, env)
     elif args[0] == "slide" and code == 0:
@@ -197,18 +200,24 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
 
 
 def _log_timing(service, call, args: list[str], gathered: bool, begun: float, admitted: float, code: int) -> None:
-    """`timing: pptx <verb> <target>: <total> ms = admission + queue + worker (the engine's own) + after`."""
+    """`timing: pptx <verb> <target>: <total> ms = admission + [own ahead] + [gathering] + queue + worker (the engine's
+    own) + after`: what a part's apply waited for its own build-ahead, what it waited in the gathering for its build to
+    go out, and what came after the worker (its answer read, its pictures attached), each as its own term (lane S2)."""
     with contextlib.suppress(Exception):
         now = time.perf_counter()
         timing = getattr(call, "timing", None) or {}
         target = next((Path(a).name for a in args[1:] if not a.startswith("-")), "")
         parts = [f"admission {int((admitted - begun) * 1000)}"]
+        if getattr(call, "ahead_wait_ms", 0):
+            parts.append(f"own ahead {call.ahead_wait_ms}")
         if gathered:
-            parts.append(f"gathered ({timing.get('batch') or 1} part(s) in its build)")
+            parts.append(f"gathering {timing.get('gathering_ms', '?')} ({timing.get('batch') or 1} part(s) in its build)")
         if timing:
             parts.append(f"queue {timing.get('queue_ms')}")
             parts.append(f"worker {timing.get('run_ms')} (the engine's own {timing.get('engine_ms')}; pid "
                          f"{timing.get('worker')}, call {int(timing.get('worker_calls') or 0) + 1} on it)")
+        if getattr(call, "ran_until", None):
+            parts.append(f"after {int((now - call.ran_until) * 1000)}")
         spawned = (call.counters or {}).get("spawned")
         engine = list(getattr(call, "engine_timings", []) or []) + list(timing.get("engine_lines") or [])
         phases = _last_json("".join(call.stdout_kept)).get("timings")     # its own answer's phases (lanes F, G)
