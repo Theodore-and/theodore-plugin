@@ -195,6 +195,37 @@ class KeptAliveCase(unittest.TestCase):
             self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
         self.assertEqual(self.pool.opened, opened)
 
+    def test_a_connection_given_back_just_before_the_lock_is_taken_is_reused_not_closed(self):
+        # Another thread gives a connection back after this request started but before it holds the pool's lock:
+        # the connection is reused, not read as idle for less than nothing and closed as stale (release/0.5.0's
+        # linux-arm64 job: 9 connections opened where 6 requests at once need 6).
+        self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
+        self.assertEqual(self.pool.opened, 1)
+        given = self.pool._idle.pop()
+        real = self.pool._lock
+        pool = self.pool
+
+        class GivenBackFirst:
+            """The pool's lock, except that when _take comes for it the first time, the connection is given back
+            first, as by another thread, dated now."""
+            done = False
+
+            def __enter__(lock):
+                if not lock.done and sys._getframe(1).f_code.co_name == "_take":
+                    lock.done = True
+                    with real:
+                        pool._idle.append((given[0], given[1], time.monotonic()))
+                return real.__enter__()
+
+            def __exit__(lock, *exc):
+                return real.__exit__(*exc)
+        self.pool._lock = GivenBackFirst()
+        self.addCleanup(setattr, self.pool, "_lock", real)
+        self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
+        self.assertTrue(self.pool._lock.done, "the connection was given back while the request waited for the lock")
+        self.assertEqual(self.pool.opened, 1, "the connection given back was reused")
+        self.assertEqual(len(self.accepted), 1)
+
     def test_a_connection_the_server_closed_is_opened_again_once(self):
         self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
         self.end_server_connections()
