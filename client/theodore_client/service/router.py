@@ -41,9 +41,10 @@ TIMING_LINES = ("timings: ",)       # the engine's own, under THEODORE_TIMINGS=1
 ORPHAN_GRACE_S = float(os.environ.get("THEODORE_ORPHAN_GRACE_S") or 10.0)   # a dead session's call, cancelled, then this
 SLOW_LOG_S = 30.0                  # a call running longer: its thread's stack in the log, once a minute
 SLOW_LOG_EVERY_S = 60.0
-# However a call is stuck, its caller gets an answer: past the workers' own ceiling (CALL_CEILING_S) by a margin.
+# However a call is stuck, its caller gets an answer: past the workers' own ceiling (CALL_CEILING_S) by 30 s, the
+# margin a call may spend waiting for a worker on a loaded machine before its own ceiling starts to count.
 _CEILING = float(os.environ.get("THEODORE_CALL_CEILING_S") or 900.0)
-ROUTER_CEILING_S = _CEILING + min(30.0, _CEILING)
+ROUTER_CEILING_S = _CEILING + 30.0
 
 
 class Call:
