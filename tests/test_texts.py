@@ -192,6 +192,19 @@ class SheetFiles(TextsCase):
         self.assertFalse(old.exists())
         self.assertTrue(fresh.exists())
 
+    def test_a_file_dated_a_moment_ahead_of_the_clock_is_kept_and_one_far_ahead_goes(self):
+        # On Windows before Python 3.13 time.time() ticks every 15.6 ms while the file system dates finer, so a sheet
+        # just written can read as a few milliseconds "in the future": release/0.5.0's Windows job swept one so.
+        near = self.texts.sheet_files(["a.jpg"], session="s")[0][1]
+        far = self.texts.sheet_files(["b.jpg"], session="s")[0][1]
+        soon = time.time() + 2
+        os.utime(near, (soon, soon))
+        ahead = time.time() + specimens.AHEAD_SECONDS + 60
+        os.utime(far, (ahead, ahead))
+        self.texts.sweep()
+        self.assertTrue(near.exists(), "a moment ahead of the clock: recent")
+        self.assertFalse(far.exists(), "far ahead of it: not trusted to be recent")
+
     def test_never_in_the_working_folder(self):
         work = Path(tempfile.mkdtemp(prefix="theodore-cwd-"))
         self.addCleanup(shutil.rmtree, work, True)
