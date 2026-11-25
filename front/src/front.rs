@@ -89,6 +89,7 @@ fn hello() -> Hello {
         session_id: session.unwrap_or_else(|| "shell".into()),
         host: host_of_env().into(),
         pid: sys::parent_pid(),
+        cwd: None, // each call carries its own folder; only a relay names one for its session
         plugin_root: home::env_value("CLAUDE_PLUGIN_ROOT").or_else(|| home::plugin_root_of_exe().map(|p| p.to_string_lossy().into_owned())),
     }
 }

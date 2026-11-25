@@ -588,6 +588,7 @@ impl Relay {
             session_id: self.session_id.clone(),
             host: host_for(self.opts.for_host.as_deref(), &st.client_name).into(),
             pid: sys::parent_pid(),
+            cwd: Some(self.cwd.to_string_lossy().into_owned()).filter(|_| self.cwd.is_absolute()),
             plugin_root: self.opts.plugin_root.as_ref().map(|p| p.to_string_lossy().into_owned()),
         }
     }
