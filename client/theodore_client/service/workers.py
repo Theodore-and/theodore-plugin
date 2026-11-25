@@ -113,14 +113,27 @@ def part_apply(argv: list[str], cwd: str | None) -> bool:
     return path.parent.name == "parts"
 
 
+def _marker_key(folder: Path) -> str | None:
+    marker = folder / ".theodore.json"
+    if marker.is_file():
+        key = json.loads(marker.read_text(encoding="utf-8")).get("key")
+        if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{16}", key):
+            return key
+    return None
+
+
 def _is_workspace(folder: Path) -> str | None:
-    """The workspace key of a folder (C3 marker key, or the 1.x key: sha256 of the real path), or None."""
+    """The workspace key of a folder (C3 marker key, or the 1.x key: sha256 of the real path), or None. A 2.0 Studio
+    part has no marker of its own: its key is derived from its lead's, as the engine derives it (ws2.part_key:
+    sha256("<lead key>/<part id>")[:16], the part's folder being <lead>/parts/<part id>; lanes/G.md)."""
     try:
-        marker = folder / ".theodore.json"
-        if marker.is_file():
-            key = json.loads(marker.read_text(encoding="utf-8")).get("key")
-            if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{16}", key):
-                return key
+        key = _marker_key(folder)
+        if key:
+            return key
+        if folder.parent.name == "parts":
+            lead = _marker_key(folder.parent.parent)
+            if lead:
+                return hashlib.sha256(f"{lead}/{folder.name}".encode("utf-8")).hexdigest()[:16]
         if (folder / ".pptx-state").is_dir() or (folder / "task.json").is_file():
             return hashlib.sha256(os.path.realpath(str(folder)).encode("utf-8")).hexdigest()[:16]
     except (OSError, ValueError):
@@ -603,6 +616,13 @@ class _KeyLock:
                 if not queue:
                     self._held.pop(key, None)
             mine.set()
+
+    def busy(self, key: str | None) -> bool:
+        """A command holds the key or waits for it."""
+        if not key:
+            return False
+        with self._lock:
+            return bool(self._held.get(key))
 
     def try_take(self, key: str | None) -> threading.Event | None:
         """The key at once when no command holds it or waits for it (an ahead never waits behind a write); else None.

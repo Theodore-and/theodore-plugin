@@ -903,6 +903,24 @@ class BuildAhead(ServiceCase):
 
 
 class AheadUnit(unittest.TestCase):
+    def test_a_2_0_parts_key_is_derived_from_its_leads_marker(self):
+        # Lane S2's S2-8: a 2.0 part has no marker of its own (lanes/G.md: ws2.part_key derives it), so the service
+        # knew no key for it and the routing to the worker that built its ahead never engaged.
+        import hashlib
+        import tempfile
+
+        from theodore_client.service import workers
+        with tempfile.TemporaryDirectory() as tmp:
+            lead = Path(tmp) / "deck"
+            (lead / "parts" / "s07").mkdir(parents=True)
+            (lead / ".theodore.json").write_text(json.dumps({"key": "00112233aabbccdd"}))
+            want = hashlib.sha256(b"00112233aabbccdd/s07").hexdigest()[:16]
+            self.assertEqual(workers.workspace_key(["apply", str(lead / "parts" / "s07")], None), want)
+            self.assertEqual(workers.workspace_key(["apply", str(lead)], None), "00112233aabbccdd")
+            (Path(tmp) / "loose" / "parts" / "s01").mkdir(parents=True)
+            self.assertIsNone(workers.workspace_key(["apply", str(Path(tmp) / "loose" / "parts" / "s01")], None),
+                              "no lead marker: no key")
+
     def test_a_burst_saved_whole_goes_out_at_the_first_poll_that_sees_it(self):
         # Lane S2's S2-7: all fifteen deck.js land within milliseconds, and the still poll cost each ahead ~100 ms of its
         # head start. When every part of a burst is saved anew, its aheads go at once; one part alone still waits.

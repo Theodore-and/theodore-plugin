@@ -321,12 +321,10 @@ class Ahead:
                 for part in ready:                  # a part whose workspace another command holds waits
                     if part.key is None:
                         part.key = workers.workspace_key(["apply", part.path], part.cwd) or ""
-                tokens, free = [], []
-                for part in ready:
-                    token = self.pool.keys.try_take(part.key or None)
-                    if token is not None:
-                        tokens.append((part, token))
-                        free.append(part)
+                # A part whose workspace another command holds (a write verb on it, its own apply) waits for the next
+                # ahead. An ahead does not hold the part's key itself: the designer's apply must not wait on a key for
+                # an ahead on an older deck.js (it waits for its own ahead in before_apply only on the same one).
+                free = [part for part in ready if not self.pool.keys.busy(part.key or None)]
                 if not free:
                     continue
                 count = max(1, min(slots, len(free)))
@@ -334,16 +332,13 @@ class Ahead:
                 chunks = [free[i:i + share] for i in range(0, len(free), share)]
                 for chunk in chunks:
                     worker = self.pool.take_for_ahead(version)
-                    held = [(p, t) for p, t in tokens if p in chunk]
                     if worker is None:
-                        for _p, token in held:
-                            self.pool.keys.give(_p.key or None, token)
                         continue
                     call = _Call(chunk)
                     for part in chunk:
                         part.ahead, part.built, part.ready_since = call, part.seen, None
                     self.running.append(call)
-                    launches.append((call, worker, held))
+                    launches.append((call, worker, []))
         for call, worker, held in launches:
             self._count("ahead_calls")
             for _ in call.members:
@@ -358,8 +353,6 @@ class Ahead:
         try:
             code = self.pool.run_ahead(call, worker, argv, first.env)
         finally:
-            for part, token in held:
-                self.pool.keys.give(part.key or None, token)
             elapsed = int((time.monotonic() - call.started) * 1000)
             if call.cancelled.is_set():
                 self._count("ahead_cancelled")
