@@ -32,6 +32,9 @@ COUNTERS = ("spawned", "deck_hashes", "deckjs_full_parses", "packages_written", 
             "http_requests", "tls_handshakes")
 
 
+TIMING_LINES = ("timings: ",)       # the engine's own, under THEODORE_TIMINGS=1 (lanes F and G: one line a verb)
+
+
 class Call:
     """One `call` frame being answered."""
 
@@ -73,6 +76,7 @@ class Call:
         self.counters: dict = {}           # the proof harness's counts for this call (C1 done.counters, request K-1)
         self.stdout_kept: list[str] = []   # stdout, kept (up to KEEP_STDOUT) for the pictures it names
         self.stdout_kept_size = 0
+        self.engine_timings: list[str] = []   # the engine's `theodore-timings` lines (THEODORE_TIMINGS=1), for the log
 
     def _fingerprint(self) -> str:
         """What makes two shell commands "the same command on the same inputs" (C1 "Deadline")."""
@@ -98,6 +102,8 @@ class Call:
     def out(self, text: str, stream: str = "stdout") -> None:
         if not text:
             return
+        if stream == "stderr" and ("timings" in text) and len(self.engine_timings) < 64:
+            self.engine_timings.extend(line for line in text.splitlines() if line.startswith(TIMING_LINES))
         if stream == "stdout" and self.stdout_kept_size < KEEP_STDOUT:
             self.stdout_kept.append(text)
             self.stdout_kept_size += len(text)

@@ -189,6 +189,8 @@ while True:
                         "resident": os.environ.get("THEODORE_RESIDENT"), "home": os.environ.get("THEODORE_HOME"),
                         "node_options": os.environ.get("NODE_OPTIONS"), "work": os.environ.get("THEODORE_WORK_DIR")}) + "\n")
         say("a line on standard error\n", "stderr")
+        if os.environ.get("THEODORE_TIMINGS") == "1":   # the engine's own line (lanes F and G)
+            say(f"timings: {verb} 5 ms (fake.step 5)\n", "stderr")
     for k, v in saved.items():
         if v is None:
             os.environ.pop(k, None)
