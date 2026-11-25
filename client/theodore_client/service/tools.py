@@ -126,8 +126,21 @@ def _engine_env(call) -> dict:
     return env
 
 
+TIMINGS = os.environ.get("THEODORE_SERVICE_TIMINGS") == "1"    # one line a pptx call in service.log (rig proofs)
+
+
 def tool_pptx(service, call) -> tuple[int, list]:
     args = list(call.args) or ["--help"]
+    begun = time.perf_counter()
+    coming = service.parts.arriving(args, call)     # a Studio part on its way to the gathering (parts.py)
+    try:
+        return _pptx(service, call, args, begun, coming)
+    finally:
+        if coming is not None and not getattr(call, "arrived", False):
+            service.parts.arrived(coming)       # refused on its way (licence, setup): no longer coming
+
+
+def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> tuple[int, list]:
     with capture.captured(stderr=True) as early:
         service.licence.require("pptx")
         install.require_runtime()
@@ -143,8 +156,12 @@ def tool_pptx(service, call) -> tuple[int, list]:
     if early.getvalue():
         call.out(early.getvalue(), "stderr")
     call.set_phase(f"pptx {args[0]}")
+    admitted = time.perf_counter()
     env = _engine_env(call)
     wanted = service.parts.wants(version, args, call)
+    if coming is not None:                  # here now: no longer on its way
+        service.parts.arrived(coming)
+        call.arrived = True
     if wanted is not None:                  # a Studio part arriving with the others: one build for several (parts.py)
         code, pending = service.parts.run(call, version, args, env, wanted)
     else:
@@ -163,7 +180,33 @@ def tool_pptx(service, call) -> tuple[int, list]:
         attach_pictures(call, "".join(call.stdout_kept))
     if args[0] == "finish":
         threading.Thread(target=_after_finish, name="after-finish", daemon=True).start()
+    if TIMINGS:
+        _log_timing(service, call, args, wanted is not None, begun, admitted, code)
     return code, pending
+
+
+def _log_timing(service, call, args: list[str], gathered: bool, begun: float, admitted: float, code: int) -> None:
+    """`timing: pptx <verb> <target>: <total> ms = admission + queue + worker (the engine's own) + after`."""
+    with contextlib.suppress(Exception):
+        now = time.perf_counter()
+        timing = getattr(call, "timing", None) or {}
+        target = next((Path(a).name for a in args[1:] if not a.startswith("-")), "")
+        parts = [f"admission {int((admitted - begun) * 1000)}"]
+        if gathered:
+            parts.append(f"gathered ({timing.get('batch') or 1} part(s) in its build)")
+        if timing:
+            parts.append(f"queue {timing.get('queue_ms')}")
+            parts.append(f"worker {timing.get('run_ms')} (the engine's own {timing.get('engine_ms')}; pid "
+                         f"{timing.get('worker')}, call {int(timing.get('worker_calls') or 0) + 1} on it)")
+        spawned = (call.counters or {}).get("spawned")
+        engine = list(getattr(call, "engine_timings", []) or []) + list(timing.get("engine_lines") or [])
+        phases = _last_json("".join(call.stdout_kept)).get("timings")     # its own answer's phases (lanes F, G)
+        if isinstance(phases, dict) and not any(line.startswith("timings: ") and "apply-parts" not in line for line in engine):
+            engine.append("answer timings: " + ", ".join(f"{name} {value}" for name, value in list(phases.items())[:40]))
+        service.log(f"timing: pptx {args[0]} {target}: {int((now - begun) * 1000)} ms = {' + '.join(parts)}; exit "
+                    f"{code}{f'; workers started for it {spawned}' if spawned else ''}; since the call reached the "
+                    f"service {int((now - call.started_perf) * 1000)} ms"
+                    + "".join(f"\n    {line}" for line in engine[:16]))
 
 
 def _parts_coming(service, version: str, args: list[str], call) -> None:
@@ -176,12 +219,16 @@ def _parts_coming(service, version: str, args: list[str], call) -> None:
     lead = next((arg for arg in args[1:] if not arg.startswith("-")), None)
     if lead is not None and not os.path.isabs(lead):
         lead = os.path.join(call.cwd or ".", lead)
+    parts = answer.get("parts")
+    count = answer.get("tasks") if isinstance(answer.get("tasks"), int) else (len(parts) if isinstance(parts, list) else None)
+    with contextlib.suppress(Exception):         # what a proof reads: how prepare said the parts come
+        service.log(f"parts: prepare says {count if count is not None else 'an unknown number of'} parts come "
+                    f"{'in turn' if answer.get('in_turn') is True else 'at once' if answer.get('in_turn') is False else '(in_turn not said)'}"
+                    f"{'' if answer.get('prepared') == 'parts' else ' (no prepared: parts mark)'}")
     if answer.get("in_turn") is True:
         if lead:
             service.parts.prepared(lead, at_once=False)
         return
-    parts = answer.get("parts")
-    count = answer.get("tasks") if isinstance(answer.get("tasks"), int) else (len(parts) if isinstance(parts, list) else None)
     if lead and answer.get("prepared") == "parts":
         service.parts.prepared(lead, at_once=True)
     service.pool.warm_up(version, count)

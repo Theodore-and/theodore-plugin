@@ -231,6 +231,7 @@ class Worker:
         self.busy = False
         self.rank: int | None = None                # the rank of the call it runs (RANKS)
         self.build_threads: int | None = None       # THEODORE_BUILD_THREADS for its Node builds (lane F), when set
+        self.started_perf = time.perf_counter()
         self.retiring = False
         self.calls = 0
         self.rss_mb = 0.0
@@ -263,6 +264,7 @@ class Worker:
             env["THEODORE_BUILD_THREADS"] = str(self.build_threads)
         env["PYTHONUNBUFFERED"] = "1"
         command = [self.spec.python(), "-I", str(self.spec.serve_script), "serve", "--protocol", str(frames.PROTOCOL)]
+        self.started_perf = time.perf_counter()
         work.mkdir(parents=True, exist_ok=True)
         # Unbuffered pipes: no buffer lock a reader thread could hold when the service exits (Python aborts at
         # shutdown on a daemon thread blocked inside a buffered read).
@@ -331,6 +333,13 @@ class Worker:
             self.info = frame
             self.rss_mb = float(frame.get("rss_mb") or 0)
             self.ready.set()
+            with contextlib.suppress(Exception):     # what a proof reads: when a worker was warm, and what it can do
+                self.pool.service.log(
+                    f"worker {self.spec.version} ready {int((time.perf_counter() - self.started_perf) * 1000)} ms after "
+                    f"its start (its warm-up {frame.get('warm_ms')} ms, {self.rss_mb:.0f} MB, pid {frame.get('pid')}"
+                    f"{', ' + self.group if self.group != self.spec.version else ''}; features: "
+                    f"{', '.join(frame.get('features') or []) or 'none'})")
+            self.pool.worker_ready(self)
             return
         if kind == "fatal":
             self.fatal = frame
@@ -507,6 +516,7 @@ class Pool:
         self.waiting: dict[str, list[tuple[int, int]]] = {}    # per group: the waiting calls' (rank, arrival)
         self._arrivals = 0
         self.on_release: list = []                  # called with the version when a worker is free again (parts.py)
+        self.features: dict[str, set] = {}          # per engine version: what a ready worker of it said it can do
         self.keys = _KeyLock()
         self.closed = False
         self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
@@ -610,6 +620,24 @@ class Pool:
                 missing = count - len(self._live(version))
             for _ in range(max(0, missing)):
                 threading.Thread(target=one, args=(spec,), name="pool-warm-up", daemon=True).start()
+
+    def worker_ready(self, worker: "Worker") -> None:
+        if "apply-parts" in (worker.info.get("features") or []):
+            self.features.setdefault(worker.spec.version, set()).add("apply-parts")
+        with self.cond:
+            self.cond.notify_all()
+        for hook in list(self.on_release):
+            with contextlib.suppress(Exception):
+                hook(worker.group)
+
+    def parts_capability(self, version: str) -> bool | None:
+        """Whether the engine takes several Studio parts in one apply: True once a worker of it said so (remembered
+        for the service's life), False when a ready worker did not, None while none has been ready yet."""
+        if "apply-parts" in self.features.get(version, ()):
+            return True
+        with self.cond:
+            ready = [w for w in self._live(version) if w.ready.is_set()]
+        return False if ready else None
 
     def can_apply_parts(self, version: str) -> bool:
         """A ready worker of the engine said it takes several Studio parts in one apply (`ready.features`)."""
@@ -771,6 +799,7 @@ class Pool:
         if not spec.resident() or self._oneshot(version):
             return run_oneshot(self.service, call, spec, argv, env, stdin), []
         held = sorted(set(keys)) if keys is not None else [key if priority != "read" else None]
+        entered = time.perf_counter()
         with contextlib.ExitStack() as stack:
             for one in held:
                 stack.enter_context(self.keys.held(one))
@@ -792,6 +821,9 @@ class Pool:
                     self._release(worker)
                     return 130, []
                 started = time.monotonic()
+                with contextlib.suppress(Exception):     # the call's time, for the service's timings (tools.py)
+                    call.timing = {"queue_ms": int((time.perf_counter() - entered) * 1000), "worker": worker.process.pid,
+                                   "worker_calls": worker.calls}
                 try:
                     result = worker.run(call, argv, env, stdin, key, priority)
                 except WorkerFailed as exc:
@@ -802,6 +834,8 @@ class Pool:
                     call.out(RETRY_TEXT)
                     return 75, []
                 self._release(worker)
+                with contextlib.suppress(Exception):
+                    call.timing.update(run_ms=int((time.monotonic() - started) * 1000), engine_ms=result.get("elapsed_ms"))
                 if time.monotonic() - started > STATS_AFTER_S:
                     worker.ask_stats()
                 if result.get("key") and key and result["key"] != key:

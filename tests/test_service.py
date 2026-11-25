@@ -405,6 +405,18 @@ class Burst(ServiceCase):
         self.assertEqual(len({json.loads(Collector.stdout(f).splitlines()[0])["pid"] for f in frames_}), 3)
 
 
+class Timings(ServiceCase):
+    def test_with_timings_on_each_pptx_call_and_each_worker_say_their_time_in_the_log(self):
+        self.env["THEODORE_SERVICE_TIMINGS"] = "1"
+        self.service()
+        client, got = self.connect()
+        self.call(client, got, "t", ["echo"], env={"THEODORE_TIMINGS": "1"})
+        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: none\)")
+        self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own")
+        self.assertIn("timings: echo 5 ms (fake.step 5)", log, "the engine's own line, under the call's")
+
+
 class StudioParts(ServiceCase):
     """A Studio deck's parts applied together (lanes G and F; the coordinator's decision, 25 Nov): a lone part's apply
     runs at once; the others of a burst gather and go in one build per free worker; each designer gets its own answer."""
@@ -423,10 +435,10 @@ class StudioParts(ServiceCase):
         time.sleep(0.5)
         return lead
 
-    def burst(self, lead: Path, names: list[str], hold: str = "0.3") -> dict:
+    def burst(self, lead: Path, names: list[str], hold: str = "0.3", tag: str = "") -> dict:
         for name in names:
-            self.call(self.client_, self.got, name, ["apply", str(lead / "parts" / name), "--hold", hold], wait=False)
-        return {name: self.got.wait(name, 60) for name in names}
+            self.call(self.client_, self.got, tag + name, ["apply", str(lead / "parts" / name), "--hold", hold], wait=False)
+        return {name: self.got.wait(tag + name, 60) for name in names}
 
     def test_a_burst_goes_in_one_build_per_free_worker_and_each_gets_its_own_answer(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
@@ -441,10 +453,13 @@ class StudioParts(ServiceCase):
             answer = json.loads(Collector.stdout(frames_[name]).splitlines()[0])
             self.assertEqual(Path(answer["argv"][1]).name, name, "each designer got its own part's answer")
             batches.append(answer.get("batch", 1))
-        self.assertIn(1, batches, "the first to arrive ran alone, at once")
-        self.assertGreaterEqual(max(batches), 2, "those that followed went in one build")
-        self.assertLessEqual(len(set(batches)), 3, f"few builds for seven parts: {batches}")
-        lone = json.loads(Collector.stdout(frames_[names[batches.index(1)]]).splitlines()[0])
+        # The first may run alone when it reaches the gathering before the others reached the service; every other part
+        # of the burst is gathered, in equal shares over the free workers.
+        self.assertLessEqual(batches.count(1), 1, f"at most the first ran alone: {batches}")
+        self.assertGreaterEqual(max(batches), 2, f"the others went in one build: {batches}")
+        self.assertLessEqual(len(set(batches) - {1}), 2, f"in equal shares: {batches}")
+        lone = json.loads(Collector.stdout(self.burst(lead, ["s01"], hold="0", tag="later-")["s01"]).splitlines()[0])
+        self.assertNotIn("batch", lone, "a part alone afterwards: the plain apply")
         self.assertEqual(lone["build_threads"], str(max(1, (os.cpu_count() or 2) // 2)), "THEODORE_BUILD_THREADS")
         log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
         self.assertRegex(log, r"parts: \d+ of a deck in \d+ build\(s\)", "the log says how a burst was built")
@@ -464,10 +479,10 @@ class StudioParts(ServiceCase):
         lead = self.prepared(5)
         frames_ = self.burst(lead, [f"s{i:02d}" for i in range(1, 6)])
         exits = sorted(Collector.done(got)["exit"] for got in frames_.values())
-        self.assertIn(2, exits, "those gathered got the run's own refusal")
+        self.assertIn(exits, ([2] * 5, [0] + [2] * 4), "every designer gathered got the run's own refusal (the first "
+                                                         "may have run alone, before the others came)")
         refused = [got for got in frames_.values() if Collector.done(got)["exit"] == 2]
         self.assertTrue(all('"ok": false' in Collector.stdout(got) for got in refused))
-        self.assertIn(0, exits, "the one that ran alone, as a plain apply, was not refused")
 
     def test_parts_that_come_in_turn_are_never_gathered(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})

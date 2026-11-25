@@ -25,7 +25,8 @@ from pathlib import Path
 
 from . import workers
 
-GATHER_S = 0.015                 # how long a burst's later part applies wait for each other, at most
+GATHER_S = 0.015                 # how long a burst's later part applies wait for each other once all have come
+GATHER_CAP_S = 0.25              # at most this long while others of the burst are still on their way (admission)
 WAIT_FREE_S = 1.0                # waiting here longer for a worker to come free, they go to the pool's queue instead
 BURST_FOR_S = 6 * 3600.0         # a deck's `prepare` announces its parts' burst for this long
 MOST_IN_BATCH = 32
@@ -51,6 +52,7 @@ class _Member:
         self.output = ""
         self.counters: dict = {}
         self.pending: list = []
+        self.timing: dict = {}
 
 
 class _BatchCall:
@@ -68,11 +70,14 @@ class _BatchCall:
         self.worker_images = False
         self.counters: dict = {}
         self.stdout: list[str] = []
+        self.engine_timings: list[str] = []
         self.phase = "starting"
 
     def out(self, text: str, stream: str = "stdout") -> None:
         if stream == "stdout":
             self.stdout.append(text)
+        elif "timings" in text:
+            self.engine_timings.extend(line for line in text.splitlines() if line.startswith("timings: "))
 
     def image(self, *_args, **_kwargs) -> bool:
         return False
@@ -89,6 +94,7 @@ class _BatchCall:
 class _Lead:
     def __init__(self):
         self.pending: list[_Member] = []
+        self.first_pending = 0.0
         self.last_dispatch = -1e9
         self.timer: threading.Timer | None = None
         self.argv: list[str] = []
@@ -102,6 +108,7 @@ class Gatherer:
         self.bursts: dict[str, float] = {}          # lead (real path) -> when its prepare announced a burst
         self.leads: dict[tuple, _Lead] = {}          # (version, lead, the rest of argv, env) -> its gathering
         self.claimed: dict[str, int] = {}            # per version: free workers promised to runs not yet started
+        self.on_way: dict[str, int] = {}             # per lead: part applies arrived at the service, not yet here
         pool.on_release.append(self._worker_free)
 
     # --- what prepare said -----------------------------------------------------------------------------------------
@@ -116,6 +123,31 @@ class Gatherer:
 
     # --- a part's apply --------------------------------------------------------------------------------------------
 
+    def arriving(self, argv: list[str], call) -> str | None:
+        """A part apply of a deck whose parts come at once reached the service (before its admission: the licence,
+        the engine's choice): counted, so the first of a burst to reach the gathering knows others are on their way
+        and does not run alone. Returns its lead, to give back to `arrived`."""
+        if call.stdin is not None:
+            return None
+        found = _lead_and_part(argv, call.cwd)
+        if found is None:
+            return None
+        with self.lock:
+            if found[0] not in self.bursts:
+                return None
+            self.on_way[found[0]] = self.on_way.get(found[0], 0) + 1
+        return found[0]
+
+    def arrived(self, lead: str | None) -> None:
+        if lead is None:
+            return
+        with self.lock:
+            left = self.on_way.get(lead, 0) - 1
+            if left > 0:
+                self.on_way[lead] = left
+            else:
+                self.on_way.pop(lead, None)
+
     def wants(self, version: str, argv: list[str], call) -> tuple | None:
         """(shape, part) when this call is a part apply of a deck whose parts come at once, on an engine that takes
         several; None to run it as before."""
@@ -127,7 +159,9 @@ class Gatherer:
         lead, part, index = found
         with self.lock:
             since = self.bursts.get(lead)
-        if since is None or time.monotonic() - since > BURST_FOR_S or not self.pool.can_apply_parts(version):
+        # Gathered while the engine can take several parts, or while no worker of it has been ready yet: a cold
+        # service's burst waits for a worker anyway, and its first ready worker says which (_cut).
+        if since is None or time.monotonic() - since > BURST_FOR_S or self.pool.parts_capability(version) is False:
             return None
         rest = tuple(arg for i, arg in enumerate(argv) if i != index)
         return (version, lead, rest, tuple(sorted((call.env or {}).items()))), part
@@ -144,13 +178,16 @@ class Gatherer:
                 twice = False
             lead.argv, lead.env = list(argv), dict(env)
             now = time.monotonic()
+            others_coming = self.on_way.get(shape[1], 0) > 0
             if twice:
                 pass
-            elif not lead.pending and now - lead.last_dispatch > GATHER_S and self._free(version) > 0:
+            elif not lead.pending and not others_coming and now - lead.last_dispatch > GATHER_S and self._free(version) > 0:
                 alone = True                            # a lone part apply: at once, never a window
                 lead.last_dispatch = now
                 self._claim(version)
             else:
+                if not lead.pending:
+                    lead.first_pending = now
                 lead.pending.append(member)
                 if lead.timer is None:
                     lead.timer = threading.Timer(GATHER_S, self._cut, args=(shape,))
@@ -168,10 +205,14 @@ class Gatherer:
                 if still and call.cancelled.is_set():   # still gathering: it simply leaves
                     lead.pending.remove(member)
                     return 130, []
-                stuck = still and lead.timer is None and time.monotonic() - waited_since > WAIT_FREE_S
+                waited = time.monotonic() - waited_since
+                known = self.pool.parts_capability(version) is not None
+                stuck = still and lead.timer is None and (waited > WAIT_FREE_S if known else waited > workers.READY_WAIT_S)
             if stuck:                                   # no worker came free (one died, or long calls hold them)
                 self._cut(shape, force=True)
         call.out(member.output)
+        if member.timing:
+            call.timing = dict(member.timing, batch=member.timing.get("batch"))
         for name, value in member.counters.items():
             if isinstance(value, int):
                 call.count(name, value)
@@ -192,9 +233,11 @@ class Gatherer:
     def _cut(self, shape: tuple, force: bool = False) -> None:
         """The window closed: every waiting part of the lead goes out now, in equal shares over the free workers
         (waiting for a busy one to come free costs a whole build; one more part in a batch costs its own share of
-        it). With none free they wait for the next (_worker_free), or with `force` go to the pool's queue as one."""
+        it). With none free they wait for the next (_worker_free), or with `force` go to the pool's queue as one.
+        Until a worker of the engine has been ready they wait for it (a cold service's burst), and when its workers
+        take one part a call each runs alone."""
         version = shape[0]
-        launch = []
+        launch, alone = [], []
         with self.lock:
             lead = self.leads.get(shape)
             if lead is None:
@@ -202,26 +245,56 @@ class Gatherer:
             lead.timer = None
             if not lead.pending:
                 return
-            free = self._free(version)
-            if free <= 0:
-                if not force:
-                    return
-                free = 1
-            share = max(1, min(MOST_IN_BATCH, -(-len(lead.pending) // free)))
-            while lead.pending and free > 0:
-                batch, lead.pending = lead.pending[:share], lead.pending[share:]
-                launch.append(batch)
-                self._claim(version)
-                free -= 1
-            lead.last_dispatch = time.monotonic()
+            if not force and self.on_way.get(shape[1], 0) > 0 and \
+                    time.monotonic() - lead.first_pending < GATHER_CAP_S:
+                lead.timer = threading.Timer(GATHER_S, self._cut, args=(shape,))     # others of it are on their way
+                lead.timer.daemon = True
+                lead.timer.start()
+                return
+            capability = self.pool.parts_capability(version)
             argv, env = list(lead.argv), dict(lead.env)
+            if capability is None and not force:
+                starting = self._starting(version)
+            elif capability is not True:
+                alone, lead.pending = lead.pending, []
+                lead.last_dispatch = time.monotonic()
+            else:
+                free = self._free(version)
+                if free <= 0 and force:
+                    free = 1
+                if free > 0:
+                    share = max(1, min(MOST_IN_BATCH, -(-len(lead.pending) // free)))
+                    while lead.pending and free > 0:
+                        batch, lead.pending = lead.pending[:share], lead.pending[share:]
+                        launch.append(batch)
+                        self._claim(version)
+                        free -= 1
+                    lead.last_dispatch = time.monotonic()
             left = len(lead.pending)
+        if capability is None and not force:
+            if not starting:                    # nothing is starting a worker for them: one starts now
+                self.pool.warm_up(version, 1)
+            return
+        if alone:
+            with contextlib.suppress(Exception):
+                self.pool.service.log(f"parts: {len(alone)} of a deck, each alone (this engine's workers take one part "
+                                      f"a call)")
+            for member in alone:
+                threading.Thread(target=self._run_batch, args=(version, argv, env, [member]), name="parts-alone",
+                                 daemon=True).start()
+            return
+        if not launch:
+            return
         with contextlib.suppress(Exception):     # what the proof reads: a burst's parts, in how many builds
             self.pool.service.log(f"parts: {sum(len(b) for b in launch)} of a deck in {len(launch)} build(s) "
                                   f"({', '.join(str(len(b)) for b in launch)}){f', {left} waiting' if left else ''}")
         for batch in launch:
             threading.Thread(target=self._run_batch, args=(version, argv, env, batch), name="parts-batch",
                              daemon=True).start()
+
+    def _starting(self, version: str) -> bool:
+        with self.pool.cond:
+            return any(not w.ready.is_set() for w in self.pool._live(version))     # noqa: SLF001
 
     def _worker_free(self, version: str) -> None:
         with self.lock:
@@ -294,4 +367,7 @@ class Gatherer:
                 member.output = row["stdout"]   # exactly what `pptx apply <that part>` alone prints (lane G)
             if position == 0:
                 member.counters = dict(call.counters)   # the run's own counts, once
+            member.timing = dict(getattr(call, "timing", None) or {}, batch=len(batch))
+            # the run's own line (`timings: apply-parts ...`); each part's phases are in its own answer (`timings`)
+            member.timing["engine_lines"] = [line for line in call.engine_timings if line.startswith("timings: apply-parts")]
             member.done.set()
