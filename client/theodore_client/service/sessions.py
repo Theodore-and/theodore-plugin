@@ -11,11 +11,12 @@ import time
 
 
 class Session:
-    __slots__ = ("id", "host", "relays", "opened", "last_seen", "plugin_root", "chat")
+    __slots__ = ("id", "host", "relays", "opened", "last_seen", "plugin_root", "chat", "cwd")
 
-    def __init__(self, session_id: str, host: str, plugin_root: str | None):
+    def __init__(self, session_id: str, host: str, plugin_root: str | None, cwd: str | None = None):
         self.id = session_id
         self.host = host
+        self.cwd = cwd                   # the folder the session works in (its relay's hello), when known
         self.relays: set = set()
         self.opened = time.monotonic()
         self.last_seen = self.opened
@@ -37,7 +38,8 @@ class Sessions:
             session = self._sessions.get(client.session_id)
             new = session is None
             if new:
-                session = self._sessions[client.session_id] = Session(client.session_id, client.host, client.plugin_root)
+                session = self._sessions[client.session_id] = Session(client.session_id, client.host, client.plugin_root,
+                                                                      getattr(client, "cwd", None))
             session.relays.add(client)
             session.last_seen = time.monotonic()
         if new and self._on_open is not None:

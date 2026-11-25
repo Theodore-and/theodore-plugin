@@ -299,6 +299,8 @@ class Service:
         client.session_id = str(session.get("id") or "")[:128] or f"{client.role}-{secrets.token_hex(6)}"
         client.host = str(session.get("host") or "unknown")
         client.pid = session.get("pid")
+        cwd = session.get("cwd")
+        client.cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
         client.plugin_root = hello.get("plugin_root") if isinstance(hello.get("plugin_root"), str) else None
         new = client.role == "relay" and self.sessions.get(client.session_id) is None
         client.send({"t": "welcome", "v": 1, "protocol": frames.PROTOCOL,
@@ -310,6 +312,9 @@ class Service:
 
     def _session_opened(self, session) -> None:
         self.log(f"session opened ({session.host})")
+        if session.cwd:     # lane BIG's facts ahead start after an answered call: one cheap one there, before start
+            threading.Thread(target=self.pool.prime_folder, args=(session.cwd,), name="service-prime",
+                             daemon=True).start()
 
         def texts_open() -> None:
             # The session's cheap first request (lane D) goes on a connection the start opened, not one of its own. A

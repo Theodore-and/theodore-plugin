@@ -45,6 +45,7 @@ RANKS = {"read": 0, "write": 1, "long": 2, "ahead": 3}      # the queue's order:
 # "ahead": a Studio part built before its designer applies it (ahead.py), never queued: it takes an idle worker or none
 WARM_WAIT_S = 0.5                 # a long call waits this long for the always-warm worker to finish a short call
 RECYCLE_CALLS = 2000
+PRIME_WAIT_S = 20.0               # a session's folder is primed once a worker is ready, within this (Pool.prime_folder)
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
 CREATE_NO_WINDOW = 0x08000000
@@ -584,6 +585,32 @@ def worker_threads(most: int) -> int:
     return min(4, max(1, (os.cpu_count() or 2) // max(1, most)))
 
 
+class _QuietCall:
+    """What a worker needs of a call whose answer nobody reads (Pool.prime_folder)."""
+
+    def __init__(self, cwd: str):
+        self.id = f"prime-{int(time.monotonic() * 1000)}"
+        self.cwd = cwd
+        self.images = False
+        self.deadline_ms = None
+        self.cancelled = threading.Event()
+        self.worker = None
+        self.worker_images = False
+        self.phase = "prime"
+
+    def out(self, *_args, **_kwargs) -> None:
+        pass
+
+    def image(self, *_args, **_kwargs) -> bool:
+        return False
+
+    def set_phase(self, *_args, **_kwargs) -> None:
+        pass
+
+    def count(self, *_args, **_kwargs) -> None:
+        pass
+
+
 class _KeyLock:
     """Writes on one workspace key run one at a time, in arrival order."""
 
@@ -1117,6 +1144,49 @@ class Pool:
             return 78, []
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
+
+    def prime_folder(self, folder: str) -> None:
+        """A session opened in `folder`: one cheap call answered there (`pptx --help`) on an idle worker of the current
+        engine, so the worker's after-answer work starts before the session's first command. Lane BIG's facts ahead
+        then make the template facts of the folder's decks at idle priority, ended the moment a call starts, so the
+        first `start --from` reads them (95 to 228 ms of CPU instead of 0.5 to 2.1 s on 120 MB decks). Only while no
+        call runs or waits (that call's own answer starts the same work), only a resident engine, waiting at most
+        PRIME_WAIT_S for a worker to be ready; it writes nothing in the folder."""
+        try:
+            if not os.path.isdir(folder):
+                return
+            version = install.selected_engine()
+            spec = Spec(version) if version else None
+            if spec is None or not spec.resident() or self._oneshot(version):
+                return
+        except Exception:  # noqa: BLE001  a head start only
+            return
+        deadline = time.monotonic() + PRIME_WAIT_S
+        worker = None
+        with self.cond:
+            while not self.closed and time.monotonic() < deadline:
+                live = self._live(version)
+                busy = any(w.busy for w in live) or self.waiting.get(version)
+                if busy:
+                    return                      # a call is here: its answer starts the same work
+                idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
+                if idle:
+                    worker = min(idle, key=lambda w: (len(w.keys), w.calls))
+                    worker.busy, worker.rank = True, RANKS["ahead"]
+                    break
+                self.cond.wait(0.25)
+        if worker is None:
+            return
+        call = _QuietCall(folder)
+        try:
+            worker.run(call, ["--help"], {}, None, None, "read")
+            self.service.log(f"primed {folder}: a call answered there on worker {worker.process.pid} (facts made ahead)")
+        except WorkerFailed:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._release(worker)
 
     def ahead_slots(self, version: str) -> int:
         """How many build-aheads (ahead.py) may start now: the idle workers but one, and none while a call waits."""
