@@ -494,6 +494,20 @@ class PoolSizing(unittest.TestCase):
                 pool.tick()
             self.assertEqual(sorted(retired), ["added-1", "added-2"], "the warm worker stays")
 
+    def test_only_the_services_end_tells_a_worker_to_stop_the_shared_office(self):
+        # R's one office per user, joined by every worker: a recycle or a shrink lets go of it (B and R, 25 Nov)
+        from types import SimpleNamespace
+
+        from theodore_client.service import workers
+        sent = []
+        worker = SimpleNamespace(retiring=False, channel=SimpleNamespace(send=sent.append))
+        workers.Worker.retire(worker, 0)                    # a shrink
+        workers.Worker.retire(worker)                       # a recycle
+        workers.Worker.retire(worker, 2000, final=True)     # the service's end (Pool.close)
+        self.assertEqual(sent, [{"t": "exit", "grace_ms": 0}, {"t": "exit", "grace_ms": workers.EXIT_GRACE_MS},
+                                {"t": "exit", "grace_ms": 2000, "offices": "stop"}])
+        self.assertTrue(worker.retiring)
+
     def test_the_queue_goes_by_expected_cost(self):
         from theodore_client.service import workers
         self.assertEqual(workers.rank(["slide", "list", "/w"], "/"), 0)
@@ -677,6 +691,8 @@ class StudioParts(ServiceCase):
 
 class Lifecycle(ServiceCase):
     def test_nothing_runs_after_the_last_relay_detaches(self):
+        exits = self.box.tmp / "exit-frames.jsonl"
+        self.env["FAKE_EXITS"] = str(exits)
         record = self.service()
         client, got = self.connect()
         worker_pid = json.loads(Collector.stdout(self.call(client, got, "e", ["echo"])))["pid"]
@@ -686,6 +702,10 @@ class Lifecycle(ServiceCase):
         self.assertTrue(wait_gone(record["pid"], 10), "the service exits after its linger")
         self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
         self.assertFalse((self.box.home / "state" / "run" / "service.json").exists())
+        frames_ = [json.loads(line) for line in exits.read_text().splitlines()]
+        self.assertTrue(frames_, "the worker was told to exit")
+        for frame in frames_:       # the service's end: the worker stops the office the workers share (C2)
+            self.assertEqual(frame, {"t": "exit", "grace_ms": 2000, "offices": "stop"})
 
     def test_after_a_relay_detaches_earlier_shell_commands_keep_no_idle_window(self):
         # K's A4 re-run (25 Nov): shell commands with no relay attached, then a relay's session: the service stayed

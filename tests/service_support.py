@@ -80,6 +80,9 @@ def reader():
             send({"t": "stats", "rss_mb": float(os.environ.get("FAKE_WORKER_RSS") or 20.0), "workspaces": [],
                   "requests": state["calls"], "uptime_s": 1})
         elif kind == "exit":
+            if os.environ.get("FAKE_EXITS"):        # the exit frames this worker was sent, one JSON line each
+                with open(os.environ["FAKE_EXITS"], "a", encoding="utf-8") as record:
+                    record.write(json.dumps(frame) + "\n")
             runs.put(None)
 threading.Thread(target=reader, daemon=True).start()
 while True:
@@ -169,7 +172,10 @@ while True:
                  "status": "created"} for i in range(1, n + 1)]
         for row in rows:
             os.makedirs(row["workspace"], exist_ok=True)
-        say(json.dumps({"ok": True, "prepared": "parts", "in_turn": "--in-turn" in argv, "parts": rows}) + "\n")
+        # The engine's own form (cli_output.print_payload): the object indented, then one SLIDE line per part.
+        lines = [f"SLIDE {i} of {n} (redesigned): \"Part {i}\"  WORKSPACE: {row['workspace']}" for i, row in enumerate(rows, 1)]
+        say(json.dumps({"ok": True, "prepared": "parts", "parts": rows, "lines": lines, "in_turn": "--in-turn" in argv},
+                       indent=2) + "\n" + "".join(line + "\n" for line in lines))
     elif verb == "apply" and FEATURES and len(targets) > 1 and os.environ.get("FAKE_PARTS_REFUSED"):
         code = 2                            # the call itself refused (lane G): one object, no parts
         say(json.dumps({"ok": False, "summary": "refused", "error": "parts of two decks"}) + "\n")
