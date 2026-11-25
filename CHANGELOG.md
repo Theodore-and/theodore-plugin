@@ -18,6 +18,13 @@ milliseconds.
 - A connection the server had already closed is no longer reported as offline: the request goes on a new connection.
 - A request the server answers with a passing error (500, 502, 503 or 504) is sent once more after a second, and
   nothing already received is lost.
+- A command never waits forever. If the engine stops during a command, the service notices at once: a command that
+  had written nothing runs once more, and one that may have written says so instead of guessing. A command still
+  running at its time limit is stopped with the same answer.
+- Several parts prepared at once are now built together by the service, as intended; each had been built on its own.
+- With engine 2.0, Theodore's engines share one LibreOffice, kept open until the service ends, instead of each
+  opening its own.
+- Theodore's runtime is updated for engine 2.0: it no longer carries the two libraries 2.0 stopped using.
 
 ## 0.4.34
 
