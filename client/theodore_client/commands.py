@@ -1118,6 +1118,7 @@ def setup_job() -> int:
     job.begin("runtime")
     try:
         install.install_runtime(job)
+        install.compile_client()        # the service's modules too, before the first command ever loads them
         account.import_pending_activation()
         if credentials.load():
             try:
