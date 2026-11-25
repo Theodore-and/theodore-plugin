@@ -100,6 +100,16 @@ while True:
         send({"t": "out", "id": call, "stream": stream, "data": text})
     verb = argv[0] if argv else "--help"
     targets = [a for i, a in enumerate(argv[1:], 1) if not a.startswith("-") and argv[i - 1] != "--hold"]
+    if "--pid-file" in argv:                # where the test finds the worker to kill
+        open(argv[argv.index("--pid-file") + 1], "w").write(str(os.getpid()))
+    if "--orphan" in argv:                  # a child that keeps this worker's output pipe open after it is gone
+        import subprocess as _sp
+        _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)", argv[argv.index("--orphan") + 1]],
+                  stdin=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        os._exit(9)
+    if "--freeze" in argv:                  # stuck: alive, answering nothing
+        import signal as _signal
+        os.kill(os.getpid(), _signal.SIGSTOP)
     t0 = time.time()
     if "--hold" in argv:                    # any verb: busy this long first (a long call, a part's build)
         hold_end = time.monotonic() + float(argv[argv.index("--hold") + 1])
@@ -177,9 +187,13 @@ while True:
         except FileNotFoundError:
             tup = [path, -1, 0, 0, "0"]
         send({"t": "inputs", "id": call, "files": [tup]})
+        if "--hold-before-commit" in argv:
+            time.sleep(float(argv[argv.index("--hold-before-commit") + 1]))
         with open(path, "a") as handle:
             handle.write("x")
         send({"t": "committed", "id": call, "key": "written-workspace"})
+        if "--hold-after-commit" in argv:
+            time.sleep(float(argv[argv.index("--hold-after-commit") + 1]))
         say(json.dumps({"ok": True}) + "\n")
     else:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))

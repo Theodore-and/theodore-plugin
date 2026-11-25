@@ -213,8 +213,8 @@ class Pool(ServiceCase):
         client, got = self.connect()
         first = json.loads(Collector.stdout(self.call(client, got, "a", ["echo"])))
         frames_ = self.call(client, got, "b", ["crash"])
-        self.assertEqual(Collector.done(frames_)["exit"], 75)
-        self.assertIn("THEODORE RETRY", Collector.stdout(frames_))
+        self.assertEqual(Collector.done(frames_)["exit"], 78, "it may have read anything: answered, not run again")
+        self.assertIn("THEODORE INTERNAL: Theodore's engine ended (exit 9) during this command", Collector.stdout(frames_))
         after = json.loads(Collector.stdout(self.call(client, got, "c", ["echo"])))
         self.assertNotEqual(after["pid"], first["pid"])
         # a read is run again by itself; a write only when its inputs did not change and nothing was committed
@@ -227,7 +227,76 @@ class Pool(ServiceCase):
         self.assertEqual(Collector.done(write)["exit"], 0)
         self.assertEqual(target.read_text(), "ax", "run again once, written once")
         moved = self.call(client, got, "w2", ["write", str(target), "--crash-once", str(self.box.tmp / "flag-w2"), "--touch-first"])
-        self.assertEqual(Collector.done(moved)["exit"], 75, "its input changed: not run again")
+        self.assertEqual(Collector.done(moved)["exit"], 78, "its input changed: not run again")
+
+    def kill_when_running(self, pid_file: Path) -> int:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.02)
+        time.sleep(0.3)
+        pid = int(pid_file.read_text())
+        os.kill(pid, 9)
+        return pid
+
+    def test_a_worker_killed_before_its_call_wrote_runs_it_again_on_a_fresh_one(self):
+        self.service()
+        client, got = self.connect()
+        target, pid_file = self.box.tmp / "deck.txt", self.box.tmp / "pid-before"
+        target.write_text("a")
+        self.call(client, got, "w", ["write", str(target), "--hold-before-commit", "3", "--pid-file", str(pid_file)],
+                  wait=False)
+        killed = self.kill_when_running(pid_file)
+        done = Collector.done(got.wait("w", 30))
+        self.assertEqual(done["exit"], 0, "nothing was written: run again on a fresh worker")
+        self.assertEqual(target.read_text(), "ax", "written once, by the second run")
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn(f"(pid {killed}) ended: exit -9", log, "its end logged with its exit code")
+        self.assertIn("nothing of it was written: run again", log)
+
+    def test_a_worker_killed_after_its_call_wrote_answers_78_with_what_to_do(self):
+        self.service()
+        client, got = self.connect()
+        target, pid_file = self.box.tmp / "deck.txt", self.box.tmp / "pid-after"
+        target.write_text("a")
+        self.call(client, got, "w", ["write", str(target), "--hold-after-commit", "3", "--pid-file", str(pid_file)],
+                  wait=False)
+        self.kill_when_running(pid_file)
+        frames_ = got.wait("w", 30)
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        self.assertIn("part of its result may be on disk", Collector.stdout(frames_))
+        self.assertIn("NEXT: run the same command again", Collector.stdout(frames_))
+
+    def test_a_worker_gone_while_a_child_holds_its_pipe_is_noticed_at_once(self):
+        # K's A3b (rig 1): the worker vanished, an office it started kept its output pipe open, and the call waited.
+        self.service()
+        client, got = self.connect()
+        started = time.monotonic()
+        self.call(client, got, "o", ["echo", "--orphan", str(self.box.tmp / "orphan-marker")], wait=False)
+        frames_ = got.wait("o", 30)
+        self.assertLess(time.monotonic() - started, 20, "answered at once, not when the pipe closes")
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("ended: exit 9, its process ended; a call was running on it", log)
+
+    def test_a_call_never_waits_past_the_ceiling(self):
+        self.env["THEODORE_CALL_CEILING_S"] = "2"
+        self.service()
+        client, got = self.connect()
+        frames_ = self.call(client, got, "slow", ["sleep", "20"])        # it answers, it progresses, it never ends
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        self.assertIn("was stopped: it did not finish in time", Collector.stdout(frames_))
+        after = self.call(client, got, "after", ["echo"])
+        self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
+
+    def test_a_call_never_waits_on_a_worker_that_stopped_answering(self):
+        self.env.update({"THEODORE_WORKER_HEARTBEAT_S": "1", "THEODORE_WORKER_HEARTBEAT_GRACE_S": "3"})
+        self.service()
+        client, got = self.connect()
+        frozen = self.call(client, got, "frozen", ["echo", "--freeze"])   # alive, answering nothing, not even stats
+        self.assertEqual(Collector.done(frozen)["exit"], 78)
+        self.assertIn("stopped answering", Collector.stdout(frozen))
+        after = self.call(client, got, "after", ["echo"])
+        self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
     def test_cancel_resend_and_the_shell_deadline(self):
         self.service()
@@ -301,6 +370,57 @@ class Fatal(ServiceCase):
         self.assertTrue(answer["oneshot"])
 
 
+class PicturesRule(unittest.TestCase):
+    def test_an_apply_past_the_auto_render_cap_attaches_the_slides_it_drew(self):
+        # rc.34 and rc.35 on a deck of more than 40 slides (checked against the real engines, 25 Nov): the render is
+        # scoped to the changed slides, `rendered_images` lists only those, and render_summary says `scoped`.
+        from theodore_client.service import tools
+        scoped = json.dumps({"ok": True, "rendered_images": ["/r/slide-2.jpg"], "render_summary": {
+            "scoped": "2", "reason": "deck exceeds full auto-render cap; rendered the slides no current render shows",
+            "slide_count": 95, "max_slides": 40}})
+        self.assertEqual(tools.pictures_of(["apply", "/w"], scoped), ["/r/slide-2.jpg"])
+        full = json.dumps({"ok": True, "rendered_images": ["/r/slide-1.jpg", "/r/slide-2.jpg"],
+                           "render_summary": {"regenerated_pages": [2]}})
+        self.assertEqual(tools.pictures_of(["apply", "/w"], full), ["/r/slide-2.jpg"], "the drawn ones, not the cached")
+        unchanged = json.dumps({"ok": True, "render_summary": {"skipped": "deck.js unchanged since the last apply"}})
+        self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
+
+
+class RouterCeiling(unittest.TestCase):
+    def test_a_call_stuck_anywhere_is_answered_by_the_ceiling_and_its_stack_logged(self):
+        from types import SimpleNamespace
+
+        from theodore_client.service import router as routing
+        logged = []
+        service = SimpleNamespace(log=logged.append, call_ended=lambda _c: None)
+        router = routing.Router(service)
+        stuck = threading.Event()
+        holder = {}
+
+        def stuck_somewhere():
+            holder["thread"] = threading.get_ident()
+            stuck.wait(30)
+        thread = threading.Thread(target=stuck_somewhere, daemon=True)
+        thread.start()
+        while "thread" not in holder:
+            time.sleep(0.01)
+        client = SimpleNamespace(session_id="s1", host="claude-code", role="relay", send=lambda _f: None)
+        call = routing.Call(router, client, {"id": "c1", "tool": "pptx", "args": ["apply", "/w"], "cwd": "/"})
+        call.thread = holder["thread"]
+        call.started -= routing.ROUTER_CEILING_S + 1
+        router.calls[("s1", "c1")] = call
+        router.running = 1
+        router.tick()
+        self.assertTrue(call.finished.is_set(), "answered, however it is stuck")
+        self.assertEqual(call.exit, 78)
+        self.assertTrue(any(line.startswith("slow call pptx apply /w (c1)") and "stuck_somewhere" in line
+                            for line in logged), logged)
+        self.assertTrue(any("past the ceiling" in line for line in logged))
+        call.out("late output\n")
+        self.assertNotIn("late output", "".join(f.get("data", "") for f in call.replay), "dropped after the answer")
+        stuck.set()
+
+
 class PoolSizing(unittest.TestCase):
     def test_a_worker_per_core_within_the_memory_share(self):
         from unittest import mock
@@ -361,17 +481,18 @@ class PoolSizing(unittest.TestCase):
             self.assertEqual(pool._threads_for_new([SimpleNamespace(build_threads=1)]), 3, "the full one went: taken again")
             retired = []
 
-            def worker(threads, used):
+            def worker(name, threads, used):
                 return SimpleNamespace(build_threads=threads, last_used=used, busy=False, retiring=False,
                                        dead=SimpleNamespace(is_set=lambda: False), ready=SimpleNamespace(is_set=lambda: True),
-                                       retire=lambda grace, name=f"{threads}@{used}": retired.append(name),
-                                       ask_stats=lambda: None)
+                                       retire=lambda grace, name=name: retired.append(name), ask_stats=lambda: None)
             now = time.monotonic()
             # the full-thread worker used longest ago, the burst's ones since: the shrink still keeps the full one
-            pool.workers["9.9"] = [worker(3, now - 900), worker(1, now - 800), worker(1, now - 700)]
+            # (names, not times: on a fresh machine the monotonic clock is small, and now - 900 is negative)
+            pool.workers["9.9"] = [worker("warm", 3, now - 900), worker("added-1", 1, now - 800),
+                                   worker("added-2", 1, now - 700)]
             with mock.patch.object(workers.install, "selected_engine", return_value="9.9"):
                 pool.tick()
-            self.assertEqual(sorted(retired), [f"1@{now - 800}", f"1@{now - 700}"], "the warm worker stays")
+            self.assertEqual(sorted(retired), ["added-1", "added-2"], "the warm worker stays")
 
     def test_the_queue_goes_by_expected_cost(self):
         from theodore_client.service import workers
@@ -579,6 +700,19 @@ class Lifecycle(ServiceCase):
         time.sleep(0.3)
         relay.close()
         self.assertTrue(wait_gone(record["pid"], 15), "gone after the relay's linger, not 60 s after the shell command")
+
+    def test_a_sessions_hung_call_does_not_keep_the_service_after_the_session_ends(self):
+        # K's A3b (rig 1): fifteen hung calls kept the service and its workers up past the 3-minute count.
+        self.env["THEODORE_ORPHAN_GRACE_S"] = "1"
+        record = self.service()
+        client, got = self.connect()
+        self.call(client, got, "hung", ["echo", "--freeze"], wait=False)       # stuck: it answers nothing, not a cancel
+        time.sleep(1.0)
+        client.close()                                                        # the session ends
+        self.assertTrue(wait_gone(record["pid"], 15), "the call stopped after the grace, then the linger: gone")
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("session ended with 1 call(s) running: cancelled", log)
+        self.assertIn("still running after its session ended: its worker stopped", log)
 
     def test_a_removed_home_ends_the_service_and_stays_removed(self):
         record = self.service()
