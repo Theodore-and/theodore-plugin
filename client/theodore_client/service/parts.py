@@ -283,13 +283,33 @@ class Gatherer:
                 free = self._free(version)
                 if free <= 0 and force:
                     free = 1
-                if free > 0:
+                # The parts whose ahead an idle worker holds in memory go to it, all in one call, with no cap: a reused
+                # apply is cheap there and only there (lane S2's S2-6: the reuse check took ~1 ms on the worker that
+                # built the ahead, 96 to 430 ms on another, reading its ahead.json afresh). The others as before.
+                homes: dict[int, tuple] = {}
+                rest = []
+                for member in lead.pending:
+                    home = self.pool.idle_home(member.key)
+                    if home is not None:
+                        homes.setdefault(id(home), (home, []))[1].append(member)
+                    else:
+                        rest.append(member)
+                for home, members in homes.values():
+                    if free <= 0:
+                        rest.extend(members)
+                        continue
+                    launch.append((members, home))
+                    self._claim(version)
+                    free -= 1
+                lead.pending = rest
+                if free > 0 and lead.pending:
                     share = max(1, min(self._cap(shape[1]), -(-len(lead.pending) // free)))
                     while lead.pending and free > 0:
                         batch, lead.pending = lead.pending[:share], lead.pending[share:]
-                        launch.append(batch)
+                        launch.append((batch, None))
                         self._claim(version)
                         free -= 1
+                if launch:
                     lead.last_dispatch = time.monotonic()
             left = len(lead.pending)
         if capability is None and not force:
@@ -307,13 +327,16 @@ class Gatherer:
         if not launch:
             return
         with contextlib.suppress(Exception):     # what the proof reads: a burst's parts, in how many builds
-            self.pool.service.log(f"parts: {sum(len(b) for b in launch)} of a deck in {len(launch)} build(s) "
-                                  f"({', '.join(str(len(b)) for b in launch)}){f', {left} waiting' if left else ''}")
+            homed = sum(1 for _b, home in launch if home is not None)
+            self.pool.service.log(f"parts: {sum(len(b) for b, _h in launch)} of a deck in {len(launch)} build(s) "
+                                  f"({', '.join(str(len(b)) for b, _h in launch)})"
+                                  f"{f', {homed} on the worker that built their ahead' if homed else ''}"
+                                  f"{f', {left} waiting' if left else ''}")
         sent = time.perf_counter()
-        for batch in launch:
+        for batch, home in launch:
             for member in batch:
                 member.sent = sent
-            threading.Thread(target=self._run_batch, args=(version, argv, env, batch), name="parts-batch",
+            threading.Thread(target=self._run_batch, args=(version, argv, env, batch, home), name="parts-batch",
                              daemon=True).start()
 
     def _starting(self, version: str) -> bool:
@@ -327,7 +350,8 @@ class Gatherer:
         for shape in waiting:
             self._cut(shape)
 
-    def _alone(self, call, version: str, argv: list[str], env: dict, keys: list[str] | None = None) -> tuple[int, list]:
+    def _alone(self, call, version: str, argv: list[str], env: dict, keys: list[str] | None = None,
+               prefer=None) -> tuple[int, list]:
         """One part on its own: the plain apply, its output streamed to its own call."""
         released = []
 
@@ -336,17 +360,18 @@ class Gatherer:
                 released.append(True)
                 self._unclaim(version)
         try:
-            return self.pool.run(call, version, argv, env, None, keys=keys, acquired=acquired)
+            return self.pool.run(call, version, argv, env, None, keys=keys, acquired=acquired, prefer=prefer)
         finally:
             acquired()
 
-    def _run_batch(self, version: str, argv: list[str], env: dict, batch: list[_Member]) -> None:
+    def _run_batch(self, version: str, argv: list[str], env: dict, batch: list[_Member], prefer=None) -> None:
         if len(batch) == 1:                     # a share of one: the plain apply (one part's answer, as alone)
             member = batch[0]
             index = next(i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-"))
             try:
                 member.exit, member.pending = self._alone(member.call, version, argv[:index] + [member.part] + argv[index + 1:],
-                                                          env, keys=[member.key] if member.key else [])
+                                                          env, keys=[member.key] if member.key else [],
+                                                          prefer=prefer or self.pool.idle_home(member.key))
             except Exception as exc:  # noqa: BLE001
                 member.exit, member.output = 78, f"THEODORE INTERNAL: the Studio part's apply failed: {exc}\n"
             with contextlib.suppress(Exception):
@@ -365,7 +390,7 @@ class Gatherer:
                 self._unclaim(version)
         try:
             code, _pending = self.pool.run(call, version, run_argv, env, None, keys=[m.key for m in batch if m.key],
-                                           order=workers.RANKS["write"], acquired=acquired)
+                                           order=workers.RANKS["write"], acquired=acquired, prefer=prefer)
         except Exception as exc:  # noqa: BLE001  every designer gets an answer
             code = 78
             call.out(f"THEODORE INTERNAL: the Studio parts applied together failed: {exc}\n")

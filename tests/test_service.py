@@ -770,6 +770,7 @@ class BuildAhead(ServiceCase):
     feature; a newer save or the designer's apply on a newer deck.js cancels it; a call with no idle worker takes it."""
 
     prepared = StudioParts.prepared
+    burst = StudioParts.burst
 
     def setUp(self):
         super().setUp()
@@ -866,6 +867,25 @@ class BuildAhead(ServiceCase):
         log = (self.box.home / "logs" / "service.log").read_text()
         self.assertRegex(log, r"ahead: 3 part\(s\) \(s01, s02, s03\) done in \d+ ms \(exit 0\): 3 built; [^\n]*\n"
                               r"    timings: apply-parts 3 part\(s\) 300 ms")
+
+    def test_parts_built_ahead_on_one_worker_are_applied_there_together(self):
+        # Lane S2's S2-6: a burst's applies spread over every worker, and each worker but the one that built the
+        # ahead read it afresh from disk (96 to 430 ms against ~1 ms). They now go to that worker, in one call.
+        self.service()
+        lead = self.prepared(3)
+        for name in ("s01", "s02", "s03"):
+            self.save(lead, name, f"slide {name}, saved\n")
+        self.assertTrue(all(self.wait_for(("ahead-built", name)) for name in ("s01", "s02", "s03")), self.events())
+        built_on = {row["pid"] for row in map(json.loads, self.aheads_file.read_text().splitlines())
+                    if row["event"] == "ahead-built"}
+        self.assertEqual(len(built_on), 1, "one several-part ahead")
+        time.sleep(0.3)
+        frames_ = self.burst(lead, ["s01", "s02", "s03"], hold="0")
+        for name, got in frames_.items():
+            self.assertEqual(Collector.done(got)["exit"], 0, got)
+            answer = json.loads(Collector.stdout(got).splitlines()[0])
+            self.assertEqual({answer["pid"]}, built_on, f"{name}: applied on the worker that built its ahead")
+        self.assertIn("on the worker that built their ahead", (self.box.home / "logs" / "service.log").read_text())
 
     def test_nothing_is_built_ahead_without_the_feature_or_a_second_idle_worker(self):
         for env in ({"FAKE_APPLY_AHEAD": ""}, {"THEODORE_SERVICE_WORKERS": "1"}):

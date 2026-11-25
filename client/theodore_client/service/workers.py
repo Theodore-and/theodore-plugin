@@ -728,7 +728,7 @@ class Pool:
                     self._spawn(spec)
         threading.Thread(target=warm, name="pool-warm", daemon=True).start()
 
-    def _choose(self, live: list, idle: list, key: str | None, rank: int, waited: float):
+    def _choose(self, live: list, idle: list, key: str | None, rank: int, waited: float, prefer=None):
         """Which idle worker takes a call, or None to wait a moment. The workspace's own worker first when it is idle:
         it holds the workspace in memory and the blocks lane F builds ahead after a slide verb (engine 4949ee1b), which
         only an apply on that worker reuses. Otherwise the always-warm worker (the machine's full thread counts: lane
@@ -738,6 +738,8 @@ class Pool:
         def warm(worker) -> bool:
             return getattr(worker, "build_threads", None) == full_threads() and \
                 any(getattr(w, "build_threads", None) != full_threads() for w in live)
+        if prefer is not None and prefer in idle:   # the worker the caller names (parts.py: where their aheads were built)
+            return prefer
         if key and self.affinity.get(key) in idle:
             return self.affinity[key]
         if rank == RANKS["long"]:
@@ -795,6 +797,22 @@ class Pool:
             ready = [w for w in self._live(version) if w.ready.is_set()]
         return False if ready else None
 
+    def remember(self, key: str | None, worker: "Worker") -> None:
+        """`key`'s workspace is in `worker`'s memory now (an ahead built it there, ahead.py): its calls go there first."""
+        if key:
+            with self.cond:
+                self.affinity[key] = worker
+
+    def idle_home(self, key: str | None) -> "Worker | None":
+        """The idle worker that holds `key`'s workspace, or None."""
+        if not key:
+            return None
+        with self.cond:
+            worker = self.affinity.get(key)
+            if worker is None or worker.busy or worker.dead.is_set() or worker.retiring or not worker.ready.is_set():
+                return None
+            return worker
+
     def has_feature(self, version: str, name: str) -> bool:
         """A ready worker of the engine listed `name` in its `ready.features` (C2), remembered for the service's life."""
         return name in self.features.get(version, ())
@@ -821,7 +839,7 @@ class Pool:
         return [w for w in self.workers.get(version, []) if not w.dead.is_set() and not w.retiring]
 
     def _acquire(self, spec: Spec, key: str | None, priority: str, call, group: str | None = None, env: dict | None = None,
-                 most: int | None = None, rank: int | None = None) -> Worker:
+                 most: int | None = None, rank: int | None = None, prefer=None) -> Worker:
         """A ready, idle worker of the version (or of a confined group) for this call. Waiting calls take workers in
         order of (rank, arrival); a long call never takes the last worker long calls could hold (one stays for short
         calls); with no idle worker the pool grows, as many starts at once as calls wait, up to `most`."""
@@ -849,7 +867,7 @@ class Pool:
                         sum(1 for w in live if w.busy and w.rank == RANKS["long"]) < long_most
                     chosen = None
                     if idle and ahead < len(idle) and allowed:
-                        chosen = self._choose(live, idle, key, rank, time.monotonic() - waited_from)
+                        chosen = self._choose(live, idle, key, rank, time.monotonic() - waited_from, prefer)
                     if chosen is not None:
                         chosen.busy = True
                         chosen.rank = rank
@@ -965,7 +983,7 @@ class Pool:
     # --- running a call ------------------------------------------------------------------------------------------------
 
     def run(self, call, version: str, argv: list[str], env: dict, stdin: dict | None, keys: list[str] | None = None,
-            order: int | None = None, acquired=None) -> tuple[int, list]:
+            order: int | None = None, acquired=None, prefer=None) -> tuple[int, list]:
         """Run one engine command for `call`. Returns (exit code, pending). `keys`: the workspace keys a batch of
         Studio parts holds (parts.py), instead of the one its argv names; `acquired`: called once a worker took it,
         or once it will not get one."""
@@ -982,7 +1000,7 @@ class Pool:
                 stack.enter_context(self.keys.held(one))
             for attempt in (1, 2):
                 try:
-                    worker = self._acquire(spec, key, priority, call, rank=order)
+                    worker = self._acquire(spec, key, priority, call, rank=order, prefer=prefer)
                 except WorkerFailed as exc:
                     if acquired is not None:
                         acquired()
