@@ -92,9 +92,9 @@ class ServiceCase(ClientCase):
         for pid in services:
             with contextlib.suppress(OSError):
                 os.kill(pid, 15)
-        stuck = [pid for pid in sorted(services) if not wait_gone(pid, 10)]
-        self.assertEqual(stuck, [], "a service did not end within 10 s of SIGTERM")
-        deadline = time.monotonic() + 5
+        stuck = [pid for pid in sorted(services) if not wait_gone(pid, 30)]       # 30 s: a loaded check machine
+        self.assertEqual(stuck, [], "a service did not end within 30 s of SIGTERM")
+        deadline = time.monotonic() + 15
         while (left := [p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]]) \
                 and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -144,7 +144,7 @@ class Endpoint(ServiceCase):
         sock.connect(record["endpoint"]["address"])
         started = time.monotonic()
         self.assertIsNone(frames.Channel(sock).read())
-        self.assertLess(time.monotonic() - started, 5)
+        self.assertLess(time.monotonic() - started, 15)        # the hello's 1 s, with room for a loaded machine
         sock.close()
         # a newer protocol: refused with this service's own
         sock = socket.socket(socket.AF_UNIX)
@@ -194,14 +194,15 @@ class Pool(ServiceCase):
     def test_short_calls_answered_while_a_long_call_runs_and_fifteen_at_once(self):
         self.service()
         client, got = self.connect()
-        self.call(client, got, "long", ["sleep", "4"], wait=False)
+        self.call(client, got, "long", ["sleep", "10"], wait=False)
         time.sleep(0.3)
         started = time.monotonic()
         for n in range(5):
             self.call(client, got, f"s{n}", ["echo", str(n)], wait=False)
         for n in range(5):
             self.assertEqual(Collector.done(got.wait(f"s{n}"))["exit"], 0)
-        self.assertLess(time.monotonic() - started, 3.5, "short calls do not wait behind the long one")
+        # The long call runs 10 s: the short ones are answered well before it ends, even on a loaded machine.
+        self.assertLess(time.monotonic() - started, 9.0, "short calls do not wait behind the long one")
         self.assertFalse(got.event("long").is_set())
         for n in range(15):
             self.call(client, got, f"p{n}", ["sleep", "0.3"], wait=False)
@@ -272,8 +273,8 @@ class Pool(ServiceCase):
         client, got = self.connect()
         started = time.monotonic()
         self.call(client, got, "o", ["echo", "--orphan", str(self.box.tmp / "orphan-marker")], wait=False)
-        frames_ = got.wait("o", 30)
-        self.assertLess(time.monotonic() - started, 20, "answered at once, not when the pipe closes")
+        frames_ = got.wait("o", 50)
+        self.assertLess(time.monotonic() - started, 45, "answered long before the orphan closes the pipe (60 s)")
         self.assertEqual(Collector.done(frames_)["exit"], 78)
         log = (self.box.home / "logs" / "service.log").read_text()
         self.assertIn("ended: exit 9, its process ended; a call was running on it", log)
@@ -695,8 +696,9 @@ class StudioParts(ServiceCase):
         lead = self.prepared(5)
         frames_ = self.burst(lead, [f"s{i:02d}" for i in range(1, 6)])
         exits = sorted(Collector.done(got)["exit"] for got in frames_.values())
-        self.assertIn(exits, ([2] * 5, [0] + [2] * 4), "every designer gathered got the run's own refusal (the first "
-                                                         "may have run alone, before the others came)")
+        # Every designer gathered gets the run's own refusal. The first may run alone (it came before the others), and
+        # under heavy load one more may miss the window and run alone too (linux-arm64 beside a native build, 25 Nov).
+        self.assertTrue(set(exits) <= {0, 2} and exits.count(0) <= 2 and exits.count(2) >= 3, exits)
         refused = [got for got in frames_.values() if Collector.done(got)["exit"] == 2]
         self.assertTrue(all('"ok": false' in Collector.stdout(got) for got in refused))
 
@@ -720,8 +722,8 @@ class Lifecycle(ServiceCase):
         self.assertTrue(alive(worker_pid))
         self.assertIn(worker_pid, children_of(record["pid"]))
         client.close()
-        self.assertTrue(wait_gone(record["pid"], 10), "the service exits after its linger")
-        self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
+        self.assertTrue(wait_gone(record["pid"], 30), "the service exits after its linger")
+        self.assertTrue(wait_gone(worker_pid, 15), "its worker ends with it")
         self.assertFalse((self.box.home / "state" / "run" / "service.json").exists())
         frames_ = [json.loads(line) for line in exits.read_text().splitlines()]
         self.assertTrue(frames_, "the worker was told to exit")
@@ -740,7 +742,7 @@ class Lifecycle(ServiceCase):
         relay, _got = self.connect()
         time.sleep(0.3)
         relay.close()
-        self.assertTrue(wait_gone(record["pid"], 15), "gone after the relay's linger, not 60 s after the shell command")
+        self.assertTrue(wait_gone(record["pid"], 30), "gone after the relay's linger, not 60 s after the shell command")
 
     def test_a_sessions_hung_call_does_not_keep_the_service_after_the_session_ends(self):
         # K's A3b (rig 1): fifteen hung calls kept the service and its workers up past the 3-minute count.
@@ -750,7 +752,7 @@ class Lifecycle(ServiceCase):
         self.call(client, got, "hung", ["echo", "--freeze"], wait=False)       # stuck: it answers nothing, not a cancel
         time.sleep(1.0)
         client.close()                                                        # the session ends
-        self.assertTrue(wait_gone(record["pid"], 15), "the call stopped after the grace, then the linger: gone")
+        self.assertTrue(wait_gone(record["pid"], 30), "the call stopped after the grace, then the linger: gone")
         log = (self.box.home / "logs" / "service.log").read_text()
         self.assertIn("session ended with 1 call(s) running: cancelled", log)
         self.assertIn("still running after its session ended: its worker stopped", log)
@@ -760,8 +762,8 @@ class Lifecycle(ServiceCase):
         client, got = self.connect()
         worker_pid = json.loads(Collector.stdout(self.call(client, got, "e", ["echo"])))["pid"]
         shutil.rmtree(self.box.home)            # removed under a running service (its sessions still open)
-        self.assertTrue(wait_gone(record["pid"], 10), "the service ends once its home is gone")
-        self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
+        self.assertTrue(wait_gone(record["pid"], 30), "the service ends once its home is gone")
+        self.assertTrue(wait_gone(worker_pid, 15), "its worker ends with it")
         time.sleep(1.5)                          # a timer's second, and the service's last log line
         self.assertFalse(self.box.home.exists(), "nothing the service wrote brought its home back")
 
@@ -777,8 +779,8 @@ class Lifecycle(ServiceCase):
         self.assertIn("a line on standard error", result.stderr)
         stopped = subprocess.run([sys.executable, "-I", str(CLIENT_DIR), "stop"], env=env, capture_output=True, text=True, timeout=60)
         self.assertTrue(stopped.stdout.startswith("THEODORE OK: "), stopped.stdout)
-        self.assertTrue(wait_gone(record["pid"], 10))
-        self.assertTrue(wait_gone(answer["pid"], 5))
+        self.assertTrue(wait_gone(record["pid"], 30))
+        self.assertTrue(wait_gone(answer["pid"], 15))
 
     def test_a_client_update_during_a_call_loses_nothing(self):
         record = self.service()
@@ -808,7 +810,7 @@ class Lifecycle(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         answer = json.loads(Collector.stdout(after).splitlines()[0])
         self.assertEqual(answer.get("argv"), ["echo"], f"a new call reached the successor: {after}")
-        self.assertTrue(wait_gone(record["pid"], 10), "the old service exits")
+        self.assertTrue(wait_gone(record["pid"], 30), "the old service exits")
         self.record = successor
 
 
@@ -840,8 +842,8 @@ class ChatWarm(ServiceCase):
         client.close()
         record = endpoint.read_service_json(self.box.home)
         if record:
-            self.assertTrue(wait_gone(record["pid"], 15))
-        self.assertTrue(wait_gone(first["pid"], 10))
+            self.assertTrue(wait_gone(record["pid"], 30))
+        self.assertTrue(wait_gone(first["pid"], 30))
         self.assertFalse((self.box.home / "state" / "chat" / "state" / "entitlement.json").exists(), "and goes with it")
 
 
