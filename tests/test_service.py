@@ -288,6 +288,24 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
+    def test_a_stopped_worker_is_never_given_the_next_call(self):
+        # Seen at load 35: a call sent right after a worker was stopped found it still idle in the pool (its process not
+        # yet seen gone), failed to reach it and was answered 78 with the stopped call's reason.
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import workers
+        with mock.patch.object(workers, "pool_sizes", return_value=(1, 2)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+            worker = workers.Worker.__new__(workers.Worker)
+            worker.pool, worker.spec, worker.retiring, worker.lost = pool, SimpleNamespace(version="9.9"), False, None
+            worker.dead, worker._result_ready = threading.Event(), threading.Event()
+            worker.process = SimpleNamespace(pid=1, poll=lambda: 0, kill=lambda: None, stdin=SimpleNamespace(close=lambda: None))
+            pool.workers["9.9"] = [worker]
+            self.assertEqual(pool._live("9.9"), [worker])
+            worker._stop("stopped answering", "stopped answering")
+            self.assertEqual(pool._live("9.9"), [], "out of the pool at once, before its process is seen gone")
+
     def test_a_call_never_waits_on_a_worker_that_stopped_answering(self):
         self.env.update({"THEODORE_WORKER_HEARTBEAT_S": "1", "THEODORE_WORKER_HEARTBEAT_GRACE_S": "3"})
         self.service()
@@ -468,6 +486,14 @@ class PoolSizing(unittest.TestCase):
             self.assertIs(pool._choose(live, [other], None, long_, 0.0), other, "busy with a long call: another at once")
             same = [SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=c) for c in (5, 1)]
             self.assertIs(pool._choose(same, same, None, long_, 0.0), same[1], "all alike: the least used")
+            # The workspace's own worker first when idle: its memory, and the blocks built ahead after a slide verb
+            # (lane F), which only an apply on it reuses.
+            warm.busy, warm.rank = False, None
+            pool.affinity["k1"] = other
+            self.assertIs(pool._choose(live, [warm, other], "k1", long_, 0.0), other, "a lead's apply on its own worker")
+            pool.affinity["k2"] = warm
+            self.assertIs(pool._choose(live, [warm, other], "k2", short, 0.0), warm, "a slide verb on its own worker")
+            self.assertIs(pool._choose(live, [warm], "k1", long_, 0.0), warm, "its own busy: the warm one")
 
     def test_the_warm_worker_has_the_full_threads_and_is_the_one_kept(self):
         from types import SimpleNamespace
