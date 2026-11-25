@@ -302,7 +302,8 @@
           "items": {
             "type": "string",
             "enum": [
-              "apply-parts"
+              "apply-parts",
+              "apply-ahead"
             ]
           },
           "uniqueItems": true
