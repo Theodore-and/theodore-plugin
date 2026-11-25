@@ -903,6 +903,33 @@ class BuildAhead(ServiceCase):
 
 
 class AheadUnit(unittest.TestCase):
+    def test_a_home_group_goes_out_as_soon_as_all_of_it_is_in(self):
+        # Lane S2's S2-9: the parts an ahead built on one worker waited 32 to 118 ms for the window while the rest of the
+        # burst came. Once every part of the group not yet applied is waiting and its worker is idle, it goes at once.
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import parts, workers
+        with mock.patch.object(workers, "pool_sizes", return_value=(1, 4)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+
+        def idle_worker():
+            ready = threading.Event()
+            ready.set()
+            return SimpleNamespace(busy=False, dead=threading.Event(), retiring=False, ready=ready, fatal=None)
+        home, other = idle_worker(), idle_worker()
+        pool.workers["9.9"] = [home, other]
+        pool.remember_group(["k1", "k2", "k3"], home)
+        gatherer = parts.Gatherer(pool)
+        lead = parts._Lead()                                                        # noqa: SLF001
+        member = lambda key: parts._Member(SimpleNamespace(), f"/d/parts/{key}", key)   # noqa: E731, SLF001
+        lead.pending = [member("k1"), member("k2"), member("x9")]
+        self.assertEqual(gatherer._home_groups("9.9", lead), [], "k3 not in yet: the group waits")     # noqa: SLF001
+        pool.leave_group("k3")                                                      # k3 applied already, alone
+        found = gatherer._home_groups("9.9", lead)                                  # noqa: SLF001
+        self.assertEqual([(sorted(m.key for m in members), worker) for members, worker in found], [(["k1", "k2"], home)])
+        self.assertEqual([m.key for m in lead.pending], ["x9"], "the rest waits for the window")
+
     def test_a_2_0_parts_key_is_derived_from_its_leads_marker(self):
         # Lane S2's S2-8: a 2.0 part has no marker of its own (lanes/G.md: ws2.part_key derives it), so the service
         # knew no key for it and the routing to the worker that built its ahead never engaged.
@@ -931,7 +958,7 @@ class AheadUnit(unittest.TestCase):
         sent = []
         keys = workers._KeyLock()                                                   # noqa: SLF001
         pool = SimpleNamespace(on_starved=[], has_feature=lambda _v, _n: True, ahead_slots=lambda _v: 1, keys=keys,
-                               take_for_ahead=lambda _v: SimpleNamespace(),
+                               take_for_ahead=lambda _v: SimpleNamespace(), remember_group=lambda _keys, _worker: None,
                                run_ahead=lambda call, worker, argv, env: sent.append(argv) or 0)
         service = SimpleNamespace(log=lambda _m: None, stopping=threading.Event(), relays_attached=lambda: 1)
         builder = ahead.Ahead(service, pool)
