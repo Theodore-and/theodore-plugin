@@ -354,7 +354,8 @@ class Router:
         self.service.log(f"call {call.tool} {' '.join(call.args[:2])} ({call.id}) past the ceiling ({int(age)} s): "
                          f"answered 78")
         with contextlib.suppress(Exception):
-            call.out(lost_text(f"did not finish this command within {int(ROUTER_CEILING_S // 60)} minutes", False))
+            # Not known whether it wrote (a one-shot engine reports no `committed`): the answer says it may have.
+            call.out(lost_text(f"did not finish this command within {int(ROUTER_CEILING_S // 60)} minutes", True))
             call.finish(EXIT_INTERNAL)
 
     def abandon_session(self, session_id: str) -> None:
