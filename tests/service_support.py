@@ -69,8 +69,23 @@ def note(event, part):                      # what a build-ahead test reads: eac
         with open(os.environ["FAKE_AHEADS"], "a", encoding="utf-8") as record:
             record.write(json.dumps({"event": event, "part": os.path.basename(part), "t": time.time(),
                                      "pid": os.getpid()}) + "\n")
+WARM_AFTER = None                       # lane B's warm-after-ready: a `warm` frame once its warm-up ended
+if os.environ.get("FAKE_WARM_AFTER"):
+    FEATURES = FEATURES + ["warm-after-ready"]
+    WARM_AFTER = float(os.environ["FAKE_WARM_AFTER"])
+    first = os.environ.get("FAKE_WARM_FIRST")           # the first worker warms after FAKE_WARM_AFTER, later ones after
+    if first:                                           # FAKE_WARM_LATE
+        try:
+            os.close(os.open(first, os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            WARM_AFTER = float(os.environ.get("FAKE_WARM_LATE") or 30)
 send({"t": "ready", "v": 1, "protocol": 1, "features": FEATURES, "engine": {"version": VERSION, "build": "test", "semantics": "b1"},
       "pid": os.getpid(), "warm_ms": 1, "rss_mb": 20.0, "verbs": ["echo", "sleep", "slide"]})
+if WARM_AFTER is not None:
+    def warm_later():
+        time.sleep(WARM_AFTER)
+        send({"t": "warm", "ms": int(WARM_AFTER * 1000)})
+    threading.Thread(target=warm_later, daemon=True).start()
 runs, cancelled, state = queue.Queue(), set(), {"calls": 0}
 def reader():
     while True:

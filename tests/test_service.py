@@ -303,6 +303,29 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
+    def test_a_worker_still_warming_takes_no_call_a_warm_worker_can_take(self):
+        # Lane S2's S2-16 (the coordinator): a worker prepare starts 5 s before the designers save met its first build
+        # cold inside the burst (round 1 1.276 s against 0.116-0.157 s once every worker was past its warm-up). Until a
+        # worker's `warm` frame (lane B: ready.features "warm-after-ready"), a call goes to a warm worker; with the warm
+        # ones busy it waits for one at most THEODORE_COLD_WAIT_S, then takes the cold one.
+        self.env.update({"FAKE_WARM_AFTER": "0.1", "FAKE_WARM_LATE": "60", "FAKE_WARM_FIRST": str(self.box.tmp / "warm-first"),
+                         "THEODORE_COLD_WAIT_S": "0.5"})
+        self.service()
+        client, got = self.connect()
+        warm_pid = json.loads(Collector.stdout(self.call(client, got, "w", ["echo"])))["pid"]
+        self.call(client, got, "hold", ["sleep", "3"], wait=False)          # the warm worker, busy
+        time.sleep(0.3)
+        began = time.monotonic()
+        cold = json.loads(Collector.stdout(self.call(client, got, "c", ["echo"])))
+        waited = time.monotonic() - began
+        self.assertNotEqual(cold["pid"], warm_pid, "with the warm one busy past the wait: the cold one")
+        self.assertGreaterEqual(waited, 0.4, "it waited for a warm worker first")
+        self.assertLess(waited, 2.5, "but not for the 3 s call")
+        got.wait("hold", 30)
+        pids = {json.loads(Collector.stdout(self.call(client, got, f"n{i}", ["echo"])))["pid"] for i in range(3)}
+        self.assertEqual(pids, {warm_pid}, "both idle: the warm one, though the cold one has fewer calls")
+        self.assertIn("warm: its warm-up ended", self.wait_log(r"warm: its warm-up ended"))
+
     def test_a_session_opened_in_a_folder_primes_it_with_one_answered_call_there(self):
         # Lane BIG (the coordinator, 25 Nov): the engine makes a folder's template facts ahead after an answered call
         # there, and a session's first call is often `start` itself. The session's folder is primed when it opens.
@@ -971,7 +994,7 @@ class AheadUnit(unittest.TestCase):
         def idle_worker():
             ready = threading.Event()
             ready.set()
-            return SimpleNamespace(busy=False, dead=threading.Event(), retiring=False, ready=ready, fatal=None)
+            return SimpleNamespace(busy=False, dead=threading.Event(), retiring=False, ready=ready, warmed=ready, fatal=None)
         home, other = idle_worker(), idle_worker()
         pool.workers["9.9"] = [home, other]
         pool.remember_group(["k1", "k2", "k3"], home)
