@@ -656,6 +656,15 @@ class Burst(ServiceCase):
         self.assertEqual(len(pids), 4, "four workers started at once, one a call (one after another, the first would "
                                        "have served several before the last was up)")
 
+    def test_a_burst_warms_only_the_workers_it_needs(self):
+        # Lane S2: each new worker costs its warm-up's CPU; an engine that takes several parts in a build needs one
+        # warm worker for three parts, an engine that takes one part a call one a part; unknown, the pool's size.
+        from theodore_client.service import tools
+        self.assertEqual([tools.workers_for(n, True) for n in (1, 3, 4, 8, 15)], [1, 1, 2, 3, 5])
+        self.assertEqual([tools.workers_for(n, False) for n in (1, 3, 15)], [1, 3, 15])
+        self.assertEqual(tools.workers_for(3, None), 3, "capability not known yet: one a part")
+        self.assertIsNone(tools.workers_for(None, True), "how many not said: the pool's size")
+
     def test_prepare_warms_the_workers_its_parts_will_need(self):
         self.env["THEODORE_SERVICE_WORKERS"] = "3"
         self.service()
