@@ -10,6 +10,8 @@ it, the sheet comes, and nothing lands anywhere else. And a text of the guidance
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -33,7 +35,15 @@ class SheetsFromTheUsersOwnFolder(ClientCase):
             path = Path(result.stdout.strip().splitlines()[0])
             self.assertEqual(path.read_bytes(), JPEG)
             self.assertEqual(path.parent.parent, (self.box.home / "work" / "scratch" / "sheets").resolve())
-            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700, "private to the user, as everywhere")
+            if sys.platform == "win32":     # no POSIX modes: this user's access list alone, nothing inherited (specimens._make_private)
+                for target in (path.parent, path):
+                    acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True).stdout
+                    for other in ("BUILTIN\\Users", "Everyone", "Authenticated Users", "BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"):
+                        self.assertNotIn(other, acl, acl)
+                    self.assertEqual(len([line for line in acl.splitlines() if ":(" in line]), 1, acl)
+                self.assertNotIn("(I)", subprocess.run(["icacls", str(path.parent)], capture_output=True, text=True).stdout)
+            else:
+                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700, "private to the user, as everywhere")
             self.assertEqual(list(self.temp.iterdir()), [], "not in the temporary folder")
             outside = [p for p in self.box.user_home.parent.rglob("*.jpg") if self.box.home.resolve() not in p.resolve().parents]
             self.assertEqual(outside, [], "nothing anywhere else")

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -66,8 +67,16 @@ class Specimen(ClientCase):
         self.assertEqual((one.read_bytes(), two.read_bytes()), (JPEG, JPEG + b"2"))
         self.assertEqual(one.parent, two.parent)
         self.assertEqual(one.parent, (self.sheets / "shell").resolve(), "the folder of a shell with no session")
-        self.assertEqual(stat.S_IMODE(one.parent.stat().st_mode), 0o700)
-        self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in (one, two)}, {0o600})
+        if sys.platform == "win32":     # no POSIX modes: this user's access list alone, nothing inherited (specimens._make_private)
+            for target in (one.parent, one, two):
+                acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True).stdout
+                for other in ("BUILTIN\\Users", "Everyone", "Authenticated Users", "BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"):
+                    self.assertNotIn(other, acl, acl)
+                self.assertEqual(len([line for line in acl.splitlines() if ":(" in line]), 1, acl)
+            self.assertNotIn("(I)", subprocess.run(["icacls", str(one.parent)], capture_output=True, text=True).stdout)
+        else:
+            self.assertEqual(stat.S_IMODE(one.parent.stat().st_mode), 0o700)
+            self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in (one, two)}, {0o600})
         for kept_out in (self.deck, self.temp):
             self.assertNotIn(kept_out.resolve(), one.resolve().parents)
             self.assertEqual(list(kept_out.rglob("*.jpg")), [])
