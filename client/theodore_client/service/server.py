@@ -66,6 +66,11 @@ class Client:
 class Service:
     def __init__(self, home: Path):
         self.home = Path(home).absolute()
+        try:                                # the folder it serves, by identity (home_present)
+            st = os.stat(self.home)
+            self.home_id = (st.st_dev, st.st_ino) if st.st_ino else None
+        except OSError:
+            self.home_id = None
         self.secret = secrets.token_hex(32)
         self.started = utc_now()
         self.started_mono = time.monotonic()
@@ -427,6 +432,14 @@ class Service:
         return max(marks)
 
     def home_present(self) -> bool:
+        """Its home's state folder is there, and the home is the one it started in: one removed and made again (a new
+        install, or a write that brought it back) is not this service's home any more."""
+        try:
+            st = os.stat(self.home)
+        except OSError:
+            return False
+        if self.home_id is not None and st.st_ino and (st.st_dev, st.st_ino) != self.home_id:
+            return False
         return (self.home / "state").is_dir()
 
     def _check_lifetime(self) -> None:
@@ -517,6 +530,8 @@ def main(argv: list[str]) -> int:
         home = argv[argv.index("--home") + 1]
     home_path = Path(home or os.environ.get("THEODORE_HOME") or Path.home() / ".theodore").absolute()
     os.environ["THEODORE_HOME"] = str(home_path)
+    from .. import core
+    core.keep_removed_home()            # a home removed under the service stays removed (core.make_parents)
     from .. import crash_ports
     crash_ports.quiet()                 # before any worker starts: a crash never waits on the system's crash reporter
     service = Service(home_path)

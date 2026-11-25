@@ -529,6 +529,29 @@ def refresh_stable_launcher(sources: list[Path]) -> str | None:
 
 
 _HOME: Home | None = None
+# A process that serves a home that exists (the service) never brings it back once it is removed under it (an
+# uninstall, a user deleting the folder): set by keep_removed_home(), every folder made below the home goes through
+# make_parents(), which refuses while the home itself is gone. Without it a write that was already on its way (a
+# sign-in record, a lock, a log line) made the folder again, and the service kept serving a home that had gone.
+_KEEP_REMOVED = False
+
+
+def keep_removed_home() -> None:
+    global _KEEP_REMOVED
+    _KEEP_REMOVED = True
+
+
+def make_parents(folder: Path) -> None:
+    """folder.mkdir(parents=True, exist_ok=True), except below a removed home in a process that keeps it removed."""
+    if _KEEP_REMOVED:
+        root = home().root
+        try:
+            inside = os.path.commonpath([os.path.abspath(folder), os.path.abspath(root)]) == os.path.abspath(root)
+        except ValueError:                  # another drive
+            inside = False
+        if inside and not os.path.isdir(root):
+            raise FileNotFoundError(f"Theodore's folder {root} is gone; nothing is written in it")
+    folder.mkdir(parents=True, exist_ok=True)
 
 
 def home() -> Home:
@@ -1003,7 +1026,7 @@ def read_json(path: Path, default=None):
 
 
 def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    make_parents(path.parent)
     # Named by the thread too: the tool server's calls run side by side (0.4.34), and two of them writing one file
     # shared one name, so one moved the other's half-written copy into place or found it gone.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -1072,7 +1095,7 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
     checked once made: one that does not lead to a directory raises LinkError, naming both paths."""
     if link.is_symlink() or link.exists():
         remove_tree(link)
-    link.parent.mkdir(parents=True, exist_ok=True)
+    make_parents(link.parent)
     if IS_WINDOWS:
         # The junction stores the target's final real path, not the path as given: inside an MSIX-packaged app (the
         # Claude desktop app) Windows silently redirects this process's files under %LOCALAPPDATA% to
@@ -1140,7 +1163,7 @@ def lock(name: str, timeout: float = 600.0):
         finally:
             held[key] -= 1
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    make_parents(path.parent)
     handle = open(path, "a+")
     deadline = time.monotonic() + timeout
     try:
@@ -1462,7 +1485,7 @@ def log(message: str) -> None:
         if _LOG_FILE is not None:
             target = _LOG_FILE
         else:
-            home().logs.mkdir(parents=True, exist_ok=True)
+            make_parents(home().logs)
             target = home().logs / "client.log"
         # On Windows a new log starts with a UTF-8 byte-order mark: Notepad and PowerShell 5.1 then read it as UTF-8
         # (without one they read the ANSI code page: C:\Users\Théo showed mangled, WINDOWS W-8).

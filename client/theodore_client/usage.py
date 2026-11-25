@@ -202,7 +202,7 @@ def _append(lines: list[bytes]) -> None:
     if not lines:
         return
     path = ledger_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    core.make_parents(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
     try:
         os.write(fd, b"".join(line.rstrip(b"\r\n") + b"\n" for line in lines))

@@ -528,6 +528,54 @@ class FolderWatch(ServiceCase):
         watches.stop()
 
 
+class RemovedHome(unittest.TestCase):
+    """A home removed under a running service stays removed (the coordinator, 25 Nov: Lifecycle's removed-home test
+    failed once under load). A write already on its way when the folder went (a sign-in record, a lock, a log line, an
+    apply's pin written after its answer) made home/state again, and the service, which ends when that folder is gone,
+    kept serving: in a process that keeps a removed home removed, no folder below it is made again, and a home made
+    again is not the service's home."""
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+
+        from theodore_client import core
+        self.root = Path(tempfile.mkdtemp(prefix="theodore-removed-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.home = self.root / "home"
+        (self.home / "state").mkdir(parents=True)
+        for patch in (mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.home)}), mock.patch.object(core, "_HOME", None),
+                      mock.patch.object(core, "_KEEP_REMOVED", True), mock.patch.object(core, "_LOG_FILE", None)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_no_write_brings_a_removed_home_back(self):
+        from theodore_client import core, usage
+        core.write_json(self.home / "state" / "before.json", {"ok": True})
+        shutil.rmtree(self.home)
+        with self.assertRaises(FileNotFoundError):
+            core.write_json(self.home / "state" / "login-pending.json", {"late": True})
+        with self.assertRaises(FileNotFoundError):
+            with core.lock("update-state", timeout=1):
+                pass
+        core.log("a line on its way")
+        with contextlib.suppress(Exception):
+            usage._append([b"a usage line"])                                    # noqa: SLF001
+        self.assertFalse(self.home.exists(), "nothing made the home again")
+        outside = self.root / "elsewhere" / "x.json"
+        core.write_json(outside, {"ok": True})
+        self.assertTrue(outside.is_file(), "a folder outside the home is made as before")
+
+    def test_a_home_made_again_is_not_the_services_home(self):
+        from theodore_client.service import server
+        service = server.Service(self.home)
+        self.assertTrue(service.home_present())
+        shutil.rmtree(self.home)
+        self.assertFalse(service.home_present())
+        (self.home / "state").mkdir(parents=True)               # a new install, or a write that brought it back
+        self.assertFalse(service.home_present(), "a new folder by the same name is not the one it served")
+
+
 class ServiceLog(unittest.TestCase):
     def test_one_open_a_line_the_old_log_kept_once_full_and_a_removed_home_stays_removed(self):
         import tempfile
