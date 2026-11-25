@@ -203,7 +203,7 @@ class Gatherer:
     def run(self, call, version: str, argv: list[str], env: dict, wanted: tuple) -> tuple[int, list]:
         shape, part = wanted
         member = _Member(call, part, workers.workspace_key(["apply", part], call.cwd))
-        alone = False
+        alone = every_part_in = False
         with self.lock:
             lead = self.leads.setdefault(shape, _Lead())
             if any(other.part == part for other in lead.pending):
@@ -223,7 +223,13 @@ class Gatherer:
                 if not lead.pending:
                     lead.first_pending = now
                 lead.pending.append(member)
-                if lead.timer is None:
+                size = self.sizes.get(shape[1])
+                if size and len(lead.pending) >= size:   # every part the prepare announced is here: none can come
+                    every_part_in = True                 # later, so no window (lane S2b's S2-20ab: 15 ms of each
+                    if lead.timer is not None:           # apply's 35 ms gathering on rig 10)
+                        lead.timer.cancel()
+                        lead.timer = None
+                elif lead.timer is None:
                     lead.timer = threading.Timer(GATHER_S, self._cut, args=(shape,))
                     lead.timer.daemon = True
                     lead.timer.start()
@@ -236,6 +242,8 @@ class Gatherer:
                 if isinstance(getattr(call, "timing", None), dict):
                     call.timing["gathering_ms"] = 0     # a lone part apply: at once
             return answer
+        if every_part_in:
+            self._cut(shape)
         waited_since = time.monotonic()
         while not member.done.wait(0.25):
             with self.lock:
@@ -274,9 +282,12 @@ class Gatherer:
         (waiting for a busy one to come free costs a whole build; one more part in a batch costs its own share of
         it). With none free they wait for the next (_worker_free), or with `force` go to the pool's queue as one.
         Until a worker of the engine has been ready they wait for it (a cold service's burst), and when its workers
-        take one part a call each runs alone."""
+        take one part a call each runs alone. The log lines are written once the builds are out, never under the
+        lock (lane S2b's S2-20ab: on a busy log, writing them first counted in each designer's gathering)."""
         version = shape[0]
-        launch, alone = [], []
+        launch, alone, said = [], [], []
+        capability = starting = None
+        left, decided = 0, False
         with self.lock:
             lead = self.leads.get(shape)
             if lead is None:
@@ -287,81 +298,92 @@ class Gatherer:
             argv, env = list(lead.argv), dict(lead.env)
             early = self._home_groups(version, lead)
             if early:                               # complete home groups: out now, not at the window's end
-                self._launch(version, argv, env, early, len(lead.pending), "at once: every part of their ahead is in")
-                if not lead.pending:
-                    return
-            if not force and self.on_way.get(shape[1], 0) > 0 and \
+                said.append(self._launch(version, argv, env, early, len(lead.pending),
+                                         "at once: every part of their ahead is in"))
+            if not lead.pending:
+                pass
+            elif not force and self.on_way.get(shape[1], 0) > 0 and \
                     time.monotonic() - lead.first_pending < GATHER_CAP_S:
                 lead.timer = threading.Timer(GATHER_S, self._cut, args=(shape,))     # others of it are on their way
                 lead.timer.daemon = True
                 lead.timer.start()
-                return
-            capability = self.pool.parts_capability(version)
-            argv, env = list(lead.argv), dict(lead.env)
-            if capability is None and not force:
-                starting = self._starting(version)
-            elif capability is not True:
-                alone, lead.pending = lead.pending, []
-                lead.last_dispatch = time.monotonic()
             else:
-                free = self._free(version)
-                if free <= 0 and force:
-                    free = 1
-                # The parts whose ahead an idle worker holds in memory go to it, all in one call, with no cap: a reused
-                # apply is cheap there and only there (lane S2's S2-6: the reuse check took ~1 ms on the worker that
-                # built the ahead, 96 to 430 ms on another, reading its ahead.json afresh). The others as before.
-                homes: dict[int, tuple] = {}
-                rest = []
-                for member in lead.pending:
-                    home = self.pool.idle_home(member.key)
-                    if home is not None:
-                        homes.setdefault(id(home), (home, []))[1].append(member)
-                    else:
-                        rest.append(member)
-                for home, members in homes.values():
-                    if free <= 0:
-                        rest.extend(members)
-                        continue
-                    launch.append((members, home))
-                    self._claim(version)
-                    free -= 1
-                lead.pending = rest
-                if free > 0 and lead.pending:
-                    share = max(1, min(self._cap(shape[1]), -(-len(lead.pending) // free)))
-                    while lead.pending and free > 0:
-                        batch, lead.pending = lead.pending[:share], lead.pending[share:]
-                        launch.append((batch, None))
+                decided = True
+                capability = self.pool.parts_capability(version)
+                if capability is None and not force:
+                    starting = self._starting(version)
+                elif capability is not True:
+                    alone, lead.pending = lead.pending, []
+                    lead.last_dispatch = time.monotonic()
+                else:
+                    free = self._free(version)
+                    if free <= 0 and force:
+                        free = 1
+                    # The parts whose ahead an idle worker holds in memory go to it, all in one call, with no cap: a
+                    # reused apply is cheap there and only there (lane S2's S2-6: the reuse check took ~1 ms on the
+                    # worker that built the ahead, 96 to 430 ms on another, reading its ahead.json afresh). The others
+                    # as before.
+                    homes: dict[int, tuple] = {}
+                    rest = []
+                    for member in lead.pending:
+                        home = self.pool.idle_home(member.key)
+                        if home is not None:
+                            homes.setdefault(id(home), (home, []))[1].append(member)
+                        else:
+                            rest.append(member)
+                    for home, members in homes.values():
+                        if free <= 0:
+                            rest.extend(members)
+                            continue
+                        launch.append((members, home))
                         self._claim(version)
                         free -= 1
-                if launch:
-                    lead.last_dispatch = time.monotonic()
-            left = len(lead.pending)
+                    lead.pending = rest
+                    if free > 0 and lead.pending:
+                        share = max(1, min(self._cap(shape[1]), -(-len(lead.pending) // free)))
+                        while lead.pending and free > 0:
+                            batch, lead.pending = lead.pending[:share], lead.pending[share:]
+                            launch.append((batch, None))
+                            self._claim(version)
+                            free -= 1
+                    if launch:
+                        lead.last_dispatch = time.monotonic()
+                left = len(lead.pending)
+        self._log(said)
+        if not decided:                         # all went with their home groups, or others are on their way
+            return
         if capability is None and not force:
             if not starting:                    # nothing is starting a worker for them: one starts now
                 self.pool.warm_up(version, 1)
             return
         if alone:
-            with contextlib.suppress(Exception):
-                self.pool.service.log(f"parts: {len(alone)} of a deck, each alone (this engine's workers take one part "
-                                      f"a call)")
             for member in alone:
                 threading.Thread(target=self._run_batch, args=(version, argv, env, [member]), name="parts-alone",
                                  daemon=True).start()
+            self._log([f"parts: {len(alone)} of a deck, each alone (this engine's workers take one part a call)"])
             return
         if not launch:
             return
-        with contextlib.suppress(Exception):     # what the proof reads: a burst's parts, in how many builds
-            homed = sum(1 for _b, home in launch if home is not None)
-            self.pool.service.log(f"parts: {sum(len(b) for b, _h in launch)} of a deck in {len(launch)} build(s) "
-                                  f"({', '.join(str(len(b)) for b, _h in launch)})"
-                                  f"{f', {homed} on the worker that built their ahead' if homed else ''}"
-                                  f"{f', {left} waiting' if left else ''}")
+        self._send(version, argv, env, launch)
+        homed = sum(1 for _b, home in launch if home is not None)      # what the proof reads: a burst's parts, in
+        self._log([f"parts: {sum(len(b) for b, _h in launch)} of a deck in {len(launch)} build(s) "   # how many builds
+                   f"({', '.join(str(len(b)) for b, _h in launch)})"
+                   f"{f', {homed} on the worker that built their ahead' if homed else ''}"
+                   f"{f', {left} waiting' if left else ''}"])
+
+    def _send(self, version: str, argv: list[str], env: dict, launch: list) -> None:
         sent = time.perf_counter()
         for batch, home in launch:
             for member in batch:
                 member.sent = sent
             threading.Thread(target=self._run_batch, args=(version, argv, env, batch, home), name="parts-batch",
                              daemon=True).start()
+
+    def _log(self, lines: list) -> None:
+        for line in lines:
+            if line:
+                with contextlib.suppress(Exception):
+                    self.pool.service.log(line)
 
     def _home_groups(self, version: str, lead: _Lead) -> list:
         """(members, worker) for each idle worker holding an ahead group whose every part not yet applied is waiting
@@ -385,18 +407,13 @@ class Gatherer:
             lead.last_dispatch = time.monotonic()
         return found
 
-    def _launch(self, version: str, argv: list[str], env: dict, launch: list, left: int, how: str) -> None:
-        """Start these builds (the caller holds self.lock: the threads do the rest)."""
-        with contextlib.suppress(Exception):
-            self.pool.service.log(f"parts: {sum(len(b) for b, _h in launch)} of a deck in {len(launch)} build(s) "
-                                  f"({', '.join(str(len(b)) for b, _h in launch)}) on the worker that built their "
-                                  f"ahead, {how}{f', {left} waiting' if left else ''}")
-        sent = time.perf_counter()
-        for batch, home in launch:
-            for member in batch:
-                member.sent = sent
-            threading.Thread(target=self._run_batch, args=(version, argv, env, batch, home), name="parts-batch",
-                             daemon=True).start()
+    def _launch(self, version: str, argv: list[str], env: dict, launch: list, left: int, how: str) -> str:
+        """Start these builds (the caller holds self.lock: the threads do the rest). Returns the log line, which the
+        caller writes once it has let go of the lock."""
+        self._send(version, argv, env, launch)
+        return (f"parts: {sum(len(b) for b, _h in launch)} of a deck in {len(launch)} build(s) "
+                f"({', '.join(str(len(b)) for b, _h in launch)}) on the worker that built their "
+                f"ahead, {how}{f', {left} waiting' if left else ''}")
 
     def _starting(self, version: str) -> bool:
         with self.pool.cond:

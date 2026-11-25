@@ -528,6 +528,77 @@ class FolderWatch(ServiceCase):
         watches.stop()
 
 
+class RemovedHome(unittest.TestCase):
+    """A home removed under a running service stays removed (the coordinator, 25 Nov: Lifecycle's removed-home test
+    failed once under load). A write already on its way when the folder went (a sign-in record, a lock, a log line, an
+    apply's pin written after its answer) made home/state again, and the service, which ends when that folder is gone,
+    kept serving: in a process that keeps a removed home removed, no folder below it is made again, and a home made
+    again is not the service's home."""
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+
+        from theodore_client import core
+        self.root = Path(tempfile.mkdtemp(prefix="theodore-removed-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.home = self.root / "home"
+        (self.home / "state").mkdir(parents=True)
+        for patch in (mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.home)}), mock.patch.object(core, "_HOME", None),
+                      mock.patch.object(core, "_KEEP_REMOVED", True), mock.patch.object(core, "_LOG_FILE", None)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_no_write_brings_a_removed_home_back(self):
+        from theodore_client import core, usage
+        core.write_json(self.home / "state" / "before.json", {"ok": True})
+        shutil.rmtree(self.home)
+        with self.assertRaises(FileNotFoundError):
+            core.write_json(self.home / "state" / "login-pending.json", {"late": True})
+        with self.assertRaises(FileNotFoundError):
+            with core.lock("update-state", timeout=1):
+                pass
+        core.log("a line on its way")
+        with contextlib.suppress(Exception):
+            usage._append([b"a usage line"])                                    # noqa: SLF001
+        self.assertFalse(self.home.exists(), "nothing made the home again")
+        outside = self.root / "elsewhere" / "x.json"
+        core.write_json(outside, {"ok": True})
+        self.assertTrue(outside.is_file(), "a folder outside the home is made as before")
+
+    def test_a_home_made_again_is_not_the_services_home(self):
+        from theodore_client.service import server
+        service = server.Service(self.home)
+        self.assertTrue(service.home_present())
+        shutil.rmtree(self.home)
+        self.assertFalse(service.home_present())
+        (self.home / "state").mkdir(parents=True)               # a new install, or a write that brought it back
+        self.assertFalse(service.home_present(), "a new folder by the same name is not the one it served")
+
+
+class ServiceLog(unittest.TestCase):
+    def test_one_open_a_line_the_old_log_kept_once_full_and_a_removed_home_stays_removed(self):
+        import tempfile
+        from unittest import mock
+
+        from theodore_client.service import server
+        root = Path(tempfile.mkdtemp(prefix="theodore-log-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "home").mkdir()
+        service = server.Service(root / "home")
+        shutil.rmtree(root / "home")
+        service.log("no home: nothing written")
+        self.assertFalse((root / "home").exists(), "a removed home stays removed")
+        (root / "home").mkdir()
+        with mock.patch.object(server, "LOG_MAX", 300):
+            for n in range(12):
+                service.log(f"line {n} " + "x" * 40)
+        log, old = root / "home" / "logs" / "service.log", root / "home" / "logs" / "service.log.1"
+        self.assertTrue(old.is_file(), "a full log moves aside")
+        self.assertLessEqual(log.stat().st_size if log.exists() else 0, 300 + 80)
+        self.assertIn("line 11", (log.read_text() if log.exists() else "") + old.read_text())
+
+
 class Cleanup(unittest.TestCase):
     """The LibreOffice a Theodore before 0.5.0 fetched into <home>/tools, removed by the 0.5.1 service (the coordinator,
     25 Nov: engine 2.0 calls none): only there, never through a link, yielding to calls, never in a session's way."""
@@ -1301,6 +1372,81 @@ class BuildAhead(ServiceCase):
                 self.client_.close()
                 self.stop_service()
                 self.env.update({"FAKE_APPLY_AHEAD": "1", "THEODORE_SERVICE_WORKERS": "2"})
+
+
+class GatheringUnit(unittest.TestCase):
+    """What a designer's apply spends in the gathering besides waiting for the others of its burst (lane S2b's S2-20ab,
+    rig 10 round 1: 35 ms of each apply there, against about 15 warm)."""
+
+    def gatherer(self, logged: list, log_s: float = 0.0):
+        from types import SimpleNamespace
+
+        from theodore_client.service import parts
+
+        def log(line):
+            if line.startswith("parts: "):
+                time.sleep(log_s)
+            logged.append((time.perf_counter(), line))
+        pool = SimpleNamespace(on_release=[], parts_capability=lambda _v: True, idle_count=lambda _v: 2,
+                               idle_home=lambda _k: None, group_left=lambda _k: set(), leave_group=lambda _k: None,
+                               most=2, service=SimpleNamespace(log=log))
+        gatherer = parts.Gatherer(pool)
+        lead = "/decks/deck"
+        gatherer.prepared(lead, at_once=True, count=3)
+        sent: list = []
+
+        def run_batch(_version, _argv, _env, batch, _home=None):
+            sent.append((time.perf_counter(), [m.part for m in batch]))
+            for member in batch:
+                member.exit = 0
+                member.done.set()
+        gatherer._run_batch = run_batch                                  # noqa: SLF001
+        return gatherer, os.path.realpath(lead), sent
+
+    def burst(self, gatherer, lead: str) -> list:
+        from types import SimpleNamespace
+        members = []
+        gatherer.on_way[lead] = 3                     # three designers' applies admitted (tools: parts.coming)
+        threads = []
+        for name in ("s01", "s02", "s03"):
+            call = SimpleNamespace(cwd="/decks", cancelled=threading.Event(), timing={}, env={}, stdin=None,
+                                   out=lambda *_a, **_k: None, count=lambda *_a, **_k: None)
+            gatherer.arrived(lead)
+            shape = ("9.9", lead, ("apply", "--json"), ())
+            thread = threading.Thread(target=gatherer.run, args=(call, "9.9", ["apply", f"{lead}/parts/{name}"], {},
+                                                                (shape, f"{lead}/parts/{name}")))
+            thread.start()
+            threads.append(thread)
+            members.append(call)
+            time.sleep(0.01)
+        for thread in threads:
+            thread.join(10)
+        return members
+
+    def test_a_burst_whose_every_part_is_in_goes_at_once(self):
+        from unittest import mock
+
+        from theodore_client.service import parts
+        logged: list = []
+        gatherer, lead, sent = self.gatherer(logged)
+        with mock.patch.object(parts, "GATHER_S", 5.0):
+            began = time.perf_counter()
+            self.burst(gatherer, lead)
+        self.assertTrue(sent, "the builds went out")
+        self.assertLess(sent[0][0] - began, 1.0, "with every announced part in, no window")
+        self.assertEqual(sorted(p for _t, names in sent for p in names),
+                         sorted(f"{lead}/parts/{n}" for n in ("s01", "s02", "s03")), "the same parts, batched as before")
+        self.assertEqual(len(sent), 2, "one build per free worker, as before")
+
+    def test_its_log_line_is_written_after_its_builds_go_out(self):
+        logged: list = []
+        gatherer, lead, sent = self.gatherer(logged, log_s=0.4)
+        calls = self.burst(gatherer, lead)
+        line_at = next((t for t, line in logged if line.startswith("parts: 3 of a deck")), None)
+        self.assertIsNotNone(line_at, logged)
+        self.assertLessEqual(max(t for t, _names in sent), line_at, "the builds before the line")
+        for call in calls:
+            self.assertLess(call.timing.get("gathering_ms", 0), 300, "a slow log never counts in the gathering")
 
 
 class AheadUnit(unittest.TestCase):

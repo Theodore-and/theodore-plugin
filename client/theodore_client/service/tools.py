@@ -181,10 +181,16 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
         _parts_coming(service, version, args, call, env)
     elif args[0] == "slide" and code == 0:
         service.ahead.wrote(args, call.cwd)     # a part's deck.js written through the service: still now
-    elif args[0] == "apply" and code == 0:
-        service.ahead.applied(args, call.cwd, _last_json("".join(call.stdout_kept)))     # reused its ahead?
-    with contextlib.suppress(Exception):
-        install._pin_workspaces(args, version)          # noqa: SLF001  the workspace's pin, as the client wrote it
+    elif args[0] == "apply" and code == 0:     # reused its ahead? Counted and logged after the answer
+        call.after.append(lambda: service.ahead.applied(args, call.cwd, _last_json("".join(call.stdout_kept))))
+
+    def pin() -> None:
+        with contextlib.suppress(Exception):
+            install._pin_workspaces(args, version)      # noqa: SLF001  the workspace's pin, as the client wrote it
+    if args[0] == "apply":      # after the answer: a burst's first applies wrote 15 pins and pins.json at once (S2b)
+        call.after.append(pin)
+    else:                       # before it: a command right after `start` or `prepare` finds its workspace pinned
+        pin()
     if code in (1, install.LICENCE_EXIT):     # the engine's licence refusal, read from its last JSON object (L1)
         refusal = install.refusal_in_output("".join(call.stdout_kept), code)
         if refusal is not None:
