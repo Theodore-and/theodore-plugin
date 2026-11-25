@@ -1,5 +1,24 @@
 # Changes
 
+## 0.5.0
+
+Theodore keeps its engine running between commands, and on macOS and Linux its short command starts in a few
+milliseconds.
+
+- Behind Theodore's tool and its short command, a service keeps Theodore's engine running (engine rc.35 and later), so
+  a command no longer starts the engine and its libraries each time. Several commands at once run side by side: the
+  service grows to one engine per core under load, shrinks back when idle, and stops a few minutes after the last
+  session ends. With an earlier engine, the service runs each command as before.
+- The tool's answer to an apply holds the pictures of the slides it changed, and to a render the pictures asked for,
+  so they reach the assistant without opening files.
+- The design guidance comes in one request per call, on a kept connection, and its texts are held only in memory,
+  never written to disk.
+- On macOS and Linux, `theodore` is now a small native program that hands each command to the service, with no shell
+  or Python to start first. Windows keeps its launcher until a signed program is available.
+- A connection the server had already closed is no longer reported as offline: the request goes on a new connection.
+- A request the server answers with a passing error (500, 502, 503 or 504) is sent once more after a second, and
+  nothing already received is lost.
+
 ## 0.4.34
 
 Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side. Setting
