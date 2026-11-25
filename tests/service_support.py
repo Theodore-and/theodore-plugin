@@ -97,6 +97,9 @@ while True:
         sys.stdout.flush()
         os._exit(0)
     state["calls"] += 1
+    if os.environ.get("FAKE_CALLS"):        # each run this worker took, for a test that checks what the service sent
+        with open(os.environ["FAKE_CALLS"], "a", encoding="utf-8") as record:
+            record.write(json.dumps({"argv": run.get("argv"), "cwd": run.get("cwd"), "pid": os.getpid()}) + "\n")
     call, argv, started = run["id"], run["argv"], time.monotonic()
     saved = {k: os.environ.get(k) for k in run.get("env") or {}}
     for k, v in (run.get("env") or {}).items():

@@ -141,6 +141,9 @@
             "pid": {
               "type": "integer",
               "minimum": 0
+            },
+            "cwd": {
+              "$ref": "#/$defs/absPath"
             }
           }
         },
@@ -191,7 +194,7 @@
         "env": {
           "type": "object",
           "propertyNames": {
-            "pattern": "^(CLAUDECODE|CLAUDE_CODE_SESSION_ID|CLAUDE_PLUGIN_ROOT|CODEX_THREAD_ID|THEODORE_[A-Z0-9_]+)$"
+            "pattern": "^(CLAUDECODE|CLAUDE_CODE_SESSION_ID|CLAUDE_PID|CLAUDE_PLUGIN_ROOT|CODEX_THREAD_ID|THEODORE_[A-Z0-9_]+)$"
           },
           "additionalProperties": {
             "type": "string"
@@ -457,7 +460,7 @@
         },
         "slide": {
           "type": "string",
-          "pattern": "^s[0-9]{3,4}[a-z]{0,3}$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$"
         },
         "page": {
           "type": "integer",

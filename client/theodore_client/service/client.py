@@ -33,13 +33,14 @@ class Connection:
 
 class ServiceClient:
     def __init__(self, home: Path, *, role: str, name: str, session_id: str, host: str, plugin_root: str | None = None,
-                 on_frame=None, on_notify=None, log=None):
+                 on_frame=None, on_notify=None, log=None, cwd: str | None = None):
         self.home = Path(home)
         self.role = role
         self.name = name
         self.session_id = session_id
         self.host = host
         self.plugin_root = plugin_root
+        self.cwd = cwd                      # the session's working folder (a relay's): the service primes it (C1)
         self.on_frame = on_frame or (lambda frame: None)
         self.on_notify = on_notify or (lambda frame: None)
         self.log = log or (lambda message: None)
@@ -60,7 +61,8 @@ class ServiceClient:
         conn = Connection(record, stream)
         hello = {"t": "hello", "v": 1, "secret": record["secret"], "role": self.role, "protocol": frames.PROTOCOL,
                  "client": {"name": self.name, "version": __version__},
-                 "session": {"id": self.session_id, "host": self.host, "pid": os.getpid()}}
+                 "session": {"id": self.session_id, "host": self.host, "pid": os.getpid(),
+                             **({"cwd": self.cwd} if self.cwd and os.path.isabs(self.cwd) else {})}}
         if self.plugin_root:
             hello["plugin_root"] = self.plugin_root
         try:

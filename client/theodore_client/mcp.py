@@ -349,7 +349,8 @@ class Relay:
                 self.client = service_client.ServiceClient(self.home, role="relay", name="theodore-relay-py",
                                                            session_id=self.session_id, host=self.host(),
                                                            plugin_root=PLUGIN_ROOT or os.environ.get("CLAUDE_PLUGIN_ROOT") or None,
-                                                           on_frame=self.on_frame, on_notify=self.on_notify, log=core.log)
+                                                           on_frame=self.on_frame, on_notify=self.on_notify, log=core.log,
+                                                           cwd=self.cwd)
             client = self.client
         try:
             client.connect(start=True)

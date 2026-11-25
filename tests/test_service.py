@@ -100,11 +100,11 @@ class ServiceCase(ClientCase):
             time.sleep(0.05)
         self.assertEqual(left, [], "workers outlived their service")
 
-    def connect(self, role: str = "relay", session: str = "s1") -> tuple[service_client.ServiceClient, Collector]:
+    def connect(self, role: str = "relay", session: str = "s1", cwd: str | None = None) -> tuple[service_client.ServiceClient, Collector]:
         collector = Collector()
         client = service_client.ServiceClient(self.box.home, role=role, name="theodore-relay-py" if role == "relay" else "theodore-front-py",
                                               session_id=session, host="claude-code", on_frame=collector,
-                                              on_notify=collector.notify)
+                                              on_notify=collector.notify, cwd=cwd)
         client.connect(start=False)
         self.addCleanup(client.close)
         return client, collector
@@ -287,6 +287,24 @@ class Pool(ServiceCase):
         self.assertIn("was stopped: it did not finish in time", Collector.stdout(frames_))
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
+
+    def test_a_session_opened_in_a_folder_primes_it_with_one_answered_call_there(self):
+        # Lane BIG (the coordinator, 25 Nov): the engine makes a folder's template facts ahead after an answered call
+        # there, and a session's first call is often `start` itself. The session's folder is primed when it opens.
+        record = self.box.tmp / "calls.jsonl"
+        folder = self.box.tmp / "the user's folder"
+        folder.mkdir()
+        self.env["FAKE_CALLS"] = str(record)
+        self.service()
+        client, got = self.connect(cwd=str(folder))
+        deadline = time.monotonic() + 20
+        rows = []
+        while time.monotonic() < deadline and not rows:
+            time.sleep(0.1)
+            rows = [json.loads(line) for line in record.read_text().splitlines()] if record.exists() else []
+        self.assertEqual([(row["argv"], row["cwd"]) for row in rows], [(["--help"], str(folder))])
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), [], "nothing written in the folder")
+        self.assertIn(f"primed {folder}", (self.box.home / "logs" / "service.log").read_text())
 
     def test_a_new_workspaces_next_calls_go_to_the_worker_that_made_it(self):
         # K's r61: after five starts on one worker, the first `slide list` went to a fresh worker (the new workspace's
