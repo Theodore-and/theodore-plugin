@@ -663,6 +663,12 @@ def pool_sizes() -> tuple[int, int]:
     return 1, most
 
 
+# A pool of this many workers gives a burst of this many parts or more every idle worker for its build-aheads
+# (Pool.whole_pool_for).
+WHOLE_POOL = 3
+WHOLE_POOL_PARTS = 4
+
+
 def full_threads() -> int:
     """The always-warm worker's threads, build and render: one fewer than the processors, at most 4 (the engine's own
     rule): it serves the lone designer and the big renders (the coordinator, 25 Nov)."""
@@ -775,6 +781,7 @@ class Pool:
         self._arrivals = 0
         self.on_release: list = []                  # called with the version when a worker is free again (parts.py)
         self.on_starved: list = []                  # called with the version when a call finds no idle worker (ahead.py)
+        self._behind_aheads: list[int] = []         # ms each call waited for a worker while aheads ran, not yet logged
         self.ahead_groups: dict[str, set] = {}      # a part's key -> the keys its ahead built with it, not applied yet
         self.features: dict[str, set] = {}          # per engine version: what a ready worker of it said it can do
         self.keys = _KeyLock()
@@ -1089,6 +1096,8 @@ class Pool:
                         if rank == RANKS["long"] and len(idle) == 1 and len(live) < most:
                             # the last warm worker went to a long call: another starts for the short ones to come
                             self._spare(chosen, (spec, group, env, most))
+                        if starved_told:    # it waited with aheads running: what that cost it, for the log
+                            self._behind_aheads.append(int((time.monotonic() - waited_from) * 1000))
                         return chosen
                     if idle and ahead < len(idle) and allowed:
                         self.cond.wait(0.02)             # a long call waiting a moment for the warm worker
@@ -1128,6 +1137,15 @@ class Pool:
             finally:
                 waiting.remove(ticket)
                 self.cond.notify_all()
+
+    def _log_behind_aheads(self) -> None:
+        """One line for each call that waited for a worker while build-aheads ran, with its wait: what the aheads cost
+        the calls beside them (lane S2: read with a burst's timings; a pool that gives a burst every worker makes any
+        other call wait for the first one freed)."""
+        with self.cond:
+            waits, self._behind_aheads = self._behind_aheads, []
+        for waited in waits:
+            self.service.log(f"ahead: a call waited {waited} ms for a worker while build-aheads ran")
 
     def _spare(self, taken: Worker, how: tuple) -> None:
         """The worker a long call leaves for the short calls to come, started beside it (called with the pool's lock
@@ -1258,6 +1276,7 @@ class Pool:
             for attempt in (1, 2):
                 try:
                     worker = self._acquire(spec, key, priority, call, rank=order, prefer=prefer)
+                    self._log_behind_aheads()
                 except WorkerFailed as exc:
                     if acquired is not None:
                         acquired()
@@ -1381,25 +1400,36 @@ class Pool:
             self._release(worker)
         return True
 
-    def ahead_slots(self, version: str) -> int:
-        """How many build-aheads (ahead.py) may start now: the idle workers but one, and none while a call waits."""
+    def whole_pool_for(self, parts: int) -> bool:
+        """Whether a burst of `parts` parts may take every idle worker for its build-aheads, none kept idle: only in
+        a pool of WHOLE_POOL workers (4 processors) and for WHOLE_POOL_PARTS parts or more (the coordinator, 25 Nov,
+        on lane S2's S2-23 and S2-24: with one of rig 7's three workers kept idle, 8 parts go 6 and 2 and the fuller
+        worker's pictures are 172 to 193 ms late on a second deck; on all three they go 4, 2 and 2). A larger pool
+        keeps one worker idle as before."""
+        return self.most == WHOLE_POOL and parts >= WHOLE_POOL_PARTS
+
+    def ahead_slots(self, version: str, parts: int = 0) -> int:
+        """How many build-aheads (ahead.py) may start now for a burst of `parts` ready parts: the idle workers but one
+        (every idle worker where whole_pool_for says so), and none while a call waits."""
         with self.cond:
             if self.closed or self.waiting.get(version):
                 return 0
             idle = [w for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal]
-            return max(0, len(idle) - 1)
+            return max(0, len(idle) - (0 if self.whole_pool_for(parts) else 1))
 
-    def take_for_ahead(self, version: str) -> "Worker | None":
+    def take_for_ahead(self, version: str, parts: int = 0) -> "Worker | None":
         """An idle worker for a build-ahead, or None: only when no call waits for a worker of the engine and another
         stays idle after it, so a designer's apply never waits behind an ahead. The one with the most build threads
         first, the always-warm worker included (lane S2b's S2-18 on rig 7: two 4-part aheads on the two 1-thread
         workers while the 3-thread one sat idle, and the applies waited 490-542 ms for them); the one left idle is the
         smallest. Then one past its warm-up before one still warming. The part's workspace keys are the caller's to
-        hold (Pool.keys.try_take)."""
+        hold (Pool.keys.try_take). For a burst of `parts` ready parts that may take the whole pool (whole_pool_for),
+        the last idle worker too; a call that comes meanwhile takes the first worker freed, since no ahead takes one
+        while a call waits."""
         with self.cond:
             live = self._live(version)
             idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
-            if self.closed or self.waiting.get(version) or len(idle) < 2:
+            if self.closed or self.waiting.get(version) or len(idle) < (1 if self.whole_pool_for(parts) else 2):
                 return None
             chosen = min(idle, key=lambda w: (-(getattr(w, "build_threads", None) or 1), not w.warmed.is_set(),
                                               len(w.keys), w.calls))

@@ -60,6 +60,7 @@ class _Call:
         self.stats = {part.path: part.seen for part in members}     # the deck.js each part is built from
         first = members[0]
         self.id = f"ahead-{os.path.basename(first.path)}-{len(members)}-{int(time.monotonic() * 1000)}"
+        self.whole_pool = False             # of a burst given the pool's every worker: no waiting call cancels it
         self.cwd = first.cwd
         self.images = False
         self.deadline_ms = None
@@ -232,10 +233,12 @@ class Ahead:
                 self.service.log(f"ahead: {os.path.basename(part.path)} reused by its apply; {self._counts_text()}")
 
     def starved(self, group: str) -> None:
-        """A foreground call found no idle worker: the youngest ahead running on that engine is cancelled."""
+        """A foreground call found no idle worker: the youngest ahead running on that engine is cancelled. Not one of
+        a burst that was given the pool's every worker (the coordinator, 25 Nov): in Studio the calls that come during
+        its aheads are its designers' own applies, which want those builds; the call takes the first worker freed."""
         with self.lock:
             mine = [c for c in self.running if not c.done.is_set() and not c.cancelled.is_set()
-                    and c.members[0].version == group]
+                    and c.members[0].version == group and not c.whole_pool]
             youngest = max(mine, key=lambda c: c.started, default=None)
         if youngest is not None:
             self._cancel(youngest, "a call waits for a worker")
@@ -315,7 +318,7 @@ class Ahead:
                 oldest = min(p.ready_since for p in ready)
                 if lead not in complete and now - burst.changed < POLL_S and now - oldest < SETTLE_S:
                     continue                        # its saves are still coming: they go together
-                slots = self.pool.ahead_slots(version)
+                slots = self.pool.ahead_slots(version, len(ready))
                 if slots <= 0:
                     continue
                 for part in ready:                  # a part whose workspace another command holds waits
@@ -329,17 +332,22 @@ class Ahead:
                     continue
                 taken = []
                 for _ in range(max(1, min(slots, len(free)))):
-                    worker = self.pool.take_for_ahead(version)
+                    worker = self.pool.take_for_ahead(version, len(ready))
                     if worker is None:
                         break
                     taken.append(worker)
-                # Shares by each worker's build threads (the engine builds a call's parts on its thread pool): the
-                # always-warm worker's 3 threads take three parts in the time a 1-thread worker takes one.
-                sizes = shares(len(free), [getattr(w, "build_threads", None) or 1 for w in taken], MOST_IN_AHEAD)
+                # A burst that took the pool's every worker (Pool.whole_pool_for): a call that comes meanwhile waits
+                # for the first one freed and cancels none of these aheads (`starved`).
+                whole = bool(taken) and self.pool.whole_pool_for(len(ready)) and self.pool.idle_count(version) == 0
+                # Shares by what each worker's build and render threads make of a part (`shares`): every worker's
+                # last picture as early as the split allows, so no designer waits for the fullest worker's.
+                sizes = shares(len(free), [(getattr(w, "build_threads", None) or 1, getattr(w, "render_threads", None) or 1)
+                                           for w in taken], MOST_IN_AHEAD)
                 start = 0
                 for worker, size in zip(taken, sizes):
                     chunk, start = free[start:start + size], start + size
                     call = _Call(chunk)
+                    call.whole_pool = whole
                     for part in chunk:
                         part.ahead, part.built, part.ready_since = call, part.seen, None
                     self.running.append(call)
@@ -422,22 +430,46 @@ class Ahead:
             self.service.log(f"ahead: {len(call.members)} part(s) ({names}{more}) {what}; {self._counts_text()}{below}")
 
 
-def shares(parts: int, weights: list[int], most: int) -> list[int]:
-    """`parts` split over workers in proportion to their weights (largest remainders), each at least one part when
-    there are as many parts as workers, at most `most` (what the cap leaves waits for the next ahead)."""
-    n = len(weights)
+# What a part costs the worker that builds it ahead, relative to one another (lane S2's S2-23 and S2-24, round 1 on
+# rigs 7 and 10): its own share of the Python side, one part at a time whatever the threads (compose and its files,
+# 60 to 75 ms); its Node build, spread over the build threads (15 to 50 ms on one); and its picture, drawn with the
+# batch's others a round of the render threads at a time (a round 65 to 170 ms warm, 130 to 265 ms on threads that
+# have drawn nothing yet).
+PART_SERIAL = 2.0
+PART_BUILD = 1.0
+PICTURE_ROUND = 6.0
+
+
+def last_picture(parts: int, build_threads: int, render_threads: int) -> float:
+    """When a worker with these threads has built `parts` parts and drawn their pictures, in the relative units
+    above: what its designers wait for."""
+    rounds = -(-parts // max(1, render_threads))
+    return parts * (PART_SERIAL + PART_BUILD / max(1, build_threads)) + rounds * PICTURE_ROUND
+
+
+def shares(parts: int, threads: list[tuple[int, int]], most: int) -> list[int]:
+    """`parts` split over workers, given each one's (build threads, render threads), so that the latest worker's last
+    picture comes as early as possible: each next part goes to the worker that would be done with it soonest, the
+    earlier worker on a tie. Each gets at least one part when there are as many parts as workers, at most `most`
+    (what the cap leaves waits for the next ahead).
+
+    Shares in proportion to the build threads alone (S2-23) gave the always-warm worker 9 of rig 10's 15 parts (4
+    threads against 1, 1, 1) and 6 of rig 7's 8: its build ended at 1.33 s against the others' 0.80 to 0.88, since
+    most of a part's cost is not spread over threads, and its pictures, drawn only after its build, were 124 to 193
+    ms late for its designers' applies on a second deck."""
+    n = len(threads)
     if not n or parts <= 0:
         return [0] * n
-    floor = 1 if parts >= n else 0
-    exact = [parts * w / sum(weights) for w in weights]
-    sizes = [max(floor, int(x)) for x in exact]
-    while sum(sizes) > parts:
-        j = max((k for k in range(n) if sizes[k] > floor), key=lambda k: sizes[k] - exact[k])
-        sizes[j] -= 1
-    while sum(sizes) < parts:
-        j = max(range(n), key=lambda k: exact[k] - sizes[k])
-        sizes[j] += 1
-    return [min(most, size) for size in sizes]
+    sizes = [1 if parts >= n else 0] * n
+    left = parts - sum(sizes)
+    while left > 0:
+        open_ = [k for k in range(n) if sizes[k] < most]
+        if not open_:
+            break
+        k = min(open_, key=lambda k: (last_picture(sizes[k] + 1, *threads[k]), k))
+        sizes[k] += 1
+        left -= 1
+    return sizes
 
 
 def _tally(values) -> dict[str, int]:
