@@ -53,6 +53,7 @@ class _Member:
         self.counters: dict = {}
         self.pending: list = []
         self.timing: dict = {}
+        self.pictures: dict = {}              # the run's pictures the worker sent from its memory, by path
         self.entered = time.perf_counter()    # into the gathering
         self.sent: float | None = None        # its build went out (the timing line's "gathering")
 
@@ -65,7 +66,11 @@ class _BatchCall:
         first = members[0].call
         self.id = f"parts-{first.id}"
         self.cwd = first.cwd
-        self.images = False             # each part's pictures attach from its own answer (lane J's rule)
+        # Each part's pictures attach from its own answer (lane J's rule, tools.attach_pictures). A worker that holds
+        # them in memory sends their bytes with the run (C1 `image` frames): kept here by path, so no designer's answer
+        # waits for a file written moments before to be read (lane S2, S2-23: 32 to 476 ms on Windows).
+        self.images = any(getattr(m.call, "images", False) for m in members)
+        self.pictures: dict[str, tuple[str, str]] = {}      # path -> (mime, base64)
         self.deadline_ms = None
         self.cancelled = threading.Event()
         self.worker = None
@@ -81,8 +86,10 @@ class _BatchCall:
         elif "timings: " in text or "gc: " in text:                                          # router.TIMING_LINES
             self.engine_timings.extend(line for line in text.splitlines() if line.startswith(("timings: ", "gc: ")))
 
-    def image(self, *_args, **_kwargs) -> bool:
-        return False
+    def image(self, mime: str, path: str, data: str | None = None, *_more, **_named) -> bool:
+        if path and isinstance(data, str) and data:
+            self.pictures[path] = (mime, data)
+        return True
 
     def set_phase(self, phase: str, done: int | None = None, total: int | None = None) -> None:
         self.phase = phase
@@ -258,6 +265,8 @@ class Gatherer:
             if stuck:                                   # no worker came free (one died, or long calls hold them)
                 self._cut(shape, force=True)
         call.out(member.output)
+        if member.pictures:
+            call.held_pictures = member.pictures    # tools.attach_pictures takes its own answer's from them
         if member.timing:
             call.timing = dict(member.timing, batch=member.timing.get("batch"))
         for name, value in member.counters.items():
@@ -497,6 +506,7 @@ class Gatherer:
                 member.output = row["stdout"]   # exactly what `pptx apply <that part>` alone prints (lane G)
             if position == 0:
                 member.counters = dict(call.counters)   # the run's own counts, once
+            member.pictures = call.pictures
             member.timing = dict(getattr(call, "timing", None) or {}, batch=len(batch))
             if member.sent is not None:
                 member.timing["gathering_ms"] = int((member.sent - member.entered) * 1000)
