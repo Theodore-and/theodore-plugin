@@ -903,6 +903,66 @@ class BuildAhead(ServiceCase):
 
 
 class AheadUnit(unittest.TestCase):
+    def test_a_2_0_parts_key_is_derived_from_its_leads_marker(self):
+        # Lane S2's S2-8: a 2.0 part has no marker of its own (lanes/G.md: ws2.part_key derives it), so the service
+        # knew no key for it and the routing to the worker that built its ahead never engaged.
+        import hashlib
+        import tempfile
+
+        from theodore_client.service import workers
+        with tempfile.TemporaryDirectory() as tmp:
+            lead = Path(tmp) / "deck"
+            (lead / "parts" / "s07").mkdir(parents=True)
+            (lead / ".theodore.json").write_text(json.dumps({"key": "00112233aabbccdd"}))
+            want = hashlib.sha256(b"00112233aabbccdd/s07").hexdigest()[:16]
+            self.assertEqual(workers.workspace_key(["apply", str(lead / "parts" / "s07")], None), want)
+            self.assertEqual(workers.workspace_key(["apply", str(lead)], None), "00112233aabbccdd")
+            (Path(tmp) / "loose" / "parts" / "s01").mkdir(parents=True)
+            self.assertIsNone(workers.workspace_key(["apply", str(Path(tmp) / "loose" / "parts" / "s01")], None),
+                              "no lead marker: no key")
+
+    def test_a_burst_saved_whole_goes_out_at_the_first_poll_that_sees_it(self):
+        # Lane S2's S2-7: all fifteen deck.js land within milliseconds, and the still poll cost each ahead ~100 ms of its
+        # head start. When every part of a burst is saved anew, its aheads go at once; one part alone still waits.
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import ahead, workers
+        sent = []
+        keys = workers._KeyLock()                                                   # noqa: SLF001
+        pool = SimpleNamespace(on_starved=[], has_feature=lambda _v, _n: True, ahead_slots=lambda _v: 1, keys=keys,
+                               take_for_ahead=lambda _v: SimpleNamespace(),
+                               run_ahead=lambda call, worker, argv, env: sent.append(argv) or 0)
+        service = SimpleNamespace(log=lambda _m: None, stopping=threading.Event(), relays_attached=lambda: 1)
+        builder = ahead.Ahead(service, pool)
+        with tempfile.TemporaryDirectory() as tmp:
+            burst = ahead._Burst(str(Path(tmp) / "deck"))
+            parts = []
+            for name in ("s01", "s02", "s03"):
+                folder = Path(tmp) / "deck" / "parts" / name
+                folder.mkdir(parents=True)
+                (folder / "deck.js").write_text("starter\n")
+                part = ahead._Part(os.path.realpath(folder), "9.9", {}, tmp, burst)
+                part.key = ""
+                builder.parts[part.path] = part
+                parts.append(part)
+            parts[0].deck.write_text("saved, alone\n")
+            for part in parts:
+                builder._poll(part)                                                 # noqa: SLF001
+            builder._dispatch()                                                     # noqa: SLF001
+            time.sleep(0.2)
+            self.assertEqual(sent, [], "one part saved: it waits for its still poll")
+            for part in parts[1:]:
+                part.deck.write_text(f"saved, {os.path.basename(part.path)}, with the others\n")
+            for part in parts:
+                builder._poll(part)                                                 # noqa: SLF001
+            builder._dispatch()                                                     # noqa: SLF001
+            deadline = time.monotonic() + 5
+            while not sent and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(len(sent), 1, "the whole burst saved: one ahead at once, no still poll")
+            self.assertEqual(sorted(os.path.basename(a) for a in sent[0][1:-1]), ["s01", "s02", "s03"])
+
     def test_an_apply_waiting_for_its_own_ahead_stops_being_on_its_way_before_it_waits(self):
         # Lane S2's rig 7: every apply of 8 reused its ahead, yet each waited ~160 ms in the gathering for the parts
         # still waiting on theirs (counted on their way, they held the cut up to GATHER_CAP_S).
@@ -1112,6 +1172,7 @@ class Relay(ServiceCase):
     """`theodore mcp` against the real service: the plugin's tools and calls answered out of order."""
 
     def test_pptx_tool_through_the_relay(self):
+        self.env["THEODORE_SERVICE_TIMINGS"] = "1"      # the relay's own line a tools/call too (lane S2)
         proc = subprocess.Popen([sys.executable, "-I", str(CLIENT_DIR), "mcp"], env=self.env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(self.box.tmp))
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
@@ -1164,6 +1225,9 @@ class Relay(ServiceCase):
         self.assertEqual(failed["_meta"]["exitCode"], 3)
         proc.stdin.close()
         self.assertEqual(proc.wait(timeout=30), 0)
+        log = (self.box.home / "logs" / "client.log").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(log, r"relay: pptx echo relay: \d+ ms = forwarded \d+, first frame \d+, done \d+, written \d+; "
+                              r"exit 0, response \d+ bytes, 0 image\(s\) of 0 bytes; the service's own \d+ ms")
 
 
 if __name__ == "__main__":

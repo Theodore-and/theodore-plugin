@@ -290,18 +290,30 @@ class Ahead:
 
     def _dispatch(self) -> None:
         """The ready parts of each burst, once its saves have settled (no change in the last poll, or the oldest ready
-        for SETTLE_S): one several-part ahead per worker allowed, in equal shares."""
+        for SETTLE_S), or at once when every part of the burst has been saved since its last ahead or apply (lane
+        S2's S2-7: all fifteen land within milliseconds, and the still poll cost each ahead ~100 ms of its head
+        start): one several-part ahead per worker allowed, in equal shares."""
         now = time.monotonic()
         launches: list[tuple[_Call, object, list]] = []
         with self.lock:
+            every: dict[str, list[_Part]] = {}
+            for part in self.parts.values():
+                every.setdefault(part.burst.lead, []).append(part)
+            complete = set()                        # bursts whose every part is saved anew and in no ahead
+            for lead, members in every.items():
+                if len(members) > 1 and all(p.seen is not None and p.seen != p.built and p.ahead is None for p in members):
+                    complete.add(lead)
+                    for part in members:
+                        if part.ready_since is None:
+                            part.ready_since = now
             groups: dict[tuple[str, str], list[_Part]] = {}
             for part in self.parts.values():
                 if part.ready_since is not None and part.ahead is None and part.seen == _stat(part.deck):
                     groups.setdefault((part.version, part.burst.lead), []).append(part)
-            for (version, _lead), ready in groups.items():
+            for (version, lead), ready in groups.items():
                 burst = ready[0].burst
                 oldest = min(p.ready_since for p in ready)
-                if now - burst.changed < POLL_S and now - oldest < SETTLE_S:
+                if lead not in complete and now - burst.changed < POLL_S and now - oldest < SETTLE_S:
                     continue                        # its saves are still coming: they go together
                 slots = self.pool.ahead_slots(version)
                 if slots <= 0:
@@ -309,12 +321,10 @@ class Ahead:
                 for part in ready:                  # a part whose workspace another command holds waits
                     if part.key is None:
                         part.key = workers.workspace_key(["apply", part.path], part.cwd) or ""
-                tokens, free = [], []
-                for part in ready:
-                    token = self.pool.keys.try_take(part.key or None)
-                    if token is not None:
-                        tokens.append((part, token))
-                        free.append(part)
+                # A part whose workspace another command holds (a write verb on it, its own apply) waits for the next
+                # ahead. An ahead does not hold the part's key itself: the designer's apply must not wait on a key for
+                # an ahead on an older deck.js (it waits for its own ahead in before_apply only on the same one).
+                free = [part for part in ready if not self.pool.keys.busy(part.key or None)]
                 if not free:
                     continue
                 count = max(1, min(slots, len(free)))
@@ -322,16 +332,13 @@ class Ahead:
                 chunks = [free[i:i + share] for i in range(0, len(free), share)]
                 for chunk in chunks:
                     worker = self.pool.take_for_ahead(version)
-                    held = [(p, t) for p, t in tokens if p in chunk]
                     if worker is None:
-                        for _p, token in held:
-                            self.pool.keys.give(_p.key or None, token)
                         continue
                     call = _Call(chunk)
                     for part in chunk:
                         part.ahead, part.built, part.ready_since = call, part.seen, None
                     self.running.append(call)
-                    launches.append((call, worker, held))
+                    launches.append((call, worker, []))
         for call, worker, held in launches:
             self._count("ahead_calls")
             for _ in call.members:
@@ -346,8 +353,6 @@ class Ahead:
         try:
             code = self.pool.run_ahead(call, worker, argv, first.env)
         finally:
-            for part, token in held:
-                self.pool.keys.give(part.key or None, token)
             elapsed = int((time.monotonic() - call.started) * 1000)
             if call.cancelled.is_set():
                 self._count("ahead_cancelled")
