@@ -450,6 +450,84 @@ class Pool(ServiceCase):
         self.assertIn("THEODORE SIGN_IN_REQUIRED", Collector.stdout(worker))
 
 
+class FolderWatch(ServiceCase):
+    """A session's folder watched for decks that appear or change while it is open (lane BIG's facts ahead; the
+    coordinator, 25 Nov): each is told to the engine by one more call answered there, as at the session's opening."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls_file = self.box.tmp / "calls.jsonl"
+        self.folder = self.box.tmp / "the user's folder"
+        self.folder.mkdir()
+        self.deck("old.pptx", b"an invented deck")
+        self.env.update({"FAKE_CALLS": str(self.calls_file), "THEODORE_FOLDER_POLL_S": "0.2"})
+        self.service()
+        self.client_, self.got = self.connect(cwd=str(self.folder))
+        self.assertEqual(self.primes(1), 1, "the session's opening primes its folder")
+        self.wait_log(r"folder watch: watching ")
+
+    def deck(self, name: str, data: bytes, age: float = 10.0) -> Path:
+        path = self.folder / name
+        path.write_bytes(data)
+        when = time.time() - age                # unwritten for `age` seconds (a copy keeps its source's time)
+        os.utime(path, (when, when))
+        return path
+
+    def primes(self, want: int, seconds: float = 15.0) -> int:
+        deadline = time.monotonic() + seconds
+        count = 0
+        while time.monotonic() < deadline:
+            rows = [json.loads(line) for line in self.calls_file.read_text().splitlines()] if self.calls_file.exists() else []
+            count = sum(1 for row in rows if row["argv"] == ["--help"] and row["cwd"] == str(self.folder))
+            if count >= want:
+                break
+            time.sleep(0.05)
+        return count
+
+    def test_a_new_deck_is_told_to_the_engine(self):
+        self.deck("copied in.pptx", b"another invented deck")
+        self.assertEqual(self.primes(2), 2, "one more call answered in the folder")
+        log = self.wait_log(r"\(a deck new or changed there\)")
+        self.assertIn("folder watch: copied in.pptx is new or changed", log)
+        self.deck("notes.txt", b"not a deck")
+        self.deck("~$copied in.pptx", b"an Office lock file")
+        self.assertEqual(self.primes(3, seconds=1.5), 2, "only decks are news")
+
+    def test_a_deck_changed_in_place_is_told_to_the_engine(self):
+        self.deck("old.pptx", b"the invented deck, saved again with more in it", age=5.0)
+        self.assertEqual(self.primes(2), 2, "the folder's mtime stays: the known deck's own stat says it changed")
+        self.assertIn("folder watch: old.pptx is new or changed", self.wait_log(r"old\.pptx is new or changed"))
+
+    def test_a_deck_written_while_a_call_ran_is_ours(self):
+        self.call(self.client_, self.got, "busy", ["sleep", "0.6"], wait=False)
+        time.sleep(0.3)
+        self.deck("output.pptx", b"what a call wrote", age=0)
+        self.got.wait("busy", 30)
+        log = self.wait_log(r"output\.pptx written by a call of Theodore")
+        self.assertIn("folder watch: output.pptx written by a call of Theodore, not news", log)
+        self.assertEqual(self.primes(2, seconds=1.0), 1, "nothing told for it")
+
+    def test_the_watch_ends_with_the_session(self):
+        self.client_.close()
+        self.wait_log(r"folder watch: stopped watching ")
+        self.deck("later.pptx", b"a deck after the session")
+        self.assertEqual(self.primes(2, seconds=1.5), 1, "no session there: no watch")
+        self.assertNotIn("later.pptx", self.wait_log(r"later\.pptx", seconds=0.5))
+
+    def test_theodores_own_home_is_never_watched(self):
+        from types import SimpleNamespace
+
+        from theodore_client.service import folders
+        logged = []
+        watches = folders.FolderWatches(SimpleNamespace(home=self.box.home, log=logged.append))
+        inside = self.box.home / "workspaces"
+        inside.mkdir(exist_ok=True)
+        watches.open("s2", str(inside))
+        watches.open("s2", str(self.box.home))
+        self.assertEqual(logged, [], "its workspaces and outputs are Theodore's own")
+        watches.stop()
+
+
 class Fatal(ServiceCase):
     def test_a_worker_that_cannot_start_falls_back_to_oneshot(self):
         self.env["FAKE_WORKER_FATAL"] = "1"

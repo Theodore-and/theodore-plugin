@@ -8,6 +8,7 @@ is attached to the call still running. Finished calls are remembered for 10 minu
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import hashlib
 import json
@@ -215,6 +216,17 @@ class Router:
         self.lock = threading.Lock()
         self.running = 0
         self.last_request = time.monotonic()
+        # When calls ran, by the wall clock (a file's mtime is on it): the folder watch takes a deck written then for a
+        # call's own output (folders.py). The open stretch's start, and the last ones that ended.
+        self.busy_from: float | None = None
+        self.busy_spans: collections.deque = collections.deque(maxlen=64)
+
+    def busy_at(self, when: float, grace: float) -> bool:
+        """Whether a call ran at `when` (seconds since the epoch), or ended at most `grace` seconds before it."""
+        with self.lock:
+            if self.busy_from is not None and when >= self.busy_from:
+                return True
+            return any(start <= when <= end + grace for start, end in self.busy_spans)
 
     def submit(self, client, frame: dict) -> None:
         call_id = frame.get("id")
@@ -249,6 +261,8 @@ class Router:
             self.calls[key] = call
             self.running += 1
             self.last_request = time.monotonic()
+            if self.busy_from is None:
+                self.busy_from = time.time()
             if self.service.relays_attached() == 0:
                 self.service.note_unattached_request()
         if call.deadline_ms:
@@ -299,6 +313,9 @@ class Router:
             if self.calls.get((call.session, call.id)) is call:
                 self.running = max(0, self.running - 1)
                 self.last_request = time.monotonic()
+                if not self.running and self.busy_from is not None:
+                    self.busy_spans.append((self.busy_from, time.time()))
+                    self.busy_from = None
         self.service.call_ended(call)
 
     def cancel(self, client, call_id: str) -> None:

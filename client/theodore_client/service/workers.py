@@ -1170,48 +1170,54 @@ class Pool:
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
 
-    def prime_folder(self, folder: str) -> None:
-        """A session opened in `folder`: one cheap call answered there (`pptx --help`) on an idle worker of the current
-        engine, so the worker's after-answer work starts before the session's first command. Lane BIG's facts ahead
-        then make the template facts of the folder's decks at idle priority, ended the moment a call starts, so the
-        first `start --from` reads them (95 to 228 ms of CPU instead of 0.5 to 2.1 s on 120 MB decks). Only while no
-        call runs or waits (that call's own answer starts the same work), only a resident engine, waiting at most
-        PRIME_WAIT_S for a worker to be ready; it writes nothing in the folder."""
+    def prime_folder(self, folder: str, wait_s: float = PRIME_WAIT_S, why: str = "its session opened") -> bool:
+        """`folder` is a session's (its opening, or a deck new or changed there: folders.py): one cheap call answered
+        there (`pptx --help`) on an idle worker of the current engine, the always-warm one first, so the worker's
+        after-answer work starts before the session's next command. Lane BIG's facts ahead then make the template facts
+        of the folder's decks at idle priority, ended the moment a call starts, so the first `start --from` reads them
+        (95 to 228 ms of CPU instead of 0.5 to 2.1 s on 120 MB decks). Only while no call runs or waits, only a
+        resident engine, waiting at most `wait_s` for a worker to be ready; it writes nothing in the folder. False when
+        it sent nothing because a call runs or waits, or no worker was ready in time (the folder watch tries again)."""
         try:
             if not os.path.isdir(folder):
-                return
+                return True
             version = install.selected_engine()
             spec = Spec(version) if version else None
             if spec is None or not spec.resident() or self._oneshot(version):
-                return
+                return True
         except Exception:  # noqa: BLE001  a head start only
-            return
-        deadline = time.monotonic() + PRIME_WAIT_S
+            return True
+        deadline = time.monotonic() + wait_s
         worker = None
         with self.cond:
-            while not self.closed and time.monotonic() < deadline:
+            while not self.closed:
                 live = self._live(version)
                 busy = any(w.busy for w in live) or self.waiting.get(version)
                 if busy:
-                    return                      # a call is here: its answer starts the same work
+                    return False                # a call is here: it goes first
                 idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
                 if idle:
-                    worker = min(idle, key=lambda w: (len(w.keys), w.calls))
+                    worker = min(idle, key=lambda w: (getattr(w, "build_threads", None) != full_threads(),
+                                                      len(w.keys), w.calls))
                     worker.busy, worker.rank = True, RANKS["ahead"]
                     break
+                if time.monotonic() >= deadline:
+                    return False
                 self.cond.wait(0.25)
         if worker is None:
-            return
+            return True
         call = _QuietCall(folder)
         try:
             worker.run(call, ["--help"], {}, None, None, "read")
-            self.service.log(f"primed {folder}: a call answered there on worker {worker.process.pid} (facts made ahead)")
+            self.service.log(f"primed {folder} ({why}): a call answered there on worker {worker.process.pid} "
+                             f"(facts made ahead)")
         except WorkerFailed:
             pass
         except Exception:  # noqa: BLE001
             pass
         finally:
             self._release(worker)
+        return True
 
     def ahead_slots(self, version: str) -> int:
         """How many build-aheads (ahead.py) may start now: the idle workers but one, and none while a call waits."""

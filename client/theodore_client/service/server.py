@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__
-from . import endpoint, frames, router as routing, sessions as sessions_mod
+from . import endpoint, folders, frames, router as routing, sessions as sessions_mod
 
 # After the last relay detaches: 100 s, so that the service, its workers and what they started (a warm office, which
 # takes up to 10 s to stop) have all ended 2 minutes after it (PLAN §3 A; DESIGN §3.5 "after 2 minutes").
@@ -83,6 +83,7 @@ class Service:
         self.listener = None
         self.router = routing.Router(self)
         self.sessions = sessions_mod.Sessions(on_open=self._session_opened, on_close=self._session_closed)
+        self.folders = folders.FolderWatches(self)
         self.pool = None
         self.parts = None
         self.texts = None
@@ -197,6 +198,8 @@ class Service:
 
     def _shutdown(self) -> None:
         endpoint.remove_service_json(self.home, self.pid)
+        with contextlib.suppress(Exception):
+            self.folders.stop()
         with contextlib.suppress(Exception):
             self.timers.stop()
         with contextlib.suppress(Exception):
@@ -315,6 +318,8 @@ class Service:
         if session.cwd:     # lane BIG's facts ahead start after an answered call: one cheap one there, before start
             threading.Thread(target=self.pool.prime_folder, args=(session.cwd,), name="service-prime",
                              daemon=True).start()
+            with contextlib.suppress(Exception):
+                self.folders.open(session.id, session.cwd)      # and again for each deck new or changed there
 
         def texts_open() -> None:
             # The session's cheap first request (lane D) goes on a connection the start opened, not one of its own. A
@@ -335,6 +340,8 @@ class Service:
 
     def _session_closed(self, session) -> None:
         self.log(f"session closed ({session.host})")
+        with contextlib.suppress(Exception):
+            self.folders.close(session.id)
         with contextlib.suppress(Exception):
             self.router.abandon_session(session.id)
         with contextlib.suppress(Exception):
