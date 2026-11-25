@@ -202,6 +202,7 @@ class FakeApi:
         self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
         self.batch_route = True                        # POST /v1/guide/batch (C6); False: a service from before it (404)
         self.batches: list[list[dict]] = []            # the items of every batch received
+        self.batch_failures: list[int] = []            # HTTP statuses the next batches answer first (a 5xx blip), one each
         self.preferences: list[dict] = []
         # Lane ONBOARD: GET/PUT /v1/studio. None: a server before it (404); else the account's answer.
         self.studio: dict | None = {"studio_enabled": True, "included": True, "available": True}
@@ -508,6 +509,9 @@ class FakeApi:
             return self._error(h, 422, "validation_failed", "items")
         if self.guide_kill:
             return self._error(h, 426, "update_required", "Theodore is paused on this channel.")
+        if self.batch_failures:
+            self.batches.append([])                  # asked, not answered
+            return self._error(h, self.batch_failures.pop(0), "internal_error", "Something went wrong.")
         self.batches.append(items)
         entries, members = [], []
         for item in items:
