@@ -10,6 +10,7 @@ import json
 import re
 import os
 import queue
+import select
 import socket
 import sys
 import threading
@@ -678,6 +679,20 @@ _REUSED_LOST = (http.client.RemoteDisconnected, ConnectionResetError, Connection
                 ssl.SSLEOFError, ssl.SSLZeroReturnError)
 
 
+def _peer_closed(connection: http.client.HTTPConnection) -> bool:
+    """Whether the remote end has closed an idle kept connection: nothing is owed on it, so anything to read (the end
+    of the stream, a reset, a TLS close) means it is no longer usable. Asked without waiting, before a request is sent
+    on it, so no request is ever sent on a connection known closed."""
+    sock = connection.sock
+    if sock is None:
+        return True
+    try:
+        readable, _writable, _broken = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    return bool(readable)
+
+
 class KeptAlive:
     """A pool of kept-alive connections to the API origin. Thread-safe; one per process (KEPT)."""
 
@@ -744,10 +759,12 @@ class KeptAlive:
             self.opened += 1
         return connection
 
-    def _take(self, route: tuple, timeout: float) -> tuple[http.client.HTTPConnection, bool]:
-        """An idle connection of this route (True), else a new one (False); connections gone stale, or of another
-        route (the API base changed), are closed."""
-        now, found, dropped = time.monotonic(), None, []
+    def _take(self, route: tuple, timeout: float, fresh: bool = False) -> tuple[http.client.HTTPConnection, bool, float]:
+        """(connection, reused, idle since): an idle connection of this route, the most recently used first, else a new
+        one (`fresh`: always a new one). Connections gone stale, of another route (the API base changed), or that the
+        remote end has closed while idle (an edge's idle timeout: seen before anything is sent on them) are closed."""
+        now = time.monotonic()
+        found, since, dropped = None, now, []
         with self._lock:
             kept = []
             for item in self._idle:
@@ -755,8 +772,13 @@ class KeptAlive:
                     dropped.append(item[1])
                 else:
                     kept.append(item)
-            if kept:
-                found = kept.pop()[1]             # the most recently used: the least likely to be closed by now
+            while kept and not fresh:
+                _route, candidate, idle_since = kept.pop()
+                if _peer_closed(candidate):
+                    dropped.append(candidate)
+                    continue
+                found, since = candidate, idle_since
+                break
             self._idle = kept
         for connection in dropped:
             connection.close()
@@ -764,11 +786,20 @@ class KeptAlive:
             found.timeout = timeout
             if found.sock is not None:
                 found.sock.settimeout(timeout)
-            return found, True
+            return found, True, since
         try:
-            return self._open(route, timeout), False
+            return self._open(route, timeout), False, now
         except (OSError, http.client.HTTPException) as exc:
             raise _network_error(exc) from None
+
+    def _drop_idle(self, route: tuple, since: float) -> None:
+        """Close this route's idle connections idle since `since` or longer: one of them proved closed by the remote
+        end, so the idle timeout that closed it has most likely closed them too."""
+        with self._lock:
+            dropped = [item[1] for item in self._idle if item[0] == route and item[2] <= since]
+            self._idle = [item for item in self._idle if not (item[0] == route and item[2] <= since)]
+        for connection in dropped:
+            connection.close()
 
     def _give(self, route: tuple, connection: http.client.HTTPConnection, response: http.client.HTTPResponse) -> None:
         """Keep the connection for the next request when its answer was read to the end and it may stay open."""
@@ -837,15 +868,21 @@ class KeptAlive:
         parts = urllib.parse.urlsplit(url)
         target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         twice = method in ("GET", "HEAD") if again is None else again
+        fresh = False
         for attempt in (1, 2):
-            connection, reused = self._take(route, wait)
+            connection, reused, since = self._take(route, wait, fresh=fresh)
             try:
                 connection.request(method, target, body=data, headers=hdrs)
                 response = connection.getresponse()
             except _REUSED_LOST as exc:
                 connection.close()
                 if reused and twice and attempt == 1:
-                    continue                    # the server closed it while it was idle: once more, on a new one
+                    # The remote end closed it just as it was used (it was seen open before the request): once more,
+                    # on a new connection, never another idle one; those idle as long go too. Only a failure on the
+                    # new one is a network failure.
+                    self._drop_idle(route, since)
+                    fresh = True
+                    continue
                 raise _network_error(exc) from None
             except (OSError, http.client.HTTPException) as exc:
                 connection.close()
