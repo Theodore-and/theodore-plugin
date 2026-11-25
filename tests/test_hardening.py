@@ -817,6 +817,62 @@ class WindowsRenderer(unittest.TestCase):
             self.assertIn("tools install libreoffice", raised.exception.next_step)
             spawn.assert_not_called()
 
+    def installed_engine(self, version: str, *, own_renderer: bool) -> None:
+        """An installed engine, made current: a 2.0 one carries its own renderer (pptx_runtime/js/render), a 1.x none."""
+        from theodore_client import install
+        folder = install.engine_dir(version)
+        folder.mkdir(parents=True, exist_ok=True)
+        core.write_json(folder / ".theodore-engine.json", {"version": version, "sha256": "0" * 64})
+        if own_renderer:
+            entry = folder.joinpath(*install.OWN_RENDERER)
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text("// the engine's own renderer\n")
+        core.write_json(core.home().engines / "current.json", {"version": version})
+
+    def test_an_engine_that_draws_its_own_slides_starts_the_fetch_and_does_not_wait(self):
+        # Lane S2 on rig 10 (25 Nov 2026): a fresh Windows computer with neither PowerPoint nor LibreOffice; with the
+        # 2.0 engine every designer's first apply waited 25 s for LibreOffice, then failed with 67. 2.0 draws its slides.
+        import time as clock
+        from theodore_client import install
+        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True) as spawn:
+            self.installed_engine("1.0.0-rc.36", own_renderer=True)
+            self.assertTrue(win.engine_draws_its_own("1.0.0-rc.36"))
+            started = clock.monotonic()
+            for call in (["apply", "C:/deck/ws"], ["render", "C:/deck/ws"], ["slide", "add", "C:/deck/ws"]):
+                win.wait_for_renderer(call, wait=25.0)               # returns at once: no 67, no wait
+            self.assertLess(clock.monotonic() - started, 2.0)
+            self.assertEqual(spawn.call_args.args[1], ["tools", "install", "libreoffice", "--job"],
+                             "the fetch still starts in the background, for the exact tier")
+            spawn.reset_mock()
+            install.Job("libreoffice").update(pid=0, failed={"cause": "PROXY_AUTH", "detail": "the proxy asks for a sign-in"})
+            win.wait_for_renderer(["apply", "C:/deck/ws"])             # a failed fetch does not stop it either
+            spawn.assert_not_called()
+
+    def test_an_engine_without_its_own_renderer_waits_as_before(self):
+        from theodore_client import install
+        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True) as spawn, \
+                mock.patch.dict(os.environ, {"THEODORE_TEST_RENDERER_WAIT": "0"}), mock.patch.object(core, "is_loopback_api", return_value=True):
+            self.installed_engine("1.0.0-rc.33", own_renderer=False)
+            self.assertFalse(win.engine_draws_its_own("1.0.0-rc.33"))
+            with self.assertRaises(core.Status) as raised:
+                win.wait_for_renderer(["apply", "C:/deck/ws"])
+            self.assertEqual(raised.exception.name, "SETUP_IN_PROGRESS", "1.x: the same 67 as before")
+            self.assertEqual(spawn.call_args.args[1], ["tools", "install", "libreoffice", "--job"])
+
+    def test_a_deck_pinned_to_a_1x_engine_waits_even_when_current_draws_its_own(self):
+        from theodore_client import install
+        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True), \
+                mock.patch.dict(os.environ, {"THEODORE_TEST_RENDERER_WAIT": "0"}), mock.patch.object(core, "is_loopback_api", return_value=True):
+            self.installed_engine("1.0.0-rc.33", own_renderer=False)
+            self.installed_engine("1.0.0-rc.36", own_renderer=True)            # current
+            deck = core.home().root / "decks" / "deck-on-rc33"          # inside this test's own home
+            (deck / ".pptx-state").mkdir(parents=True)
+            core.write_json(deck / ".pptx-state" / "theodore-engine.json", {"version": "1.0.0-rc.33"})
+            with self.assertRaises(core.Status) as raised:
+                win.wait_for_renderer(["apply", str(deck)])
+            self.assertEqual(raised.exception.name, "SETUP_IN_PROGRESS", "the deck runs on its own 1.x engine")
+            win.wait_for_renderer(["apply", "C:/no/such/deck"])               # no workspace: the current 2.0 engine
+
     def test_a_converter_or_another_system_means_nothing_is_fetched(self):
         from theodore_client import commands, install
         cases = ({"office": r"C:\Program Files\LibreOffice\program\soffice.exe"}, {"powerpoint": True}, {"pin": None})

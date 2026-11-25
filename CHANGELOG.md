@@ -1,8 +1,45 @@
 # Changes
 
+## 0.5.0
+
+Theodore keeps its engine running between commands, and on macOS and Linux its short command starts in a few
+milliseconds.
+
+- Behind Theodore's tool and its short command, a service keeps Theodore's engine running (engine 2.0), so
+  a command no longer starts the engine and its libraries each time. Several commands at once run side by side: the
+  service grows to one engine per core under load, shrinks back when idle, and stops a few minutes after the last
+  session ends. With an earlier engine, the service runs each command as before.
+- The tool's answer to an apply holds the pictures of the slides it changed, and to a render the pictures asked for,
+  so they reach the assistant without opening files.
+- The design guidance comes in one request per call, on a kept connection, and its texts are held only in memory,
+  never written to disk.
+- On macOS and Linux, `theodore` is now a small native program that hands each command to the service, with no shell
+  or Python to start first. Windows keeps its launcher until a signed program is available.
+- A connection the server had already closed is no longer reported as offline: the request goes on a new connection.
+- A request the server answers with a passing error (500, 502, 503 or 504) is sent once more after a second, and
+  nothing already received is lost.
+- A command never waits forever. If the engine stops during a command, the service notices at once: a command that
+  had written nothing runs once more, and one that may have written says so instead of guessing. A command still
+  running at its time limit is stopped with the same answer.
+- Several parts prepared at once are now built together by the service, as intended; each had been built on its own.
+- With engine 2.0, Theodore's engines share one LibreOffice, kept open until the service ends, instead of each
+  opening its own.
+- Theodore's runtime is updated for engine 2.0: it no longer carries the two libraries 2.0 stopped using.
+
 ## 0.4.34
 
-Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side.
+Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side. Setting
+Theodore up changes no permission setting and needs no restart of the app.
+
+- Setting Theodore up writes no permission rule into the assistant's settings. The two skills carry the permissions
+  Theodore's own work needs (its short command and launchers, its tools, edits inside a deck's workspace, reads of
+  Theodore's own folders), so its commands run without a rule; a person who wants the rules written can still ask
+  for them (`theodore hosts settings --apply`).
+- The set-up no longer asks to quit and reopen the app. The first deck goes in a new conversation, where Theodore's
+  skills are loaded from its start (in Codex, a new session). The installers keep the registration's own output out
+  of what the assistant reads, and the set-up page asks for its installer line to be run on its own.
+- When Theodore is ready, the welcome, `doctor` and `status` say in one sentence whether Studio is on, instead of
+  asking and waiting for an answer.
 
 - `theodore …` starts Theodore's client straight from its own Python: the short command and the launchers in the
   skill folders start no other program once Theodore is set up. In Git Bash a command started about twenty small
