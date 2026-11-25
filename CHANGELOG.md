@@ -5,7 +5,7 @@
 Theodore keeps its engine running between commands, and on macOS and Linux its short command starts in a few
 milliseconds.
 
-- Behind Theodore's tool and its short command, a service keeps Theodore's engine running (engine rc.35 and later), so
+- Behind Theodore's tool and its short command, a service keeps Theodore's engine running (engine 2.0), so
   a command no longer starts the engine and its libraries each time. Several commands at once run side by side: the
   service grows to one engine per core under load, shrinks back when idle, and stops a few minutes after the last
   session ends. With an earlier engine, the service runs each command as before.
