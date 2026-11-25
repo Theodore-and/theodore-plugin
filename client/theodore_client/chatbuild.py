@@ -719,7 +719,10 @@ def _engine_process(directory: Path, args: list[str], folder: Path, env: dict, s
                     progress(elapsed, f"pptx {args[0]} running ({int(elapsed)} s)")
             if elapsed > RUN_TIMEOUT_S:
                 proc.kill()
-                code = proc.wait()
+                try:
+                    code = proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    code = -9  # held in exit (a crash the crash reporter has not taken yet): left, never waited for
                 break
     reader.join(timeout=10)
     drop_licence_copy()

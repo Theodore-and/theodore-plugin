@@ -502,6 +502,8 @@ def main(argv: list[str]) -> int:
         home = argv[argv.index("--home") + 1]
     home_path = Path(home or os.environ.get("THEODORE_HOME") or Path.home() / ".theodore").absolute()
     os.environ["THEODORE_HOME"] = str(home_path)
+    from .. import crash_ports
+    crash_ports.quiet()                 # before any worker starts: a crash never waits on the system's crash reporter
     service = Service(home_path)
     _on_signals(service)
     try:
