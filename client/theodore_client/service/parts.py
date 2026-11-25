@@ -129,6 +129,23 @@ class Gatherer:
                 self.bursts.pop(real, None)
                 self.sizes.pop(real, None)
 
+    def of_burst(self, argv: list[str], cwd: str | None) -> bool:
+        """Whether a call names a part of a deck whose parts come at once (`slide open <lead>/parts/s01`, `apply
+        <lead>/parts/s01`, ...): its designers have started."""
+        with self.lock:
+            folders = [os.path.normcase(os.path.join(lead, "parts")) + os.sep for lead, since in self.bursts.items()
+                       if time.monotonic() - since <= BURST_FOR_S]
+        if not folders:
+            return False
+        for arg in argv[1:]:
+            if arg.startswith("-"):
+                continue
+            with contextlib.suppress(OSError, ValueError):
+                real = os.path.normcase(os.path.realpath(arg if os.path.isabs(arg) else os.path.join(cwd or ".", arg)))
+                if any(real.startswith(folder) for folder in folders):
+                    return True
+        return False
+
     def _cap(self, lead: str) -> int:
         """The most parts one build takes: the burst over the pool, ceil(parts / workers) (4 for 15 parts on 4 workers;
         lane S2's rig 7: with build-aheads holding three workers, 12 dropped parts went to the one free worker as one

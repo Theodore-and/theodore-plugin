@@ -19,11 +19,16 @@ from __future__ import annotations
 
 import base64
 import codecs
+import collections
 import contextlib
+import functools
+import glob
 import hashlib
 import json
 import os
 import re
+import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -36,6 +41,14 @@ from . import frames
 IS_WINDOWS = os.name == "nt"
 READY_WAIT_S = 90.0
 IDLE_SHRINK_S = 300.0
+# A Studio deck's workers, warmed at its `prepare` (one a part, within the pool's size), are kept this long against the
+# idle shrink: its designers write for minutes before their saves, and the burst starts no worker of its own (lane S2b).
+BURST_KEEP_S = 30 * 60.0
+# A call that finds every worker busy starts another only after it has waited about what a new worker takes to be ready
+# (the engine's recent starts; this before any): a call that would queue less never pays a start beside the burst's
+# builds (lane S2b's S2-19: 15 `slide open`s queued 24-33 ms, and the workers started for them ran their start-ups
+# during the build-aheads, 2.0 to 3.9 s instead of 0.8 to 1.3). THEODORE_COLD_START_S sets it.
+COLD_START_S = 1.0
 RECYCLE_RSS_MB = 800.0
 WORKER_MB = 600.0                 # one warm worker with its Node and renderer, for the pool's memory cap
 RENDER_THREAD_MB = 250.0          # each warm render thread beyond the first (lane R's budget, 25 Nov)
@@ -580,13 +593,58 @@ def _ram_bytes() -> int:
         return 8 << 30
 
 
+@functools.lru_cache(maxsize=1)
+def physical_cores() -> int | None:
+    """The processor's physical cores (a core's second hyperthread not counted), or None when not known."""
+    try:
+        if IS_WINDOWS:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            get = kernel32.GetLogicalProcessorInformationEx
+            get.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+            get.restype = wintypes.BOOL
+            size = wintypes.DWORD(0)
+            get(0, None, ctypes.byref(size))            # RelationProcessorCore: one record a physical core
+            buffer = ctypes.create_string_buffer(size.value)
+            if not size.value or not get(0, buffer, ctypes.byref(size)):
+                return None
+            count = offset = 0
+            while offset + 8 <= size.value:
+                relationship, length = struct.unpack_from("<II", buffer, offset)
+                if not length:
+                    break
+                count += relationship == 0
+                offset += length
+            return count or None
+        if sys.platform == "darwin":
+            import ctypes
+            libc = ctypes.CDLL(None)
+            value, length = ctypes.c_int(0), ctypes.c_size_t(ctypes.sizeof(ctypes.c_int))
+            ok = libc.sysctlbyname(b"hw.physicalcpu", ctypes.byref(value), ctypes.byref(length), None, ctypes.c_size_t(0))
+            return value.value if ok == 0 and value.value > 0 else None
+        cores = set()
+        for path in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/topology/core_id"):
+            folder = os.path.dirname(path)
+            with open(os.path.join(folder, "physical_package_id"), encoding="ascii") as package, \
+                    open(path, encoding="ascii") as core_id:
+                cores.add((package.read().strip(), core_id.read().strip()))
+        return len(cores) or None
+    except Exception:  # noqa: BLE001  not known: the processors as the system counts them
+        return None
+
+
 def pool_sizes() -> tuple[int, int]:
-    """(base, most) workers per engine version: one kept warm, and under load one per core within MEMORY_SHARE of the
-    memory at WORKER_MB each (2 at least, MOST_WORKERS at most). THEODORE_SERVICE_WORKERS sets both."""
+    """(base, most) workers per engine version: one kept warm, and under load one per core (physical cores and one,
+    where the system says how many) within MEMORY_SHARE of the memory at WORKER_MB each (2 at least, MOST_WORKERS at
+    most). THEODORE_SERVICE_WORKERS sets both."""
     forced = os.environ.get("THEODORE_SERVICE_WORKERS")
     if forced and forced.isdigit() and int(forced) > 0:
         return int(forced), int(forced)
     cores = os.cpu_count() or 2
+    physical = physical_cores()
+    if physical:                    # two hyperthreads share one core: rig 7's 4 vCPU on 2 cores take 3 workers, not 4
+        cores = min(cores, physical + 1)
     budget = _ram_bytes() * MEMORY_SHARE / (1 << 20)
     most = max(2, min(cores, int(budget // WORKER_MB), MOST_WORKERS))
 
@@ -716,6 +774,9 @@ class Pool:
         self.closed = False
         self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
         self._engine_run = None
+        self.starts: dict[str, collections.deque] = {}  # per version: its recent workers' seconds from start to ready
+        self.warming: dict[str, tuple[object, set]] = {}  # per version: a prepare's warm-up and the workers it started
+        self.kept: dict[str, tuple[int, float]] = {}    # per version: workers kept against the idle shrink, until
 
     # --- facts ------------------------------------------------------------------------------------------------------
 
@@ -774,7 +835,7 @@ class Pool:
     def _watch_start(self, worker: Worker) -> None:
         ok = worker.wait_ready(READY_WAIT_S)
         with self.cond:
-            if not ok or worker.fatal:
+            if (not ok or worker.fatal) and not worker.retiring:     # a warm-up cut (end_warm_up) is no failure
                 self.service.log(f"worker {worker.spec.version} did not become ready"
                                  f"{': ' + str(worker.fatal.get('code')) if worker.fatal else ''}")
                 # One-shot for a while: a licence refusal answers through the one-shot engine's own JSON (and a new
@@ -834,28 +895,78 @@ class Pool:
             return full_threads()
         return worker_threads(self.most)
 
-    def warm_up(self, version: str, count: int | None = None) -> None:
+    def warm_up(self, version: str, count: int | None = None, keep_s: float = 0.0) -> None:
         """Workers of the engine started now, side by side and in the background, up to `count` (the pool's size):
-        a Studio deck's `prepare` means its designers' applies are coming, and each should find a warm worker."""
+        a Studio deck's `prepare` means its designers' calls are coming, and each should find a worker ready. They
+        are kept against the idle shrink for `keep_s`; the warm-up ends at its designers' first call (end_warm_up)."""
         count = self.most if count is None else min(count, self.most)
+        token = object()
 
         def one(spec: Spec) -> None:
             with contextlib.suppress(Exception):
-                self._spawn(spec, limit=count)
+                with self.cond:
+                    if self.warming.get(version, (None,))[0] is not token:
+                        return                  # its designers came first
+                worker = self._spawn(spec, limit=count)
+                if worker is None:
+                    return
+                with self.cond:
+                    late = self.warming.get(version, (None,))[0] is not token
+                    if late:                    # they came while it started: it stops as the others did
+                        worker.retiring = True
+                        self.cond.notify_all()
+                    else:
+                        self.warming[version][1].add(worker)
+                if late:
+                    worker.kill()
         with contextlib.suppress(Exception):
             spec = Spec(version)
             if not spec.resident() or self._oneshot(version):
                 return
             with self.cond:
-                missing = count - len(self._live(version))
+                live = self._live(version)
+                missing = count - len(live)
+                # its own starts, and those already under way (the spare a long `prepare` started): all end at once
+                self.warming[version] = (token, {w for w in live if not w.ready.is_set()})
+                if keep_s > 0:
+                    self.kept[version] = (count, time.monotonic() + keep_s)
             for _ in range(max(0, missing)):
                 threading.Thread(target=one, args=(spec,), name="pool-warm-up", daemon=True).start()
+
+    def end_warm_up(self, version: str, why: str) -> None:
+        """A prepare's warm-up ends: the workers it started, or found starting, that are not ready yet stop, and it
+        starts no more, so no start-up runs beside its designers' calls (the coordinator after lane S2b's S2-19). Those
+        ready stay."""
+        with self.cond:
+            token, started = self.warming.pop(version, (None, set()))
+            cut = [w for w in started if not w.ready.is_set() and not w.dead.is_set()]
+            for worker in cut:
+                worker.retiring = True
+            self.cond.notify_all()
+        for worker in cut:
+            worker.kill()
+        if cut:
+            with contextlib.suppress(Exception):
+                self.service.log(f"warm-up: {len(cut)} worker(s) still starting stopped at {why}; "
+                                 f"{len(started) - len(cut)} of its warm-up ready")
+
+    def cold_start_s(self, version: str) -> float:
+        """About what a new worker of the engine takes to be ready: the median of its recent starts, else COLD_START_S."""
+        forced = os.environ.get("THEODORE_COLD_START_S")
+        if forced:
+            with contextlib.suppress(ValueError):
+                return max(0.0, float(forced))
+        seen = list(self.starts.get(version) or ())
+        return min(5.0, max(0.2, statistics.median(seen))) if seen else COLD_START_S
 
     def worker_ready(self, worker: "Worker") -> None:
         said = [f for f in (worker.info.get("features") or []) if isinstance(f, str)]
         if said:
             self.features.setdefault(worker.spec.version, set()).update(said)
         with self.cond:
+            with contextlib.suppress(Exception):
+                self.starts.setdefault(worker.spec.version, collections.deque(maxlen=8)).append(
+                    time.perf_counter() - worker.started_perf)
             self.cond.notify_all()
         for hook in list(self.on_release):
             with contextlib.suppress(Exception):
@@ -977,7 +1088,11 @@ class Pool:
                         self.cond.wait(0.02)             # a long call waiting a moment for the warm worker
                         continue
                     starting = [w for w in live if not w.ready.is_set()]
-                    if not spawned and len(live) < most and len(starting) < len(waiting):
+                    grow = not spawned and len(live) < most and len(starting) < len(waiting)
+                    # With workers there, one comes free before a new one would be ready, or the call has waited
+                    # that long already: only then does it start one (COLD_START_S).
+                    wait_more = self.cold_start_s(spec.version) - (time.monotonic() - waited_from) if live else 0.0
+                    if grow and wait_more <= 0:
                         spawned = True
                         self.cond.release()
                         try:
@@ -998,7 +1113,7 @@ class Pool:
                         finally:
                             self.cond.acquire()
                         continue
-                    self.cond.wait(0.25)
+                    self.cond.wait(min(0.25, wait_more) if grow and wait_more > 0 else 0.25)
             finally:
                 waiting.remove(ticket)
                 self.cond.notify_all()
@@ -1049,6 +1164,9 @@ class Pool:
                 idle = sorted([w for w in live if not w.busy and w.ready.is_set()],
                               key=lambda w: (getattr(w, "build_threads", None) == full_threads(), w.last_used))
                 keep = 1 if group == current else 0
+                count, until = self.kept.get(group, (0, 0.0))
+                if now < until:                 # a Studio deck's workers, until its designers' saves (BURST_KEEP_S)
+                    keep = max(keep, count)
                 for worker in idle[:max(0, len(live) - keep)]:
                     if now - worker.last_used > IDLE_SHRINK_S:
                         worker.retire(0)
