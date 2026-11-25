@@ -833,6 +833,7 @@ class BuildAhead(ServiceCase):
         # Lane S2's rig 7: single-part aheads ran three at a time and 12 of 15 were still queued when their designers
         # applied. A burst's saved parts now go as one several-part ahead per worker allowed (one here: two workers,
         # one kept idle), so they all start building at once.
+        self.env["THEODORE_TIMINGS"] = "1"          # the engine's own line goes under the ahead's (lane S2)
         self.service()
         lead = self.prepared(3)
         for name in ("s01", "s02", "s03"):
@@ -844,7 +845,9 @@ class BuildAhead(ServiceCase):
         self.assertEqual(len({row["pid"] for row in starts}), 1, "in one call, on one worker")
         first_built = min(row["t"] for row in rows if row["event"] == "ahead-built")
         self.assertTrue(all(row["t"] <= first_built for row in starts), "all started before any was built")
-        self.assertIn("ahead: 3 part(s) (s01, s02, s03) done", (self.box.home / "logs" / "service.log").read_text())
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertRegex(log, r"ahead: 3 part\(s\) \(s01, s02, s03\) done in \d+ ms \(exit 0\): 3 built; [^\n]*\n"
+                              r"    timings: apply-parts 3 part\(s\) 300 ms")
 
     def test_nothing_is_built_ahead_without_the_feature_or_a_second_idle_worker(self):
         for env in ({"FAKE_APPLY_AHEAD": ""}, {"THEODORE_SERVICE_WORKERS": "1"}):

@@ -160,6 +160,8 @@ while True:
             for target in targets:
                 note("ahead-built", target)
                 rows.append({"ok": True, "ahead": "built", "part": target, "slides": 1, "ms": 300})
+            if os.environ.get("THEODORE_TIMINGS") == "1":   # the engine's own line (lanes F and G)
+                say(f"timings: apply-parts {len(rows)} part(s) 300 ms (ahead.build 250, ahead.write 50)\n", "stderr")
             if len(rows) == 1:
                 say(json.dumps(rows[0], indent=2) + "\n")
             else:
