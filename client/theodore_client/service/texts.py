@@ -702,7 +702,7 @@ class Texts:
                 with contextlib.suppress(OSError):
                     found = entry.stat(follow_symlinks=False)
                     if stat.S_ISREG(found.st_mode) and 0 < found.st_size <= specimens.MAX_BYTES \
-                            and 0 <= now - found.st_mtime <= SHEET_FILES_KEEP_S and (best is None or found.st_mtime > best[1]):
+                            and specimens.sheet_file_recent(found.st_mtime, now) and (best is None or found.st_mtime > best[1]):
                         best = (entry.path, found.st_mtime, match.group(1))
             if best is not None:
                 with contextlib.suppress(OSError):
