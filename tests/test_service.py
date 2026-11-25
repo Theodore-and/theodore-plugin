@@ -1632,44 +1632,6 @@ class BuildAhead(ServiceCase):
         self.assertTrue(self.wait_for(("ahead-built", "s01")), self.events())
         self.assertNotIn(("ahead-cancelled", "s01"), self.events(), "the ahead was left alone")
 
-    def test_a_burst_of_four_parts_takes_all_three_workers_and_a_call_then_waits_for_the_first_freed(self):
-        # The coordinator, 25 Nov: in a pool of three (4 processors) a burst of four parts or more builds ahead on all
-        # three workers. A call that comes meanwhile cancels none of those aheads: it has the first worker freed, and
-        # the log says what it waited.
-        self.env.update({"THEODORE_SERVICE_WORKERS": "3", "FAKE_AHEAD_S": "1.5"})
-        self.service()
-        lead = self.prepared(4)
-        names = ["s01", "s02", "s03", "s04"]
-        for name in names:
-            self.save(lead, name, f"slide {name}, saved\n")
-        self.assertTrue(all(self.wait_for(("ahead-start", name)) for name in names), self.events())
-        rows = [json.loads(line) for line in self.aheads_file.read_text().splitlines()]
-        self.assertEqual(len({row["pid"] for row in rows if row["event"] == "ahead-start"}), 3, "on all three workers")
-        began = time.monotonic()
-        other = self.call(self.client_, self.got, "other", ["--help"])
-        waited = time.monotonic() - began
-        self.assertEqual(Collector.done(other)["exit"], 0)
-        self.assertGreater(waited, 0.3, "it waited for a worker: every one was building ahead")
-        self.assertLess(waited, 6.0)
-        self.assertTrue(all(self.wait_for(("ahead-built", name)) for name in names), self.events())
-        self.assertEqual([e for e in self.events() if e[0] == "ahead-cancelled"], [], "no ahead was cancelled for it")
-        log = self.wait_log(r"ahead: a call waited \d+ ms for a worker while build-aheads ran")
-        self.assertRegex(log, r"ahead: a call waited \d+ ms for a worker while build-aheads ran")
-
-    def test_a_burst_of_three_parts_in_a_pool_of_three_leaves_a_worker_for_the_calls(self):
-        self.env.update({"THEODORE_SERVICE_WORKERS": "3", "FAKE_AHEAD_S": "2"})
-        self.service()
-        lead = self.prepared(3)
-        for name in ("s01", "s02", "s03"):
-            self.save(lead, name, f"slide {name}, saved\n")
-        self.assertTrue(all(self.wait_for(("ahead-start", name)) for name in ("s01", "s02", "s03")), self.events())
-        rows = [json.loads(line) for line in self.aheads_file.read_text().splitlines()]
-        self.assertEqual(len({row["pid"] for row in rows if row["event"] == "ahead-start"}), 2, "two build, one stays idle")
-        began = time.monotonic()
-        other = self.call(self.client_, self.got, "other", ["--help"])
-        self.assertEqual(Collector.done(other)["exit"], 0)
-        self.assertLess(time.monotonic() - began, 1.5, "at once, on the worker kept idle")
-
     def test_nothing_is_built_ahead_without_the_feature_or_a_second_idle_worker(self):
         for env in ({"FAKE_APPLY_AHEAD": ""}, {"THEODORE_SERVICE_WORKERS": "1"}):
             with self.subTest(env=env):
@@ -1797,7 +1759,7 @@ class AheadUnit(unittest.TestCase):
         full10, full7, small = (4, 4), (3, 3), (1, 1)
         self.assertEqual(ahead.shares(15, [full10, small, small, small], 32), [6, 3, 3, 3], "8 processors, one worker idle")
         self.assertEqual(ahead.shares(8, [full7, small], 32), [6, 2], "4 processors, one worker idle")
-        self.assertEqual(ahead.shares(8, [full7, small, small], 32), [4, 2, 2], "4 processors, were all three taken")
+        self.assertEqual(ahead.shares(8, [full7, small, small], 32), [4, 2, 2], "were three workers taken")
         self.assertEqual(ahead.shares(15, [small] * 4, 32), [4, 4, 4, 3], "equal workers: equal shares")
         self.assertEqual(ahead.shares(3, [(10, 10), small, small], 32), [1, 1, 1], "each worker taken gets a part")
         self.assertEqual(ahead.shares(2, [full10, small, small], 32), [1, 1, 0], "fewer parts than workers")
@@ -1826,80 +1788,6 @@ class AheadUnit(unittest.TestCase):
         self.assertGreater(ahead.last_picture(4, 4, 4), ahead.last_picture(4, 1, 1) / 4, "threads do not divide a part's whole cost")
         self.assertEqual(ahead.last_picture(5, 4, 4) - ahead.last_picture(4, 4, 4),
                          ahead.PART_SERIAL + ahead.PART_BUILD / 4 + ahead.PICTURE_ROUND, "a fifth picture is a second round")
-
-    def test_a_pool_of_three_gives_a_burst_of_four_parts_every_worker_and_a_larger_pool_keeps_one_idle(self):
-        # The coordinator, 25 Nov, on lane S2's S2-23 and S2-24: rig 7 (4 processors) has three workers; with one
-        # kept idle its 8 parts go 6 and 2 and the fuller worker's pictures come 172 to 193 ms late on a second deck.
-        # A pool of three gives a burst of four parts or more all three; a pool of four or more keeps one idle as
-        # before; and once a call waits, no ahead takes a worker, so the call has the first one freed.
-        from types import SimpleNamespace
-        from unittest import mock
-
-        from theodore_client.service import ahead, workers
-
-        def worker(threads):
-            flags = {name: threading.Event() for name in ("ready", "warmed", "dead")}
-            flags["ready"].set()
-            flags["warmed"].set()
-            return SimpleNamespace(build_threads=threads, render_threads=threads, busy=False, rank=None, keys=set(),
-                                   calls=0, retiring=False, fatal=None, **flags)
-
-        def pool_of(most, *threads):
-            with mock.patch.object(workers, "pool_sizes", return_value=(1, most)):
-                pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
-            pool.workers["9.9"] = [worker(t) for t in threads]
-            return pool
-        three = pool_of(3, 1, 3, 1)
-        small, full, other = three.workers["9.9"]
-        self.assertTrue(three.whole_pool_for(4) and three.whole_pool_for(15))
-        self.assertFalse(three.whole_pool_for(3), "a burst of three parts leaves a worker idle")
-        self.assertEqual((three.ahead_slots("9.9", 8), three.ahead_slots("9.9", 3), three.ahead_slots("9.9")), (3, 2, 2))
-        taken = [three.take_for_ahead("9.9", 8) for _ in range(4)]
-        self.assertIs(taken[0], full, "the most threads first")
-        self.assertEqual({id(w) for w in taken[1:3]}, {id(small), id(other)})
-        self.assertIsNone(taken[3])
-        self.assertEqual(ahead.shares(8, [(w.build_threads, w.render_threads) for w in taken[:3]], 32), [4, 2, 2])
-        # A call comes while every worker builds ahead: it waits, and when a worker is freed no ahead takes it first.
-        three.waiting["9.9"] = [(workers.RANKS["write"], 1)]
-        full.busy = False
-        self.assertEqual(three.ahead_slots("9.9", 8), 0, "none while a call waits")
-        self.assertIsNone(three.take_for_ahead("9.9", 8), "the freed worker is the waiting call's")
-        three.waiting["9.9"] = []
-        self.assertIs(three.take_for_ahead("9.9", 8), full, "with no call waiting, the next ahead may take it")
-        # Three parts in a pool of three: one worker stays idle.
-        few = pool_of(3, 3, 1, 1)
-        self.assertIsNotNone(few.take_for_ahead("9.9", 3))
-        self.assertIsNotNone(few.take_for_ahead("9.9", 3))
-        self.assertIsNone(few.take_for_ahead("9.9", 3), "the last idle worker stays for the calls")
-        # A pool of four or more (8 processors: five) keeps one idle whatever the burst; so does a pool of two.
-        for most, threads in ((4, (3, 1, 1, 1)), (5, (4, 1, 1, 1, 1)), (2, (1, 1))):
-            pool = pool_of(most, *threads)
-            self.assertFalse(pool.whole_pool_for(15), most)
-            self.assertEqual(pool.ahead_slots("9.9", 15), len(threads) - 1, most)
-            got = [pool.take_for_ahead("9.9", 15) for _ in threads]
-            self.assertEqual(sum(w is not None for w in got), len(threads) - 1, f"one of {most} stays idle")
-            self.assertIsNone(got[-1])
-
-    def test_a_call_that_finds_every_worker_on_a_whole_pool_bursts_aheads_cancels_none_of_them(self):
-        # A foreground call that finds no idle worker cancels the youngest ahead running; not one of a burst that was
-        # given the pool's every worker (in Studio that call is a designer's apply, which wants those builds): it
-        # waits for the first worker freed.
-        from types import SimpleNamespace
-
-        from theodore_client.service import ahead
-
-        def running(started, whole):
-            return SimpleNamespace(done=threading.Event(), cancelled=threading.Event(), started=started, whole_pool=whole,
-                                   members=[SimpleNamespace(version="9.9")])
-        cancelled = []
-        watch = SimpleNamespace(lock=threading.Lock(), running=[running(1.0, True), running(2.0, True), running(3.0, True)],
-                                _cancel=lambda call, why: cancelled.append((call.started, why)))
-        ahead.Ahead.starved(watch, "9.9")
-        self.assertEqual(cancelled, [], "a whole-pool burst's aheads go on")
-        watch.running.append(running(0.5, False))
-        watch.running.append(running(0.7, False))
-        ahead.Ahead.starved(watch, "9.9")
-        self.assertEqual(cancelled, [(0.7, "a call waits for a worker")], "the youngest of the others, as before")
 
     def test_a_home_group_goes_out_as_soon_as_all_of_it_is_in(self):
         # Lane S2's S2-9: the parts an ahead built on one worker waited 32 to 118 ms for the window while the rest of the
@@ -1955,9 +1843,8 @@ class AheadUnit(unittest.TestCase):
         from theodore_client.service import ahead, workers
         sent = []
         keys = workers._KeyLock()                                                   # noqa: SLF001
-        pool = SimpleNamespace(on_starved=[], has_feature=lambda _v, _n: True, ahead_slots=lambda _v, _parts=0: 1, keys=keys,
-                               take_for_ahead=lambda _v, _parts=0: SimpleNamespace(), whole_pool_for=lambda _parts: False,
-                               idle_count=lambda _v: 1, remember_group=lambda _keys, _worker: None,
+        pool = SimpleNamespace(on_starved=[], has_feature=lambda _v, _n: True, ahead_slots=lambda _v: 1, keys=keys,
+                               take_for_ahead=lambda _v: SimpleNamespace(), remember_group=lambda _keys, _worker: None,
                                run_ahead=lambda call, worker, argv, env: sent.append(argv) or 0)
         service = SimpleNamespace(log=lambda _m: None, stopping=threading.Event(), relays_attached=lambda: 1)
         builder = ahead.Ahead(service, pool)

@@ -60,7 +60,6 @@ class _Call:
         self.stats = {part.path: part.seen for part in members}     # the deck.js each part is built from
         first = members[0]
         self.id = f"ahead-{os.path.basename(first.path)}-{len(members)}-{int(time.monotonic() * 1000)}"
-        self.whole_pool = False             # of a burst given the pool's every worker: no waiting call cancels it
         self.cwd = first.cwd
         self.images = False
         self.deadline_ms = None
@@ -233,12 +232,10 @@ class Ahead:
                 self.service.log(f"ahead: {os.path.basename(part.path)} reused by its apply; {self._counts_text()}")
 
     def starved(self, group: str) -> None:
-        """A foreground call found no idle worker: the youngest ahead running on that engine is cancelled. Not one of
-        a burst that was given the pool's every worker (the coordinator, 25 Nov): in Studio the calls that come during
-        its aheads are its designers' own applies, which want those builds; the call takes the first worker freed."""
+        """A foreground call found no idle worker: the youngest ahead running on that engine is cancelled."""
         with self.lock:
             mine = [c for c in self.running if not c.done.is_set() and not c.cancelled.is_set()
-                    and c.members[0].version == group and not c.whole_pool]
+                    and c.members[0].version == group]
             youngest = max(mine, key=lambda c: c.started, default=None)
         if youngest is not None:
             self._cancel(youngest, "a call waits for a worker")
@@ -318,7 +315,7 @@ class Ahead:
                 oldest = min(p.ready_since for p in ready)
                 if lead not in complete and now - burst.changed < POLL_S and now - oldest < SETTLE_S:
                     continue                        # its saves are still coming: they go together
-                slots = self.pool.ahead_slots(version, len(ready))
+                slots = self.pool.ahead_slots(version)
                 if slots <= 0:
                     continue
                 for part in ready:                  # a part whose workspace another command holds waits
@@ -332,13 +329,10 @@ class Ahead:
                     continue
                 taken = []
                 for _ in range(max(1, min(slots, len(free)))):
-                    worker = self.pool.take_for_ahead(version, len(ready))
+                    worker = self.pool.take_for_ahead(version)
                     if worker is None:
                         break
                     taken.append(worker)
-                # A burst that took the pool's every worker (Pool.whole_pool_for): a call that comes meanwhile waits
-                # for the first one freed and cancels none of these aheads (`starved`).
-                whole = bool(taken) and self.pool.whole_pool_for(len(ready)) and self.pool.idle_count(version) == 0
                 # Shares by what each worker's build and render threads make of a part (`shares`): every worker's
                 # last picture as early as the split allows, so no designer waits for the fullest worker's.
                 sizes = shares(len(free), [(getattr(w, "build_threads", None) or 1, getattr(w, "render_threads", None) or 1)
@@ -347,7 +341,6 @@ class Ahead:
                 for worker, size in zip(taken, sizes):
                     chunk, start = free[start:start + size], start + size
                     call = _Call(chunk)
-                    call.whole_pool = whole
                     for part in chunk:
                         part.ahead, part.built, part.ready_since = call, part.seen, None
                     self.running.append(call)
