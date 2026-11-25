@@ -82,6 +82,7 @@ class Call:
         self.image_count = 0
         self.lock = threading.Lock()
         self.worker = None                 # set by the pool while a worker runs it (for cancel)
+        self.after: list = []              # run once its done frame is sent (the timing line: lane S2's S2-9)
         self.fingerprint = self._fingerprint()
         self.detached_by_deadline = False
         self.worker_images = False         # a worker sent its own image frames
@@ -287,6 +288,9 @@ class Router:
                          "TELL THE USER: Theodore hit an internal problem; I am retrying.\n")
             code, pending = EXIT_INTERNAL, []
         call.finish(code, pending)
+        for hook in call.after:            # after the answer, never on its path
+            with contextlib.suppress(Exception):
+                hook()
 
     def call_ended(self, call: Call) -> None:
         with self.lock:

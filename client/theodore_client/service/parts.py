@@ -213,6 +213,7 @@ class Gatherer:
         if twice:                               # after the waiting one: the part's key lock keeps them in turn
             return self.pool.run(call, version, argv, env, None)
         if alone:
+            self.pool.leave_group(member.key)
             answer = self._alone(call, version, argv, env)
             with contextlib.suppress(Exception):
                 if isinstance(getattr(call, "timing", None), dict):
@@ -266,6 +267,12 @@ class Gatherer:
             lead.timer = None
             if not lead.pending:
                 return
+            argv, env = list(lead.argv), dict(lead.env)
+            early = self._home_groups(version, lead)
+            if early:                               # complete home groups: out now, not at the window's end
+                self._launch(version, argv, env, early, len(lead.pending), "at once: every part of their ahead is in")
+                if not lead.pending:
+                    return
             if not force and self.on_way.get(shape[1], 0) > 0 and \
                     time.monotonic() - lead.first_pending < GATHER_CAP_S:
                 lead.timer = threading.Timer(GATHER_S, self._cut, args=(shape,))     # others of it are on their way
@@ -339,6 +346,41 @@ class Gatherer:
             threading.Thread(target=self._run_batch, args=(version, argv, env, batch, home), name="parts-batch",
                              daemon=True).start()
 
+    def _home_groups(self, version: str, lead: _Lead) -> list:
+        """(members, worker) for each idle worker holding an ahead group whose every part not yet applied is waiting
+        here (lane S2's S2-9: home groups waited 32 to 118 ms for the window while the rest of the burst came). They
+        leave lead.pending; the caller holds self.lock."""
+        found = []
+        homes: dict[int, tuple] = {}
+        for member in lead.pending:
+            home = self.pool.idle_home(member.key)
+            if home is not None:
+                homes.setdefault(id(home), (home, []))[1].append(member)
+        for home, members in homes.values():
+            have = {m.key for m in members}
+            left = set().union(*(self.pool.group_left(m.key) for m in members))
+            if not left or not left <= have or self._free(version) <= 0:
+                continue
+            found.append((members, home))
+            self._claim(version)
+            lead.pending = [m for m in lead.pending if m not in members]
+        if found:
+            lead.last_dispatch = time.monotonic()
+        return found
+
+    def _launch(self, version: str, argv: list[str], env: dict, launch: list, left: int, how: str) -> None:
+        """Start these builds (the caller holds self.lock: the threads do the rest)."""
+        with contextlib.suppress(Exception):
+            self.pool.service.log(f"parts: {sum(len(b) for b, _h in launch)} of a deck in {len(launch)} build(s) "
+                                  f"({', '.join(str(len(b)) for b, _h in launch)}) on the worker that built their "
+                                  f"ahead, {how}{f', {left} waiting' if left else ''}")
+        sent = time.perf_counter()
+        for batch, home in launch:
+            for member in batch:
+                member.sent = sent
+            threading.Thread(target=self._run_batch, args=(version, argv, env, batch, home), name="parts-batch",
+                             daemon=True).start()
+
     def _starting(self, version: str) -> bool:
         with self.pool.cond:
             return any(not w.ready.is_set() for w in self.pool._live(version))     # noqa: SLF001
@@ -365,6 +407,8 @@ class Gatherer:
             acquired()
 
     def _run_batch(self, version: str, argv: list[str], env: dict, batch: list[_Member], prefer=None) -> None:
+        for member in batch:                    # out now: the rest of its ahead group no longer waits for it
+            self.pool.leave_group(member.key)
         if len(batch) == 1:                     # a share of one: the plain apply (one part's answer, as alone)
             member = batch[0]
             index = next(i for i, arg in enumerate(argv[1:], 1) if not arg.startswith("-"))

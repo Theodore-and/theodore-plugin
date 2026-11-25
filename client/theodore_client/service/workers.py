@@ -659,6 +659,7 @@ class Pool:
         self._arrivals = 0
         self.on_release: list = []                  # called with the version when a worker is free again (parts.py)
         self.on_starved: list = []                  # called with the version when a call finds no idle worker (ahead.py)
+        self.ahead_groups: dict[str, set] = {}      # a part's key -> the keys its ahead built with it, not applied yet
         self.features: dict[str, set] = {}          # per engine version: what a ready worker of it said it can do
         self.keys = _KeyLock()
         self.closed = False
@@ -822,6 +823,28 @@ class Pool:
         if key:
             with self.cond:
                 self.affinity[key] = worker
+
+    def remember_group(self, keys: list, worker: "Worker") -> None:
+        """The parts one ahead built on `worker`: each is remembered there, and as one group whose applies may go out
+        together as soon as all of them are in (parts.py)."""
+        group = {key for key in keys if key}
+        with self.cond:
+            for key in group:
+                self.affinity[key] = worker
+                self.ahead_groups[key] = group
+
+    def group_left(self, key: str | None) -> set:
+        """The keys of `key`'s ahead group whose applies have not gone out yet (empty when it has none)."""
+        with self.cond:
+            return set(self.ahead_groups.get(key or "", ()))
+
+    def leave_group(self, key: str | None) -> None:
+        """`key`'s apply goes out: the rest of its group no longer waits for it."""
+        if key:
+            with self.cond:
+                group = self.ahead_groups.pop(key, None)
+                if group is not None:
+                    group.discard(key)
 
     def idle_home(self, key: str | None) -> "Worker | None":
         """The idle worker that holds `key`'s workspace, or None."""
