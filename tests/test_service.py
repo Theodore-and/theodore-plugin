@@ -660,6 +660,23 @@ class StudioParts(ServiceCase):
             self.call(self.client_, self.got, tag + name, ["apply", str(lead / "parts" / name), "--hold", hold], wait=False)
         return {name: self.got.wait(tag + name, 60) for name in names}
 
+    def test_a_build_takes_at_most_the_burst_over_the_pool_and_the_rest_go_as_workers_free(self):
+        # Lane S2's rig 7: with three workers busy, 12 parts went to the one free worker as one build of 2 to 4 s while
+        # the others came free within 0.5 s. A build now takes at most ceil(parts / workers): 4 here (8 on 2).
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
+        self.service()
+        lead = self.prepared(8)
+        self.call(self.client_, self.got, "busy", ["sleep", "1.0"], wait=False)     # one worker held for a while
+        time.sleep(0.3)
+        names = [f"s{i:02d}" for i in range(1, 9)]
+        frames_ = self.burst(lead, names)
+        batches = []
+        for name in names:
+            self.assertEqual(Collector.done(frames_[name])["exit"], 0, frames_[name])
+            batches.append(json.loads(Collector.stdout(frames_[name]).splitlines()[0]).get("batch", 1))
+        self.assertLessEqual(max(batches), 4, f"at most ceil(8 parts / 2 workers) in one build: {batches}")
+        self.got.wait("busy", 30)
+
     def test_a_burst_goes_in_one_build_per_free_worker_and_each_gets_its_own_answer(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
         self.service()

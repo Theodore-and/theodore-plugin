@@ -236,7 +236,7 @@ def _parts_coming(service, version: str, args: list[str], call, env: dict | None
             service.parts.prepared(lead, at_once=False)
         return
     if lead and answer.get("prepared") == "parts":
-        service.parts.prepared(lead, at_once=True)
+        service.parts.prepared(lead, at_once=True, count=count)
         with contextlib.suppress(Exception):
             service.ahead.announced(version, lead, parts, env or {}, call.cwd)
     service.pool.warm_up(version, count)

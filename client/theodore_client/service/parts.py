@@ -106,6 +106,7 @@ class Gatherer:
         self.pool = pool
         self.lock = threading.Lock()
         self.bursts: dict[str, float] = {}          # lead (real path) -> when its prepare announced a burst
+        self.sizes: dict[str, int] = {}             # lead (real path) -> how many parts its prepare announced
         self.leads: dict[tuple, _Lead] = {}          # (version, lead, the rest of argv, env) -> its gathering
         self.claimed: dict[str, int] = {}            # per version: free workers promised to runs not yet started
         self.on_way: dict[str, int] = {}             # per lead: part applies arrived at the service, not yet here
@@ -113,13 +114,27 @@ class Gatherer:
 
     # --- what prepare said -----------------------------------------------------------------------------------------
 
-    def prepared(self, lead: str, at_once: bool) -> None:
+    def prepared(self, lead: str, at_once: bool, count: int | None = None) -> None:
         real = os.path.realpath(lead)
         with self.lock:
             if at_once:
                 self.bursts[real] = time.monotonic()
+                if isinstance(count, int) and count > 0:
+                    self.sizes[real] = count
+                else:
+                    self.sizes.pop(real, None)
             else:
                 self.bursts.pop(real, None)
+                self.sizes.pop(real, None)
+
+    def _cap(self, lead: str) -> int:
+        """The most parts one build takes: the burst over the pool, ceil(parts / workers) (4 for 15 parts on 4 workers;
+        lane S2's rig 7: with build-aheads holding three workers, 12 dropped parts went to the one free worker as one
+        build of 2 to 4 s while the others came free within 0.5 s). The rest wait for the next worker to come free."""
+        size = self.sizes.get(lead)
+        if not size:
+            return MOST_IN_BATCH
+        return max(1, min(MOST_IN_BATCH, -(-size // max(1, int(getattr(self.pool, "most", 1) or 1)))))
 
     # --- a part's apply --------------------------------------------------------------------------------------------
 
@@ -263,7 +278,7 @@ class Gatherer:
                 if free <= 0 and force:
                     free = 1
                 if free > 0:
-                    share = max(1, min(MOST_IN_BATCH, -(-len(lead.pending) // free)))
+                    share = max(1, min(self._cap(shape[1]), -(-len(lead.pending) // free)))
                     while lead.pending and free > 0:
                         batch, lead.pending = lead.pending[:share], lead.pending[share:]
                         launch.append(batch)
