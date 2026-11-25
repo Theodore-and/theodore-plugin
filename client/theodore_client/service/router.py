@@ -38,6 +38,7 @@ COUNTERS = ("spawned", "deck_hashes", "deckjs_full_parses", "packages_written", 
 TIMING_LINES = ("timings: ",)       # the engine's own, under THEODORE_TIMINGS=1 (lanes F and G: one line a verb)
 
 
+ORPHAN_GRACE_S = float(os.environ.get("THEODORE_ORPHAN_GRACE_S") or 10.0)   # a dead session's call, cancelled, then this
 SLOW_LOG_S = 30.0                  # a call running longer: its thread's stack in the log, once a minute
 SLOW_LOG_EVERY_S = 60.0
 # However a call is stuck, its caller gets an answer: past the workers' own ceiling (CALL_CEILING_S) by a margin.
@@ -355,6 +356,40 @@ class Router:
         with contextlib.suppress(Exception):
             call.out(lost_text(f"did not finish this command within {int(ROUTER_CEILING_S // 60)} minutes", False))
             call.finish(EXIT_INTERNAL)
+
+    def abandon_session(self, session_id: str) -> None:
+        """A relay's session ended with calls of it running: nobody waits for them (K's A3b: fifteen hung calls kept
+        the service up after the session closed). Each is cancelled; one still running ORPHAN_GRACE_S later has its
+        worker stopped, or, stuck before one, is closed; then the service can leave."""
+        with self.lock:
+            calls = [c for c in self.calls.values()
+                     if c.session == session_id and c.client_role == "relay" and not c.finished.is_set()]
+        if not calls:
+            return
+        for call in calls:
+            call.cancelled.set()
+            worker = call.worker
+            if worker is not None:
+                with contextlib.suppress(Exception):
+                    worker.cancel(call)
+        self.service.log(f"session ended with {len(calls)} call(s) running: cancelled")
+        timer = threading.Timer(ORPHAN_GRACE_S, self._end_orphans, args=(calls,))
+        timer.daemon = True
+        timer.start()
+
+    def _end_orphans(self, calls: list[Call]) -> None:
+        for call in calls:
+            if call.finished.is_set():
+                continue
+            worker = call.worker
+            self.service.log(f"call {call.tool} {' '.join(call.args[:2])} ({call.id}) still running after its session "
+                             f"ended: {'its worker stopped' if worker is not None else 'closed'}")
+            if worker is not None:
+                with contextlib.suppress(Exception):
+                    worker._stop("ran on after its session ended", "was stopped: its session ended")    # noqa: SLF001
+            else:
+                with contextlib.suppress(Exception):
+                    call.finish(EXIT_CANCELLED)
 
     def running_calls(self) -> list[Call]:
         with self.lock:

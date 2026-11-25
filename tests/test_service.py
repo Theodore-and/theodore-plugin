@@ -700,6 +700,19 @@ class Lifecycle(ServiceCase):
         relay.close()
         self.assertTrue(wait_gone(record["pid"], 15), "gone after the relay's linger, not 60 s after the shell command")
 
+    def test_a_sessions_hung_call_does_not_keep_the_service_after_the_session_ends(self):
+        # K's A3b (rig 1): fifteen hung calls kept the service and its workers up past the 3-minute count.
+        self.env["THEODORE_ORPHAN_GRACE_S"] = "1"
+        record = self.service()
+        client, got = self.connect()
+        self.call(client, got, "hung", ["echo", "--freeze"], wait=False)       # stuck: it answers nothing, not a cancel
+        time.sleep(1.0)
+        client.close()                                                        # the session ends
+        self.assertTrue(wait_gone(record["pid"], 15), "the call stopped after the grace, then the linger: gone")
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("session ended with 1 call(s) running: cancelled", log)
+        self.assertIn("still running after its session ended: its worker stopped", log)
+
     def test_a_removed_home_ends_the_service_and_stays_removed(self):
         record = self.service()
         client, got = self.connect()
