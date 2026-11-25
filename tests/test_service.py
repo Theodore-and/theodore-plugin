@@ -1177,7 +1177,7 @@ class FirstCall(ServiceCase):
     short calls to come never starts beside it. A new user's first command (`start --from` as the service starts) took
     18 to 29 s on rig 9 (2 processors) with a spare worker started beside it, against 0.2 to 3 s the same command 30 s
     later; a `start` 30 s after its session opened took 2.2 to 2.3 s on rig 6 (4 processors) against 1.7 to 1.9 s with
-    no spare (starts-f)."""
+    no spare (starts-f). The pool's second worker starts the moment that call has answered."""
 
     def answer(self, got, call_id: str) -> dict:
         return json.loads(Collector.stdout(got.wait(call_id, 60)).splitlines()[0])
@@ -1209,6 +1209,34 @@ class FirstCall(ServiceCase):
                 first = self.answer(got, "first")
                 self.assertNotEqual(json.loads(Collector.stdout(done).splitlines()[0])["pid"], first["pid"])
                 self.stop_service()
+
+
+    def test_the_second_worker_starts_at_the_first_calls_answer_and_a_short_queue_still_grows_nothing(self):
+        """The coordinator's ruling (26 Nov): no spare while the first call runs; the pool's second worker within a
+        moment of its answer, so it is warm when a Studio deck's burst begins; and a burst's short queue still starts
+        no worker (S2b's rule: a call that would queue less than a start pays none)."""
+        self.env.update({"THEODORE_SERVICE_WORKERS": "4", "FAKE_WARM_AFTER": "60", "THEODORE_COLD_START_S": "30"})
+        self.service()
+        client, got = self.connect()
+        deck = self.box.tmp / "deck"
+        deck.mkdir()
+        self.call(client, got, "first", ["render", str(deck), "--hold", "2"], wait=False)
+        time.sleep(1.2)
+        self.assertEqual(self.serving(), 1, "a second worker started beside the first call")
+        first = self.answer(got, "first")
+        answered = time.monotonic()
+        while self.serving() < 2 and time.monotonic() - answered < 3.0:
+            time.sleep(0.02)
+        self.assertEqual(self.serving(), 2, "the second worker did not start within a moment of the first call's answer")
+        self.wait_log(r"(?s)worker \S+ ready.*worker \S+ ready")
+        # A burst's short queue on the two workers, the pool with room for four: the calls that wait a moment start none.
+        for n in range(4):
+            self.call(client, got, f"b{n}", ["echo", "--hold", "0.4"], wait=False)
+        done = [got.wait(f"b{n}", 30) for n in range(4)]
+        self.assertEqual([Collector.done(frames)["exit"] for frames in done], [0] * 4)
+        self.assertEqual(sum(int((Collector.done(frames).get("counters") or {}).get("spawned") or 0) for frames in done), 0)
+        self.assertEqual(self.serving(), 2, "a short queue grew the pool")
+        self.assertEqual(len({json.loads(Collector.stdout(frames).splitlines()[0])["pid"] for frames in done} | {first["pid"]}), 2)
 
 
 class FirstCallUnit(unittest.TestCase):
@@ -1255,25 +1283,27 @@ class FirstCallUnit(unittest.TestCase):
             self.assertEqual(self.settle(started, 0), [], f"warmed {warmed}")
             self.assertEqual(taken.spare_due, how)
 
-    def test_once_the_long_call_has_answered_it_starts_only_where_the_machine_has_the_processors(self):
+    def test_once_the_long_call_has_answered_the_second_worker_starts_on_any_machine(self):
         how = ("spec", "9.9", None, 3)
-        for cores, expected in ((1, []), (2, []), (3, []), (4, [how]), (8, [how])):
+        for cores in (1, 2, 4, 8):
             workers, pool, started = self.pool(cores=cores)
-            self.assertEqual(workers.SPARE_AFTER_CALL_CORES, 4)
             taken = self.worker(warmed=cores % 2 == 0)
             taken.spare_due = how
             pool.workers["9.9"] = [taken]
             pool._release(taken)
-            self.assertEqual(self.settle(started, len(expected)), expected, f"{cores} processors")
+            self.assertEqual(self.settle(started, 1), [how], f"{cores} processors")
             self.assertIsNone(taken.spare_due)
             self.assertFalse(taken.busy)
-        # never a third worker for it, and nothing owed where none was held back
+        # never a third worker for it (a call that waited meanwhile started the second), nothing owed where none was
+        # held back, and nothing once the service is closing
         workers, pool, started = self.pool(cores=8)
         taken, other = self.worker(warmed=False), self.worker(warmed=True, busy=False)
         taken.spare_due = how
         pool.workers["9.9"] = [taken, other]
         pool._release(taken)
         pool._release(other)
+        taken.spare_due, pool.workers["9.9"], pool.closed = how, [taken], True
+        pool._release(taken)
         self.assertEqual(self.settle(started, 0), [])
 
 

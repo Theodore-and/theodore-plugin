@@ -64,9 +64,6 @@ RECYCLE_CALLS = 2000
 # a warm worker made every cold round's slowest 1.07-1.58 s against 0.13-0.21 s taking any idle one, since a new
 # worker's first calls are as fast as later ones). A worker silent past WARM_MAX_S counts as warm.
 WARM_MAX_S = 60.0
-# The spare a long call leaves for the short calls to come never starts beside that call (Pool._spare). On a machine
-# with this many processors it starts once the call has answered; with fewer (rig 9's 2) only when a call needs a worker.
-SPARE_AFTER_CALL_CORES = 4
 PRIME_WAIT_S = 20.0               # a session's folder is primed once a worker is ready, within this (Pool.prime_folder)
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
@@ -1150,9 +1147,10 @@ class Pool:
         machine from the call that is running: rig 9, 2 processors, a new user's first `start --from` 18 to 29 s with
         the spare and both warm-ups beside it against 0.2 to 3 s the same command 30 s later (25 Nov); rig 6, 4
         processors, a `start` 30 s after its session opened 2.2 to 2.3 s with the spare beside it against 1.7 to 1.9 s
-        without (starts-f). Held back, it starts at once when a call waits for a worker (`_acquire`), or when the long
-        call has answered (`_release`: the pool's second worker, there for the next long call, where the machine has
-        SPARE_AFTER_CALL_CORES processors; on a smaller one only a call that needs it starts it)."""
+        without (starts-f). Held back, it starts the moment the long call has answered (`_release`: the pool's second
+        worker; a user's next command comes seconds later, after the model's turn, so it is warm when a Studio deck's
+        burst begins: the coordinator's ruling, 26 Nov), or at once when a call waits for a worker meanwhile
+        (`_acquire`)."""
         taken.spare_due = how
 
     def _release(self, worker: Worker) -> None:
@@ -1160,10 +1158,9 @@ class Pool:
             worker.busy = False
             worker.rank = None
             how, worker.spare_due = getattr(worker, "spare_due", None), None
-            # The spare its long call held back: once that call has answered it starts where the machine has the
-            # processors for a second worker beside the first, and the pool has only the one.
-            spare = how is not None and not self.closed and (os.cpu_count() or 2) >= SPARE_AFTER_CALL_CORES \
-                and len(self._live(worker.group)) == 1
+            # The spare its long call held back starts now that the call has answered, where the pool still has only
+            # the one worker (a call that waited meanwhile started its own).
+            spare = how is not None and not self.closed and len(self._live(worker.group)) == 1
             self.cond.notify_all()
         if spare:
             threading.Thread(target=self._spawn, args=how, name="pool-spare", daemon=True).start()
