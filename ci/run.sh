@@ -41,6 +41,8 @@
 # Each runs with the pinned python-build-standalone CPython of the platform (ci/bootstrap_python.py), the same file
 # users get. Outputs: ci/out/<platform>/{shim,runtime}.log and .result (pass, fail or not-run), bundle/ (the
 # archives and manifest to publish), and ci/out/summary.txt. Containers mount the repository read-only.
+# Exit status: 0 only when every result the target wrote is pass (record, stamp, selected: the stamp was written; all:
+# that, and no row of this run failed or was not run). A release step still asks `require`: the stamp is what gates.
 
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -85,6 +87,12 @@ if [ "${CI_SHIM_PROCESSES:-1}" -gt 1 ] 2>/dev/null; then SHIM_SUITE="ci/par_unit
 else SHIM_SUITE="-m unittest discover -s tests -v"; RUNTIME_SUITE="-m unittest -v tests.test_launcher tests.test_installer"; fi
 result() { # name job pass|fail|not-run
   mkdir -p "$OUT/$1"; printf '%s\n' "$3" > "$OUT/$1/$2.result"; say "$1 $2: $3"
+}
+# name/job...: true only when each one's result is pass. A target's exit status comes from here (the end of this file),
+# never from its job function, whose last command is often a line it prints (2026-11-25: the engine's runner exited 0
+# with a failed shard for that reason, and this one exited 0 after any failed target).
+passed() {
+  for _p in "$@"; do [ "$(cat "$OUT/$_p.result" 2>/dev/null | tr -d '\r')" = pass ] || return 1; done
 }
 host_python() { command -v python3 || echo /usr/bin/python3; }
 fresh() { # dir: empty it (the variable is never empty: every caller passes a path under $OUT)
@@ -483,6 +491,7 @@ record() {
   else line="checks NOT green at $sha: ${bad:-a target without a green record at this commit} (rerun a target that failed for an outside reason alone: ci/run.sh <target>)"; fi
   echo "$line" | tee "$dest/result.txt"
   say "record: $dest"
+  case "$line" in "checks green at "*) return 0 ;; esac; return 1
 }
 # The stamp is assembled from per-target records at one commit. Each job that passes on a clean tree leaves a green
 # record of its own ($LOGS/green/plugin-parts/<sha>/<target>-<job>: its time and a copy of its log), so a target that
@@ -653,6 +662,7 @@ record_selected() { # after `selected`: the targets it ran must pass; the stamp 
   elif [ -n "$dirty" ]; then line="checks NOT green at $sha: the tree has uncommitted changes (no stamp)"
   else line="checks NOT green at $sha: ${bad% }"; fi
   echo "$line" | tee "$dest/result.txt"
+  case "$line" in "checks green at "*) return 0 ;; esac; return 1
 }
 
 # --- guards: one matrix run at a time on this Mac, a load ceiling, a hard deadline per job ------------------------------
@@ -747,6 +757,7 @@ case "$TARGET" in
 esac
 # `selected` and `all` take the lock themselves, after their Windows job has started: that job runs on its own machine,
 # and waiting in the queue first only delayed the longest job of the run.
+verdict=0
 case "$TARGET" in
   macos-arm64) heavy 5400 macos-arm64 run_mac macos-arm64 darwin-arm64 "" ;;
   macos-x64) heavy 5400 macos-x64 run_mac macos-x64 darwin-x64 "arch -x86_64" ;;
@@ -755,7 +766,7 @@ case "$TARGET" in
                if [ -n "$AZURE" ] && standing_name >/dev/null; then run_windows_standing
                elif [ -n "$AZURE" ]; then run_windows_azure; else run_windows; fi ;;
   archives) heavy 900 archives run_archives ;;
-  record) record ;;
+  record) record; verdict=$? ;;
   require) require ;;
   lock-status) sh "$ROOT/ci/lock.sh" status ;;
   lock-waits) sh "$ROOT/ci/lock.sh" waits ;;
@@ -763,7 +774,7 @@ case "$TARGET" in
   secrets) limited 900 secrets run_secrets ;;
   index) run_index ;;
   summary) summary ;;
-  stamp) note_parts; stamp_from_parts ;;
+  stamp) note_parts; stamp_from_parts; verdict=$? ;;
   plan) plan ;;
   shipped) plan; limited 900 shipped run_shipped ;;
   selected)
@@ -794,7 +805,7 @@ case "$TARGET" in
     release_lock
     if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     summary
-    record_selected ;;
+    record_selected; verdict=$? ;;
   all)
     # Windows runs remotely from the start (it is the longest), the local jobs one at a time beside it.
     wpid=
@@ -816,7 +827,10 @@ case "$TARGET" in
     if [ -n "$wpid" ]; then say "waiting for windows-x64 (the shared lock is released)"; wait "$wpid"; wpid=; mv "$OUT/windows-x64.run.log" "$OUT/windows-x64/run.log" 2>/dev/null; fi
     run_index
     summary
-    record ;;
+    record; verdict=$?
+    # the stamp may stand on an earlier run's green record of a row that did not pass in this run: say so, and exit
+    # non-zero all the same
+    [ -z "$bad" ] || { say "not pass in this run: ${bad% }"; verdict=1; } ;;
   *) sed -n '2,24p' "$0"; exit 64 ;;
 esac
 # A target run alone (a rerun after an outside failure) adds its record and writes the stamp when it completes the set.
@@ -824,3 +838,15 @@ case "$TARGET" in
   macos-arm64|macos-x64|linux-x64|linux-arm64|windows-x64|network|archives|secrets)
     [ -n "${CI_PARENT:-}" ] || { note_parts; stamp_from_parts || true; } ;;
 esac
+# The exit status says what the results say (see `passed`).
+case "$TARGET" in
+  macos-arm64|macos-x64|linux-x64|linux-arm64|windows-x64)
+    if [ -n "${CI_SHIM_ONLY:-}" ]; then passed "$TARGET/shim"; else passed "$TARGET/shim" "$TARGET/runtime"; fi ;;
+  network) passed network/job ;;
+  secrets) passed secrets/scan ;;
+  archives) passed archives/build ;;
+  index) passed index/build ;;
+  shipped) passed shipped/check ;;
+  record|stamp|selected|all) [ "$verdict" -eq 0 ] ;;
+esac
+exit $?
