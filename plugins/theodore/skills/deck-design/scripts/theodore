@@ -87,6 +87,7 @@ hot() {
       hot_py=$hot_u/runtime/$hot_rt/python/python.exe hot_client="$hot_home\\client\\$hot_cv"
       hot_launcher="$hot_home\\bin\\theodore.cmd"
       [ -f "$hot_py" ] && [ -f "$hot_u/client/$hot_cv/__main__.py" ] && [ -f "$hot_u/bin/theodore.cmd" ] || return 1
+      [ -f "$hot_u/client/$hot_cv/theodore_client/hot.py" ] && hot_client="$hot_client\\__main__.py" hot_s=-S
       THEODORE_SKILL_DIR=${THEODORE_SKILL_DIR:-${0%/*/*}}         # as the full launcher's Git Bash branch sets it
       ;;
     *)
@@ -97,15 +98,19 @@ hot() {
       hot_py=$hot_home/runtime/$hot_rt/python/bin/python3 hot_client=$hot_home/client/$hot_cv
       hot_launcher=$hot_home/bin/theodore
       [ -f "$hot_py" ] && [ -x "$hot_py" ] && [ -f "$hot_client/__main__.py" ] && [ -f "$hot_launcher" ] || return 1
+      [ -f "$hot_client/theodore_client/hot.py" ] && hot_client=$hot_client/__main__.py hot_s=-S
       [ "${0%/*}" = "$hot_home/bin" ] || THEODORE_SKILL_DIR=${THEODORE_SKILL_DIR:-${0%/*/*}}   # a skill folder's copy
       ;;
   esac
   THEODORE_HOME=$hot_home THEODORE_LAUNCHER=$hot_launcher
   export THEODORE_HOME THEODORE_LAUNCHER
   [ -n "${THEODORE_SKILL_DIR:-}" ] && export THEODORE_SKILL_DIR
+  # A client that has its own hot path (theodore_client/hot.py, 0.5.1 and later) starts by its main file with -S: Python
+  # then loads neither site nor runpy, and the client loads site itself when it needs the rest. A client from before
+  # 0.5.1 (after an update of the plugin and before the client's, or a client set back) starts by its folder, as ever.
   # `skill`: whatever it says goes to standard output and it exits 0, whatever the client does (see below); a child.
   if [ "${1:-}" = skill ]; then
-    "$hot_py" -I "$hot_client" "$@" 2>&1
+    "$hot_py" -I $hot_s "$hot_client" "$@" 2>&1
     [ $? -eq 126 ] && return 1
     exit 0
   fi
@@ -113,15 +118,15 @@ hot() {
   # client (in Git Bash a forked copy is one more process started), and a start the system refuses (exit 126) returns
   # here, so the full launcher below says so (BLOCKED_BY_POLICY). A shell without it (dash) runs the client as a child.
   if command -v shopt >/dev/null 2>&1 && shopt -s execfail 2>/dev/null; then
-    exec "$hot_py" -I "$hot_client" "$@"
+    exec "$hot_py" -I $hot_s "$hot_client" "$@"
     return 1
   fi
-  "$hot_py" -I "$hot_client" "$@"
+  "$hot_py" -I $hot_s "$hot_client" "$@"
   hot_rc=$?
   [ "$hot_rc" -eq 126 ] && return 1
   exit "$hot_rc"
 }
-hot_home= hot_rt= hot_cv= hot_py= hot_client= hot_launcher= hot_value= hot_rc= hot_rest= hot_u=
+hot_home= hot_rt= hot_cv= hot_py= hot_client= hot_launcher= hot_value= hot_rc= hot_rest= hot_u= hot_s=
 hot "$@"
 
 # `skill <name>` prints a skill's instructions as a skill file's body, for a host that injects a command's output into

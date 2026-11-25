@@ -1995,10 +1995,12 @@ class HotPath(ServiceCase):
 
     HEAVY = ("theodore_client.cli", "theodore_client.core", "theodore_client.account", "theodore_client.api",
              "theodore_client.service.shell", "theodore_client.service.endpoint", "pathlib", "subprocess", "hashlib",
-             "ssl", "urllib", "email", "http")
+             "ssl", "urllib", "email", "http", "re", "fnmatch", "json", "threading", "ctypes", "struct", "socket",
+             "site", "runpy", "__future__")
+    OWN = {"theodore_client", "theodore_client.hot"}        # every module the hot path reads from a file of Python source
 
     def run_client(self, *args: str, env: dict | None = None, stdin: str | None = None):
-        return subprocess.run([sys.executable, "-I", "-X", "importtime", str(CLIENT_DIR), *args],
+        return subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(CLIENT_DIR / "__main__.py"), *args],
                               env={**self.env, **(env or {})}, cwd=str(self.box.tmp), input=stdin, capture_output=True,
                               text=True, timeout=60)
 
@@ -2006,10 +2008,24 @@ class HotPath(ServiceCase):
     def imported(result) -> set:
         return {line.split("|")[-1].strip() for line in result.stderr.splitlines() if line.startswith("import time:")}
 
+    @staticmethod
+    def from_source(names) -> set:
+        """Those of `names` this Python reads from a .py file: not built in, frozen or an extension module."""
+        import importlib.util
+        found = set()
+        for name in names:
+            try:
+                spec = importlib.util.find_spec(name)
+            except (ImportError, ValueError):
+                spec = None
+            if spec is not None and (spec.origin or "").endswith(".py"):
+                found.add(name)
+        return found
+
     def test_importing_it_loads_nothing_heavy(self):
         code = ("import sys; sys.path.insert(0, sys.argv[1]); import theodore_client.hot; "
                 "print('\\n'.join(sorted(sys.modules)))")
-        loaded = set(subprocess.run([sys.executable, "-I", "-c", code, str(CLIENT_DIR)], capture_output=True, text=True,
+        loaded = set(subprocess.run([sys.executable, "-I", "-S", "-c", code, str(CLIENT_DIR)], capture_output=True, text=True,
                                     timeout=60).stdout.split())
         self.assertIn("theodore_client.hot", loaded)
         self.assertEqual(sorted(name for name in loaded if name.split(".")[0] in {h.split(".")[0] for h in self.HEAVY}
@@ -2027,6 +2043,12 @@ class HotPath(ServiceCase):
         loaded = self.imported(result)
         self.assertIn("theodore_client.hot", loaded)
         self.assertFalse(loaded & set(self.HEAVY), sorted(loaded & set(self.HEAVY)))
+        # It stays light: on a Windows test machine each module read from a file is about 1.5 ms of a short command.
+        # Besides Python's own first modules and `os`, a call reads two: the package and hot.py. One more is a
+        # decision, never an accident: put what it needs into hot.py, or load it only where a call needs it.
+        bare = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", "-c", "import os, sys, time"],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(self.from_source(loaded - self.imported(bare)), self.OWN)
         skill = self.run_client("skill", "pptx")
         self.assertEqual(skill.returncode, 0, "a skill's injected command exits 0, as through the client")
 
@@ -2045,6 +2067,94 @@ class HotPath(ServiceCase):
         self.assertIn("theodore_client.cli", self.imported(result), "another service's folder: the client says so")
         self.assertIn("belongs to the Theodore service at https://another.example", result.stdout)
 
+    def test_the_full_client_has_the_runtimes_packages_as_in_a_start_without_S(self):
+        # The launchers start the client with -S (no site: the hot path needs none of it). What the hot path does not
+        # answer runs in the full client, which loads site first: sys.path is what a start without -S has.
+        code = ("import json, runpy, sys\nmain = sys.argv[1]\nsys.argv = [main, 'help']\n"
+                "try:\n    runpy.run_path(main, run_name='__main__')\nexcept SystemExit:\n    pass\n"
+                "print('SYS.PATH ' + json.dumps(sys.path))")
+        paths = {}
+        for flags in ("-I -S", "-I"):
+            result = subprocess.run([sys.executable, *flags.split(), "-c", code, str(CLIENT_DIR / "__main__.py")], env=self.env,
+                                    cwd=str(self.box.tmp), capture_output=True, text=True, timeout=60)
+            line = next((line for line in result.stdout.splitlines() if line.startswith("SYS.PATH ")), None)
+            self.assertTrue(line, result.stdout[-600:] + result.stderr[-600:])
+            paths[flags] = json.loads(line.split(" ", 1)[1])
+        self.assertEqual(paths["-I -S"], paths["-I"])
+        bare = subprocess.run([sys.executable, "-I", "-S", "-c", "import json, sys; print(json.dumps(sys.path))"],
+                              capture_output=True, text=True, timeout=60)
+        self.assertLess(len(json.loads(bare.stdout)), len(paths["-I -S"]), "this Python has packages for site to add")
+        self.assertIn("site", self.imported(self.run_client("help")), "a command of the full client: site is loaded for it")
+
+    @unittest.skipIf(os.name == "nt", "an interrupt signal sent to one process: macOS and Linux")
+    def test_ctrl_c_cancels_the_call_and_waits_for_its_end(self):
+        import signal
+        self.service()
+        self.run_client("pptx", "echo", "first")
+        proc = subprocess.Popen([sys.executable, "-I", "-S", str(CLIENT_DIR / "__main__.py"), "pptx", "sleep", "30"], env=self.env,
+                                cwd=str(self.box.tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.default_int_handler))
+        self.wait_log(r"sleep", 15)
+        time.sleep(1.0)
+        started = time.monotonic()
+        proc.send_signal(signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 130, out + err)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(json.loads(out.splitlines()[-1]), {"slept": "30", "cancelled": True}, "the engine was told, and its end waited for")
+        self.assertNotIn("Traceback", err)
+
+    def test_a_read_that_ctrl_c_interrupts_on_windows_goes_on_where_it_was(self):
+        # The pipe's read waits in _winapi, which Ctrl-C ends with EINTR and no KeyboardInterrupt of its own: that comes
+        # in the sleep that follows. The read in progress and the bytes that came stay with the stream, so the frames
+        # after the cancel are read whole.
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client import hot
+        body = hot.dumps({"t": "done", "id": "c", "exit": 130}).encode("utf-8")
+        data = len(body).to_bytes(4, "little") + body
+
+        class Overlapped:
+            event = 7
+
+            def __init__(self, came: bytes):
+                self.came = came
+
+            def GetOverlappedResult(self, wait):
+                return len(self.came), 0
+
+            def getbuffer(self):
+                return self.came
+
+        class Winapi:
+            reads = [data[:3], data[3:9], data[9:]]         # a frame in three pieces
+            waits = [0, InterruptedError(), 0x102, 0, 0]    # the second read is interrupted, then waits once more
+            started = 0
+
+            def ReadFile(self, handle, size, overlapped):
+                Winapi.started += 1
+                return Overlapped(Winapi.reads.pop(0)), 997
+
+            def WaitForMultipleObjects(self, handles, wait_all, milliseconds):
+                step = Winapi.waits.pop(0)
+                if isinstance(step, Exception):
+                    raise step
+                return step
+
+        def interrupted(_seconds):
+            raise KeyboardInterrupt
+
+        stream = hot._Stream.__new__(hot._Stream)       # noqa: SLF001
+        stream._sock, stream._handle, stream._ov, stream._buffer, stream._winapi = None, 1, None, bytearray(), Winapi()
+        with mock.patch.object(hot, "time", SimpleNamespace(sleep=interrupted, monotonic=time.monotonic)):
+            with self.assertRaises(KeyboardInterrupt):
+                stream.read()
+        self.assertEqual((Winapi.started, bytes(stream._buffer)), (2, data[:3]), "one piece came; the second read is in progress")
+        self.assertIsNotNone(stream._ov)
+        self.assertEqual(stream.read(), {"t": "done", "id": "c", "exit": 130})
+        self.assertEqual((Winapi.started, Winapi.reads, bytes(stream._buffer)), (3, [], b""))
+
     def test_with_no_service_it_hands_over_to_the_client_which_starts_one(self):
         result = self.run_client("pptx", "echo", "cold")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-2000:])
@@ -2053,7 +2163,7 @@ class HotPath(ServiceCase):
         self.record = endpoint.read_service_json(self.box.home)
 
     def test_its_rules_are_the_clients(self):
-        from theodore_client import cli, hostenv, hot
+        from theodore_client import cli, hot
         from theodore_client.service import context, shell
         self.assertEqual(hot.LAUNCHER_TAIL, cli.LAUNCHER_TAIL)
         self.assertEqual(hot.FRONT_COMMANDS, shell.FRONT_COMMANDS)
@@ -2068,7 +2178,7 @@ class HotPath(ServiceCase):
                           ({"CLAUDECODE": "1"}, "claude-code"), ({"CODEX_HOME": "/x"}, "codex"),
                           ({"CLAUDE_PLUGIN_ROOT": "/p"}, "claude-code"), ({}, "other")):
             with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
-                self.assertEqual(hostenv.host_name(), host)
+                self.assertEqual(hot.host_name(), host)
 
 
 class Lifecycle(ServiceCase):

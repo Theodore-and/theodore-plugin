@@ -448,6 +448,12 @@ class WindowsShortCommand(unittest.TestCase):
         self.assertIn('if exist "%THEODORE_SHIM_HOME%\\client\\current.txt" set /p THEODORE_SHIM_CV=<"%THEODORE_SHIM_HOME%\\client\\current.txt"', lines)
         run = next(line for line in lines if line.startswith('"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I '))
         self.assertTrue(run.endswith(core.RUN_LINE_TAIL), "the launcher's own end of the run line")
+        # 0.5.1: by its main file with -S (no site, no runpy), and only a client that has its own hot path; a client from
+        # before 0.5.1 starts by its folder only, which the launcher does.
+        self.assertTrue(run.startswith('"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I -S '
+                                       '"%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" %*'), run[:160])
+        guard = 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\theodore_client\\hot.py" goto :launcher'
+        self.assertLess(lines.index(guard), lines.index(run))
         self.assertEqual(lines[lines.index(run) + 1:], [":launcher", '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*', ""],
                          "nothing after the run line but the launcher's label: the file may be rewritten while the client runs")
         for program in ("findstr", "cygpath", "powershell", "where "):
@@ -459,9 +465,11 @@ class WindowsShortCommand(unittest.TestCase):
         hot, rest = text.split('h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n', 1)
         self.assertNotIn("cygpath", hot, "the hot path starts no program before the client")
         self.assertIn(f"w={core._sh_quote(str(core.home().root))} h='/c/Users/T/.theodore'\n", hot)
-        self.assertIn('    exec "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n', hot,
+        self.assertIn('    exec "$h/runtime/$r/python/python.exe" -I -S "$w\\\\client\\\\$c\\\\__main__.py" "$@"\n', hot,
                       "the client gets Windows paths; exec: no forked copy of the shell waits beside it")
         self.assertLess(hot.index("shopt -s execfail"), hot.index("exec "), "a refused start falls through to the launcher, which says so")
+        self.assertLess(hot.index('[ -f "$h/client/$c/theodore_client/hot.py" ]'), hot.index("exec "),
+                        "only a client that has its own hot path starts by its main file; the launcher starts any other")
         self.assertIn('exec sh "$b/theodore" "$@"', rest)
         self.assertEqual((core._msys_path("C:\\Users\\Théo\\.theodore"), core._msys_path("\\\\srv\\share\\x"), core._msys_path("rel")),
                          ("/c/Users/Théo/.theodore", None, None))
@@ -472,6 +480,9 @@ class WindowsShortCommand(unittest.TestCase):
             lines = (Path(support.PLUGIN) / "skills" / skill / "scripts" / "theodore.cmd").read_bytes().decode("utf-8").split("\r\n")
             run = next(line for line in lines[lines.index(":run_client"):] if line.startswith('"%PY%" -I "%HOME_DIR%\\client\\%CV%" %*'))
             self.assertTrue(run.endswith(core.RUN_LINE_TAIL), skill)
+            hot = next(line for line in lines if line.startswith('"%PY%" -I -S "%HOME_DIR%\\client\\%CV%\\__main__.py" %*'))
+            self.assertTrue(hot.endswith(core.RUN_LINE_TAIL), skill)
+            self.assertLess(lines.index(hot), lines.index(":hot_miss"), "the hot path's own run line, before anything else")
         self.assertTrue(core.RUN_LINE_TAIL.startswith(" " + cli.LAUNCHER_TAIL))
 
     def test_the_written_batch_file_is_recognised_as_theodores(self):
@@ -741,6 +752,10 @@ class InstallCmdComputerLimit(unittest.TestCase):
         self.assertIn("theodore login --refused \"$LIMIT_REFUSED\"", sh)
 
 
+# theodore.cmd's two lines that start the client: the hot path's (by its main file, 0.5.1) and :run_client's (by its folder).
+RUN_LINES = ('"%PY%" -I -S "%HOME_DIR%\\client\\%CV%\\__main__.py" %* ', '"%PY%" -I "%HOME_DIR%\\client\\%CV%" %* ')
+
+
 class CutCommandLine(unittest.TestCase):
     """cmd ends a command line at its first line feed: an argument of several lines leaves a quote open, and the rest of
     theodore.cmd's run line arrives inside the client's last argument. The client knows that text and runs nothing."""
@@ -749,15 +764,38 @@ class CutCommandLine(unittest.TestCase):
         from theodore_client import cli
         for folder in ("pptx", "deck-design"):
             text = (support.PLUGIN / "skills" / folder / "scripts" / "theodore.cmd").read_text(encoding="ascii")
-            runs = [line for line in text.splitlines() if line.startswith('"%PY%" -I "%HOME_DIR%\\client\\%CV%" %* ')]
-            self.assertEqual(1, len(runs), folder)
-            self.assertTrue(runs[0].split(" %* ", 1)[1].startswith(cli.LAUNCHER_TAIL), runs[0][:160])
+            runs = [line for line in text.splitlines() if line.startswith(RUN_LINES)]
+            self.assertEqual(2, len(runs), f"{folder}: the hot path at the top and :run_client")
+            for run in runs:
+                self.assertTrue(run.split(" %* ", 1)[1].startswith(cli.LAUNCHER_TAIL), run[:160])
 
     def test_the_run_line_is_followed_by_the_end_of_the_batch(self):
         lines = (support.LAUNCHER_DIR / "theodore.cmd").read_text(encoding="ascii").splitlines()
-        run = next(i for i, line in enumerate(lines) if line.startswith('"%PY%" -I "%HOME_DIR%\\client\\%CV%" %* '))
-        self.assertEqual("call exit /b %%ERRORLEVEL%%", lines[run + 1], "a cut run line falls through only to the end of the batch")
-        self.assertLess(lines.index(":mcp_not_ready"), run, "no label follows the run line where a fall-through would reach it")
+        runs = [i for i, line in enumerate(lines) if line.startswith(RUN_LINES)]
+        self.assertEqual([lines[i].startswith(RUN_LINES[0]) for i in runs], [True, False], "the hot path at the top, and :run_client")
+        for run in runs:
+            self.assertEqual("call exit /b %%ERRORLEVEL%%", lines[run + 1], "a cut run line falls through only to the end of the batch")
+        self.assertLess(lines.index(":mcp_not_ready"), runs[1], "no label follows the run line where a fall-through would reach it")
+
+    def test_the_hot_path_is_the_files_first_lines_and_calls_nothing(self):
+        """cmd reads a batch file again for every line, and looks for a label through the whole file: the launcher's
+        hot path (a call and a goto before the client) took 78 ms over cmd's own 19 on a 4-core test machine. So it is
+        the first lines, with no call, no goto taken and no program before the client; and it starts by its main file
+        only a client that has its own hot path (a client from before 0.5.1 cannot start so: :run_client's line)."""
+        lines = (support.LAUNCHER_DIR / "theodore.cmd").read_text(encoding="ascii").splitlines()
+        run = next(i for i, line in enumerate(lines) if line.startswith(RUN_LINES[0]))
+        self.assertEqual(lines[run + 2], ":hot_miss")
+        self.assertLess(run, 26, "no line added before the client without a reason")
+        before = lines[:run]
+        self.assertEqual([line for line in before if line.startswith(":")], [], "no label before the client")
+        self.assertEqual({line.rsplit("goto ", 1)[1] for line in before if "goto " in line}, {":hot_miss"})
+        text = "\n".join(before).lower()
+        for word in ("call ", "findstr", "for /f", "|"):
+            self.assertNotIn(word, text, f"{word!r} on the hot path")
+        self.assertLessEqual(sum(line.startswith("rem ") for line in before), 1, "a comment line is a read of the file too")
+        self.assertIn('if not exist "%HOME_DIR%\\client\\%CV%\\theodore_client\\hot.py" goto :hot_miss', before)
+        for word in ("session-start", "uninstall", "__bootstrap"):
+            self.assertTrue(any(f'"%~1"=="{word}" goto :hot_miss' in line for line in before), word)
 
     def test_an_argument_holding_the_marker_is_refused_on_every_platform(self):
         from theodore_client import cli

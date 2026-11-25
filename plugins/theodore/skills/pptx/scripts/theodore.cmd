@@ -1,4 +1,29 @@
 @echo off
+setlocal EnableExtensions DisableDelayedExpansion
+rem The hot path (0.5.1): Theodore's Python and client at once; step 0 below says what it is and what it leaves out.
+set "HOME_DIR=%USERPROFILE%\.theodore"
+if not exist "%USERPROFILE%\.theodore\bin\launcher.json" if exist "%LOCALAPPDATA%\Theodore\bin\launcher.json" set "HOME_DIR=%LOCALAPPDATA%\Theodore"
+if defined THEODORE_HOME set "HOME_DIR=%THEODORE_HOME%"
+if "%HOME_DIR%"=="\.theodore" goto :hot_miss
+if /i "%~1"=="session-start" goto :hot_miss
+if /i "%~1"=="uninstall" goto :hot_miss
+if "%~1"=="__bootstrap" goto :hot_miss
+if not exist "%HOME_DIR%\bin\theodore.cmd" goto :hot_miss
+set "RT="
+set "CV="
+if exist "%HOME_DIR%\runtime\current.txt" set /p RT=<"%HOME_DIR%\runtime\current.txt"
+if exist "%HOME_DIR%\client\current.txt" set /p CV=<"%HOME_DIR%\client\current.txt"
+if not defined RT goto :hot_miss
+if not defined CV goto :hot_miss
+set "PY=%HOME_DIR%\runtime\%RT%\python\python.exe"
+if not exist "%PY%" goto :hot_miss
+if not exist "%HOME_DIR%\client\%CV%\theodore_client\hot.py" goto :hot_miss
+if /i not "%~dp0"=="%HOME_DIR%\bin\" if not defined THEODORE_SKILL_DIR for %%I in ("%~dp0..") do set "THEODORE_SKILL_DIR=%%~fI"
+set "THEODORE_HOME=%HOME_DIR%"
+set "THEODORE_LAUNCHER=%HOME_DIR%\bin\theodore.cmd"
+"%PY%" -I -S "%HOME_DIR%\client\%CV%\__main__.py" %* & if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else if errorlevel 131 (echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73) else call exit /b %%ERRORLEVEL%%
+call exit /b %%ERRORLEVEL%%
+:hot_miss
 rem Theodore launcher (Windows batch). The same file sits in every Theodore skill folder and in <home>\bin.
 rem
 rem What it does, in order:
@@ -37,10 +62,16 @@ if "%HOME_DIR%"=="\.theodore" goto :no_home
 set "STABLE=%HOME_DIR%\bin\theodore.cmd"
 set "CONF=%SELF_DIR%\launcher.json"
 set "B=%HOME_DIR%\state\bootstrap"
-rem --- 0. the hot path (0.4.34): once Theodore is set up, the client starts from here with no other program ---------
-rem cmd's own reads of the folder's records (:check_ready), where the steps below start findstr and cmd several times. None
-rem of them is needed then: the release keys were checked when Theodore was installed, the client checks the folder's
-rem service itself, and an update brings <home>\bin up to the newest launcher. Anything missing: the full launcher below.
+rem --- 0. the hot path: once Theodore is set up, the client starts with no other program ----------------------------
+rem cmd's own reads of the folder's records, where the steps below start findstr and cmd several times. None of them is
+rem needed then: the release keys were checked when Theodore was installed, the client checks the folder's service
+rem itself, and an update brings <home>\bin up to the newest launcher. Anything missing: the full launcher below.
+rem Since 0.5.1 it is this file's first lines, for a client that has its own hot path (theodore_client\hot.py, 0.5.1
+rem and later): no call and no goto before the client (cmd looks for a label through the whole file, and reads the file
+rem again for every line: 78 ms over cmd's own 19 on a 4-core test machine, 25 Nov 2026), and the client by its main
+rem file with -S (Python then loads neither site nor runpy; the client loads site itself when it needs the rest).
+rem The lines here are 0.4.34's, and start a client from before 0.5.1 (after an update of the plugin and before the
+rem client's, or a client set back): by its folder, which every client understands.
 if /i "%~1"=="uninstall" goto :not_hot
 if "%~1"=="__bootstrap" goto :not_hot
 call :check_ready

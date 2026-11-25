@@ -1304,11 +1304,10 @@ class HotPath(LauncherCase):
         helpers = [name for name in self.started() if name != "python"]
         self.assertGreaterEqual(len(helpers), 8, f"the full launcher's helper programs: {helpers}")
 
-    @unittest.skipIf(IS_WINDOWS, "the POSIX short command")
-    def test_the_short_command_starts_the_client_with_no_other_program(self):
+    def short_command(self) -> Path:
+        """The POSIX short command, as the client writes it for this home."""
         from theodore_client import core
         from unittest import mock
-        env = self.counting()
         with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.box.home), "HOME": str(self.box.user_home)}), \
                 mock.patch.object(core, "_HOME", None):
             texts = core.shim_texts()
@@ -1316,6 +1315,41 @@ class HotPath(LauncherCase):
         shim.parent.mkdir()
         shim.write_text(texts["theodore"])
         shim.chmod(0o755)
+        return shim
+
+    def test_a_client_without_its_own_hot_path_starts_by_its_folder(self):
+        """0.5.1: the launchers and the short command start the client by its main file with -S (Python then loads
+        neither site nor runpy). A client from before 0.5.1 (after an update of the plugin and before the client's, or
+        a client set back) cannot start so: under -I Python puts no script folder on sys.path, and that client's main
+        file imports its package. So only a client that has its own hot path (theodore_client/hot.py) starts by its
+        main file, and any other by its folder, as before."""
+        import subprocess
+        current = self.box.home / "client" / "current.txt"
+        self.addCleanup(current.write_text, current.read_text())
+        says = ("import sys\nprint('STARTED', 'by its main file' if sys.argv[0].endswith('__main__.py') else 'by its folder',"
+                " 'without site' if sys.flags.no_site else 'with site', sys.argv[1:])\n")
+        shim = None if IS_WINDOWS else self.short_command()
+        for version, own_hot_path, want in (("0.0.1", False, "STARTED by its folder with site ['version']"),
+                                            ("0.0.2", True, "STARTED by its main file without site ['version']")):
+            folder = self.box.home / "client" / version
+            (folder / "theodore_client").mkdir(parents=True)
+            (folder / "__main__.py").write_text(says)
+            if own_hot_path:
+                (folder / "theodore_client" / "hot.py").write_text("")
+            current.write_text(version)
+            with self.subTest(version, by="the launcher"):
+                result = self.run_launcher("version")
+                self.assertEqual(result.stdout.strip(), want, result.stdout + result.stderr)
+            if shim is not None:
+                with self.subTest(version, by="the short command"):
+                    result = subprocess.run([str(shim), "version"], env=self.box.env, capture_output=True, text=True, timeout=180,
+                                            cwd=str(self.box.tmp))
+                    self.assertEqual(result.stdout.strip(), want, result.stdout + result.stderr)
+
+    @unittest.skipIf(IS_WINDOWS, "the POSIX short command")
+    def test_the_short_command_starts_the_client_with_no_other_program(self):
+        env = self.counting()
+        shim = self.short_command()
         import subprocess
         run = lambda *args, **extra: subprocess.run([str(shim), *args], env={**self.box.env, **env, **extra}, capture_output=True,
                                                     text=True, timeout=180, cwd=str(self.box.tmp))
