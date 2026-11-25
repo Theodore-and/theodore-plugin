@@ -623,7 +623,7 @@
         "spawned": {
           "type": "integer",
           "minimum": 0,
-          "description": "processes started for this call (Node, LibreOffice, PowerPoint, Python, any)"
+          "description": "processes started for this call (Node, PowerPoint, Python, any)"
         },
         "deck_hashes": {
           "type": "integer",
