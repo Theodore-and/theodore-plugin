@@ -35,37 +35,7 @@ def enabled() -> bool:
     return resident() and (os.environ.get("THEODORE_SERVICE") or "").strip() != "0"
 
 
-def _same_stream(first, second) -> bool:
-    """stdout and stderr are one pipe, file or console (`2>&1`): the same device and file, or on Windows the same
-    object (CompareObjectHandles) or both on a console."""
-    try:
-        if os.name == "nt":
-            import ctypes
-            import msvcrt
-            one, two = msvcrt.get_osfhandle(first.fileno()), msvcrt.get_osfhandle(second.fileno())
-            if first.isatty() and second.isatty():
-                return True
-            compare = getattr(ctypes.windll.kernelbase, "CompareObjectHandles", None)
-            return bool(compare and compare(ctypes.c_void_p(one), ctypes.c_void_p(two)))
-        a, b = os.fstat(first.fileno()), os.fstat(second.fileno())
-        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
-    except (OSError, ValueError, AttributeError):
-        return False
-
-
-def stdio_flags() -> str:
-    """THEODORE_STDIO for a call: `stdout-tty`, `stderr-tty`, `shared` (comma-separated, none of them possible)."""
-    flags = []
-    out, err = sys.__stdout__, sys.__stderr__
-    for name, stream in (("stdout-tty", out), ("stderr-tty", err)):
-        try:
-            if stream is not None and stream.isatty():
-                flags.append(name)
-        except (OSError, ValueError):
-            pass
-    if out is not None and err is not None and _same_stream(out, err):
-        flags.append("shared")
-    return ",".join(flags)
+from ..hot import stdio_flags  # noqa: E402  (one rule for both fronts: the hot path's)
 
 
 def _stdin(args: list[str]) -> dict | None:

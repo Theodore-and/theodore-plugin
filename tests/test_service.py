@@ -1988,6 +1988,89 @@ class AheadUnit(unittest.TestCase):
             self.assertFalse(waiter.is_alive())
 
 
+class HotPath(ServiceCase):
+    """The short command's hot path (hot.py; the coordinator, 26 Nov: on Windows the launcher runs this client for every
+    command): a command for a running service loads only what reaching it needs, and anything else goes to the full
+    client exactly as before."""
+
+    HEAVY = ("theodore_client.cli", "theodore_client.core", "theodore_client.account", "theodore_client.api",
+             "theodore_client.service.shell", "theodore_client.service.endpoint", "pathlib", "subprocess", "hashlib",
+             "ssl", "urllib", "email", "http")
+
+    def run_client(self, *args: str, env: dict | None = None, stdin: str | None = None):
+        return subprocess.run([sys.executable, "-I", "-X", "importtime", str(CLIENT_DIR), *args],
+                              env={**self.env, **(env or {})}, cwd=str(self.box.tmp), input=stdin, capture_output=True,
+                              text=True, timeout=60)
+
+    @staticmethod
+    def imported(result) -> set:
+        return {line.split("|")[-1].strip() for line in result.stderr.splitlines() if line.startswith("import time:")}
+
+    def test_importing_it_loads_nothing_heavy(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import theodore_client.hot; "
+                "print('\\n'.join(sorted(sys.modules)))")
+        loaded = set(subprocess.run([sys.executable, "-I", "-c", code, str(CLIENT_DIR)], capture_output=True, text=True,
+                                    timeout=60).stdout.split())
+        self.assertIn("theodore_client.hot", loaded)
+        self.assertEqual(sorted(name for name in loaded if name.split(".")[0] in {h.split(".")[0] for h in self.HEAVY}
+                                and any(name == h or name.startswith(h + ".") for h in self.HEAVY)), [])
+
+    def test_a_command_for_the_running_service_goes_the_hot_path(self):
+        self.service()
+        first = self.run_client("pptx", "echo", "first")     # the client records the folder's service (state/environment)
+        self.assertIn("theodore_client.cli", self.imported(first), "a folder with no record yet: the client's path")
+        result = self.run_client("pptx", "echo", "hot")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-2000:])
+        answer = json.loads(result.stdout.splitlines()[0])
+        self.assertEqual((answer["argv"], answer["resident"]), (["echo", "hot"], "1"), "run in the service's worker")
+        self.assertIn("a line on standard error", result.stderr)
+        loaded = self.imported(result)
+        self.assertIn("theodore_client.hot", loaded)
+        self.assertFalse(loaded & set(self.HEAVY), sorted(loaded & set(self.HEAVY)))
+        skill = self.run_client("skill", "pptx")
+        self.assertEqual(skill.returncode, 0, "a skill's injected command exits 0, as through the client")
+
+    def test_the_full_client_runs_what_the_hot_path_does_not(self):
+        self.service()
+        self.run_client("pptx", "echo", "first")
+        cases = {"the shell route off": ({"THEODORE_SERVICE": "0"}, None, ["pptx", "echo", "x"]),
+                 "standard input to send": ({}, "piped text", ["pptx", "echo", "-"]),
+                 "not a service command": ({}, None, ["version"])}
+        for name, (env, stdin, args) in cases.items():
+            with self.subTest(name):
+                result = self.run_client(*args, env=env, stdin=stdin)
+                self.assertIn("theodore_client.cli", self.imported(result), name)
+        (self.box.home / "state" / "environment").write_text("https://another.example\n")
+        result = self.run_client("pptx", "echo", "x")
+        self.assertIn("theodore_client.cli", self.imported(result), "another service's folder: the client says so")
+        self.assertIn("belongs to the Theodore service at https://another.example", result.stdout)
+
+    def test_with_no_service_it_hands_over_to_the_client_which_starts_one(self):
+        result = self.run_client("pptx", "echo", "cold")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-2000:])
+        self.assertEqual(json.loads(result.stdout.splitlines()[0])["argv"], ["echo", "cold"])
+        self.assertIn("theodore_client.cli", self.imported(result))
+        self.record = endpoint.read_service_json(self.box.home)
+
+    def test_its_rules_are_the_clients(self):
+        from theodore_client import cli, hostenv, hot
+        from theodore_client.service import context, shell
+        self.assertEqual(hot.LAUNCHER_TAIL, cli.LAUNCHER_TAIL)
+        self.assertEqual(hot.FRONT_COMMANDS, shell.FRONT_COMMANDS)
+        self.assertEqual(hot.FIXED, context.FIXED)
+        for name in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_PLUGIN_ROOT", "CODEX_THREAD_ID",
+                     "THEODORE_HOME", "THEODORE_X", "THEODORE_", "THEODORE_lower", "THEODORE_A-B", "PATH", "HOME",
+                     "CLAUDE_CODE_ENTRYPOINT", "THEODORE_RESIDENT", "THEODORE_TIMINGS", "XTHEODORE_A"):
+            with self.subTest(name):
+                self.assertEqual(hot.passed(name), bool(context.ALLOWED.match(name)) and name not in context.FIXED)
+        from unittest import mock
+        for env, host in (({"THEODORE_HOST": "My Host!"}, "myhost"), ({"CLAUDE_CODE_REMOTE": "1"}, "claude-web"),
+                          ({"CLAUDECODE": "1"}, "claude-code"), ({"CODEX_HOME": "/x"}, "codex"),
+                          ({"CLAUDE_PLUGIN_ROOT": "/p"}, "claude-code"), ({}, "other")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(hostenv.host_name(), host)
+
+
 class Lifecycle(ServiceCase):
     def test_nothing_runs_after_the_last_relay_detaches(self):
         exits = self.box.tmp / "exit-frames.jsonl"

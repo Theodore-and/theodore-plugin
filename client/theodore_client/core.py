@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, hostenv
 from .contract import CLIENT_STATUSES, EXIT
 
 IS_WINDOWS = os.name == "nt"
@@ -265,51 +265,14 @@ def windows_on_arm() -> bool:
         return False
 
 
-def _flag(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() not in ("", "0", "false", "no")
-
-
-def _claude_cloud() -> bool:
-    """A Claude cloud session: a claude.ai chat, Cowork or the desktop app's chat (each a fresh machine), or Claude
-    Code on the web."""
-    return _flag("CLAUDE_CODE_REMOTE") or os.environ.get("CLAUDE_CODE_SESSION_ORIGIN") == "claude_ai_chat" \
-        or (os.environ.get("CLAUDE_CODE_ENTRYPOINT") or "").startswith("remote")
-
-
-def _chatgpt_cloud() -> bool:
-    """ChatGPT's Work mode or a Codex cloud task: a Codex runtime on a Linux machine of OpenAI's, behind its proxy."""
-    return sys.platform.startswith("linux") and _flag("CODEX_NETWORK_PROXY_ACTIVE") \
-        and (bool(os.environ.get("CODEX_PROXY_CERT")) or Path("/opt/codex/runtimes").is_dir())
+# Which assistant and session: hostenv.py, which the short command's hot path reads without loading this module.
+_flag, _claude_cloud, _chatgpt_cloud = hostenv.flag, hostenv.claude_cloud, hostenv.chatgpt_cloud
+host_name, session_id = hostenv.host_name, hostenv.session_id
 
 
 def codex_sandboxed() -> bool:
     """This command runs inside Codex's local sandbox (Codex sets CODEX_SANDBOX for the commands it sandboxes)."""
     return bool(os.environ.get("CODEX_SANDBOX")) and not _chatgpt_cloud()
-
-
-def host_name() -> str:
-    """The assistant that called us, as far as the environment says (sent as `host`).
-
-    claude-code: Claude Code on this computer, from its Bash tool, a skill's load command or the plugin's MCP server
-    (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_PLUGIN_ROOT). claude-web: a Claude cloud session. codex: Codex on this
-    computer (the variables Codex sets for the commands it runs). chatgpt: ChatGPT Work or a Codex cloud task."""
-    import re
-    explicit = re.sub(r"[^a-z0-9-]", "", (os.environ.get("THEODORE_HOST") or "").lower())[:32].lstrip("-")
-    if explicit:
-        return explicit
-    if _claude_cloud():
-        return "claude-web"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
-        return "claude-code"
-    if _chatgpt_cloud():
-        return "chatgpt"
-    # Before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs (a Codex desktop install was shown as Claude Code).
-    if any(os.environ.get(name) for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_HOME",
-                                             "CODEX_MANAGED_BY_NPM", "CODEX_VERSION")):
-        return "codex"
-    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
-        return "claude-code"
-    return "other"
 
 
 def host_executable(name: str) -> str | None:
@@ -358,15 +321,6 @@ def host_executable(name: str) -> str | None:
         except OSError:
             continue
     return None
-
-
-def session_id() -> str:
-    """The assistant session this command runs in, when the assistant says (Claude Code, Codex); else empty."""
-    for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value[:128]
-    return ""
 
 
 # Hosts that run Theodore on a machine of the assistant's own (a cloud sandbox), never on the user's computer.
