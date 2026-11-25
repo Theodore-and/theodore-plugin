@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, hot
 from .contract import CLIENT_STATUSES, EXIT
 
 IS_WINDOWS = os.name == "nt"
@@ -265,51 +265,14 @@ def windows_on_arm() -> bool:
         return False
 
 
-def _flag(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() not in ("", "0", "false", "no")
-
-
-def _claude_cloud() -> bool:
-    """A Claude cloud session: a claude.ai chat, Cowork or the desktop app's chat (each a fresh machine), or Claude
-    Code on the web."""
-    return _flag("CLAUDE_CODE_REMOTE") or os.environ.get("CLAUDE_CODE_SESSION_ORIGIN") == "claude_ai_chat" \
-        or (os.environ.get("CLAUDE_CODE_ENTRYPOINT") or "").startswith("remote")
-
-
-def _chatgpt_cloud() -> bool:
-    """ChatGPT's Work mode or a Codex cloud task: a Codex runtime on a Linux machine of OpenAI's, behind its proxy."""
-    return sys.platform.startswith("linux") and _flag("CODEX_NETWORK_PROXY_ACTIVE") \
-        and (bool(os.environ.get("CODEX_PROXY_CERT")) or Path("/opt/codex/runtimes").is_dir())
+# Which assistant and session: in hot.py, the short command's hot path, which reads them without loading this module.
+_flag, _claude_cloud, _chatgpt_cloud = hot.flag, hot.claude_cloud, hot.chatgpt_cloud
+host_name, session_id = hot.host_name, hot.session_id
 
 
 def codex_sandboxed() -> bool:
     """This command runs inside Codex's local sandbox (Codex sets CODEX_SANDBOX for the commands it sandboxes)."""
     return bool(os.environ.get("CODEX_SANDBOX")) and not _chatgpt_cloud()
-
-
-def host_name() -> str:
-    """The assistant that called us, as far as the environment says (sent as `host`).
-
-    claude-code: Claude Code on this computer, from its Bash tool, a skill's load command or the plugin's MCP server
-    (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_PLUGIN_ROOT). claude-web: a Claude cloud session. codex: Codex on this
-    computer (the variables Codex sets for the commands it runs). chatgpt: ChatGPT Work or a Codex cloud task."""
-    import re
-    explicit = re.sub(r"[^a-z0-9-]", "", (os.environ.get("THEODORE_HOST") or "").lower())[:32].lstrip("-")
-    if explicit:
-        return explicit
-    if _claude_cloud():
-        return "claude-web"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
-        return "claude-code"
-    if _chatgpt_cloud():
-        return "chatgpt"
-    # Before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs (a Codex desktop install was shown as Claude Code).
-    if any(os.environ.get(name) for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_HOME",
-                                             "CODEX_MANAGED_BY_NPM", "CODEX_VERSION")):
-        return "codex"
-    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
-        return "claude-code"
-    return "other"
 
 
 def host_executable(name: str) -> str | None:
@@ -358,15 +321,6 @@ def host_executable(name: str) -> str | None:
         except OSError:
             continue
     return None
-
-
-def session_id() -> str:
-    """The assistant session this command runs in, when the assistant says (Claude Code, Codex); else empty."""
-    for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value[:128]
-    return ""
 
 
 # Hosts that run Theodore on a machine of the assistant's own (a cloud sandbox), never on the user's computer.
@@ -641,7 +595,13 @@ def shim_texts() -> dict[str, str] | None:
     Since 0.4.34 each starts Theodore's client straight from its Python, with no other program (the launcher before it
     started about 20 in Git Bash: 1.14 s on the Windows test machine, 4.5 to 7 s on a laptop): the runtime and client
     are read from the folder's records (runtime/current.txt, client/current.txt) by the shell itself, so an update needs
-    no new short command. When anything is missing or not a plain name, it runs the full launcher, as before."""
+    no new short command. When anything is missing or not a plain name, it runs the full launcher, as before.
+
+    Since 0.5.1 it starts the client by its main file with -S: Python then loads neither site nor runpy (38 ms of
+    Python's start on a 4-core Windows test machine, 6 of them site's), and the client loads site itself when the
+    command needs more than the hot path (__main__.py). Only a client that has that hot path (theodore_client/hot.py)
+    is started so: the record may name a client from before 0.5.1 (one set back), which starts by its folder only, so
+    the launcher runs that one."""
     head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
     # The records hold plain names; a carriage return (a record written on Windows) is dropped, anything else is refused.
     read = ('r= c= ok=1\n'
@@ -674,12 +634,12 @@ def shim_texts() -> dict[str, str] | None:
                  "if not defined THEODORE_SHIM_RT goto :launcher\r\n"
                  "if not defined THEODORE_SHIM_CV goto :launcher\r\n"
                  'if not exist "%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" goto :launcher\r\n'
-                 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" goto :launcher\r\n'
+                 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\theodore_client\\hot.py" goto :launcher\r\n'
                  'if not exist "%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" goto :launcher\r\n'
                  'set "THEODORE_HOME=%THEODORE_SHIM_HOME%"\r\n'
                  'set "THEODORE_LAUNCHER=%THEODORE_SHIM_HOME%\\bin\\theodore.cmd"\r\n'
                  # One line, then the batch ends: this file may be replaced while the client runs (an update rewrites it).
-                 '"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%" %*'
+                 '"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I -S "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" %*'
                  + RUN_LINE_TAIL + "\r\n"
                  ":launcher\r\n"
                  '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n')
@@ -693,13 +653,13 @@ def shim_texts() -> dict[str, str] | None:
             hot = (f"w={_sh_quote(windows)} h={_sh_quote(msys)}\n"
                    f"if {claim}; then\n"
                    + "".join("  " + line + "\n" for line in read.splitlines()) +
-                   '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
+                   '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/theodore_client/hot.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
                    '    THEODORE_HOME=$w THEODORE_LAUNCHER="$w\\\\bin\\\\theodore.cmd"\n'
                    '    export THEODORE_HOME THEODORE_LAUNCHER\n'
                    # exec: no copy of this shell waits beside the client (in MSYS each one is a process started);
                    # execfail: a start the system refuses (a policy) returns here, and the launcher says so.
                    '    shopt -s execfail 2>/dev/null\n'
-                   '    exec "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n'
+                   '    exec "$h/runtime/$r/python/python.exe" -I -S "$w\\\\client\\\\$c\\\\__main__.py" "$@"\n'
                    '  fi\n'
                    'fi\n')
         return {
@@ -718,10 +678,10 @@ def shim_texts() -> dict[str, str] | None:
     lines = "#!/bin/sh\n" + head + f"h={_sh_quote(root)}\n"
     # A folder elsewhere is this short command's own (THEODORE_HOME set always); the default one yields to another.
     body = (read + 'p=$h/runtime/$r/python/bin/python3\n'
-            'if [ -n "$ok" ] && [ -f "$p" ] && [ -x "$p" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore" ]; then\n'
+            'if [ -n "$ok" ] && [ -f "$p" ] && [ -x "$p" ] && [ -f "$h/client/$c/theodore_client/hot.py" ] && [ -f "$h/bin/theodore" ]; then\n'
             '  THEODORE_HOME=$h THEODORE_LAUNCHER=$h/bin/theodore\n'
             '  export THEODORE_HOME THEODORE_LAUNCHER\n'
-            '  exec "$p" -I "$h/client/$c" "$@"\n'
+            '  exec "$p" -I -S "$h/client/$c/__main__.py" "$@"\n'
             'fi\n')
     if default:
         lines += 'if [ "${THEODORE_HOME:-$h}" = "$h" ]; then\n' + "".join("  " + line + "\n" for line in body.splitlines()) + "fi\n"
