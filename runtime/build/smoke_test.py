@@ -428,7 +428,7 @@ def main() -> int:
     parser.add_argument("--platform", required=True)
     parser.add_argument("--engine", type=Path, help="unpacked engine payload for a blank deck build (local only)")
     parser.add_argument("--extra-path", action="append", default=[], type=Path,
-                        help="directory added to PATH for the engine run (for example where soffice lives)")
+                        help="directory added to PATH for the engine run")
     parser.add_argument("--keep", action="store_true", help="keep the unpacked tree and print where it is")
     args = parser.parse_args()
 

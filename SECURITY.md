@@ -10,14 +10,11 @@ installer's are in `install/`.
 - Theodore runs only when your assistant (or you) calls the launcher, and in Claude Code through the plugin's one hook
   (`hooks/hooks.json`), which runs the launcher's `session-start` when Claude Code compacts or resumes a conversation
   (see "The session note" below). There is no background service and no scheduled task. Background downloads started
-  during setup end by themselves. Two helpers of the engine outlive the command that started them and stop by
-  themselves: its own helper process (it speeds up `render` and project sync), after up to 30 idle minutes, and the
-  LibreOffice an engine command started, after up to 10 idle minutes (from engine 1.0.0-rc.27 on macOS and Linux,
-  from 1.0.0-rc.28 on Windows too). Both also stop when Theodore is uninstalled or its cache is cleared. On a Mac,
+  during setup end by themselves. One helper of the engine outlives the command that started it and stops by itself:
+  its own helper process (it speeds up `render` and project sync), after up to 30 idle minutes. It also stops when
+  Theodore is uninstalled or its cache is cleared. On a Mac,
   `pptx doctor --powerpoint`, when it is run, opens a copy of the deck in your own PowerPoint and deletes the copy
-  afterwards (README.md says where it goes and what it does with a repair prompt). On a Mac the engine sets two of LibreOffice's own preferences
-  before it starts it (`ApplePersistenceIgnoreState` and `NSAppSleepDisabled` in `org.libreoffice.script`; README.md
-  says what each is for); the uninstall leaves them.
+  afterwards (README.md says where it goes and what it does with a repair prompt).
 - The engine process, which builds your decks, makes no network calls: it has no image search and no download
   command, and a picture given by a web address is refused. It never contacts Theodore.
 - The client is the only part that contacts Theodore.
@@ -50,8 +47,8 @@ Hosts: `api.theodoreand.ai` (API), `dl.theodoreand.ai` (downloads), `theodoreand
 pages). Each of these names resolves to several addresses; the client races them (the next one starts a quarter of a
 second after the one before) and keeps the one that answered in `state/addresses.json` (the address and when, nothing
 else) for up to 7 days, so that a network where one address does not answer costs that delay once, not at every
-command. Theodore fetches no LibreOffice: its own renderer draws the slides, and a LibreOffice already on the
-computer is used for what it cannot draw (after PowerPoint on Windows). On Windows, when Claude Code finds no Git
+command. Theodore's own renderer draws the slides, and PowerPoint, where it is installed on Windows, what it cannot
+draw. On Windows, when Claude Code finds no Git
 Bash, the installer fetches Git for Windows' PortableGit, unmodified, from `dl.theodoreand.ai` and otherwise from the
 project's own release on `github.com`, checked against a pinned SHA-256; no credential goes with either.
 

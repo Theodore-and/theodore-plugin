@@ -15,7 +15,7 @@
 # names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
 # before the first deck) as a background job and waits for it a few minutes at most, so that a host's time limit on
 # the assistant's command never stops it; registers the plugin in Claude Code and Codex when they are installed; starts
-# the asset packs (about 95 MB) in the background (it installs no LibreOffice: Theodore draws the slides itself); ends
+# the asset packs (about 95 MB) in the background; ends
 # with `theodore doctor`, or with SETUP_IN_PROGRESS while the background download goes on. Running it again is safe:
 # a code that was already used never removes the sign-in an earlier run saved.
 #

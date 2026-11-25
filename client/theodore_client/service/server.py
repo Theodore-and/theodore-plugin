@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import __version__
-from . import endpoint, folders, frames, router as routing, sessions as sessions_mod
+from . import cleanup, endpoint, folders, frames, router as routing, sessions as sessions_mod
 
 # After the last relay detaches: 100 s, so that the service, its workers and what they started (a warm office, which
 # takes up to 10 s to stop) have all ended 2 minutes after it (PLAN §3 A; DESIGN §3.5 "after 2 minutes").
@@ -170,6 +170,7 @@ class Service:
     def serve_forever(self) -> int:
         threading.Thread(target=self._tick_loop, name="service-tick", daemon=True).start()
         self.timers.start()
+        cleanup.start(self)         # what an earlier Theodore fetched and no longer used: removed, yielding to calls
         while not self.stopping.is_set():
             try:
                 conn = self.listener.accept()
