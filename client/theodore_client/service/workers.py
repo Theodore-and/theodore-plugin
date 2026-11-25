@@ -471,19 +471,25 @@ def pool_sizes() -> tuple[int, int]:
     if forced and forced.isdigit() and int(forced) > 0:
         return int(forced), int(forced)
     cores = os.cpu_count() or 2
-    ram = _ram_bytes() * MEMORY_SHARE
-    most = max(2, min(cores, int(ram // (WORKER_MB * (1 << 20))), MOST_WORKERS))
-    for _ in range(4):                          # each worker's render threads beyond the first cost memory too
-        each = WORKER_MB + (worker_threads(most) - 1) * RENDER_THREAD_MB
-        fits = max(2, min(most, int(ram // (each * (1 << 20)))))
-        if fits == most:
-            break
-        most = fits
+    budget = _ram_bytes() * MEMORY_SHARE / (1 << 20)
+    most = max(2, min(cores, int(budget // WORKER_MB), MOST_WORKERS))
+
+    def worker_mb(threads: int) -> float:       # each render thread beyond a worker's first costs memory too
+        return WORKER_MB + (threads - 1) * RENDER_THREAD_MB
+    # The warm worker at the machine's full thread counts, those a burst adds at the per-worker cap.
+    while most > 2 and worker_mb(full_threads()) + (most - 1) * worker_mb(worker_threads(most)) > budget:
+        most -= 1
     return 1, most
 
 
+def full_threads() -> int:
+    """The always-warm worker's threads, build and render: one fewer than the processors, at most 4 (the engine's own
+    rule): it serves the lone designer and the big renders (the coordinator, 25 Nov)."""
+    return min(4, max(1, (os.cpu_count() or 2) - 1))
+
+
 def worker_threads(most: int) -> int:
-    """Threads a worker builds and draws on in a pool of `most`: max(1, cores // most), at most 4 (lanes F and R)."""
+    """Threads of a worker started under load, in a pool of `most`: max(1, cores // most), at most 4 (lanes F, R)."""
     return min(4, max(1, (os.cpu_count() or 2) // max(1, most)))
 
 
@@ -569,17 +575,17 @@ class Pool:
                 run.__exit__(None, None, None)
 
     def _spawn(self, spec: Spec, group: str | None = None, env: dict | None = None, limit: int | None = None) -> Worker | None:
-        """A new worker of the group, started; None when `limit` workers of it live already. Each builds on
-        max(1, cores // pool size) Node threads and draws on as many (THEODORE_BUILD_THREADS, lane F, and
-        THEODORE_RENDER_THREADS, lane R; the coordinator, 25 Nov), so a burst's builds and pictures share the cores
-        instead of oversubscribing them."""
+        """A new worker of the group, started; None when `limit` workers of it live already. The first of an engine
+        (the always-warm one) builds and draws on the machine's full thread counts; one started under load, beside
+        others, on max(1, cores // pool size) (THEODORE_BUILD_THREADS, lane F, and THEODORE_RENDER_THREADS, lane R;
+        the coordinator, 25 Nov), so a burst's builds and pictures share the cores instead of oversubscribing them."""
         worker = Worker(self, spec, group, env)
         with self.cond:
             live = self._live(worker.group)
             if limit is not None and len(live) >= limit:
                 return None
             if env is None:
-                worker.build_threads = worker.render_threads = worker_threads(self.most)    # lanes F and R
+                worker.build_threads = worker.render_threads = self._threads_for_new(live)     # lanes F and R
             self.workers.setdefault(worker.group, []).append(worker)
         self._hold_engine_run()
         try:
@@ -620,6 +626,13 @@ class Pool:
                 if not live:
                     self._spawn(spec)
         threading.Thread(target=warm, name="pool-warm", daemon=True).start()
+
+    def _threads_for_new(self, live: list) -> int:
+        """Full counts for the only worker of an engine (or the first again after one died); the per-worker cap for
+        one started beside others, unless none of those holds the full counts (it went: the new one takes them)."""
+        if not any(getattr(w, "build_threads", None) == full_threads() for w in live) or not live:
+            return full_threads()
+        return worker_threads(self.most)
 
     def warm_up(self, version: str, count: int | None = None) -> None:
         """Workers of the engine started now, side by side and in the background, up to `count` (the pool's size):
@@ -774,7 +787,9 @@ class Pool:
         with self.cond:
             for group, workers in list(self.workers.items()):
                 live = [w for w in workers if not w.dead.is_set() and not w.retiring]
-                idle = sorted([w for w in live if not w.busy and w.ready.is_set()], key=lambda w: w.last_used)
+                # The worker kept warm is the one at the machine's full thread counts, else the most recently used.
+                idle = sorted([w for w in live if not w.busy and w.ready.is_set()],
+                              key=lambda w: (getattr(w, "build_threads", None) == full_threads(), w.last_used))
                 keep = 1 if group == current else 0
                 for worker in idle[:max(0, len(live) - keep)]:
                     if now - worker.last_used > IDLE_SHRINK_S:

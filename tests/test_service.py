@@ -307,10 +307,12 @@ class PoolSizing(unittest.TestCase):
 
         from theodore_client.service import workers
         gb = 1 << 30
-        # (64 cores, 256 GB): 16 workers of 4 render threads each, 1,350 MB a worker, fit within 40% of the memory;
-        # (64 cores, 32 GB): 16 by the plain share, but at 1,350 MB a worker 9 fit; (16 cores, 8 GB): 2 of 4 threads.
-        for cores, ram, most in ((4, 16 * gb, 4), (12, 16 * gb, 10), (8, 8 * gb, 5), (2, 4 * gb, 2), (1, 2 * gb, 2),
-                                 (64, 256 * gb, 16), (64, 32 * gb, 9), (16, 8 * gb, 2)):
+        # The warm worker at the machine's full threads (min(4, cores - 1)), those a burst adds at min(4, cores // most),
+        # 600 MB a worker and 250 MB more for each render thread beyond its first, within 40% of the memory:
+        # (4, 16 GB) 1,100 + 3 x 600; (12, 16 GB) 1,350 + 8 x 600, 9 not 10; (8, 8 GB) 3 workers, the added ones at 2
+        # threads; (64, 32 GB) 9 x 1,350; (16, 8 GB) 2 x 1,350.
+        for cores, ram, most in ((4, 16 * gb, 4), (12, 16 * gb, 9), (8, 8 * gb, 3), (2, 4 * gb, 2), (1, 2 * gb, 2),
+                                 (64, 256 * gb, 16), (64, 32 * gb, 9), (16, 8 * gb, 2), (8, 16 * gb, 8)):
             with self.subTest(cores=cores, ram=ram), mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": ""}), \
                     mock.patch.object(workers.os, "cpu_count", return_value=cores), \
                     mock.patch.object(workers, "_ram_bytes", return_value=ram):
@@ -319,6 +321,34 @@ class PoolSizing(unittest.TestCase):
             self.assertEqual(workers.pool_sizes(), (3, 3))
         with mock.patch.object(workers.os, "cpu_count", return_value=64):
             self.assertEqual((workers.worker_threads(16), workers.worker_threads(9), workers.worker_threads(64)), (4, 4, 1))
+        with mock.patch.object(workers.os, "cpu_count", return_value=4):
+            self.assertEqual((workers.full_threads(), workers.worker_threads(4)), (3, 1), "rig 2: the warm one 3, the rest 1")
+
+    def test_the_warm_worker_has_the_full_threads_and_is_the_one_kept(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import workers
+        with mock.patch.object(workers.os, "cpu_count", return_value=4), \
+                mock.patch.object(workers, "pool_sizes", return_value=(1, 4)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+            self.assertEqual(pool._threads_for_new([]), 3, "the first of an engine: the machine's full counts")
+            full = SimpleNamespace(build_threads=3)
+            self.assertEqual(pool._threads_for_new([full]), 1, "one started beside it, under load: the per-worker cap")
+            self.assertEqual(pool._threads_for_new([SimpleNamespace(build_threads=1)]), 3, "the full one went: taken again")
+            retired = []
+
+            def worker(threads, used):
+                return SimpleNamespace(build_threads=threads, last_used=used, busy=False, retiring=False,
+                                       dead=SimpleNamespace(is_set=lambda: False), ready=SimpleNamespace(is_set=lambda: True),
+                                       retire=lambda grace, name=f"{threads}@{used}": retired.append(name),
+                                       ask_stats=lambda: None)
+            now = time.monotonic()
+            # the full-thread worker used longest ago, the burst's ones since: the shrink still keeps the full one
+            pool.workers["9.9"] = [worker(3, now - 900), worker(1, now - 800), worker(1, now - 700)]
+            with mock.patch.object(workers.install, "selected_engine", return_value="9.9"):
+                pool.tick()
+            self.assertEqual(sorted(retired), [f"1@{now - 800}", f"1@{now - 700}"], "the warm worker stays")
 
     def test_the_queue_goes_by_expected_cost(self):
         from theodore_client.service import workers
@@ -464,7 +494,9 @@ class StudioParts(ServiceCase):
         self.assertLessEqual(len(set(batches) - {1}), 2, f"in equal shares: {batches}")
         lone = json.loads(Collector.stdout(self.burst(lead, ["s01"], hold="0", tag="later-")["s01"]).splitlines()[0])
         self.assertNotIn("batch", lone, "a part alone afterwards: the plain apply")
-        self.assertEqual(lone["build_threads"], str(min(4, max(1, (os.cpu_count() or 2) // 2))), "THEODORE_BUILD_THREADS")
+        cores = os.cpu_count() or 2
+        self.assertIn(lone["build_threads"], {str(min(4, max(1, cores - 1))), str(min(4, max(1, cores // 2)))},
+                      "THEODORE_BUILD_THREADS: the warm worker's full counts, or the cap of one started under load")
         self.assertEqual(lone["render_threads"], lone["build_threads"], "THEODORE_RENDER_THREADS, the same cap")
         log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
         self.assertRegex(log, r"parts: \d+ of a deck in \d+ build\(s\)", "the log says how a burst was built")
