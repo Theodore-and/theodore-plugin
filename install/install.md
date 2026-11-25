@@ -18,8 +18,8 @@ decks there too, and that workspace is the computer this page means.
                   then: try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}; & "$env:LOCALAPPDATA\Theodore-install\install.cmd" --code {{ACTIVATION_CODE}}
    Windows cmd:        (if not exist "%LOCALAPPDATA%\Theodore-install" mkdir "%LOCALAPPDATA%\Theodore-install") & curl.exe -q --proto =https -fsS --connect-timeout 10 --retry 2 --retry-delay 2 -o "%LOCALAPPDATA%\Theodore-install\install.cmd" https://theodoreand.ai/install.cmd
                   then: "%LOCALAPPDATA%\Theodore-install\install.cmd" --code {{ACTIVATION_CODE}}
-   It takes a few minutes the first time (about 230 MB; more on a computer with neither PowerPoint nor
-   LibreOffice): give the command a timeout of at least 15 minutes, or run it in the background and wait for it.
+   It takes a few minutes the first time (about 230 MB): give the command a timeout of at least 15 minutes, or run
+   it in the background and wait for it.
    Each download is tried up to three times.
    The installer prints its own SHA-256; the same value is shown on https://theodoreand.ai/install.
    What it sets up: Theodore for the assistants on this computer (Claude Code, Codex and the Claude app where

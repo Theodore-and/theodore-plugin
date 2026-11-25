@@ -611,7 +611,6 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
     _check_open(args)
     install.require_runtime()
     install.wait_for_packs(args)
-    install.wait_for_renderer(args)
     install.enforce_restrictions()
     version = install.engine_for(args)
     install.enforce_restrictions(version)

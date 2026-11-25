@@ -730,8 +730,9 @@ class StampedSite(unittest.TestCase):
         self.assertIn("43 to 58 MB each (15 to 21 MB to download)", text)
         self.assertNotIn("about 2.3 MB", text, "the engine download is the compiled build's, measured")
         plugin_readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
-        for host in ("dl.theodoreand.ai", "api.theodoreand.ai", "download.documentfoundation.org", "github.com"):
+        for host in ("dl.theodoreand.ai", "api.theodoreand.ai", "github.com"):
             self.assertIn(host, plugin_readme, "the plugin's README names every host something is fetched from or sent to")
+        self.assertNotIn("download.documentfoundation.org", plugin_readme, "Theodore fetches no LibreOffice (25 Nov 2026)")
         for word in ("hooks/hooks.json", "CLAUDE.md", "AGENTS.md", "settings.json", "Never sent"):
             self.assertIn(word, plugin_readme, "the plugin's README says what runs, what is sent and what the set-up changes")
         for word in ("pptx-soffice-profile", "theodore-pptx-locks", "theodore-specimens-"):

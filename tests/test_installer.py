@@ -471,7 +471,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         tail = result.stdout.strip().splitlines()[-4:]
         # The first line says whether a download still goes on after the installer: on Windows the rest of the runtime
-        # (or LibreOffice) is often still downloading in the background when it ends; elsewhere here it is done.
+        # is often still downloading in the background when it ends; elsewhere here it is done.
         self.assertIn(tail[0], ("Theodore is set up and signed in on this computer.",
                                 "Theodore is installed on this computer and finishes a download by itself in the next few minutes."),
                       result.stdout)

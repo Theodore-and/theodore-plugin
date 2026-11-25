@@ -15,7 +15,7 @@
 # names and checks its SHA-256 and size; starts the rest of the runtime and the engine (about 100 to 130 MB in all
 # before the first deck) as a background job and waits for it a few minutes at most, so that a host's time limit on
 # the assistant's command never stops it; registers the plugin in Claude Code and Codex when they are installed; starts
-# the asset packs (about 95 MB) and, on a Mac without LibreOffice, LibreOffice (about 300 MB) in the background; ends
+# the asset packs (about 95 MB) in the background (it installs no LibreOffice: Theodore draws the slides itself); ends
 # with `theodore doctor`, or with SETUP_IN_PROGRESS while the background download goes on. Running it again is safe:
 # a code that was already used never removes the sign-in an earlier run saved.
 #
@@ -32,7 +32,7 @@ PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 PIN_RUNTIME_ID="875c13a60af59e66"
 PIN_CLIENT_VERSION="0.5.0"
-PIN_CLIENT="client/client-0.5.0.tar 0d1337a6a7a2eddaa55f83f0dbd5c26d2f2cb96a2a8347ca68c1917bc5e77c91"
+PIN_CLIENT="client/client-0.5.0.tar ccb7c3969aac86c4205d1023752f8faac50b1e1a74579864a85910a399a09ba2"
 PIN_PYTHON_darwin_arm64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
 PIN_PYTHON_darwin_x64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
 PIN_PYTHON_linux_arm64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
@@ -564,10 +564,6 @@ if theodore whoami >/dev/null 2>&1; then
   theodore guide pptx >/dev/null 2>&1          # installs the engine if the setup job has not done it yet
   say "asset packs (icons, flags, maps, backgrounds; about 95 MB), when published for this channel, download in the background"
   theodore packs install --all --background >/dev/null 2>&1
-fi
-if [ "$(uname -s)" = Darwin ] && ! command -v soffice >/dev/null 2>&1 && [ ! -d /Applications/LibreOffice.app ] && [ ! -d "$HOME_DIR/tools/libreoffice" ]; then
-  say "LibreOffice (about 300 MB, from The Document Foundation) is downloading in the background into $HOME_DIR/tools; Theodore uses it to preview slides"
-  theodore tools install libreoffice --background >/dev/null 2>&1
 fi
 
 # --- 7. the check the assistant reports: the last line says what failed, if anything did ------------------------------

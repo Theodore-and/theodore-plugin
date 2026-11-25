@@ -62,7 +62,7 @@ set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
 set "PIN_RUNTIME_ID=875c13a60af59e66"
 set "PIN_CLIENT_VERSION=0.5.0"
-set "PIN_CLIENT=client/client-0.5.0.tar 0d1337a6a7a2eddaa55f83f0dbd5c26d2f2cb96a2a8347ca68c1917bc5e77c91"
+set "PIN_CLIENT=client/client-0.5.0.tar ccb7c3969aac86c4205d1023752f8faac50b1e1a74579864a85910a399a09ba2"
 set "PIN_PYTHON_win32_x64=runtime/875c13a60af59e66/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
@@ -419,8 +419,6 @@ if errorlevel 1 goto :doctor
 call "%%T%%" guide pptx >nul 2>&1
 echo theodore-install: asset packs (icons, flags, maps, backgrounds; about 95 MB), when published for this channel, download in the background
 call "%%T%%" packs install --all --background >nul 2>&1
-rem Nothing to turn slides into images (no LibreOffice, no PowerPoint): fetch LibreOffice, as on macOS.
-call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1
 
 :doctor
 rem --- 7. the check the assistant reports: the last line says what failed, if anything did -------------------------

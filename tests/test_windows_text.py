@@ -742,30 +742,6 @@ class InstallCmdComputerLimit(unittest.TestCase):
         self.assertIn("theodore login --refused \"$LIMIT_REFUSED\"", sh)
 
 
-class OneLibreOfficeInstall(unittest.TestCase):
-    """W-15: a second LibreOffice install while one runs (the installer's background job plus `tools install
-    libreoffice`) raced over the same .part file and ended INTERNAL; it now reports the first one's progress."""
-
-    def test_a_second_install_reports_the_running_one_and_downloads_nothing(self):
-        import io
-        from contextlib import redirect_stdout
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"THEODORE_HOME": tmp}), \
-                mock.patch.object(core, "_HOME", None):
-            first = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-            self.addCleanup(first.kill)
-            core.write_json(core.home().jobs / "libreoffice.json", {"pid": first.pid, "phase": "downloading", "percent": 40, "started": 1})
-            with mock.patch.object(commands.install, "system_libreoffice", lambda: None), \
-                    mock.patch.object(commands.install, "libreoffice_binary", lambda: None), \
-                    mock.patch.object(commands.install, "libreoffice_pin", lambda: {"version": "26.2.7", "size": 350_000_000}), \
-                    mock.patch.object(commands.install, "install_libreoffice", side_effect=AssertionError("a second download")):
-                out = io.StringIO()
-                with redirect_stdout(out):
-                    code = commands.tools("libreoffice", background=False, as_job=False)
-                self.assertEqual(code, 0)
-                self.assertIn("THEODORE OK: LibreOffice is already being installed in the background (downloading, 40%)", out.getvalue())
-                self.assertEqual(commands.tools("libreoffice", background=False, as_job=True), 0, "a second job just leaves")
-
-
 class CutCommandLine(unittest.TestCase):
     """cmd ends a command line at its first line feed: an argument of several lines leaves a quote open, and the rest of
     theodore.cmd's run line arrives inside the client's last argument. The client knows that text and runs nothing."""

@@ -2465,8 +2465,8 @@ class HostsOffPath(ClientCase):
 
 class BackgroundResume(ClientCase):
     """A background download that stopped before it finished (the computer slept, the user signed out) is started
-    again by the next command: the runtime and engine by the setup job, LibreOffice and PortableGit by guide, skill and
-    doctor; doctor says what is still missing and what will fetch it."""
+    again by the next command: the runtime and engine by the setup job, PortableGit by guide, skill and doctor; doctor
+    says what is still missing and what will fetch it. Theodore fetches no LibreOffice (Carl's rule, 25 Nov 2026)."""
 
     DEAD_PID = 2 ** 22 + 12345          # no process has it
 
@@ -2485,32 +2485,15 @@ class BackgroundResume(ClientCase):
         self.assertStatus(self.client("status"), "OK", 0)
         self.assertTrue(json.loads(self.client("status", "--json").stdout)["engine"], "the engine came with it")
 
-    def test_libreoffice_that_stopped_is_started_again_and_doctor_says_so(self):
+    def test_a_libreoffice_download_an_earlier_version_left_is_not_started_again_or_named(self):
         self.box.env["THEODORE_TEST_NO_SYSTEM_LIBREOFFICE"] = "1"
         self.ready()
-        missing = {"version": "0.0.9", "url": f"{self.api.base}/dl/upstream/LibreOffice_missing.dmg", "sha256": "1" * 64, "size": 10}
-        state_path = self.box.home / "state" / "update.json"
-        state = json.loads(state_path.read_text())
-        state["tools"] = {"libreoffice": {k: missing for k in ("darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64")}}
-        state_path.write_text(json.dumps(state))
-        record = self.dead_job("libreoffice")
-        out = self.client("doctor").stdout
-        self.assertIn("restarted: downloads that had stopped before they finished were started again: libreoffice", out)
-        self.assertIn("still missing:", out)
-        self.assertIn("LibreOffice (slide previews)", out)
-        self.box.wait_jobs()
-        after = json.loads(record.read_text())
-        self.assertNotEqual(after.get("pid"), self.DEAD_PID, "a new attempt ran")
-        # a failure that passes by itself is retried a minute later at the earliest; the attempt above failed just now
-        tried = len([r for r in self.api.requests if "LibreOffice_missing.dmg" in r["path"]])
-        self.assertGreater(tried, 0)
-        self.assertNotIn("restarted:", self.client("doctor").stdout, "not again within the minute")
-        # one that needs the user is not retried: doctor names it and the command that tries again
-        self.dead_job("libreoffice", failed={"cause": "PROXY_AUTH", "detail": "the proxy asks for a sign-in"})
+        self.dead_job("libreoffice")
         out = self.client("doctor").stdout
         self.assertNotIn("restarted:", out)
-        self.assertIn("its download failed (the proxy asks for a sign-in)", out)
-        self.assertIn("tools install libreoffice` tries again", out)
+        self.assertNotIn("LibreOffice (slide previews)", out)
+        self.assertIn("still missing: nothing", out)
+        self.assertFalse([r for r in self.api.requests if "LibreOffice" in r["path"]], "nothing fetched")
 
     def test_a_download_that_never_started_is_not_begun_by_guide_or_doctor(self):
         self.ready()
@@ -2703,37 +2686,20 @@ class AutoUpdate(ClientCase):
 
 
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")
-class LibreOffice(ClientCase):
-    def test_install_from_a_disk_image_with_a_pinned_checksum(self):
+class LibreOfficeNotInstalled(ClientCase):
+    """Carl's rule (25 November 2026): `tools install libreoffice`, still asked by an earlier installer or script, fetches
+    nothing and says so; an unknown tool is a usage error."""
+
+    def test_tools_install_libreoffice_fetches_nothing(self):
         self.ready()
-        stage = self.box.tmp / "dmg-src" / "LibreOffice.app" / "Contents" / "MacOS"
-        stage.mkdir(parents=True)
-        (stage / "soffice").write_text("#!/bin/sh\necho fake soffice\n")
-        (stage / "soffice").chmod(0o755)
-        dmg = self.box.tmp / "LibreOffice_fake.dmg"
-        subprocess.run(["/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", str(self.box.tmp / "dmg-src"), "-volname", "LibreOffice",
-                        "-format", "UDZO", str(dmg)], check=True, capture_output=True)
-        data = dmg.read_bytes()
-        # the mirror on the download host does not have it (404): the second source, the publisher's own URL, does
-        self.api.files["upstream/LibreOffice_fake.dmg"] = data
-        pin = {"version": "0.0.1", "url": f"{self.api.base}/dl/upstream/LibreOffice_fake.dmg", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
-        state_path = self.box.home / "state" / "update.json"
-        state = json.loads(state_path.read_text())
-        state["tools"] = {"libreoffice": {"darwin-arm64": pin, "darwin-x64": pin}}
-        state_path.write_text(json.dumps(state))
-        result = self.client("tools", "install", "libreoffice", "--job")
-        self.assertStatus(result, "OK", 0)
-        tried = [r["path"] for r in self.api.requests if "LibreOffice_fake.dmg" in r["path"]]
-        self.assertEqual(tried, ["/dl/tools/LibreOffice_fake.dmg", "/dl/upstream/LibreOffice_fake.dmg"], "mirror first, publisher second")
-        binary = self.box.home / "tools" / "libreoffice" / "LibreOffice.app" / "Contents" / "MacOS" / "soffice"
-        self.assertTrue(os.access(binary, os.X_OK))
-        self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
-        mounts = subprocess.run(["/sbin/mount"], capture_output=True, text=True).stdout
-        self.assertNotIn(str(self.box.home), mounts, "the disk image is detached")
-        state["tools"]["libreoffice"]["darwin-arm64"] = state["tools"]["libreoffice"]["darwin-x64"] = {**pin, "sha256": "0" * 64, "version": "0.0.2"}
-        state_path.write_text(json.dumps(state))
-        first, _n, _t = self.assertStatus(self.client("tools", "install", "libreoffice", "--job"), "SETUP_FAILED", 68)
-        self.assertIn("cause HASH_MISMATCH", first)
+        for args in (("tools", "install", "libreoffice"), ("tools", "install", "libreoffice", "--background", "--if-needed"),
+                     ("tools", "install", "libreoffice", "--job")):
+            first, _n, tell = self.assertStatus(self.client(*args), "OK", 0)
+            self.assertIn("Theodore installs no LibreOffice", first, args)
+            self.assertEqual(tell, "TELL THE USER: Nothing to install.", args)
+        self.assertFalse([r for r in self.api.requests if "LibreOffice" in r["path"] or "tools/" in r["path"]], "nothing fetched")
+        self.assertFalse((self.box.home / "tools" / "libreoffice").exists())
+        self.assertFalse((self.box.home / "state" / "jobs" / "libreoffice.json").exists())
         self.assertStatus(self.client("tools", "install", "word"), "USAGE", 64)
 
 
@@ -3538,25 +3504,6 @@ class ProxiesAndSandboxes(ClientCase):
         self.assertIn(url, tell)
         plain = self.client("login", "--start")
         self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])
-
-
-class LibreOfficeAction(unittest.TestCase):
-    """doctor names the platform's real way to get LibreOffice: on Linux, where Theodore fetches none, the system's
-    package manager (lane accept-local: doctor said `tools install libreoffice`, which answers 'not supported')."""
-
-    def test_linux_names_the_package_manager_or_says_it_plainly(self):
-        from unittest import mock
-        from theodore_client import install
-        with mock.patch.object(install, "libreoffice_pin", lambda: None):
-            with mock.patch.object(install.shutil, "which", lambda tool: "/usr/bin/apt-get" if tool == "apt-get" else None):
-                self.assertEqual(install.libreoffice_install_action(),
-                                 "install LibreOffice with the system's package manager: `sudo apt-get install libreoffice-impress`")
-            with mock.patch.object(install.shutil, "which", lambda tool: "/sbin/apk" if tool == "apk" else None):
-                self.assertIn("`sudo apk add libreoffice`", install.libreoffice_install_action())
-            with mock.patch.object(install.shutil, "which", lambda tool: None):
-                action = install.libreoffice_install_action()
-                self.assertEqual(action, "install LibreOffice (its Impress part) with the system's package manager")
-                self.assertNotIn("tools install", action)
 
 
 class UpdateApplySays(ClientCase):
