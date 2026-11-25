@@ -255,7 +255,21 @@ def _parts_coming(service, version: str, args: list[str], call, env: dict | None
         service.parts.prepared(lead, at_once=True, count=count)
         with contextlib.suppress(Exception):
             service.ahead.announced(version, lead, parts, env or {}, call.cwd)
-    service.pool.warm_up(version, count)
+    service.pool.warm_up(version, workers_for(count, service.pool.parts_capability(version)))
+
+
+PARTS_PER_WORKER = 3            # a Studio burst's parts one warm worker takes in its builds (rigs 7 and 10: 3 a build)
+
+
+def workers_for(parts: int | None, several: bool | None) -> int | None:
+    """The workers a burst of `parts` needs warm by its first save (lane S2): for an engine that takes several parts
+    in one build, ceil(parts / PARTS_PER_WORKER), since each new worker is its warm-up's CPU; one a part otherwise;
+    the pool's size when prepare did not say how many (None). Warm_up caps it at the pool's size."""
+    if parts is None:
+        return None
+    if several is True:
+        return max(1, -(-parts // PARTS_PER_WORKER))
+    return max(1, parts)
 
 
 def _after_finish() -> None:
