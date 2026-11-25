@@ -427,6 +427,8 @@ class StudioParts(ServiceCase):
         self.assertLessEqual(len(set(batches)), 3, f"few builds for seven parts: {batches}")
         lone = json.loads(Collector.stdout(frames_[names[batches.index(1)]]).splitlines()[0])
         self.assertEqual(lone["build_threads"], str(max(1, (os.cpu_count() or 2) // 2)), "THEODORE_BUILD_THREADS")
+        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(log, r"parts: \d+ of a deck in \d+ build\(s\)", "the log says how a burst was built")
 
     def test_a_lone_part_apply_runs_at_once_as_a_plain_apply(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
