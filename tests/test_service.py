@@ -481,17 +481,18 @@ class PoolSizing(unittest.TestCase):
             self.assertEqual(pool._threads_for_new([SimpleNamespace(build_threads=1)]), 3, "the full one went: taken again")
             retired = []
 
-            def worker(threads, used):
+            def worker(name, threads, used):
                 return SimpleNamespace(build_threads=threads, last_used=used, busy=False, retiring=False,
                                        dead=SimpleNamespace(is_set=lambda: False), ready=SimpleNamespace(is_set=lambda: True),
-                                       retire=lambda grace, name=f"{threads}@{used}": retired.append(name),
-                                       ask_stats=lambda: None)
+                                       retire=lambda grace, name=name: retired.append(name), ask_stats=lambda: None)
             now = time.monotonic()
             # the full-thread worker used longest ago, the burst's ones since: the shrink still keeps the full one
-            pool.workers["9.9"] = [worker(3, now - 900), worker(1, now - 800), worker(1, now - 700)]
+            # (names, not times: on a fresh machine the monotonic clock is small, and now - 900 is negative)
+            pool.workers["9.9"] = [worker("warm", 3, now - 900), worker("added-1", 1, now - 800),
+                                   worker("added-2", 1, now - 700)]
             with mock.patch.object(workers.install, "selected_engine", return_value="9.9"):
                 pool.tick()
-            self.assertEqual(sorted(retired), [f"1@{now - 800}", f"1@{now - 700}"], "the warm worker stays")
+            self.assertEqual(sorted(retired), ["added-1", "added-2"], "the warm worker stays")
 
     def test_the_queue_goes_by_expected_cost(self):
         from theodore_client.service import workers
