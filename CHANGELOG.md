@@ -2,7 +2,18 @@
 
 ## 0.4.34
 
-Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side.
+Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side. Setting
+Theodore up changes no permission setting and needs no restart of the app.
+
+- Setting Theodore up writes no permission rule into the assistant's settings. The two skills carry the permissions
+  Theodore's own work needs (its short command and launchers, its tools, edits inside a deck's workspace, reads of
+  Theodore's own folders), so its commands run without a rule; a person who wants the rules written can still ask
+  for them (`theodore hosts settings --apply`).
+- The set-up no longer asks to quit and reopen the app. The first deck goes in a new conversation, where Theodore's
+  skills are loaded from its start (in Codex, a new session). The installers keep the registration's own output out
+  of what the assistant reads, and the set-up page asks for its installer line to be run on its own.
+- When Theodore is ready, the welcome, `doctor` and `status` say in one sentence whether Studio is on, instead of
+  asking and waiting for an answer.
 
 - `theodore …` starts Theodore's client straight from its own Python: the short command and the launchers in the
   skill folders start no other program once Theodore is set up. In Git Bash a command started about twenty small
