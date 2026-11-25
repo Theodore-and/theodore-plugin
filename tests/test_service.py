@@ -213,8 +213,8 @@ class Pool(ServiceCase):
         client, got = self.connect()
         first = json.loads(Collector.stdout(self.call(client, got, "a", ["echo"])))
         frames_ = self.call(client, got, "b", ["crash"])
-        self.assertEqual(Collector.done(frames_)["exit"], 75)
-        self.assertIn("THEODORE RETRY", Collector.stdout(frames_))
+        self.assertEqual(Collector.done(frames_)["exit"], 78, "it may have read anything: answered, not run again")
+        self.assertIn("THEODORE INTERNAL: Theodore's engine ended (exit 9) during this command", Collector.stdout(frames_))
         after = json.loads(Collector.stdout(self.call(client, got, "c", ["echo"])))
         self.assertNotEqual(after["pid"], first["pid"])
         # a read is run again by itself; a write only when its inputs did not change and nothing was committed
@@ -227,7 +227,70 @@ class Pool(ServiceCase):
         self.assertEqual(Collector.done(write)["exit"], 0)
         self.assertEqual(target.read_text(), "ax", "run again once, written once")
         moved = self.call(client, got, "w2", ["write", str(target), "--crash-once", str(self.box.tmp / "flag-w2"), "--touch-first"])
-        self.assertEqual(Collector.done(moved)["exit"], 75, "its input changed: not run again")
+        self.assertEqual(Collector.done(moved)["exit"], 78, "its input changed: not run again")
+
+    def kill_when_running(self, pid_file: Path) -> int:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.02)
+        time.sleep(0.3)
+        pid = int(pid_file.read_text())
+        os.kill(pid, 9)
+        return pid
+
+    def test_a_worker_killed_before_its_call_wrote_runs_it_again_on_a_fresh_one(self):
+        self.service()
+        client, got = self.connect()
+        target, pid_file = self.box.tmp / "deck.txt", self.box.tmp / "pid-before"
+        target.write_text("a")
+        self.call(client, got, "w", ["write", str(target), "--hold-before-commit", "3", "--pid-file", str(pid_file)],
+                  wait=False)
+        killed = self.kill_when_running(pid_file)
+        done = Collector.done(got.wait("w", 30))
+        self.assertEqual(done["exit"], 0, "nothing was written: run again on a fresh worker")
+        self.assertEqual(target.read_text(), "ax", "written once, by the second run")
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn(f"(pid {killed}) ended: exit -9", log, "its end logged with its exit code")
+        self.assertIn("nothing of it was written: run again", log)
+
+    def test_a_worker_killed_after_its_call_wrote_answers_78_with_what_to_do(self):
+        self.service()
+        client, got = self.connect()
+        target, pid_file = self.box.tmp / "deck.txt", self.box.tmp / "pid-after"
+        target.write_text("a")
+        self.call(client, got, "w", ["write", str(target), "--hold-after-commit", "3", "--pid-file", str(pid_file)],
+                  wait=False)
+        self.kill_when_running(pid_file)
+        frames_ = got.wait("w", 30)
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        self.assertIn("part of its result may be on disk", Collector.stdout(frames_))
+        self.assertIn("NEXT: run the same command again", Collector.stdout(frames_))
+
+    def test_a_worker_gone_while_a_child_holds_its_pipe_is_noticed_at_once(self):
+        # K's A3b (rig 1): the worker vanished, an office it started kept its output pipe open, and the call waited.
+        self.service()
+        client, got = self.connect()
+        started = time.monotonic()
+        self.call(client, got, "o", ["echo", "--orphan", str(self.box.tmp / "orphan-marker")], wait=False)
+        frames_ = got.wait("o", 30)
+        self.assertLess(time.monotonic() - started, 20, "answered at once, not when the pipe closes")
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("ended: exit 9, its process ended; a call was running on it", log)
+
+    def test_a_call_never_waits_past_the_ceiling_or_on_a_stuck_worker(self):
+        self.env.update({"THEODORE_CALL_CEILING_S": "4", "THEODORE_WORKER_HEARTBEAT_S": "1",
+                         "THEODORE_WORKER_HEARTBEAT_GRACE_S": "1"})
+        self.service()
+        client, got = self.connect()
+        frames_ = self.call(client, got, "slow", ["sleep", "20"])
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        self.assertIn("was stopped: it did not finish in time", Collector.stdout(frames_))
+        frozen = self.call(client, got, "frozen", ["echo", "--freeze"])
+        self.assertEqual(Collector.done(frozen)["exit"], 78)
+        self.assertIn("stopped answering", Collector.stdout(frozen))
+        after = self.call(client, got, "after", ["echo"])
+        self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
     def test_cancel_resend_and_the_shell_deadline(self):
         self.service()
@@ -315,6 +378,41 @@ class PicturesRule(unittest.TestCase):
         self.assertEqual(tools.pictures_of(["apply", "/w"], full), ["/r/slide-2.jpg"], "the drawn ones, not the cached")
         unchanged = json.dumps({"ok": True, "render_summary": {"skipped": "deck.js unchanged since the last apply"}})
         self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
+
+
+class RouterCeiling(unittest.TestCase):
+    def test_a_call_stuck_anywhere_is_answered_by_the_ceiling_and_its_stack_logged(self):
+        from types import SimpleNamespace
+
+        from theodore_client.service import router as routing
+        logged = []
+        service = SimpleNamespace(log=logged.append, call_ended=lambda _c: None)
+        router = routing.Router(service)
+        stuck = threading.Event()
+        holder = {}
+
+        def stuck_somewhere():
+            holder["thread"] = threading.get_ident()
+            stuck.wait(30)
+        thread = threading.Thread(target=stuck_somewhere, daemon=True)
+        thread.start()
+        while "thread" not in holder:
+            time.sleep(0.01)
+        client = SimpleNamespace(session_id="s1", host="claude-code", role="relay", send=lambda _f: None)
+        call = routing.Call(router, client, {"id": "c1", "tool": "pptx", "args": ["apply", "/w"], "cwd": "/"})
+        call.thread = holder["thread"]
+        call.started -= routing.ROUTER_CEILING_S + 1
+        router.calls[("s1", "c1")] = call
+        router.running = 1
+        router.tick()
+        self.assertTrue(call.finished.is_set(), "answered, however it is stuck")
+        self.assertEqual(call.exit, 78)
+        self.assertTrue(any(line.startswith("slow call pptx apply /w (c1)") and "stuck_somewhere" in line
+                            for line in logged), logged)
+        self.assertTrue(any("past the ceiling" in line for line in logged))
+        call.out("late output\n")
+        self.assertNotIn("late output", "".join(f.get("data", "") for f in call.replay), "dropped after the answer")
+        stuck.set()
 
 
 class PoolSizing(unittest.TestCase):

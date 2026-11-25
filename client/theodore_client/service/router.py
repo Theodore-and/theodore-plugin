@@ -11,9 +11,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
+import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 from . import frames as framing
 
@@ -33,6 +36,13 @@ COUNTERS = ("spawned", "deck_hashes", "deckjs_full_parses", "packages_written", 
 
 
 TIMING_LINES = ("timings: ",)       # the engine's own, under THEODORE_TIMINGS=1 (lanes F and G: one line a verb)
+
+
+SLOW_LOG_S = 30.0                  # a call running longer: its thread's stack in the log, once a minute
+SLOW_LOG_EVERY_S = 60.0
+# However a call is stuck, its caller gets an answer: past the workers' own ceiling (CALL_CEILING_S) by a margin.
+_CEILING = float(os.environ.get("THEODORE_CALL_CEILING_S") or 900.0)
+ROUTER_CEILING_S = _CEILING + min(30.0, _CEILING)
 
 
 class Call:
@@ -88,6 +98,8 @@ class Call:
     # --- output ------------------------------------------------------------------------------------------------------
 
     def _emit(self, frame: dict, keep: bool = True) -> None:
+        if self.finished.is_set() and frame.get("t") != "done":
+            return                          # answered already (the ceiling): what a stuck thread produces after is dropped
         with self.lock:
             if keep:
                 size = len(frame.get("data") or "") if frame["t"] == "out" else 0
@@ -262,6 +274,7 @@ class Router:
 
     def _run(self, call: Call) -> None:
         from . import tools
+        call.thread = threading.get_ident()
         try:
             code, pending = tools.run(self.service, call)
         except Exception as exc:  # noqa: BLE001  a call answers; it never ends the service
@@ -302,7 +315,8 @@ class Router:
             call.drop_subscriber(client)
 
     def tick(self) -> None:
-        """Progress for long calls; forget finished calls after REMEMBER_S."""
+        """Progress for long calls; a slow call's stack in the log; the ceiling; forget finished calls after
+        REMEMBER_S."""
         now = time.monotonic()
         with self.lock:
             calls = list(self.calls.items())
@@ -311,9 +325,36 @@ class Router:
                 if call.ended is not None and now - call.ended > REMEMBER_S:
                     with self.lock:
                         self.calls.pop(key, None)
-            elif call.progress_due(now):
+                continue
+            if call.progress_due(now):
                 with contextlib.suppress(Exception):
                     call.send_progress(now)
+            age = now - call.started
+            if age > SLOW_LOG_S and now - getattr(call, "slow_logged", 0.0) > SLOW_LOG_EVERY_S:
+                call.slow_logged = now
+                self._log_slow(call, age)
+            if age > ROUTER_CEILING_S and not getattr(call, "past_ceiling", False):
+                call.past_ceiling = True
+                self._past_ceiling(call, age)
+
+    def _log_slow(self, call: Call, age: float) -> None:
+        """Where a slow call's thread is (one line a minute): what a stall's report reads."""
+        with contextlib.suppress(Exception):
+            frame = sys._current_frames().get(getattr(call, "thread", None))        # noqa: SLF001
+            where = " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}"
+                                for f in reversed(traceback.extract_stack(frame)[-8:])) if frame else "not started"
+            self.service.log(f"slow call {call.tool} {' '.join(call.args[:2])} ({call.id}): {int(age)} s, at {where}")
+
+    def _past_ceiling(self, call: Call, age: float) -> None:
+        """However a call is stuck (a worker, a lock, a wait), its caller is answered by the ceiling: 78 and what to do.
+        Its thread is left to end; what it produces after is not sent."""
+        from .workers import lost_text
+        self._log_slow(call, age)
+        self.service.log(f"call {call.tool} {' '.join(call.args[:2])} ({call.id}) past the ceiling ({int(age)} s): "
+                         f"answered 78")
+        with contextlib.suppress(Exception):
+            call.out(lost_text(f"did not finish this command within {int(ROUTER_CEILING_S // 60)} minutes", False))
+            call.finish(EXIT_INTERNAL)
 
     def running_calls(self) -> list[Call]:
         with self.lock:
