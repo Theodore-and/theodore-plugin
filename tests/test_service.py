@@ -737,6 +737,61 @@ class PicturesRule(unittest.TestCase):
         self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
 
 
+class PicturesOut(unittest.TestCase):
+    """A burst's answers each carry a picture of about 100 KB (lane S2b's S2-22, rig 10 round 1 on a fresh store: 90 to
+    304 ms, one designer after another, between a part's answer and its done frame, where the same build's next run had
+    3 to 11): the service may write a client more than a 64 KB pipe held, and the timing line says what reading and
+    sending the pictures took."""
+
+    def test_the_timing_line_says_what_the_pictures_took(self):
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import tools
+        folder = Path(tempfile.mkdtemp(prefix="theodore-pictures-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        picture = folder / "slide-1.jpg"
+        picture.write_bytes(b"\xff\xd8" + b"x" * 100_000)
+        sent = []
+
+        def image(mime, path, data):
+            time.sleep(0.05)                # a client reading slowly
+            sent.append((mime, path, len(data)))
+            return True
+        call = SimpleNamespace(args=["apply", str(folder)], cwd=str(folder), image=image, timing={})
+        tools.attach_pictures(call, json.dumps({"ok": True, "rendered_images": [str(picture)],
+                                                "render_summary": {"regenerated_pages": [1]}}))
+        self.assertEqual(len(sent), 1)
+        read_ms, sent_ms = call.timing["pictures"]
+        self.assertGreaterEqual(sent_ms, 45)
+        self.assertLess(read_ms, 45)
+
+    @unittest.skipIf(os.name == "nt", "the Unix socket's send buffer")
+    def test_the_service_may_write_a_client_more_than_a_picture_before_it_reads(self):
+        import socket
+        import tempfile
+
+        from theodore_client.service import endpoint
+        folder = Path(tempfile.mkdtemp(prefix="thsock-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(folder / "s"))
+        server.listen(1)
+        listener = endpoint.UnixListener.__new__(endpoint.UnixListener)
+        listener._sock = server                                                 # noqa: SLF001
+        server.settimeout(5)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(str(folder / "s"))
+        conn = listener.accept()
+        self.addCleanup(conn.close)
+        self.addCleanup(client.close)
+        fresh = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        default = fresh.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        fresh.close()
+        self.assertGreater(conn.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF), default)
+        self.assertGreaterEqual(endpoint.SEND_BUFFER, 1 << 20, "the Windows pipe's out buffer too")
+
+
 class RouterCeiling(unittest.TestCase):
     def test_a_call_stuck_anywhere_is_answered_by_the_ceiling_and_its_stack_logged(self):
         from types import SimpleNamespace

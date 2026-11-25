@@ -254,6 +254,8 @@ class UnixListener:
         if not _same_user(conn):
             conn.close()
             return None
+        with contextlib.suppress(OSError):
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SEND_BUFFER)
         return conn
 
     def close(self, unlink: bool = True) -> None:
@@ -325,6 +327,8 @@ class TcpListener:
             return None
         conn.settimeout(None)
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        with contextlib.suppress(OSError):
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SEND_BUFFER)
         return conn
 
     def close(self, unlink: bool = True) -> None:
@@ -568,6 +572,11 @@ def _windows_release_mutex(handle) -> None:
 
 
 PIPE_PREFIX = "\\\\.\\pipe\\theodore-"
+# What the service may write to a client before the client reads it (the pipe's out buffer, a socket's send buffer):
+# a burst's answers each carry a picture of about 100 KB, more than the 64 KB a pipe held, so every picture frame
+# waited for the relay to read it, one designer after another (lane S2b's S2-22, rig 10 round 1 on a fresh store,
+# where the machine is busy: 90 to 304 ms between a part's answer and its done frame). The system bounds it.
+SEND_BUFFER = 4 << 20
 _ERROR_PIPE_BUSY = 231
 _ERROR_PIPE_CONNECTED = 535
 _ERROR_BROKEN_PIPE = 109
@@ -720,7 +729,7 @@ class PipeListener:
                                               wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
         open_mode = 0x00000003 | 0x40000000 | (0x00080000 if first else 0)     # DUPLEX, OVERLAPPED, FIRST_PIPE_INSTANCE
         pipe_mode = 0x00000000 | 0x00000000 | 0x00000000 | 0x00000008          # BYTE, READMODE_BYTE, WAIT, REJECT_REMOTE_CLIENTS
-        handle = kernel32.CreateNamedPipeW(self.address, open_mode, pipe_mode, 255, 1 << 16, 1 << 16, 0,
+        handle = kernel32.CreateNamedPipeW(self.address, open_mode, pipe_mode, 255, SEND_BUFFER, 1 << 16, 0,
                                            ctypes.byref(self._security))
         if handle in (None, 0, ctypes.c_void_p(-1).value):
             error = ctypes.get_last_error()
