@@ -54,8 +54,14 @@ def _path():
     return core.home().state / FILE
 
 
-def _sessions() -> dict:
-    value = core.read_json(_path())
+def _sessions(kept: bool = False) -> dict:
+    """The note's sessions. `kept`: from memory while the file's stat holds (a read-only look on a command's way; a
+    writer reads it fresh under the lock)."""
+    if kept:
+        from . import install
+        value = install.read_json_by_stat(_path())
+    else:
+        value = core.read_json(_path())
     sessions = value.get("sessions") if isinstance(value, dict) else None
     return sessions if isinstance(sessions, dict) else {}
 
@@ -183,21 +189,14 @@ def engine_notice(verb: str) -> None:
     if not sid or verb not in ("start", "apply"):
         return
     try:
+        # Looked at first without the lock: almost always there is nothing to say (or it was said), nothing is written,
+        # and the many designers of one session applying at once never queue on the lock file (a waiter sleeps 50 ms).
+        if _notice(_sessions(kept=True), sid, verb)[0] is None:
+            return
         with core.lock(LOCK, timeout=LOCK_TIMEOUT_S):
-            sessions = _sessions()
-            entry = _entry(sessions, sid)
-            told = [key for key in entry.get("told") or [] if isinstance(key, str)]
-            design = _loaded(entry).get("deck-design")
-            line = key = None
-            if design is not None:
-                current = _current(fresh=False)["deck-design"]
-                if _known(design) and _known(current) and design != current:
-                    key = f"deck-design {current}"
-                    line = DESIGN_NEWER_TEXT.format(old=design, new=current, launcher=core.quoted_launcher())
-            elif verb == "start":
-                key = "design-first"
-                line = DESIGN_FIRST_TEXT.format(launcher=core.quoted_launcher())
-            if line is None or key in told:
+            sessions = _sessions()          # read again under the lock: another command may have said it meanwhile
+            line, key, entry, told = _notice(sessions, sid, verb)
+            if line is None:
                 return
             sessions[sid] = {**entry, "at": int(core.now()), "told": told + [key]}
             _save(sessions)
@@ -205,3 +204,22 @@ def engine_notice(verb: str) -> None:
         sys.stderr.flush()
     except Exception as exc:  # noqa: BLE001  the line never changes what the engine command does
         core.log(f"sessions: no line ({exc.__class__.__name__})")
+
+
+def _notice(sessions: dict, sid: str, verb: str) -> tuple:
+    """(line, key, entry, told): the line this session is owed before `verb`, or None when there is none or it was said."""
+    entry = _entry(sessions, sid)
+    told = [key for key in entry.get("told") or [] if isinstance(key, str)]
+    design = _loaded(entry).get("deck-design")
+    line = key = None
+    if design is not None:
+        current = _current(fresh=False)["deck-design"]
+        if _known(design) and _known(current) and design != current:
+            key = f"deck-design {current}"
+            line = DESIGN_NEWER_TEXT.format(old=design, new=current, launcher=core.quoted_launcher())
+    elif verb == "start":
+        key = "design-first"
+        line = DESIGN_FIRST_TEXT.format(launcher=core.quoted_launcher())
+    if line is None or key in told:
+        return None, None, entry, told
+    return line, key, entry, told
