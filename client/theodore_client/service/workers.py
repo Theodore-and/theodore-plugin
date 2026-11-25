@@ -736,13 +736,17 @@ class Pool:
         threading.Thread(target=warm, name="pool-warm", daemon=True).start()
 
     def _choose(self, live: list, idle: list, key: str | None, rank: int, waited: float):
-        """Which idle worker takes a call, or None to wait a moment. The always-warm worker (the machine's full thread
-        counts: lane R's warm render threads) is kept for long calls, a lead's apply and a render: a long call takes it
-        when it is idle, and waits up to WARM_WAIT_S for it while it runs a short call; short calls take another idle
-        worker first, and it only when it is the one idle. Otherwise the workspace's own worker, else the least used."""
+        """Which idle worker takes a call, or None to wait a moment. The workspace's own worker first when it is idle:
+        it holds the workspace in memory and the blocks lane F builds ahead after a slide verb (engine 4949ee1b), which
+        only an apply on that worker reuses. Otherwise the always-warm worker (the machine's full thread counts: lane
+        R's warm render threads) is kept for long calls, a lead's apply and a render: a long call takes it when it is
+        idle, and waits up to WARM_WAIT_S for it while it runs a short call; short calls take another idle worker
+        first, and it only when it is the one idle. Else the least used."""
         def warm(worker) -> bool:
             return getattr(worker, "build_threads", None) == full_threads() and \
                 any(getattr(w, "build_threads", None) != full_threads() for w in live)
+        if key and self.affinity.get(key) in idle:
+            return self.affinity[key]
         if rank == RANKS["long"]:
             for worker in idle:
                 if warm(worker):
@@ -753,8 +757,6 @@ class Pool:
             others = [w for w in idle if not warm(w)]
             if others:
                 idle = others
-        if key and self.affinity.get(key) in idle:
-            return self.affinity[key]
         return min(idle, key=lambda w: (len(w.keys), w.calls))
 
     def _threads_for_new(self, live: list) -> int:

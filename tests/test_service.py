@@ -486,6 +486,14 @@ class PoolSizing(unittest.TestCase):
             self.assertIs(pool._choose(live, [other], None, long_, 0.0), other, "busy with a long call: another at once")
             same = [SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=c) for c in (5, 1)]
             self.assertIs(pool._choose(same, same, None, long_, 0.0), same[1], "all alike: the least used")
+            # The workspace's own worker first when idle: its memory, and the blocks built ahead after a slide verb
+            # (lane F), which only an apply on it reuses.
+            warm.busy, warm.rank = False, None
+            pool.affinity["k1"] = other
+            self.assertIs(pool._choose(live, [warm, other], "k1", long_, 0.0), other, "a lead's apply on its own worker")
+            pool.affinity["k2"] = warm
+            self.assertIs(pool._choose(live, [warm, other], "k2", short, 0.0), warm, "a slide verb on its own worker")
+            self.assertIs(pool._choose(live, [warm], "k1", long_, 0.0), warm, "its own busy: the warm one")
 
     def test_the_warm_worker_has_the_full_threads_and_is_the_one_kept(self):
         from types import SimpleNamespace
