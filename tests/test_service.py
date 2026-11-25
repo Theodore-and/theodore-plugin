@@ -303,28 +303,25 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
-    def test_a_worker_still_warming_takes_no_call_a_warm_worker_can_take(self):
-        # Lane S2's S2-16 (the coordinator): a worker prepare starts 5 s before the designers save met its first build
-        # cold inside the burst (round 1 1.276 s against 0.116-0.157 s once every worker was past its warm-up). Until a
-        # worker's `warm` frame (lane B: ready.features "warm-after-ready"), a call goes to a warm worker; with the warm
-        # ones busy it waits for one at most THEODORE_COLD_WAIT_S, then takes the cold one.
-        self.env.update({"FAKE_WARM_AFTER": "0.1", "FAKE_WARM_LATE": "60", "FAKE_WARM_FIRST": str(self.box.tmp / "warm-first"),
-                         "THEODORE_COLD_WAIT_S": "0.5"})
+    def test_a_call_with_no_warm_idle_worker_takes_a_cold_idle_one_at_once(self):
+        # Lane S2's S2-17 (the coordinator): waiting up to 1 s for a worker past its warm-up (C2 `warm`, lane B) made
+        # every cold round's slowest 1.07-1.58 s against 0.13-0.21 s taking any idle worker. A worker still warming is
+        # only a second choice: with the warm one busy, a call takes it at once.
+        self.env.update({"FAKE_WARM_AFTER": "0.1", "FAKE_WARM_LATE": "60", "FAKE_WARM_FIRST": str(self.box.tmp / "warm-first")})
         self.service()
         client, got = self.connect()
         warm_pid = json.loads(Collector.stdout(self.call(client, got, "w", ["echo"])))["pid"]
+        self.assertIn("warm: its warm-up ended", self.wait_log(r"warm: its warm-up ended"), "the `warm` frame is read")
         self.call(client, got, "hold", ["sleep", "3"], wait=False)          # the warm worker, busy
         time.sleep(0.3)
+        cold_pid = json.loads(Collector.stdout(self.call(client, got, "c1", ["echo"])))["pid"]   # a second one starts
+        self.assertNotEqual(cold_pid, warm_pid)
         began = time.monotonic()
-        cold = json.loads(Collector.stdout(self.call(client, got, "c", ["echo"])))
+        again = json.loads(Collector.stdout(self.call(client, got, "c2", ["echo"])))
         waited = time.monotonic() - began
-        self.assertNotEqual(cold["pid"], warm_pid, "with the warm one busy past the wait: the cold one")
-        self.assertGreaterEqual(waited, 0.4, "it waited for a warm worker first")
-        self.assertLess(waited, 2.5, "but not for the 3 s call")
+        self.assertEqual(again["pid"], cold_pid, "the warm one busy: the idle one still warming")
+        self.assertLess(waited, 0.6, "at once, never waiting for the warm one")
         got.wait("hold", 30)
-        pids = {json.loads(Collector.stdout(self.call(client, got, f"n{i}", ["echo"])))["pid"] for i in range(3)}
-        self.assertEqual(pids, {warm_pid}, "both idle: the warm one, though the cold one has fewer calls")
-        self.assertIn("warm: its warm-up ended", self.wait_log(r"warm: its warm-up ended"))
 
     def test_a_session_opened_in_a_folder_primes_it_with_one_answered_call_there(self):
         # Lane BIG (the coordinator, 25 Nov): the engine makes a folder's template facts ahead after an answered call
@@ -546,8 +543,10 @@ class PoolSizing(unittest.TestCase):
         with mock.patch.object(workers.os, "cpu_count", return_value=4), \
                 mock.patch.object(workers, "pool_sizes", return_value=(1, 4)):
             pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
-            warm = SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=9)
-            other = SimpleNamespace(build_threads=1, busy=False, rank=None, keys=set(), calls=0)
+            on = threading.Event()
+            on.set()
+            warm = SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=9, warmed=on)
+            other = SimpleNamespace(build_threads=1, busy=False, rank=None, keys=set(), calls=0, warmed=on)
             live = [warm, other]
             long_, short = workers.RANKS["long"], workers.RANKS["write"]
             self.assertIs(pool._choose(live, [warm, other], None, long_, 0.0), warm, "a lead's apply: the warm worker")
@@ -558,7 +557,7 @@ class PoolSizing(unittest.TestCase):
             self.assertIs(pool._choose(live, [other], None, long_, 0.6), other, "but not past WARM_WAIT_S")
             warm.rank = long_
             self.assertIs(pool._choose(live, [other], None, long_, 0.0), other, "busy with a long call: another at once")
-            same = [SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=c) for c in (5, 1)]
+            same = [SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=c, warmed=on) for c in (5, 1)]
             self.assertIs(pool._choose(same, same, None, long_, 0.0), same[1], "all alike: the least used")
             # The workspace's own worker first when idle: its memory, and the blocks built ahead after a slide verb
             # (lane F), which only an apply on it reuses.
@@ -568,6 +567,39 @@ class PoolSizing(unittest.TestCase):
             pool.affinity["k2"] = warm
             self.assertIs(pool._choose(live, [warm, other], "k2", short, 0.0), warm, "a slide verb on its own worker")
             self.assertIs(pool._choose(live, [warm], "k1", long_, 0.0), warm, "its own busy: the warm one")
+
+    def test_a_worker_past_its_warm_up_is_preferred_among_the_idle_and_never_waited_for(self):
+        # C2 `warm` (lane B) only orders the idle workers a call or an ahead may take (lane S2's S2-17, the coordinator).
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import workers
+        with mock.patch.object(workers.os, "cpu_count", return_value=4), \
+                mock.patch.object(workers, "pool_sizes", return_value=(1, 4)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+
+            def worker(threads, warmed, calls):
+                flags = {name: threading.Event() for name in ("ready", "warmed", "dead")}
+                flags["ready"].set()
+                if warmed:
+                    flags["warmed"].set()
+                return SimpleNamespace(build_threads=threads, busy=False, rank=None, keys=set(), calls=calls,
+                                       retiring=False, fatal=None, **flags)
+            full, cold, warm = worker(3, True, 0), worker(1, False, 0), worker(1, True, 9)
+            live = [full, cold, warm]
+            short, long_ = workers.RANKS["write"], workers.RANKS["long"]
+            self.assertIs(pool._choose(live, [full, cold, warm], None, short, 0.0), warm,
+                          "both idle: the one past its warm-up, though the other has fewer calls")
+            self.assertIs(pool._choose(live, [full, cold], None, short, 0.0), cold, "no warm one besides: the cold one")
+            full.busy, full.rank = True, long_
+            self.assertIs(pool._choose(live, [cold, warm], None, long_, 0.0), warm, "a long call too")
+            self.assertIs(pool._choose(live, [cold], None, long_, 0.0), cold, "and with none warm, the cold one at once")
+            full.busy, full.rank = False, None
+            pool.workers["9.9"] = live
+            self.assertEqual(pool.ahead_slots("9.9"), 2, "the aheads count every idle worker but one")
+            self.assertIs(pool.take_for_ahead("9.9"), warm, "an ahead: the one past its warm-up first")
+            self.assertIs(pool.take_for_ahead("9.9"), cold, "then the one still warming, at once")
+            self.assertIsNone(pool.take_for_ahead("9.9"), "never the last idle worker")
 
     def test_the_warm_worker_has_the_full_threads_and_is_the_one_kept(self):
         from types import SimpleNamespace
@@ -840,6 +872,24 @@ class StudioParts(ServiceCase):
         for name, got in frames_.items():
             answer = json.loads(Collector.stdout(got).splitlines()[0])
             self.assertNotIn("batch", answer, name)
+
+    def test_a_burst_on_workers_still_warming_is_gathered_onto_them_at_once(self):
+        # Lane S2's S2-17 (the coordinator): the gathering counted only workers past their warm-up (C2 `warm`, lane B)
+        # as free, so a burst right after prepare waited 700-1,030 ms. It cuts its builds for every idle worker.
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1", "FAKE_WARM_AFTER": "60"})
+        self.service()
+        lead = self.prepared(6)
+        self.wait_log(r"(?s)ready \d+ ms after.*ready \d+ ms after")          # both workers ready, neither warm
+        names = [f"s{i:02d}" for i in range(1, 7)]
+        began = time.monotonic()
+        frames_ = self.burst(lead, names, hold="0.2")
+        took = time.monotonic() - began
+        for name in names:
+            self.assertEqual(Collector.done(frames_[name])["exit"], 0, frames_[name])
+        log = self.wait_log(r"parts: \d+ of a deck in \d+ build\(s\)")
+        self.assertRegex(log, r"parts: \d+ of a deck in \d+ build\(s\)", "gathered onto the workers still warming")
+        self.assertNotIn("warm: its warm-up ended", log, "neither worker was past its warm-up")
+        self.assertLess(took, 1.0, f"never waiting for a warm worker (the gathering's 1 s for a free one): {took:.2f} s")
 
 
 class BuildAhead(ServiceCase):
