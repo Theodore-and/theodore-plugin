@@ -179,7 +179,7 @@ while True:
         send({"t": "inputs", "id": call, "files": [tup]})
         with open(path, "a") as handle:
             handle.write("x")
-        send({"t": "committed", "id": call, "key": "0123456789abcdef"})
+        send({"t": "committed", "id": call, "key": "written-workspace"})
         say(json.dumps({"ok": True}) + "\n")
     else:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))
