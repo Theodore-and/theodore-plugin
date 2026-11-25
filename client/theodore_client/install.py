@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -399,7 +401,7 @@ def setup_status() -> Status:
 
 def require_runtime(wait: float = 0.0) -> str:
     """The id of a complete runtime, or raise SETUP_IN_PROGRESS / SETUP_FAILED."""
-    rid = core.read_text(core.home().runtime / "current.txt")
+    rid = read_text_by_stat(core.home().runtime / "current.txt")
     if rid and runtime_ready(rid):
         return rid
     status = setup_status()
@@ -414,12 +416,59 @@ def require_runtime(wait: float = 0.0) -> str:
 
 # --- engines -------------------------------------------------------------------------------------------------------------
 
+# --- small state files read on every command (a resident service reads them per call) ----------------------------------
+
+# A file whose stat (size, mtime_ns, file id) is the one seen at its last read is not read again: the service answers 15
+# designers' commands at once, and each reads these files on its way (rig 1: admission 18-52 ms in a burst). A file is
+# kept only once it is older than RACY_S at its read, so a rewrite within the same clock tick that kept its size is never
+# mistaken for the same bytes (the store's racy rule), and a change made by another process is seen at the next call.
+RACY_S = 2.0
+_BY_STAT: dict[str, tuple[tuple, object]] = {}
+_BY_STAT_LOCK = threading.Lock()
+
+
+def _stamp(path: Path) -> tuple | None:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_size, info.st_mtime_ns, getattr(info, "st_ino", 0), getattr(info, "st_dev", 0))
+
+
+def _by_stat(path: Path, read):
+    """`read(path)` answered from memory while the file's stat is the one of a read past the racy window."""
+    key = str(path)
+    stamp = _stamp(path)
+    if stamp is not None:
+        with _BY_STAT_LOCK:
+            kept = _BY_STAT.get(key)
+        if kept is not None and kept[0] == stamp:
+            return copy.deepcopy(kept[1])
+    value = read(path)
+    if stamp is not None and time.time() - stamp[1] / 1e9 >= RACY_S and _stamp(path) == stamp:
+        with _BY_STAT_LOCK:
+            _BY_STAT[key] = (stamp, copy.deepcopy(value))
+    else:
+        with _BY_STAT_LOCK:
+            _BY_STAT.pop(key, None)
+    return value
+
+
+def read_json_by_stat(path: Path) -> dict:
+    """core.read_json for a state file read on every command; a copy, so a caller may change what it gets."""
+    return _by_stat(path, core.read_json)
+
+
+def read_text_by_stat(path: Path) -> str:
+    return _by_stat(path, core.read_text)
+
+
 def engines_state() -> dict:
-    return core.read_json(core.home().engines / "current.json")
+    return read_json_by_stat(core.home().engines / "current.json")
 
 
 def update_state() -> dict:
-    return core.read_json(core.home().state / "update.json")
+    return read_json_by_stat(core.home().state / "update.json")
 
 
 # One lock for everything that decides which engine is current: accepting a signed document (the replay times), the
@@ -441,7 +490,7 @@ def save_update_state(**fields) -> None:
 
 
 def pins() -> dict:
-    return core.read_json(core.home().state / "pins.json")
+    return read_json_by_stat(core.home().state / "pins.json")
 
 
 def engine_dirs() -> dict:
