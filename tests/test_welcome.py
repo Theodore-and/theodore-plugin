@@ -89,7 +89,7 @@ class Welcome(ClientCase):
         self.assertIn(STUDIO_ON, text)
         self.assertIn(PACKS_READY, text)
         self.assertNotIn("?", text, "a state, never a question (24 Nov: he asked 'can you turn studio on?' 10 s later)")
-        self.assertNotIn("new session", text)
+        self.assertTrue(text.endswith("Start a new session, then ask for your first deck."), "Claude Code: the first deck in a new session")
         self.assertNotIn("quit the app", text, "the app's chats only when the user asks")
         self.assertNotRegex(text, MECHANISM)
         self.assertNotRegex(text, NO_TIME_CLAIM)
@@ -165,13 +165,15 @@ class Welcome(ClientCase):
         self.assertIn("Apart from that, run no Theodore command in this session", nxt)
         self.assertIn("ask them to start a new session first", nxt)
 
-    def test_claude_code_never_needs_a_new_session(self):
-        """Lane L3 (25 Nov): in Claude Code the first deck works in the conversation that installed Theodore, whether or
-        not the installer's own `guide pptx` was recorded for it; a new session was a step the person did not need."""
+    def test_claude_code_sends_the_first_deck_to_a_new_session(self):
+        """Lane L3 (25 Nov): the conversation that installed Theodore has neither its skills nor its instructions line
+        (Claude Code loads them when a conversation starts); there Opus made the first deck as the Claude app's own
+        slide artifact. Whatever the installer's own `guide pptx` recorded for the session."""
         for sid in ("s-new", "s-loaded"):
             _f, nxt, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": sid}), "OK", 0)
-            self.assertNotIn("new session", tell, sid)
-            self.assertNotIn("new session", nxt, sid)
+            self.assertIn("Start a new session, then ask for your first deck.", tell, sid)
+            self.assertIn("If they ask for a deck in this conversation anyway, ask them to start a new session first", nxt, sid)
+            self.assertNotIn("run no Theodore command", nxt, "Studio on or off still runs here")
 
     def test_still_downloading_the_welcome_waits_for_the_first_status_that_says_ok(self):
         """Lead's staging run (2026-11-19): an assistant finishes its tool work before it speaks, so a welcome given with

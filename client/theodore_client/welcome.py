@@ -161,14 +161,17 @@ def _host() -> str | None:
     return None
 
 
-def _new_session_needed(host: str | None) -> bool:
-    """Only Codex, which loads plugins, tools and rules only when a session starts, so there each Theodore command of
-    the set-up session would ask for approval. In Claude Code the first deck works in the conversation that installed
-    Theodore: the assistant there may not have the plugin's skills and agents yet (Claude Code 2.1.330 loads them when
-    its process starts, and the Claude app's Code tab keeps one process for a conversation), and it builds the deck
-    with Theodore's launcher and the same texts (lane L3's rehearsal of 25 November 2026). A new session was one more
-    step for the person, and whether it was said depended on the installer's own `guide pptx` running in time."""
-    return host == "codex"
+def _new_session_needed(host: str | None, first_deck: bool = True) -> bool:
+    """Codex loads plugins, tools and rules only when a session starts. So does Claude Code: a plugin's skills, agents
+    and tool, and the instructions line, load when a conversation starts, and the Claude app's Code tab keeps one
+    process for a conversation, so the conversation that installed Theodore has none of them. There the first deck
+    went to the app's own slide artifact instead of Theodore in one rehearsal (Opus, auto mode, the user's
+    configuration), and ran through Theodore's launcher without its agents in two (lane L3, 25 November 2026). The
+    welcome (`first_deck`) sends the first deck to a new session in both; doctor, which also runs in conversations
+    that have Theodore, says it only for Codex."""
+    if host == "codex":
+        return True
+    return first_deck and host == "claude-code"
 
 
 def _downloading() -> bool:
@@ -207,7 +210,10 @@ def _welcome_status(name: str, summary: str, engine_downloading: bool, download_
                    "on); otherwise do nothing about it") if studio_ in ("on", "off") else ""
     after = (". Apart from that, run no Theodore command in this session: Codex loads Theodore's tool and permissions "
              "only when a session starts, so here each Theodore command would ask for approval; if they ask for a deck "
-             "here, ask them to start a new session first") if host == "codex" else ""
+             "here, ask them to start a new session first") if host == "codex" else (
+        ". If they ask for a deck in this conversation anyway, ask them to start a new session first: Claude Code loads "
+        "Theodore's skills and instructions only when a conversation starts, so here the deck would be made without "
+        "them") if new_session else ""
     _remember({"owed": False, "given": True})
     return Status(name, summary, give + studio_next + after + ". " + CLOSING, " ".join(lines))
 
