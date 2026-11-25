@@ -40,6 +40,9 @@
       "$ref": "#/$defs/log"
     },
     {
+      "$ref": "#/$defs/warm"
+    },
+    {
       "$ref": "C1-frames.schema.json#/$defs/progress"
     },
     {
@@ -303,7 +306,8 @@
             "type": "string",
             "enum": [
               "apply-parts",
-              "apply-ahead"
+              "apply-ahead",
+              "warm-after-ready"
             ]
           },
           "uniqueItems": true
@@ -528,6 +532,22 @@
         "message": {
           "type": "string",
           "maxLength": 20000
+        }
+      }
+    },
+    "warm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t"
+      ],
+      "properties": {
+        "t": {
+          "const": "warm"
+        },
+        "ms": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

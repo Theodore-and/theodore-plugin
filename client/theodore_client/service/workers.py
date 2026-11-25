@@ -45,6 +45,12 @@ RANKS = {"read": 0, "write": 1, "long": 2, "ahead": 3}      # the queue's order:
 # "ahead": a Studio part built before its designer applies it (ahead.py), never queued: it takes an idle worker or none
 WARM_WAIT_S = 0.5                 # a long call waits this long for the always-warm worker to finish a short call
 RECYCLE_CALLS = 2000
+# A worker whose engine says its warm-up goes on after `ready` (ready.features "warm-after-ready", then a `warm` frame
+# once it ended: lane B) takes no call that a warm worker can take: a call waits for a warm one at most COLD_WAIT_S,
+# about what a cold first build costs (lane S2's S2-16: round 1 1.276 s against 0.116-0.157 s warm), then takes the
+# cold one; with no warm worker at all it takes it at once. A worker silent past WARM_MAX_S counts as warm.
+COLD_WAIT_S = float(os.environ.get("THEODORE_COLD_WAIT_S") or 1.0)
+WARM_MAX_S = 60.0
 PRIME_WAIT_S = 20.0               # a session's folder is primed once a worker is ready, within this (Pool.prime_folder)
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
@@ -254,6 +260,7 @@ class Worker:
         self.process: subprocess.Popen | None = None
         self.channel: frames.Channel | None = None
         self.ready = threading.Event()
+        self.warmed = threading.Event()             # its warm-up ended (C2 `warm`), or its engine has none after ready
         self.dead = threading.Event()
         self.fatal: dict | None = None
         self.info: dict = {}
@@ -395,6 +402,12 @@ class Worker:
             self.info = frame
             self.rss_mb = float(frame.get("rss_mb") or 0)
             self.ready.set()
+            if "warm-after-ready" in (frame.get("features") or []):
+                timer = threading.Timer(WARM_MAX_S, self._warm, args=("no `warm` frame came",))
+                timer.daemon = True
+                timer.start()
+            else:
+                self.warmed.set()
             with contextlib.suppress(Exception):     # what a proof reads: when a worker was warm, and what it can do
                 self.pool.service.log(
                     f"worker {self.spec.version} ready {int((time.perf_counter() - self.started_perf) * 1000)} ms after "
@@ -403,6 +416,9 @@ class Worker:
                     f"{', '.join(frame.get('features') or []) or 'none'}; threads: build "
                     f"{self.build_threads or 'engine default'}, render {self.render_threads or 'engine default'})")
             self.pool.worker_ready(self)
+            return
+        if kind == "warm":
+            self._warm(f"{frame.get('ms')} ms after `ready`")
             return
         if kind == "fatal":
             self.fatal = frame
@@ -432,6 +448,15 @@ class Worker:
         elif kind == "done":
             self._result = frame
             self._result_ready.set()
+
+    def _warm(self, how: str) -> None:
+        if self.warmed.is_set():
+            return
+        self.warmed.set()
+        with contextlib.suppress(Exception):
+            self.pool.service.log(f"worker {self.spec.version} warm: its warm-up ended {how} (pid {self.process.pid})")
+        with contextlib.suppress(Exception):
+            self.pool.worker_ready(self)        # waiting calls and the gathering look again
 
     # --- calls ----------------------------------------------------------------------------------------------------------
 
@@ -894,8 +919,10 @@ class Pool:
             return any("apply-parts" in (w.info.get("features") or []) for w in self._live(version) if w.ready.is_set())
 
     def idle_count(self, version: str) -> int:
+        """Idle workers that are warm (the gathering cuts its builds for these: a cold worker's first build is slow)."""
         with self.cond:
-            return sum(1 for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal)
+            return sum(1 for w in self._live(version) if w.ready.is_set() and w.warmed.is_set() and not w.busy
+                       and not w.fatal)
 
     def _oneshot(self, version: str) -> bool:
         until = self.oneshot_until.get(version)
@@ -933,6 +960,12 @@ class Pool:
                         raise WorkerFailed("workers of this engine do not start")
                     live = self._live(group)
                     idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
+                    warm = [w for w in idle if w.warmed.is_set()]
+                    if warm or not idle:
+                        idle = warm
+                    elif any(w.warmed.is_set() for w in live if w.ready.is_set() and not w.fatal) and \
+                            time.monotonic() - waited_from < COLD_WAIT_S:
+                        idle = []                       # warm ones are busy: one may come free before a cold start pays
                     ahead = sum(1 for other in waiting if other < ticket)
                     allowed = rank < RANKS["long"] or \
                         sum(1 for w in live if w.busy and w.rank == RANKS["long"]) < long_most
@@ -952,7 +985,8 @@ class Pool:
                     if idle and ahead < len(idle) and allowed:
                         self.cond.wait(0.02)             # a long call waiting a moment for the warm worker
                         continue
-                    starting = [w for w in live if not w.ready.is_set()]
+                    # starting: not ready yet, or ready and still warming while idle (no second cold start for it)
+                    starting = [w for w in live if not w.ready.is_set() or (not w.warmed.is_set() and not w.busy)]
                     if not spawned and len(live) < most and len(starting) < len(waiting):
                         spawned = True
                         self.cond.release()
@@ -1194,7 +1228,7 @@ class Pool:
         with self.cond:
             if self.closed or self.waiting.get(version):
                 return 0
-            idle = [w for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal]
+            idle = [w for w in self._live(version) if w.ready.is_set() and w.warmed.is_set() and not w.busy and not w.fatal]
             return max(0, len(idle) - 1)
 
     def take_for_ahead(self, version: str) -> "Worker | None":
@@ -1203,7 +1237,7 @@ class Pool:
         renders). The part's workspace keys are the caller's to hold (Pool.keys.try_take)."""
         with self.cond:
             live = self._live(version)
-            idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
+            idle = [w for w in live if w.ready.is_set() and w.warmed.is_set() and not w.busy and not w.fatal]
             if self.closed or self.waiting.get(version) or len(idle) < 2:
                 return None
             others = [w for w in idle if getattr(w, "build_threads", None) != full_threads()] or idle
