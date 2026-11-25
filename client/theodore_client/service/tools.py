@@ -194,17 +194,19 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
         attach_pictures(call, "".join(call.stdout_kept))
     if args[0] == "finish":
         threading.Thread(target=_after_finish, name="after-finish", daemon=True).start()
-    if TIMINGS:
-        _log_timing(service, call, args, wanted is not None, begun, admitted, code)
+    if TIMINGS:                             # written once the done frame is out (lane S2's S2-9: 1 to 38 ms before it)
+        ended, gathered = time.perf_counter(), wanted is not None
+        call.after.append(lambda: _log_timing(service, call, args, gathered, begun, admitted, code, ended))
     return code, pending
 
 
-def _log_timing(service, call, args: list[str], gathered: bool, begun: float, admitted: float, code: int) -> None:
+def _log_timing(service, call, args: list[str], gathered: bool, begun: float, admitted: float, code: int,
+                ended: float | None = None) -> None:
     """`timing: pptx <verb> <target>: <total> ms = admission + [own ahead] + [gathering] + queue + worker (the engine's
     own) + after`: what a part's apply waited for its own build-ahead, what it waited in the gathering for its build to
     go out, and what came after the worker (its answer read, its pictures attached), each as its own term (lane S2)."""
     with contextlib.suppress(Exception):
-        now = time.perf_counter()
+        now = ended if ended is not None else time.perf_counter()
         timing = getattr(call, "timing", None) or {}
         target = next((Path(a).name for a in args[1:] if not a.startswith("-")), "")
         parts = [f"admission {int((admitted - begun) * 1000)}"]
