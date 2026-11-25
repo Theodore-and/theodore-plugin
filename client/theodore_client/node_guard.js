@@ -1,11 +1,15 @@
 // Theodore's guard for the Node processes its engine starts on behalf of a chat (`mcp --for claude-desktop`).
 //
 // Loaded first by NODE_OPTIONS (--require), beside Node's permission model (--permission), which already limits the
-// file system to Theodore's folders and the deck's folder and refuses child processes, worker threads, the inspector,
-// WASI and process.binding. What the permission model of Node 24 does not limit is the network, and native addons
-// once allowed; this file closes both for the script a model wrote (deck.js):
+// file system to Theodore's folders and the deck's folder and refuses the inspector, WASI and process.binding. What
+// the permission model of Node 24 does not limit is the network, and native addons, child processes and worker threads
+// once allowed; this file closes them for the script a model wrote (deck.js):
 //   - no network: the network modules answer with a refusal, and fetch, WebSocket and EventSource are gone;
-//   - native addons only from the runtime's own node_modules (sharp, skia-canvas), never from a file a script wrote.
+//   - native addons only from the runtime's own node_modules (sharp, skia-canvas), never from a file a script wrote;
+//   - other programs: only Node itself on one of the engine's own scripts;
+//   - worker threads: only on one of the engine's own scripts (its build and drawing pools), with the parent's options.
+// NODE_OPTIONS applies to every thread of the process, so a worker thread runs under the same permission model and
+// this same guard.
 // Everything is fixed before any other code runs and cannot be undone from inside the process: the originals are kept
 // only in this closure, and the replaced properties are neither writable nor configurable.
 "use strict";
@@ -89,7 +93,34 @@
       return cpStandIn[key];
     },
   });
-  const standInOf = (request) => (bare(request) === "child_process" ? cpFacade : standInFor(request));
+
+  // worker_threads: the engine's own pools start threads on its own scripts (the 2.0 build worker, js/worker.js; the
+  // renderer's drawing pool, js/render/pool.js); a chat's builds and drawings then run as fast as elsewhere (the
+  // coordinator, 25 Nov, on lane F's finding). The stand-in's Worker starts a thread only on a .js file inside the
+  // engine's scripts, by its resolved path, never on code given as text, and with the parent's Node options.
+  const workerThreads = load.call(Module, "worker_threads", null, false);
+  const workerScript = (filename) => {
+    let file = null;
+    try { file = filename instanceof URL ? require("url").fileURLToPath(filename) : String(filename); } catch (_e) { file = null; }
+    const real = file && realOrNull(file);
+    if (!scriptRoot || !real || !inside(real, scriptRoot + path.sep) || !real.endsWith(".js")) throw refusal(`a worker thread on ${String(filename)}`);
+    return real;
+  };
+  class GuardedWorker extends workerThreads.Worker {
+    constructor(filename, given) {
+      const options = given && typeof given === "object" ? { ...given } : {};
+      if (options.eval) throw refusal("a worker thread on code given as text");
+      delete options.execArgv;
+      super(workerScript(filename), options);
+    }
+  }
+  const wtFacade = Object.freeze({ ...workerThreads, Worker: GuardedWorker });
+  const standInOf = (request) => {
+    const name = bare(request);
+    if (name === "child_process") return cpFacade;
+    if (name === "worker_threads") return wtFacade;
+    return standInFor(request);
+  };
 
   fix(Module, "_load", function (request, parent, isMain) {
     if (blocked(request)) return standInOf(request);
