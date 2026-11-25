@@ -396,6 +396,13 @@ def sheets_root() -> Path:
     return (Path(work) if work else core.home().root / "work") / "scratch" / "sheets"
 
 
+def sheet_file_recent(mtime: float, now: float) -> bool:
+    """Written or used within the last 15 minutes. A file just written can be dated a little ahead of the clock (on
+    Windows before Python 3.13 time.time() ticks every 15.6 ms while the file system dates finer): up to AHEAD_SECONDS
+    ahead counts as recent, as for the specimen folders; further ahead is not trusted."""
+    return -AHEAD_SECONDS <= now - mtime <= SHEET_FILES_KEEP_S
+
+
 def sweep_sheet_files(everything: bool = False) -> None:
     """The sheet files older than 15 minutes go, and the session folders left empty; with `everything` (an uninstall,
     a refusal of the device or the account), all of them. Never raises."""
@@ -414,9 +421,9 @@ def sweep_sheet_files(everything: bool = False) -> None:
                     continue
                 for path in list(folder.iterdir()):
                     with contextlib.suppress(OSError):
-                        if not 0 <= now - path.lstat().st_mtime <= SHEET_FILES_KEEP_S:
+                        if not sheet_file_recent(path.lstat().st_mtime, now):
                             path.unlink()
-                if not any(folder.iterdir()) and not 0 <= now - folder.lstat().st_mtime <= 60:
+                if not any(folder.iterdir()) and not -AHEAD_SECONDS <= now - folder.lstat().st_mtime <= 60:
                     folder.rmdir()
     except Exception:       # noqa: BLE001  a cleanup must not stop the command it precedes
         pass
