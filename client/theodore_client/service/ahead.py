@@ -68,13 +68,17 @@ class _Call:
         self.worker_images = False
         self.counters: dict = {}
         self.stdout: list[str] = []
+        self.engine_timings: list[str] = []   # the engine's own `timings: ...` lines (THEODORE_TIMINGS=1), for the log
         self.phase = "ahead"
         self.started = time.monotonic()
         self.done = threading.Event()
 
     def out(self, text: str, stream: str = "stdout") -> None:
-        if stream == "stdout" and sum(len(t) for t in self.stdout) < 1 << 20:
-            self.stdout.append(text)
+        if stream == "stdout":
+            if sum(len(t) for t in self.stdout) < 1 << 20:
+                self.stdout.append(text)
+        elif "timings: " in text and len(self.engine_timings) < 40:
+            self.engine_timings.extend(line for line in text.splitlines() if line.startswith("timings: "))
 
     def image(self, *_args, **_kwargs) -> bool:
         return False
@@ -353,7 +357,9 @@ class Ahead:
                 for outcome in outcomes.values():
                     self._count(f"ahead_{outcome}" if outcome in ("built", "kept", "skipped") else "ahead_failed")
                 summary = ", ".join(f"{n} {o}" for o, n in sorted(_tally(outcomes.values()).items()))
-                self._log(call, f"done in {elapsed} ms (exit {code}): {summary}")
+                # the engine's own lines under it (lane S2: where a several-part ahead's time goes, for F and R2)
+                self._log(call, f"done in {elapsed} ms (exit {code}): {summary}",
+                          "".join(f"\n    {line}" for line in call.engine_timings[:20]))
             with self.lock:
                 for part in call.members:
                     if part.ahead is call:
@@ -395,11 +401,11 @@ class Ahead:
         with self.count_lock:
             return json.dumps({k: v for k, v in self.counts.items() if v}, separators=(",", ":"))
 
-    def _log(self, call: _Call, what: str) -> None:
+    def _log(self, call: _Call, what: str, below: str = "") -> None:
         with contextlib.suppress(Exception):
             names = ", ".join(os.path.basename(p.path) for p in call.members[:8])
             more = f" and {len(call.members) - 8} more" if len(call.members) > 8 else ""
-            self.service.log(f"ahead: {len(call.members)} part(s) ({names}{more}) {what}; {self._counts_text()}")
+            self.service.log(f"ahead: {len(call.members)} part(s) ({names}{more}) {what}; {self._counts_text()}{below}")
 
 
 def _tally(values) -> dict[str, int]:
