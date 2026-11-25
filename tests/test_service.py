@@ -699,9 +699,11 @@ class StudioParts(ServiceCase):
             self.assertEqual(Path(answer["argv"][1]).name, name, "each designer got its own part's answer")
             batches.append(answer.get("batch", 1))
         # The first may run alone when it reaches the gathering before the others reached the service; every other part
-        # of the burst is gathered, in equal shares over the free workers.
-        self.assertLessEqual(batches.count(1), 1, f"at most the first ran alone: {batches}")
-        self.assertGreaterEqual(max(batches), 2, f"the others went in one build: {batches}")
+        # of the burst is gathered, in equal shares over the free workers, at most ceil(7 parts / 2 workers) = 4 in a
+        # build; under load the cap can leave one part over, which then goes alone too.
+        self.assertLessEqual(batches.count(1), 2, f"at most the first and one left over ran alone: {batches}")
+        self.assertGreaterEqual(max(batches), 2, f"the others went in builds of several: {batches}")
+        self.assertLessEqual(max(batches), 4, f"never more than the cap in a build: {batches}")
         self.assertLessEqual(len(set(batches) - {1}), 2, f"in equal shares: {batches}")
         lone = json.loads(Collector.stdout(self.burst(lead, ["s01"], hold="0", tag="later-")["s01"]).splitlines()[0])
         self.assertNotIn("batch", lone, "a part alone afterwards: the plain apply")
@@ -786,7 +788,7 @@ class BuildAhead(ServiceCase):
                          "one ahead for the saved part, then the designer's apply; none for the parts not saved")
         log = (self.box.home / "logs" / "service.log").read_text()
         self.assertIn("ahead: watching 3 part(s) of deck", log)
-        self.assertIn("done: built", log)
+        self.assertRegex(log, r"ahead: 1 part\(s\) \(s01\) done in \d+ ms \(exit 0\): 1 built")
 
     def test_the_designers_apply_waits_for_its_own_ahead_on_the_same_save(self):
         self.env["FAKE_AHEAD_S"] = "1.0"
@@ -827,6 +829,23 @@ class BuildAhead(ServiceCase):
         self.assertIn("cancelling: a call waits for a worker", (self.box.home / "logs" / "service.log").read_text())
         self.got.wait("long", 30)
 
+    def test_a_bursts_saves_go_out_together_as_several_part_aheads(self):
+        # Lane S2's rig 7: single-part aheads ran three at a time and 12 of 15 were still queued when their designers
+        # applied. A burst's saved parts now go as one several-part ahead per worker allowed (one here: two workers,
+        # one kept idle), so they all start building at once.
+        self.service()
+        lead = self.prepared(3)
+        for name in ("s01", "s02", "s03"):
+            self.save(lead, name, f"slide {name}, saved\n")
+        self.assertTrue(all(self.wait_for(("ahead-built", name)) for name in ("s01", "s02", "s03")), self.events())
+        rows = [json.loads(line) for line in self.aheads_file.read_text().splitlines()]
+        starts = [row for row in rows if row["event"] == "ahead-start"]
+        self.assertEqual(sorted(row["part"] for row in starts), ["s01", "s02", "s03"], "each part once")
+        self.assertEqual(len({row["pid"] for row in starts}), 1, "in one call, on one worker")
+        first_built = min(row["t"] for row in rows if row["event"] == "ahead-built")
+        self.assertTrue(all(row["t"] <= first_built for row in starts), "all started before any was built")
+        self.assertIn("ahead: 3 part(s) (s01, s02, s03) done", (self.box.home / "logs" / "service.log").read_text())
+
     def test_nothing_is_built_ahead_without_the_feature_or_a_second_idle_worker(self):
         for env in ({"FAKE_APPLY_AHEAD": ""}, {"THEODORE_SERVICE_WORKERS": "1"}):
             with self.subTest(env=env):
@@ -858,8 +877,7 @@ class AheadUnit(unittest.TestCase):
             (folder / "deck.js").write_text("slide one\n")
             part = ahead._Part(os.path.realpath(folder), "9.9", {}, tmp, ahead._Burst(str(Path(tmp) / "deck")))
             builder.parts[part.path] = part
-            running = ahead._Call(part, ahead._stat(part.deck))
-            running.started = time.monotonic()
+            running = ahead._Call([part])
             part.ahead = running
             told = []
             waiter = threading.Thread(target=builder.before_apply, args=(["apply", str(folder)], tmp),
