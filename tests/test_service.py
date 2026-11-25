@@ -324,6 +324,29 @@ class PoolSizing(unittest.TestCase):
         with mock.patch.object(workers.os, "cpu_count", return_value=4):
             self.assertEqual((workers.full_threads(), workers.worker_threads(4)), (3, 1), "rig 2: the warm one 3, the rest 1")
 
+    def test_long_calls_take_the_warm_worker_and_short_ones_the_others(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import workers
+        with mock.patch.object(workers.os, "cpu_count", return_value=4), \
+                mock.patch.object(workers, "pool_sizes", return_value=(1, 4)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+            warm = SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=9)
+            other = SimpleNamespace(build_threads=1, busy=False, rank=None, keys=set(), calls=0)
+            live = [warm, other]
+            long_, short = workers.RANKS["long"], workers.RANKS["write"]
+            self.assertIs(pool._choose(live, [warm, other], None, long_, 0.0), warm, "a lead's apply: the warm worker")
+            self.assertIs(pool._choose(live, [warm, other], None, short, 0.0), other, "a part's apply: another first")
+            self.assertIs(pool._choose(live, [warm], None, short, 0.0), warm, "the warm one when it is the one idle")
+            warm.busy, warm.rank = True, short
+            self.assertIsNone(pool._choose(live, [other], None, long_, 0.0), "it finishes a short call: wait for it")
+            self.assertIs(pool._choose(live, [other], None, long_, 0.6), other, "but not past WARM_WAIT_S")
+            warm.rank = long_
+            self.assertIs(pool._choose(live, [other], None, long_, 0.0), other, "busy with a long call: another at once")
+            same = [SimpleNamespace(build_threads=3, busy=False, rank=None, keys=set(), calls=c) for c in (5, 1)]
+            self.assertIs(pool._choose(same, same, None, long_, 0.0), same[1], "all alike: the least used")
+
     def test_the_warm_worker_has_the_full_threads_and_is_the_one_kept(self):
         from types import SimpleNamespace
         from unittest import mock
