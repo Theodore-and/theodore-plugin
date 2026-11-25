@@ -27,7 +27,7 @@ from pathlib import Path
 from .. import account, api, core, install, specimens, usage
 from ..contract import SKILLS
 from ..core import Status
-from . import capture, context
+from . import capture, context, workers
 
 IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 IMAGE_BYTES_MAX = 3 << 20
@@ -164,6 +164,8 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
             here.append(True)
             service.parts.arrived(coming)
             call.arrived = True
+    if service.parts.of_burst(args, call.cwd):  # a designer's first call: the prepare's warm-up has had its time
+        service.pool.end_warm_up(version, f"its designers' first call (pptx {' '.join(args[:2])})")
     if args[0] == "apply":                  # a part's own build-ahead: dropped, waited for or cancelled (ahead.py);
         waiting = time.perf_counter()       # waiting, it holds no ready part back
         service.ahead.before_apply(args, call.cwd, on_wait=not_coming)
@@ -232,8 +234,9 @@ def _log_timing(service, call, args: list[str], gathered: bool, begun: float, ad
 
 def _parts_coming(service, version: str, args: list[str], call, env: dict | None = None) -> None:
     """`prepare`'s answer says how its parts come (lane G): all at once (`in_turn` false; Studio) warms a worker per
-    part up to the pool's size and gathers their applies; one at a time (`in_turn` true) needs neither. An answer
-    without these (an engine before them) warms the pool to its size, as a burst may follow."""
+    part up to the pool's size (the coordinator after lane S2b's S2-19: the designers' first calls find them ready, and
+    the burst starts none of its own), kept for BURST_KEEP_S, and gathers their applies; one at a time (`in_turn`
+    true) needs neither. An answer without these (an engine before them) warms the pool to its size."""
     answer = _last_json("".join(call.stdout_kept))
     if answer.get("ok") is False:
         return
@@ -254,21 +257,7 @@ def _parts_coming(service, version: str, args: list[str], call, env: dict | None
         service.parts.prepared(lead, at_once=True, count=count)
         with contextlib.suppress(Exception):
             service.ahead.announced(version, lead, parts, env or {}, call.cwd)
-    service.pool.warm_up(version, workers_for(count, service.pool.parts_capability(version)))
-
-
-PARTS_PER_WORKER = 3            # a Studio burst's parts one warm worker takes in its builds (rigs 7 and 10: 3 a build)
-
-
-def workers_for(parts: int | None, several: bool | None) -> int | None:
-    """The workers a burst of `parts` needs warm by its first save (lane S2): for an engine that takes several parts
-    in one build, ceil(parts / PARTS_PER_WORKER), since each new worker is its warm-up's CPU; one a part otherwise;
-    the pool's size when prepare did not say how many (None). Warm_up caps it at the pool's size."""
-    if parts is None:
-        return None
-    if several is True:
-        return max(1, -(-parts // PARTS_PER_WORKER))
-    return max(1, parts)
+    service.pool.warm_up(version, max(1, count) if isinstance(count, int) else None, keep_s=workers.BURST_KEEP_S)
 
 
 def _after_finish() -> None:

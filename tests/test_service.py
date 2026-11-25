@@ -604,8 +604,21 @@ class PoolSizing(unittest.TestCase):
                                  (64, 256 * gb, 16), (64, 32 * gb, 9), (16, 8 * gb, 2), (8, 16 * gb, 8)):
             with self.subTest(cores=cores, ram=ram), mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": ""}), \
                     mock.patch.object(workers.os, "cpu_count", return_value=cores), \
+                    mock.patch.object(workers, "physical_cores", return_value=None), \
                     mock.patch.object(workers, "_ram_bytes", return_value=ram):
                 self.assertEqual(workers.pool_sizes(), (1, most))
+        # Physical cores and one where the system says (the coordinator after lane S2b's S2-19: rig 7's 4 vCPU on 2
+        # cores started a 4th worker whose start-up ran beside the burst's builds): rig 7 3, rig 10 (8 on 4) 5; a
+        # processor without hyperthreads keeps one a core.
+        for logical, physical, most in ((4, 2, 3), (8, 4, 5), (10, 10, 10), (16, 8, 9), (2, 1, 2)):
+            with self.subTest(logical=logical, physical=physical), \
+                    mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": ""}), \
+                    mock.patch.object(workers.os, "cpu_count", return_value=logical), \
+                    mock.patch.object(workers, "physical_cores", return_value=physical), \
+                    mock.patch.object(workers, "_ram_bytes", return_value=256 * gb):
+                self.assertEqual(workers.pool_sizes(), (1, most))
+        found = workers.physical_cores()
+        self.assertTrue(found is None or 1 <= found <= (os.cpu_count() or 1), f"this machine: {found}")
         with mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": "3"}):
             self.assertEqual(workers.pool_sizes(), (3, 3))
         with mock.patch.object(workers.os, "cpu_count", return_value=64):
@@ -703,6 +716,10 @@ class PoolSizing(unittest.TestCase):
             pool.workers["9.9"] = [worker("warm", 3, now - 900), worker("added-1", 1, now - 800),
                                    worker("added-2", 1, now - 700)]
             with mock.patch.object(workers.install, "selected_engine", return_value="9.9"):
+                pool.kept["9.9"] = (3, now + 60)       # a Studio deck's workers, kept until its designers' saves
+                pool.tick()
+                self.assertEqual(retired, [], "kept against the idle shrink while its burst may come")
+                pool.kept["9.9"] = (3, now - 1)
                 pool.tick()
             self.assertEqual(sorted(retired), ["added-1", "added-2"], "the warm worker stays")
 
@@ -789,14 +806,79 @@ class Burst(ServiceCase):
         self.assertEqual(len(pids), 4, "four workers started at once, one a call (one after another, the first would "
                                        "have served several before the last was up)")
 
-    def test_a_burst_warms_only_the_workers_it_needs(self):
-        # Lane S2: each new worker costs its warm-up's CPU; an engine that takes several parts in a build needs one
-        # warm worker for three parts, an engine that takes one part a call one a part; unknown, the pool's size.
-        from theodore_client.service import tools
-        self.assertEqual([tools.workers_for(n, True) for n in (1, 3, 4, 8, 15)], [1, 1, 2, 3, 5])
-        self.assertEqual([tools.workers_for(n, False) for n in (1, 3, 15)], [1, 3, 15])
-        self.assertEqual(tools.workers_for(3, None), 3, "capability not known yet: one a part")
-        self.assertIsNone(tools.workers_for(None, True), "how many not said: the pool's size")
+    def serving(self) -> int:
+        return len([p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]])
+
+    def test_prepare_warms_a_worker_a_part_within_the_pools_size(self):
+        # The coordinator after lane S2b's S2-19: the designers' first calls find their workers ready, and the burst
+        # starts none of its own. Two parts: two workers; nine on a pool of four: four (with an engine that takes
+        # several parts in a build, which warmed one worker for three parts before).
+        self.env.update({"THEODORE_SERVICE_WORKERS": "4", "FAKE_APPLY_PARTS": "1"})
+        self.service()
+        client, got = self.connect()
+        for parts, want in ((2, 2), (9, 4)):
+            deck = self.box.tmp / f"deck {parts}"
+            deck.mkdir()
+            self.call(client, got, f"prep{parts}", ["prepare", str(deck), "--parts", str(parts)])
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and self.serving() < want:
+                time.sleep(0.1)
+            time.sleep(1.0)
+            self.assertEqual(self.serving(), want, f"{parts} parts")
+        self.assertIn("parts: prepare says 9 parts come at once", self.wait_log(r"prepare says 9 parts"))
+
+    def test_prepares_warm_up_ends_at_its_designers_first_call(self):
+        # Warming at prepare never runs beside the designers' calls: the workers still starting when the first of them
+        # names a part stop, and the call runs on a worker that is ready.
+        self.env.update({"THEODORE_SERVICE_WORKERS": "3", "FAKE_WORKER_START_S": "4"})
+        self.service()
+        client, got = self.connect()
+        lead = self.box.tmp / "deck"
+        lead.mkdir()
+        self.call(client, got, "prep", ["prepare", str(lead), "--parts", "3"])     # its own worker, then two more
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and self.serving() < 3:
+            time.sleep(0.1)
+        opened = self.call(client, got, "open", ["slide", "list", str(lead / "parts" / "s01")])
+        self.assertEqual(Collector.done(opened)["exit"], 0)
+        self.assertRegex(self.wait_log(r"warm-up: \d worker"), r"warm-up: [123] worker\(s\) still starting stopped at "
+                         r"its designers' first call \(pptx slide list\)", "the one it had not started yet never starts")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and self.serving() > 1:
+            time.sleep(0.1)
+        self.assertEqual(self.serving(), 1, "only the worker that was ready")
+        again = self.call(client, got, "again", ["echo"])
+        self.assertEqual(json.loads(Collector.stdout(again))["resident"], "1", "a cut warm-up is no failed start")
+
+    def test_a_call_that_would_queue_less_than_a_start_starts_no_worker(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "THEODORE_COLD_START_S": "2"})
+        self.service()
+        client, got = self.connect()
+        self.call(client, got, "w", ["echo"])
+        first = self.answer(got, "w")
+        self.call(client, got, "short", ["echo", "--hold", "0.5"], wait=False)
+        time.sleep(0.1)
+        self.call(client, got, "next", ["echo"], wait=False)
+        done = got.wait("next", 30)
+        answer = json.loads(Collector.stdout(done).splitlines()[0])
+        self.assertEqual(answer["pid"], first["pid"], "it waited for the busy worker")
+        self.assertEqual(int((Collector.done(done).get("counters") or {}).get("spawned") or 0), 0)
+        self.assertEqual(self.serving(), 1, "no worker started beside it")
+
+    def test_a_call_queued_longer_than_a_start_starts_one(self):
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "THEODORE_COLD_START_S": "0.5"})
+        self.service()
+        client, got = self.connect()
+        self.call(client, got, "w", ["echo"])
+        first = self.answer(got, "w")
+        self.call(client, got, "long", ["echo", "--hold", "6"], wait=False)
+        time.sleep(0.2)
+        began = time.monotonic()
+        done = self.call(client, got, "next", ["echo"])
+        self.assertLess(time.monotonic() - began, 4.5, "a worker started for it after about a start's wait")
+        self.assertNotEqual(json.loads(Collector.stdout(done).splitlines()[0])["pid"], first["pid"])
+        self.assertEqual(int((Collector.done(done).get("counters") or {}).get("spawned") or 0), 1)
+        got.wait("long", 30)
 
     def test_prepare_warms_the_workers_its_parts_will_need(self):
         self.env["THEODORE_SERVICE_WORKERS"] = "3"
