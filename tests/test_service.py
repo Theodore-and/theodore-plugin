@@ -699,9 +699,11 @@ class StudioParts(ServiceCase):
             self.assertEqual(Path(answer["argv"][1]).name, name, "each designer got its own part's answer")
             batches.append(answer.get("batch", 1))
         # The first may run alone when it reaches the gathering before the others reached the service; every other part
-        # of the burst is gathered, in equal shares over the free workers.
-        self.assertLessEqual(batches.count(1), 1, f"at most the first ran alone: {batches}")
-        self.assertGreaterEqual(max(batches), 2, f"the others went in one build: {batches}")
+        # of the burst is gathered, in equal shares over the free workers, at most ceil(7 parts / 2 workers) = 4 in a
+        # build; under load the cap can leave one part over, which then goes alone too.
+        self.assertLessEqual(batches.count(1), 2, f"at most the first and one left over ran alone: {batches}")
+        self.assertGreaterEqual(max(batches), 2, f"the others went in builds of several: {batches}")
+        self.assertLessEqual(max(batches), 4, f"never more than the cap in a build: {batches}")
         self.assertLessEqual(len(set(batches) - {1}), 2, f"in equal shares: {batches}")
         lone = json.loads(Collector.stdout(self.burst(lead, ["s01"], hold="0", tag="later-")["s01"]).splitlines()[0])
         self.assertNotIn("batch", lone, "a part alone afterwards: the plain apply")
