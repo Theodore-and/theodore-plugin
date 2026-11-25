@@ -98,12 +98,19 @@ class Service:
     def log(self, message: str) -> None:
         path = self.home / "logs" / "service.log"
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [{self.pid}] {message.rstrip()}\n"
+        # One open and one write a line under the lock, its size read from the open file (lane S2b's S2-20ab: a burst's
+        # threads log side by side, and every stat before the write was time another waited for the lock).
         with self.log_lock, contextlib.suppress(OSError):
-            path.parent.mkdir(exist_ok=True)        # never the home itself: a removed home stays removed
-            if path.exists() and path.stat().st_size > LOG_MAX:
-                os.replace(path, path.with_suffix(".log.1"))
-            with open(path, "a", encoding="utf-8") as handle:
+            try:
+                handle = open(path, "a", encoding="utf-8")
+            except FileNotFoundError:
+                path.parent.mkdir(exist_ok=True)    # never the home itself: a removed home stays removed
+                handle = open(path, "a", encoding="utf-8")
+            with handle:
                 handle.write(line)
+                full = handle.tell() > LOG_MAX
+            if full:
+                os.replace(path, path.with_suffix(".log.1"))
 
     # --- start and stop ---------------------------------------------------------------------------------------------
 

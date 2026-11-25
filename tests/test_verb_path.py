@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -233,6 +234,22 @@ class CredentialAndLookups(HomeCase):
                 mock.patch.dict(os.environ, {"PATH": "/one"}):
             os.environ.pop("SOFFICE_BIN", None)
             self.assertNotIn("SOFFICE_BIN", install.engine_env(self.home))
+
+class PinsTogether(HomeCase):
+    def test_the_pins_of_a_burst_written_side_by_side_are_all_kept(self):
+        # The service pins each designer's part after its answer, fifteen at once (lane S2b's S2-20ab): one rewrite of
+        # pins.json at a time, none lost.
+        spaces = [self.workspace(f"part{n:02d}") for n in range(12)]
+        threads = [threading.Thread(target=install._pin_workspaces, args=(["apply", str(ws)], "9.9")) for ws in spaces]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        kept = core.read_json(self.home / "state" / "pins.json").get("workspaces") or {}
+        self.assertEqual(len(kept), 12, kept)
+        for ws in spaces:
+            self.assertEqual(core.read_json(ws / ".pptx-state" / "theodore-engine.json").get("version"), "9.9")
+
 
 class RunLock(HomeCase):
     """Each engine run held a lock file of its own (engine-run-<pid>-<thread>.lock), created and deleted per run: one more

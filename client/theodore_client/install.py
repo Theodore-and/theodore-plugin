@@ -1508,7 +1508,15 @@ def _pin_key(workspace: Path) -> str:
     return core.sha256_hex(str(workspace).encode("utf-8"))[:16]     # a hash: no folder name is stored
 
 
+_PINS_LOCK = threading.Lock()      # the service's calls side by side: one rewrite of pins.json at a time, none lost
+
+
 def _pin_workspaces(args: list[str], version: str) -> None:
+    with _PINS_LOCK:
+        _pin_workspaces_locked(args, version)
+
+
+def _pin_workspaces_locked(args: list[str], version: str) -> None:
     record = pins()
     spaces = record.setdefault("workspaces", {})
     changed = False
