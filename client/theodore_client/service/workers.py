@@ -46,10 +46,10 @@ RANKS = {"read": 0, "write": 1, "long": 2, "ahead": 3}      # the queue's order:
 WARM_WAIT_S = 0.5                 # a long call waits this long for the always-warm worker to finish a short call
 RECYCLE_CALLS = 2000
 # A worker whose engine says its warm-up goes on after `ready` (ready.features "warm-after-ready", then a `warm` frame
-# once it ended: lane B) takes no call that a warm worker can take: a call waits for a warm one at most COLD_WAIT_S,
-# about what a cold first build costs (lane S2's S2-16: round 1 1.276 s against 0.116-0.157 s warm), then takes the
-# cold one; with no warm worker at all it takes it at once. A worker silent past WARM_MAX_S counts as warm.
-COLD_WAIT_S = float(os.environ.get("THEODORE_COLD_WAIT_S") or 1.0)
+# once it ended: lane B) is only a second choice while it warms: of the idle workers a call, the gathering or an ahead
+# may take, one past its warm-up goes first, but none of them ever waits for one (lane S2's S2-17: waiting up to 1 s for
+# a warm worker made every cold round's slowest 1.07-1.58 s against 0.13-0.21 s taking any idle one, since a new
+# worker's first calls are as fast as later ones). A worker silent past WARM_MAX_S counts as warm.
 WARM_MAX_S = 60.0
 PRIME_WAIT_S = 20.0               # a session's folder is primed once a worker is ready, within this (Pool.prime_folder)
 EXIT_GRACE_MS = 30000
@@ -455,8 +455,6 @@ class Worker:
         self.warmed.set()
         with contextlib.suppress(Exception):
             self.pool.service.log(f"worker {self.spec.version} warm: its warm-up ended {how} (pid {self.process.pid})")
-        with contextlib.suppress(Exception):
-            self.pool.worker_ready(self)        # waiting calls and the gathering look again
 
     # --- calls ----------------------------------------------------------------------------------------------------------
 
@@ -808,7 +806,8 @@ class Pool:
         only an apply on that worker reuses. Otherwise the always-warm worker (the machine's full thread counts: lane
         R's warm render threads) is kept for long calls, a lead's apply and a render: a long call takes it when it is
         idle, and waits up to WARM_WAIT_S for it while it runs a short call; short calls take another idle worker
-        first, and it only when it is the one idle. Else the least used."""
+        first, and it only when it is the one idle. Else one past its warm-up (C2 `warm`) before one still warming, then
+        the least used. It never waits for a warm one."""
         def warm(worker) -> bool:
             return getattr(worker, "build_threads", None) == full_threads() and \
                 any(getattr(w, "build_threads", None) != full_threads() for w in live)
@@ -826,7 +825,7 @@ class Pool:
             others = [w for w in idle if not warm(w)]
             if others:
                 idle = others
-        return min(idle, key=lambda w: (len(w.keys), w.calls))
+        return min(idle, key=lambda w: (not w.warmed.is_set(), len(w.keys), w.calls))
 
     def _threads_for_new(self, live: list) -> int:
         """Full counts for the only worker of an engine (or the first again after one died); the per-worker cap for
@@ -919,10 +918,8 @@ class Pool:
             return any("apply-parts" in (w.info.get("features") or []) for w in self._live(version) if w.ready.is_set())
 
     def idle_count(self, version: str) -> int:
-        """Idle workers that are warm (the gathering cuts its builds for these: a cold worker's first build is slow)."""
         with self.cond:
-            return sum(1 for w in self._live(version) if w.ready.is_set() and w.warmed.is_set() and not w.busy
-                       and not w.fatal)
+            return sum(1 for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal)
 
     def _oneshot(self, version: str) -> bool:
         until = self.oneshot_until.get(version)
@@ -960,12 +957,6 @@ class Pool:
                         raise WorkerFailed("workers of this engine do not start")
                     live = self._live(group)
                     idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
-                    warm = [w for w in idle if w.warmed.is_set()]
-                    if warm or not idle:
-                        idle = warm
-                    elif any(w.warmed.is_set() for w in live if w.ready.is_set() and not w.fatal) and \
-                            time.monotonic() - waited_from < COLD_WAIT_S:
-                        idle = []                       # warm ones are busy: one may come free before a cold start pays
                     ahead = sum(1 for other in waiting if other < ticket)
                     allowed = rank < RANKS["long"] or \
                         sum(1 for w in live if w.busy and w.rank == RANKS["long"]) < long_most
@@ -985,8 +976,7 @@ class Pool:
                     if idle and ahead < len(idle) and allowed:
                         self.cond.wait(0.02)             # a long call waiting a moment for the warm worker
                         continue
-                    # starting: not ready yet, or ready and still warming while idle (no second cold start for it)
-                    starting = [w for w in live if not w.ready.is_set() or (not w.warmed.is_set() and not w.busy)]
+                    starting = [w for w in live if not w.ready.is_set()]
                     if not spawned and len(live) < most and len(starting) < len(waiting):
                         spawned = True
                         self.cond.release()
@@ -1228,20 +1218,21 @@ class Pool:
         with self.cond:
             if self.closed or self.waiting.get(version):
                 return 0
-            idle = [w for w in self._live(version) if w.ready.is_set() and w.warmed.is_set() and not w.busy and not w.fatal]
+            idle = [w for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal]
             return max(0, len(idle) - 1)
 
     def take_for_ahead(self, version: str) -> "Worker | None":
         """An idle worker for a build-ahead, or None: only when no call waits for a worker of the engine and another
         stays idle after it. Never the always-warm worker while another is idle (it serves leads' applies and
-        renders). The part's workspace keys are the caller's to hold (Pool.keys.try_take)."""
+        renders); one past its warm-up before one still warming. The part's workspace keys are the caller's to hold
+        (Pool.keys.try_take)."""
         with self.cond:
             live = self._live(version)
-            idle = [w for w in live if w.ready.is_set() and w.warmed.is_set() and not w.busy and not w.fatal]
+            idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
             if self.closed or self.waiting.get(version) or len(idle) < 2:
                 return None
             others = [w for w in idle if getattr(w, "build_threads", None) != full_threads()] or idle
-            chosen = min(others, key=lambda w: (len(w.keys), w.calls))
+            chosen = min(others, key=lambda w: (not w.warmed.is_set(), len(w.keys), w.calls))
             chosen.busy = True
             chosen.rank = RANKS["ahead"]
             return chosen
