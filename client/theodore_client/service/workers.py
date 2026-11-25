@@ -400,7 +400,8 @@ class Worker:
                     f"worker {self.spec.version} ready {int((time.perf_counter() - self.started_perf) * 1000)} ms after "
                     f"its start (its warm-up {frame.get('warm_ms')} ms, {self.rss_mb:.0f} MB, pid {frame.get('pid')}"
                     f"{', ' + self.group if self.group != self.spec.version else ''}; features: "
-                    f"{', '.join(frame.get('features') or []) or 'none'})")
+                    f"{', '.join(frame.get('features') or []) or 'none'}; threads: build "
+                    f"{self.build_threads or 'engine default'}, render {self.render_threads or 'engine default'})")
             self.pool.worker_ready(self)
             return
         if kind == "fatal":

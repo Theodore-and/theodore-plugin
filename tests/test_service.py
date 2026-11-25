@@ -694,7 +694,8 @@ class Timings(ServiceCase):
         client, got = self.connect()
         self.call(client, got, "t", ["echo"], env={"THEODORE_TIMINGS": "1"})
         log = self.log_with("timing: pptx echo")       # written once the call's done frame is out (588da9e)
-        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: apply-parts\)")
+        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: apply-parts; threads: "
+                              r"build \d+, render \d+\)")
         self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own"
                               r"[^)]*\) \+ after \d+;")
         self.assertIn("timings: echo 5 ms (fake.step 5)", log, "the engine's own line, under the call's")
