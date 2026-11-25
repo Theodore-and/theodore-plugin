@@ -763,9 +763,14 @@ class KeptAlive:
         """(connection, reused, idle since): an idle connection of this route, the most recently used first, else a new
         one (`fresh`: always a new one). Connections gone stale, of another route (the API base changed), or that the
         remote end has closed while idle (an edge's idle timeout: seen before anything is sent on them) are closed."""
-        now = time.monotonic()
-        found, since, dropped = None, now, []
+        found, dropped = None, []
         with self._lock:
+            # The clock is read under the lock: a connection given back by another thread between a reading taken
+            # before the lock and the lock itself was dated after that reading, read as idle for less than nothing and
+            # closed as stale, and a new one opened in its place (release/0.5.0's linux-arm64 job: 9 opened where 6
+            # requests at once need 6).
+            now = time.monotonic()
+            since = now
             kept = []
             for item in self._idle:
                 if item[0] != route or not 0 <= now - item[2] <= KEPT_IDLE_SECONDS:
