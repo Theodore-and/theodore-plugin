@@ -301,6 +301,22 @@ class Fatal(ServiceCase):
         self.assertTrue(answer["oneshot"])
 
 
+class PicturesRule(unittest.TestCase):
+    def test_an_apply_past_the_auto_render_cap_attaches_the_slides_it_drew(self):
+        # rc.34 and rc.35 on a deck of more than 40 slides (checked against the real engines, 25 Nov): the render is
+        # scoped to the changed slides, `rendered_images` lists only those, and render_summary says `scoped`.
+        from theodore_client.service import tools
+        scoped = json.dumps({"ok": True, "rendered_images": ["/r/slide-2.jpg"], "render_summary": {
+            "scoped": "2", "reason": "deck exceeds full auto-render cap; rendered the slides no current render shows",
+            "slide_count": 95, "max_slides": 40}})
+        self.assertEqual(tools.pictures_of(["apply", "/w"], scoped), ["/r/slide-2.jpg"])
+        full = json.dumps({"ok": True, "rendered_images": ["/r/slide-1.jpg", "/r/slide-2.jpg"],
+                           "render_summary": {"regenerated_pages": [2]}})
+        self.assertEqual(tools.pictures_of(["apply", "/w"], full), ["/r/slide-2.jpg"], "the drawn ones, not the cached")
+        unchanged = json.dumps({"ok": True, "render_summary": {"skipped": "deck.js unchanged since the last apply"}})
+        self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
+
+
 class PoolSizing(unittest.TestCase):
     def test_a_worker_per_core_within_the_memory_share(self):
         from unittest import mock
