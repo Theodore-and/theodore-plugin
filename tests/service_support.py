@@ -163,8 +163,9 @@ while True:
             for target in targets:
                 note("ahead-built", target)
                 rows.append({"ok": True, "ahead": "built", "part": target, "slides": 1, "ms": 300})
-            if os.environ.get("THEODORE_TIMINGS") == "1":   # the engine's own line (lanes F and G)
+            if os.environ.get("THEODORE_TIMINGS") == "1":   # the engine's own lines (lanes F and G; F's gc line)
                 say(f"timings: apply-parts {len(rows)} part(s) 300 ms (ahead.build 250, ahead.write 50)\n", "stderr")
+                say("gc: full collection 22 ms, 4 collected, 2000 blocks held, during a call\n", "stderr")
             if len(rows) == 1:
                 say(json.dumps(rows[0], indent=2) + "\n")
             else:
@@ -261,8 +262,9 @@ while True:
                         "resident": os.environ.get("THEODORE_RESIDENT"), "home": os.environ.get("THEODORE_HOME"),
                         "node_options": os.environ.get("NODE_OPTIONS"), "work": os.environ.get("THEODORE_WORK_DIR")}) + "\n")
         say("a line on standard error\n", "stderr")
-        if os.environ.get("THEODORE_TIMINGS") == "1":   # the engine's own line (lanes F and G)
+        if os.environ.get("THEODORE_TIMINGS") == "1":   # the engine's own lines (lanes F and G; F's gc line)
             say(f"timings: {verb} 5 ms (fake.step 5)\n", "stderr")
+            say("gc: full collection 21 ms, 3 collected, 1000 blocks held, during a call\n", "stderr")
     for k, v in saved.items():
         if v is None:
             os.environ.pop(k, None)

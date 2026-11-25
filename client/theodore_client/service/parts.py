@@ -78,8 +78,8 @@ class _BatchCall:
     def out(self, text: str, stream: str = "stdout") -> None:
         if stream == "stdout":
             self.stdout.append(text)
-        elif "timings" in text:
-            self.engine_timings.extend(line for line in text.splitlines() if line.startswith("timings: "))
+        elif "timings: " in text or "gc: " in text:                                          # router.TIMING_LINES
+            self.engine_timings.extend(line for line in text.splitlines() if line.startswith(("timings: ", "gc: ")))
 
     def image(self, *_args, **_kwargs) -> bool:
         return False
@@ -467,5 +467,6 @@ class Gatherer:
             if member.sent is not None:
                 member.timing["gathering_ms"] = int((member.sent - member.entered) * 1000)
             # the run's own line (`timings: apply-parts ...`); each part's phases are in its own answer (`timings`)
-            member.timing["engine_lines"] = [line for line in call.engine_timings if line.startswith("timings: apply-parts")]
+            member.timing["engine_lines"] = [line for line in call.engine_timings
+                                             if line.startswith(("timings: apply-parts", "gc: "))]
             member.done.set()

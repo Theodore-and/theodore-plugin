@@ -8,6 +8,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -80,6 +81,19 @@ class ServiceCase(ClientCase):
     def service(self) -> dict:
         self.record = start_service(self.env, self.box.home)
         return self.record
+
+    def wait_log(self, pattern: str, seconds: float = 15.0) -> str:
+        """service.log once a line matches `pattern` (a regular expression), or as it is: lines written after a call's
+        answer (its timing line, an ahead's done, a primed folder) may come a moment after the answer."""
+        deadline = time.monotonic() + seconds
+        log = ""
+        while time.monotonic() < deadline:
+            path = self.box.home / "logs" / "service.log"
+            log = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+            if re.search(pattern, log):
+                break
+            time.sleep(0.05)
+        return log
 
     def stop_service(self) -> None:
         """SIGTERM ends every service of this home (a successor too) within 10 s, and their workers with them; the test
@@ -305,7 +319,7 @@ class Pool(ServiceCase):
             rows = [json.loads(line) for line in record.read_text().splitlines()] if record.exists() else []
         self.assertEqual([(row["argv"], row["cwd"]) for row in rows], [(["--help"], str(folder))])
         self.assertEqual(sorted(p.name for p in folder.iterdir()), [], "nothing written in the folder")
-        self.assertIn(f"primed {folder}", (self.box.home / "logs" / "service.log").read_text())
+        self.assertIn(f"primed {folder}", self.wait_log(re.escape(f"primed {folder}")))
 
     def test_a_new_workspaces_next_calls_go_to_the_worker_that_made_it(self):
         # K's r61: after five starts on one worker, the first `slide list` went to a fresh worker (the new workspace's
@@ -663,21 +677,33 @@ class Burst(ServiceCase):
 
 
 class Timings(ServiceCase):
+    def log_with(self, text: str, seconds: float = 15.0) -> str:
+        """service.log once it holds `text` (a call's timing line is written just after its answer), or as it is."""
+        deadline = time.monotonic() + seconds
+        log = ""
+        while time.monotonic() < deadline:
+            log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+            if text in log:
+                break
+            time.sleep(0.05)
+        return log
+
     def test_with_timings_on_each_pptx_call_and_each_worker_say_their_time_in_the_log(self):
         self.env.update({"THEODORE_SERVICE_TIMINGS": "1", "FAKE_APPLY_PARTS": "1"})
         self.service()
         client, got = self.connect()
         self.call(client, got, "t", ["echo"], env={"THEODORE_TIMINGS": "1"})
-        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        log = self.log_with("timing: pptx echo")       # written once the call's done frame is out (588da9e)
         self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: apply-parts\)")
         self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own"
                               r"[^)]*\) \+ after \d+;")
         self.assertIn("timings: echo 5 ms (fake.step 5)", log, "the engine's own line, under the call's")
+        self.assertIn("    gc: full collection 21 ms", log, "and its gc line (lane F), under the call's too")
         # A Studio part's apply: what it waited in the gathering, as its own term (lane S2)
         (self.box.tmp / "deck").mkdir()
         self.call(client, got, "prep", ["prepare", str(self.box.tmp / "deck"), "--parts", "2"])
         self.call(client, got, "p1", ["apply", str(self.box.tmp / "deck" / "parts" / "s01")])
-        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        log = self.log_with("timing: pptx apply s01")
         self.assertRegex(log, r"timing: pptx apply s01: \d+ ms = admission \d+ \+ gathering \d+ \(1 part\(s\) in its "
                               r"build\) \+ queue")
 
@@ -824,7 +850,7 @@ class BuildAhead(ServiceCase):
         self.assertEqual(Collector.done(applied)["exit"], 0)
         self.assertEqual(self.events(), [("ahead-start", "s01"), ("ahead-built", "s01"), ("apply", "s01")],
                          "one ahead for the saved part, then the designer's apply; none for the parts not saved")
-        log = (self.box.home / "logs" / "service.log").read_text()
+        log = self.wait_log(r"ahead: 1 part\(s\) \(s01\) done in")
         self.assertIn("ahead: watching 3 part(s) of deck", log)
         self.assertRegex(log, r"ahead: 1 part\(s\) \(s01\) done in \d+ ms \(exit 0\): 1 built")
 
@@ -883,9 +909,9 @@ class BuildAhead(ServiceCase):
         self.assertEqual(len({row["pid"] for row in starts}), 1, "in one call, on one worker")
         first_built = min(row["t"] for row in rows if row["event"] == "ahead-built")
         self.assertTrue(all(row["t"] <= first_built for row in starts), "all started before any was built")
-        log = (self.box.home / "logs" / "service.log").read_text()
+        log = self.wait_log(r"ahead: 3 part\(s\) \(s01, s02, s03\) done in \d+ ms[^\n]*\n    timings[^\n]*\n    gc: ")
         self.assertRegex(log, r"ahead: 3 part\(s\) \(s01, s02, s03\) done in \d+ ms \(exit 0\): 3 built; [^\n]*\n"
-                              r"    timings: apply-parts 3 part\(s\) 300 ms")
+                              r"    timings: apply-parts 3 part\(s\) 300 ms[^\n]*\n    gc: full collection 22 ms")
 
     def test_parts_built_ahead_on_one_worker_are_applied_there_together(self):
         # Lane S2's S2-6: a burst's applies spread over every worker, and each worker but the one that built the

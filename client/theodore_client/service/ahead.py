@@ -77,8 +77,8 @@ class _Call:
         if stream == "stdout":
             if sum(len(t) for t in self.stdout) < 1 << 20:
                 self.stdout.append(text)
-        elif "timings: " in text and len(self.engine_timings) < 40:
-            self.engine_timings.extend(line for line in text.splitlines() if line.startswith("timings: "))
+        elif ("timings: " in text or "gc: " in text) and len(self.engine_timings) < 40:      # router.TIMING_LINES
+            self.engine_timings.extend(line for line in text.splitlines() if line.startswith(("timings: ", "gc: ")))
 
     def image(self, *_args, **_kwargs) -> bool:
         return False
