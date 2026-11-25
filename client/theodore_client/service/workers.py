@@ -38,6 +38,7 @@ READY_WAIT_S = 90.0
 IDLE_SHRINK_S = 300.0
 RECYCLE_RSS_MB = 800.0
 WORKER_MB = 600.0                 # one warm worker with its Node and renderer, for the pool's memory cap
+RENDER_THREAD_MB = 250.0          # each warm render thread beyond the first (lane R's budget, 25 Nov)
 MEMORY_SHARE = 0.4                # at most this share of the computer's memory goes to workers
 MOST_WORKERS = 16
 RANKS = {"read": 0, "write": 1, "long": 2}      # the queue's order: expected cost (B-A-worker 12)
@@ -231,6 +232,7 @@ class Worker:
         self.busy = False
         self.rank: int | None = None                # the rank of the call it runs (RANKS)
         self.build_threads: int | None = None       # THEODORE_BUILD_THREADS for its Node builds (lane F), when set
+        self.render_threads: int | None = None      # THEODORE_RENDER_THREADS for its drawing pool (lane R), when set
         self.started_perf = time.perf_counter()
         self.retiring = False
         self.calls = 0
@@ -262,6 +264,8 @@ class Worker:
         env["THEODORE_WORK_DIR"] = str(work)
         if self.build_threads:
             env["THEODORE_BUILD_THREADS"] = str(self.build_threads)
+        if self.render_threads:
+            env["THEODORE_RENDER_THREADS"] = str(self.render_threads)     # 1: draws on its own thread, no pool
         env["PYTHONUNBUFFERED"] = "1"
         command = [self.spec.python(), "-I", str(self.spec.serve_script), "serve", "--protocol", str(frames.PROTOCOL)]
         self.started_perf = time.perf_counter()
@@ -467,8 +471,20 @@ def pool_sizes() -> tuple[int, int]:
     if forced and forced.isdigit() and int(forced) > 0:
         return int(forced), int(forced)
     cores = os.cpu_count() or 2
-    by_memory = int(_ram_bytes() * MEMORY_SHARE // (WORKER_MB * (1 << 20)))
-    return 1, max(2, min(cores, by_memory, MOST_WORKERS))
+    ram = _ram_bytes() * MEMORY_SHARE
+    most = max(2, min(cores, int(ram // (WORKER_MB * (1 << 20))), MOST_WORKERS))
+    for _ in range(4):                          # each worker's render threads beyond the first cost memory too
+        each = WORKER_MB + (worker_threads(most) - 1) * RENDER_THREAD_MB
+        fits = max(2, min(most, int(ram // (each * (1 << 20)))))
+        if fits == most:
+            break
+        most = fits
+    return 1, most
+
+
+def worker_threads(most: int) -> int:
+    """Threads a worker builds and draws on in a pool of `most`: max(1, cores // most), at most 4 (lanes F and R)."""
+    return min(4, max(1, (os.cpu_count() or 2) // max(1, most)))
 
 
 class _KeyLock:
@@ -554,15 +570,16 @@ class Pool:
 
     def _spawn(self, spec: Spec, group: str | None = None, env: dict | None = None, limit: int | None = None) -> Worker | None:
         """A new worker of the group, started; None when `limit` workers of it live already. Each builds on
-        max(1, cores // pool size) Node threads (THEODORE_BUILD_THREADS; lane F and the coordinator, 25 Nov), so a
-        burst's builds share the cores instead of oversubscribing them."""
+        max(1, cores // pool size) Node threads and draws on as many (THEODORE_BUILD_THREADS, lane F, and
+        THEODORE_RENDER_THREADS, lane R; the coordinator, 25 Nov), so a burst's builds and pictures share the cores
+        instead of oversubscribing them."""
         worker = Worker(self, spec, group, env)
         with self.cond:
             live = self._live(worker.group)
             if limit is not None and len(live) >= limit:
                 return None
             if env is None:
-                worker.build_threads = max(1, (os.cpu_count() or 2) // max(1, self.most))
+                worker.build_threads = worker.render_threads = worker_threads(self.most)    # lanes F and R
             self.workers.setdefault(worker.group, []).append(worker)
         self._hold_engine_run()
         try:
