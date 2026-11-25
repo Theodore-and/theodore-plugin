@@ -127,7 +127,7 @@ class Service:
 
     def _setup_parts(self) -> None:
         from .. import api, core, credentials
-        from . import chat, licence, parts, texts, timers, workers
+        from . import ahead, chat, licence, parts, texts, timers, workers
         core.scope_refusals_per_thread()        # a refusal belongs to the call that learned it (core.begin_call per call)
         from .. import commands
         commands.HOSTS_EVERY_S = 300.0          # the hosts' registration and settings: every 5 minutes, not every guide
@@ -146,6 +146,7 @@ class Service:
             use(self.texts)
         self.pool = workers.Pool(self)
         self.parts = parts.Gatherer(self.pool)      # a Studio deck's parts applied together (lanes G and F)
+        self.ahead = ahead.Ahead(self, self.pool)   # and built ahead of their designers' applies (ahead.py)
         self.timers = timers.Timers(self)
 
     def _warm_api(self) -> None:

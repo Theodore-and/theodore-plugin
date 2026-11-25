@@ -691,6 +691,104 @@ class StudioParts(ServiceCase):
             self.assertNotIn("batch", answer, name)
 
 
+class BuildAhead(ServiceCase):
+    """A Studio part built before its designer applies it (ahead.py; the coordinator, 25 Nov; lanes S2 and G): a saved
+    part's deck.js gets `apply <part> --ahead` on an idle worker; never the last idle one, never without the engine's
+    feature; a newer save or the designer's apply on a newer deck.js cancels it; a call with no idle worker takes it."""
+
+    prepared = StudioParts.prepared
+
+    def setUp(self):
+        super().setUp()
+        self.aheads_file = self.box.tmp / "aheads.jsonl"
+        self.env.update({"FAKE_APPLY_PARTS": "1", "FAKE_APPLY_AHEAD": "1", "FAKE_AHEADS": str(self.aheads_file),
+                         "THEODORE_SERVICE_WORKERS": "2"})
+
+    def events(self) -> list[tuple[str, str]]:
+        try:
+            lines = self.aheads_file.read_text().splitlines()
+        except FileNotFoundError:
+            return []
+        return [(row["event"], row["part"]) for row in map(json.loads, lines)]
+
+    def wait_for(self, event: tuple[str, str], seconds: float = 10.0) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if event in self.events():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def save(self, lead: Path, part: str, text: str) -> None:
+        (lead / "parts" / part / "deck.js").write_text(text)     # a designer's file tool: one whole-file write
+
+    def test_a_saved_part_is_built_ahead_and_its_apply_comes_after(self):
+        self.service()
+        lead = self.prepared(3)
+        self.save(lead, "s01", "slide one, saved\n")
+        self.assertTrue(self.wait_for(("ahead-built", "s01")), self.events())
+        applied = self.call(self.client_, self.got, "a1", ["apply", str(lead / "parts" / "s01")])
+        self.assertEqual(Collector.done(applied)["exit"], 0)
+        self.assertEqual(self.events(), [("ahead-start", "s01"), ("ahead-built", "s01"), ("apply", "s01")],
+                         "one ahead for the saved part, then the designer's apply; none for the parts not saved")
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("ahead: watching 3 part(s) of deck", log)
+        self.assertIn("done: built", log)
+
+    def test_the_designers_apply_waits_for_its_own_ahead_on_the_same_save(self):
+        self.env["FAKE_AHEAD_S"] = "1.0"
+        self.service()
+        lead = self.prepared(2)
+        self.save(lead, "s01", "slide one, saved\n")
+        self.assertTrue(self.wait_for(("ahead-start", "s01")), self.events())
+        self.call(self.client_, self.got, "a1", ["apply", str(lead / "parts" / "s01")])
+        self.assertEqual(self.events(), [("ahead-start", "s01"), ("ahead-built", "s01"), ("apply", "s01")],
+                         "the apply went after its own ahead, which it reuses")
+
+    def test_an_apply_on_a_newer_save_cancels_the_ahead_and_goes_at_once(self):
+        self.env["FAKE_AHEAD_S"] = "5"
+        self.service()
+        lead = self.prepared(2)
+        self.save(lead, "s01", "slide one, saved\n")
+        self.assertTrue(self.wait_for(("ahead-start", "s01")), self.events())
+        self.save(lead, "s01", "slide one, saved again with more words\n")
+        began = time.monotonic()
+        applied = self.call(self.client_, self.got, "a1", ["apply", str(lead / "parts" / "s01")])
+        self.assertEqual(Collector.done(applied)["exit"], 0)
+        self.assertLess(time.monotonic() - began, 3.0, "not after the 5 s ahead")
+        self.assertTrue(self.wait_for(("ahead-cancelled", "s01")), self.events())
+
+    def test_a_call_that_finds_no_idle_worker_takes_the_aheads(self):
+        self.env["FAKE_AHEAD_S"] = "8"
+        self.service()
+        lead = self.prepared(2)
+        self.save(lead, "s01", "slide one, saved\n")
+        self.assertTrue(self.wait_for(("ahead-start", "s01")), self.events())
+        self.call(self.client_, self.got, "long", ["sleep", "4"], wait=False)     # the other worker, now busy
+        time.sleep(0.5)
+        began = time.monotonic()
+        quick = self.call(self.client_, self.got, "quick", ["echo"])
+        self.assertEqual(Collector.done(quick)["exit"], 0)
+        self.assertLess(time.monotonic() - began, 3.0, "on the ahead's worker, not after the sleep or the ahead")
+        self.assertTrue(self.wait_for(("ahead-cancelled", "s01")), self.events())
+        self.assertIn("cancelling: a call waits for a worker", (self.box.home / "logs" / "service.log").read_text())
+        self.got.wait("long", 30)
+
+    def test_nothing_is_built_ahead_without_the_feature_or_a_second_idle_worker(self):
+        for env in ({"FAKE_APPLY_AHEAD": ""}, {"THEODORE_SERVICE_WORKERS": "1"}):
+            with self.subTest(env=env):
+                self.env.update(env)
+                self.service()
+                lead = self.prepared(2)
+                self.save(lead, "s01", "slide one, saved\n")
+                time.sleep(1.5)
+                self.assertEqual([e for e in self.events() if e[0].startswith("ahead")], [])
+                self.call(self.client_, self.got, "bye", ["--help"])
+                self.client_.close()
+                self.stop_service()
+                self.env.update({"FAKE_APPLY_AHEAD": "1", "THEODORE_SERVICE_WORKERS": "2"})
+
+
 class Lifecycle(ServiceCase):
     def test_nothing_runs_after_the_last_relay_detaches(self):
         exits = self.box.tmp / "exit-frames.jsonl"

@@ -62,7 +62,13 @@ time.sleep(float(os.environ.get("FAKE_WORKER_START_S") or 0))     # a slow warm-
 if os.environ.get("FAKE_WORKER_FATAL"):
     send({"t": "fatal", "code": "IMPORT", "message": "a stand-in failure", "exit": 78})
     sys.exit(78)
-FEATURES = ["apply-parts"] if os.environ.get("FAKE_APPLY_PARTS") else []
+FEATURES = (["apply-parts"] if os.environ.get("FAKE_APPLY_PARTS") else []) + \
+    (["apply-ahead"] if os.environ.get("FAKE_APPLY_AHEAD") else [])
+def note(event, part):                      # what a build-ahead test reads: each ahead and apply, in order
+    if os.environ.get("FAKE_AHEADS"):
+        with open(os.environ["FAKE_AHEADS"], "a", encoding="utf-8") as record:
+            record.write(json.dumps({"event": event, "part": os.path.basename(part), "t": time.time(),
+                                     "pid": os.getpid()}) + "\n")
 send({"t": "ready", "v": 1, "protocol": 1, "features": FEATURES, "engine": {"version": VERSION, "build": "test", "semantics": "b1"},
       "pid": os.getpid(), "warm_ms": 1, "rss_mb": 20.0, "verbs": ["echo", "sleep", "slide"]})
 runs, cancelled, state = queue.Queue(), set(), {"calls": 0}
@@ -136,6 +142,23 @@ while True:
             os._exit(9)
     if verb == "crash":
         os._exit(9)
+    if verb == "apply" and "--ahead" in argv and targets:
+        # lane G's build-ahead: the part built into the store, nothing visible; a cancel ends it with 130
+        note("ahead-start", targets[0])
+        end = time.monotonic() + float(os.environ.get("FAKE_AHEAD_S") or 0.3)
+        while time.monotonic() < end and call not in cancelled:
+            time.sleep(0.01)
+        if call in cancelled:
+            code = 130
+            note("ahead-cancelled", targets[0])
+            say(json.dumps({"ok": False, "cancelled": True}) + "\n")
+        else:
+            note("ahead-built", targets[0])
+            say(json.dumps({"ok": True, "ahead": "built", "part": targets[0], "slides": 1, "ms": 300}, indent=2) + "\n")
+        verb = "--ahead-done"
+    elif verb == "apply" and targets:
+        for target in targets:
+            note("apply", target)
     if verb == "sleep":
         end = time.monotonic() + float(argv[1])
         while time.monotonic() < end:
@@ -145,6 +168,8 @@ while True:
             send({"t": "progress", "id": call, "elapsed_ms": int((time.monotonic() - started) * 1000), "phase": "sleeping"})
             time.sleep(0.05)
         say(json.dumps({"slept": argv[1], "cancelled": code == 130}) + "\n")
+    elif verb == "--ahead-done":
+        pass
     elif verb == "fail":
         code = int(argv[1])
         say(json.dumps({"ok": False}) + "\n")

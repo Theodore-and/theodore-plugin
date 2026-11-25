@@ -41,7 +41,8 @@ WORKER_MB = 600.0                 # one warm worker with its Node and renderer, 
 RENDER_THREAD_MB = 250.0          # each warm render thread beyond the first (lane R's budget, 25 Nov)
 MEMORY_SHARE = 0.4                # at most this share of the computer's memory goes to workers
 MOST_WORKERS = 16
-RANKS = {"read": 0, "write": 1, "long": 2}      # the queue's order: expected cost (B-A-worker 12)
+RANKS = {"read": 0, "write": 1, "long": 2, "ahead": 3}      # the queue's order: expected cost (B-A-worker 12);
+# "ahead": a Studio part built before its designer applies it (ahead.py), never queued: it takes an idle worker or none
 WARM_WAIT_S = 0.5                 # a long call waits this long for the always-warm worker to finish a short call
 RECYCLE_CALLS = 2000
 EXIT_GRACE_MS = 30000
@@ -600,6 +601,35 @@ class _KeyLock:
                     self._held.pop(key, None)
             mine.set()
 
+    def try_take(self, key: str | None) -> threading.Event | None:
+        """The key at once when no command holds it or waits for it (an ahead never waits behind a write); else None.
+        Given back with give()."""
+        mine = threading.Event()
+        if not key:
+            return mine
+        with self._lock:
+            if self._held.get(key):
+                return None
+            self._held[key] = [mine]
+        return mine
+
+    def give(self, key: str | None, mine: threading.Event) -> None:
+        if key:
+            with self._lock:
+                queue = self._held.get(key, [])
+                if mine in queue:
+                    queue.remove(mine)
+                if not queue:
+                    self._held.pop(key, None)
+        mine.set()
+
+
+class _Taken:
+    """An idle worker and a part's workspace key, taken together for an ahead (Pool.take_for_ahead)."""
+
+    def __init__(self, worker: "Worker", key: str | None, token: threading.Event):
+        self.worker, self.key, self.token = worker, key, token
+
 
 class Pool:
     def __init__(self, service):
@@ -612,6 +642,7 @@ class Pool:
         self.waiting: dict[str, list[tuple[int, int]]] = {}    # per group: the waiting calls' (rank, arrival)
         self._arrivals = 0
         self.on_release: list = []                  # called with the version when a worker is free again (parts.py)
+        self.on_starved: list = []                  # called with the version when a call finds no idle worker (ahead.py)
         self.features: dict[str, set] = {}          # per engine version: what a ready worker of it said it can do
         self.keys = _KeyLock()
         self.closed = False
@@ -748,8 +779,9 @@ class Pool:
                 threading.Thread(target=one, args=(spec,), name="pool-warm-up", daemon=True).start()
 
     def worker_ready(self, worker: "Worker") -> None:
-        if "apply-parts" in (worker.info.get("features") or []):
-            self.features.setdefault(worker.spec.version, set()).add("apply-parts")
+        said = [f for f in (worker.info.get("features") or []) if isinstance(f, str)]
+        if said:
+            self.features.setdefault(worker.spec.version, set()).update(said)
         with self.cond:
             self.cond.notify_all()
         for hook in list(self.on_release):
@@ -764,6 +796,10 @@ class Pool:
         with self.cond:
             ready = [w for w in self._live(version) if w.ready.is_set()]
         return False if ready else None
+
+    def has_feature(self, version: str, name: str) -> bool:
+        """A ready worker of the engine listed `name` in its `ready.features` (C2), remembered for the service's life."""
+        return name in self.features.get(version, ())
 
     def can_apply_parts(self, version: str) -> bool:
         """A ready worker of the engine said it takes several Studio parts in one apply (`ready.features`)."""
@@ -795,7 +831,7 @@ class Pool:
         most = self.most if most is None else most
         rank = RANKS.get(priority, RANKS["write"]) if rank is None else rank
         long_most = max(1, most - 1)
-        spawned = False
+        spawned = starved_told = False
         waited_from = time.monotonic()
         with self.cond:
             self._arrivals += 1
@@ -841,6 +877,16 @@ class Pool:
                         continue
                     if call.cancelled.is_set():
                         raise WorkerFailed("cancelled while waiting for a worker")
+                    if not starved_told and any(w.busy and w.rank == RANKS["ahead"] for w in live):
+                        starved_told = True             # an ahead gives its worker to a call that has none (ahead.py)
+                        self.cond.release()
+                        try:
+                            for hook in list(self.on_starved):
+                                with contextlib.suppress(Exception):
+                                    hook(group)
+                        finally:
+                            self.cond.acquire()
+                        continue
                     self.cond.wait(0.25)
             finally:
                 waiting.remove(ticket)
@@ -1009,6 +1055,38 @@ class Pool:
             return 78, []
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
+
+    def take_for_ahead(self, version: str, key: str | None) -> _Taken | None:
+        """An idle worker for a build-ahead (ahead.py), or None: only when no call waits for a worker of the engine,
+        another worker stays idle after it, and no command holds or waits for the part's workspace. Never the
+        always-warm worker while another is idle (it serves leads' applies and renders)."""
+        token = self.keys.try_take(key)
+        if token is None:
+            return None
+        with self.cond:
+            live = self._live(version)
+            idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
+            if not self.closed and not self.waiting.get(version) and len(idle) >= 2:
+                others = [w for w in idle if getattr(w, "build_threads", None) != full_threads()] or idle
+                chosen = min(others, key=lambda w: (len(w.keys), w.calls))
+                chosen.busy = True
+                chosen.rank = RANKS["ahead"]
+                return _Taken(chosen, key, token)
+        self.keys.give(key, token)
+        return None
+
+    def run_ahead(self, call, taken: _Taken, argv: list[str], env: dict) -> int:
+        """Run a build-ahead on the worker take_for_ahead gave; never re-run, never one-shot. Returns its exit."""
+        try:
+            try:
+                result = taken.worker.run(call, argv, env, None, taken.key, "write")
+            except WorkerFailed:
+                self._release(taken.worker)
+                return 78
+            self._release(taken.worker)
+            return int(result.get("exit", 78))
+        finally:
+            self.keys.give(taken.key, taken.token)
 
     def close_confined(self) -> None:
         """Every chat's workers end now (the licence was refused or withdrawn)."""
