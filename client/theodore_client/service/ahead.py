@@ -292,7 +292,7 @@ class Ahead:
         """The ready parts of each burst, once its saves have settled (no change in the last poll, or the oldest ready
         for SETTLE_S), or at once when every part of the burst has been saved since its last ahead or apply (lane
         S2's S2-7: all fifteen land within milliseconds, and the still poll cost each ahead ~100 ms of its head
-        start): one several-part ahead per worker allowed, in equal shares."""
+        start): one several-part ahead per worker allowed, in shares by the workers' build threads."""
         now = time.monotonic()
         launches: list[tuple[_Call, object, list]] = []
         with self.lock:
@@ -327,13 +327,18 @@ class Ahead:
                 free = [part for part in ready if not self.pool.keys.busy(part.key or None)]
                 if not free:
                     continue
-                count = max(1, min(slots, len(free)))
-                share = max(1, min(MOST_IN_AHEAD, -(-len(free) // count)))
-                chunks = [free[i:i + share] for i in range(0, len(free), share)]
-                for chunk in chunks:
+                taken = []
+                for _ in range(max(1, min(slots, len(free)))):
                     worker = self.pool.take_for_ahead(version)
                     if worker is None:
-                        continue
+                        break
+                    taken.append(worker)
+                # Shares by each worker's build threads (the engine builds a call's parts on its thread pool): the
+                # always-warm worker's 3 threads take three parts in the time a 1-thread worker takes one.
+                sizes = shares(len(free), [getattr(w, "build_threads", None) or 1 for w in taken], MOST_IN_AHEAD)
+                start = 0
+                for worker, size in zip(taken, sizes):
+                    chunk, start = free[start:start + size], start + size
                     call = _Call(chunk)
                     for part in chunk:
                         part.ahead, part.built, part.ready_since = call, part.seen, None
@@ -415,6 +420,24 @@ class Ahead:
             names = ", ".join(os.path.basename(p.path) for p in call.members[:8])
             more = f" and {len(call.members) - 8} more" if len(call.members) > 8 else ""
             self.service.log(f"ahead: {len(call.members)} part(s) ({names}{more}) {what}; {self._counts_text()}{below}")
+
+
+def shares(parts: int, weights: list[int], most: int) -> list[int]:
+    """`parts` split over workers in proportion to their weights (largest remainders), each at least one part when
+    there are as many parts as workers, at most `most` (what the cap leaves waits for the next ahead)."""
+    n = len(weights)
+    if not n or parts <= 0:
+        return [0] * n
+    floor = 1 if parts >= n else 0
+    exact = [parts * w / sum(weights) for w in weights]
+    sizes = [max(floor, int(x)) for x in exact]
+    while sum(sizes) > parts:
+        j = max((k for k in range(n) if sizes[k] > floor), key=lambda k: sizes[k] - exact[k])
+        sizes[j] -= 1
+    while sum(sizes) < parts:
+        j = max(range(n), key=lambda k: exact[k] - sizes[k])
+        sizes[j] += 1
+    return [min(most, size) for size in sizes]
 
 
 def _tally(values) -> dict[str, int]:

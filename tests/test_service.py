@@ -737,6 +737,61 @@ class PicturesRule(unittest.TestCase):
         self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
 
 
+class PicturesOut(unittest.TestCase):
+    """A burst's answers each carry a picture of about 100 KB (lane S2b's S2-22, rig 10 round 1 on a fresh store: 90 to
+    304 ms, one designer after another, between a part's answer and its done frame, where the same build's next run had
+    3 to 11): the service may write a client more than a 64 KB pipe held, and the timing line says what reading and
+    sending the pictures took."""
+
+    def test_the_timing_line_says_what_the_pictures_took(self):
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import tools
+        folder = Path(tempfile.mkdtemp(prefix="theodore-pictures-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        picture = folder / "slide-1.jpg"
+        picture.write_bytes(b"\xff\xd8" + b"x" * 100_000)
+        sent = []
+
+        def image(mime, path, data):
+            time.sleep(0.05)                # a client reading slowly
+            sent.append((mime, path, len(data)))
+            return True
+        call = SimpleNamespace(args=["apply", str(folder)], cwd=str(folder), image=image, timing={})
+        tools.attach_pictures(call, json.dumps({"ok": True, "rendered_images": [str(picture)],
+                                                "render_summary": {"regenerated_pages": [1]}}))
+        self.assertEqual(len(sent), 1)
+        read_ms, sent_ms = call.timing["pictures"]
+        self.assertGreaterEqual(sent_ms, 45)
+        self.assertLess(read_ms, 45)
+
+    @unittest.skipIf(os.name == "nt", "the Unix socket's send buffer")
+    def test_the_service_may_write_a_client_more_than_a_picture_before_it_reads(self):
+        import socket
+        import tempfile
+
+        from theodore_client.service import endpoint
+        folder = Path(tempfile.mkdtemp(prefix="thsock-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(folder / "s"))
+        server.listen(1)
+        listener = endpoint.UnixListener.__new__(endpoint.UnixListener)
+        listener._sock = server                                                 # noqa: SLF001
+        server.settimeout(5)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(str(folder / "s"))
+        conn = listener.accept()
+        self.addCleanup(conn.close)
+        self.addCleanup(client.close)
+        fresh = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        default = fresh.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        fresh.close()
+        self.assertGreater(conn.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF), default)
+        self.assertGreaterEqual(endpoint.SEND_BUFFER, 1 << 20, "the Windows pipe's out buffer too")
+
+
 class RouterCeiling(unittest.TestCase):
     def test_a_call_stuck_anywhere_is_answered_by_the_ceiling_and_its_stack_logged(self):
         from types import SimpleNamespace
@@ -872,8 +927,8 @@ class PoolSizing(unittest.TestCase):
             full.busy, full.rank = False, None
             pool.workers["9.9"] = live
             self.assertEqual(pool.ahead_slots("9.9"), 2, "the aheads count every idle worker but one")
-            self.assertIs(pool.take_for_ahead("9.9"), warm, "an ahead: the one past its warm-up first")
-            self.assertIs(pool.take_for_ahead("9.9"), cold, "then the one still warming, at once")
+            self.assertIs(pool.take_for_ahead("9.9"), full, "an ahead: the most build threads first")
+            self.assertIs(pool.take_for_ahead("9.9"), warm, "then, of equal ones, the one past its warm-up")
             self.assertIsNone(pool.take_for_ahead("9.9"), "never the last idle worker")
 
     def test_the_warm_worker_has_the_full_threads_and_is_the_one_kept(self):
@@ -1359,6 +1414,21 @@ class BuildAhead(ServiceCase):
             self.assertEqual({answer["pid"]}, built_on, f"{name}: applied on the worker that built its ahead")
         self.assertIn("on the worker that built their ahead", (self.box.home / "logs" / "service.log").read_text())
 
+    def test_a_designers_apply_never_waits_behind_another_parts_ahead(self):
+        # Aheads take every idle worker but one (lane S2b's S2-18: the always-warm worker too), so the apply of a part
+        # with no ahead of its own runs at once, and the ahead running goes on.
+        self.env["FAKE_AHEAD_S"] = "4"
+        self.service()
+        lead = self.prepared(2)
+        self.save(lead, "s01", "slide one, saved\n")
+        self.assertTrue(self.wait_for(("ahead-start", "s01")), self.events())
+        began = time.monotonic()
+        applied = self.call(self.client_, self.got, "a2", ["apply", str(lead / "parts" / "s02")])
+        self.assertEqual(Collector.done(applied)["exit"], 0)
+        self.assertLess(time.monotonic() - began, 2.5, "at once, not after the 4 s ahead")
+        self.assertTrue(self.wait_for(("ahead-built", "s01")), self.events())
+        self.assertNotIn(("ahead-cancelled", "s01"), self.events(), "the ahead was left alone")
+
     def test_nothing_is_built_ahead_without_the_feature_or_a_second_idle_worker(self):
         for env in ({"FAKE_APPLY_AHEAD": ""}, {"THEODORE_SERVICE_WORKERS": "1"}):
             with self.subTest(env=env):
@@ -1450,6 +1520,36 @@ class GatheringUnit(unittest.TestCase):
 
 
 class AheadUnit(unittest.TestCase):
+    def test_an_ahead_takes_the_most_threads_and_its_parts_go_by_threads(self):
+        # Lane S2b's S2-18 on rig 7: a burst's two 4-part aheads went to the two 1-thread workers while the 3-thread
+        # always-warm one sat idle. The aheads now take the most threads first, leave the smallest idle, and split the
+        # parts by threads (the engine builds a call's parts on its thread pool).
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import ahead, workers
+        with mock.patch.object(workers.os, "cpu_count", return_value=4), \
+                mock.patch.object(workers, "pool_sizes", return_value=(1, 4)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+
+            def worker(threads):
+                flags = {name: threading.Event() for name in ("ready", "warmed", "dead")}
+                flags["ready"].set()
+                flags["warmed"].set()
+                return SimpleNamespace(build_threads=threads, busy=False, rank=None, keys=set(), calls=0,
+                                       retiring=False, fatal=None, **flags)
+            small, full, other = worker(1), worker(3), worker(1)
+            pool.workers["9.9"] = [small, full, other]
+            self.assertEqual(pool.ahead_slots("9.9"), 2)
+            self.assertIs(pool.take_for_ahead("9.9"), full, "the always-warm worker's 3 threads first")
+            self.assertIn(pool.take_for_ahead("9.9"), (small, other))
+            self.assertIsNone(pool.take_for_ahead("9.9"), "a 1-thread worker stays idle for the designers' applies")
+        self.assertEqual(ahead.shares(8, [3, 1], 32), [6, 2], "8 parts on 3 + 1 threads")
+        self.assertEqual(ahead.shares(15, [4, 1, 1, 1, 1], 32), [7, 2, 2, 2, 2])
+        self.assertEqual(ahead.shares(3, [10, 1, 1], 32), [1, 1, 1], "each worker taken gets a part")
+        self.assertEqual(ahead.shares(40, [1, 1], 32), [20, 20])
+        self.assertEqual(ahead.shares(80, [1, 1], 32), [32, 32], "the cap: the rest wait for the next ahead")
+
     def test_a_home_group_goes_out_as_soon_as_all_of_it_is_in(self):
         # Lane S2's S2-9: the parts an ahead built on one worker waited 32 to 118 ms for the window while the rest of the
         # burst came. Once every part of the group not yet applied is waiting and its worker is idle, it goes at once.

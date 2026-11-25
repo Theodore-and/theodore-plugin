@@ -1347,16 +1347,18 @@ class Pool:
 
     def take_for_ahead(self, version: str) -> "Worker | None":
         """An idle worker for a build-ahead, or None: only when no call waits for a worker of the engine and another
-        stays idle after it. Never the always-warm worker while another is idle (it serves leads' applies and
-        renders); one past its warm-up before one still warming. The part's workspace keys are the caller's to hold
-        (Pool.keys.try_take)."""
+        stays idle after it, so a designer's apply never waits behind an ahead. The one with the most build threads
+        first, the always-warm worker included (lane S2b's S2-18 on rig 7: two 4-part aheads on the two 1-thread
+        workers while the 3-thread one sat idle, and the applies waited 490-542 ms for them); the one left idle is the
+        smallest. Then one past its warm-up before one still warming. The part's workspace keys are the caller's to
+        hold (Pool.keys.try_take)."""
         with self.cond:
             live = self._live(version)
             idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
             if self.closed or self.waiting.get(version) or len(idle) < 2:
                 return None
-            others = [w for w in idle if getattr(w, "build_threads", None) != full_threads()] or idle
-            chosen = min(others, key=lambda w: (not w.warmed.is_set(), len(w.keys), w.calls))
+            chosen = min(idle, key=lambda w: (-(getattr(w, "build_threads", None) or 1), not w.warmed.is_set(),
+                                              len(w.keys), w.calls))
             chosen.busy = True
             chosen.rank = RANKS["ahead"]
             return chosen
