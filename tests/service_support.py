@@ -214,8 +214,11 @@ while True:
         lead = argv[1]
         rows = [{"part": f"s{i:02d}", "slide": f"s{i:02d}", "workspace": os.path.join(lead, "parts", f"s{i:02d}"),
                  "status": "created"} for i in range(1, n + 1)]
+        import hashlib
         for row in rows:
             os.makedirs(row["workspace"], exist_ok=True)
+            with open(os.path.join(row["workspace"], ".theodore.json"), "w") as marker:   # a part is a workspace (C3)
+                marker.write(json.dumps({"key": hashlib.sha256(row["workspace"].encode()).hexdigest()[:16]}))
         # The engine's own form (cli_output.print_payload): the object indented, then one SLIDE line per part.
         lines = [f"SLIDE {i} of {n} (redesigned): \"Part {i}\"  WORKSPACE: {row['workspace']}" for i, row in enumerate(rows, 1)]
         say(json.dumps({"ok": True, "prepared": "parts", "parts": rows, "lines": lines, "in_turn": "--in-turn" in argv},

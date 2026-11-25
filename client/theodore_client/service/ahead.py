@@ -356,6 +356,9 @@ class Ahead:
                 outcomes = call.outcomes(code)
                 for outcome in outcomes.values():
                     self._count(f"ahead_{outcome}" if outcome in ("built", "kept", "skipped") else "ahead_failed")
+                for part in call.members:           # held in this worker's memory: its apply goes there (lane S2's S2-6)
+                    if outcomes.get(part.path) in ("built", "kept"):
+                        self.pool.remember(part.key or None, worker)
                 summary = ", ".join(f"{n} {o}" for o, n in sorted(_tally(outcomes.values()).items()))
                 # the engine's own lines under it (lane S2: where a several-part ahead's time goes, for F and R2)
                 self._log(call, f"done in {elapsed} ms (exit {code}): {summary}",
