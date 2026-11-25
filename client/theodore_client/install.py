@@ -618,6 +618,102 @@ def _self_test(directory: Path, runtime_id: str) -> None:
         raise EngineError(f"the runtime's Node did not start: {exc}") from None
 
 
+# --- the first start, at install ---------------------------------------------------------------------------------------
+#
+# What only a first start pays is paid when an engine is installed, not by the first command ever. The runtime's Python
+# files come as source (the standard library as its publisher ships it, the packages installed without compiling), and
+# the interpreter compiles each on its first import and keeps the result beside it: on rig 9 (2 processors) the first
+# worker after an install was ready after 10.8 s, later ones after 2.9 to 5.5 s. So after an engine's self-test the
+# client starts it once exactly as the service starts its workers (`engine.py serve`, contract C2, the runtime's own
+# interpreter with -I, so no PYTHONDONTWRITEBYTECODE of the user's applies), with its input closed: the worker loads
+# what every worker loads before `ready`, finds no service and ends by itself, having started nothing else. The
+# compiled files are the interpreter's own, beside their sources in the runtime's folder (Theodore's home, the user's
+# own folder, the same real files for a process inside or outside an app's package), where every later worker reads
+# them. Nothing is listed here and nothing else is stored. At low priority: an engine update's first start yields to
+# the session it runs beside. It never fails an install: an engine that does not start as a worker still runs one-shot.
+FIRST_START_WAIT_S = 180.0
+_BELOW_NORMAL_PRIORITY = 0x00004000     # Windows BELOW_NORMAL_PRIORITY_CLASS
+_NO_WINDOW = 0x08000000                 # Windows CREATE_NO_WINDOW
+
+
+def _worker_frames(raw: bytes) -> list[dict]:
+    """The C2 frames in a worker's output: a 4-byte little-endian length, then that many bytes of JSON, each."""
+    frames, at = [], 0
+    while at + 4 <= len(raw):
+        size = int.from_bytes(raw[at:at + 4], "little")
+        body = raw[at + 4:at + 4 + size]
+        if len(body) < size:
+            break
+        at += 4 + size
+        with contextlib.suppress(ValueError):
+            frame = json.loads(body.decode("utf-8"))
+            if isinstance(frame, dict):
+                frames.append(frame)
+    return frames
+
+
+def first_start(directory: Path, runtime_id: str | None = None, label: str | None = None) -> dict:
+    """Start the engine in `directory` once as a worker and wait for it to end (see above). Returns what happened, for
+    the log and the tests: {"said": "ready" | "fatal" | "nothing" | "not started", "ms": the whole start, ...}."""
+    began = time.monotonic()
+    result: dict = {"said": "not started"}
+    name = label or directory.name
+    try:
+        script = directory / "skills" / "pptx" / "scripts" / "engine.py"
+        python = core.home().runtime_python(runtime_id)
+        if not script.is_file() or python is None or not python.is_file():
+            return result           # an engine with no worker, or no runtime of ours: nothing to start
+        env = engine_env(directory)
+        env["THEODORE_RESIDENT"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        flags = {"creationflags": _NO_WINDOW | _BELOW_NORMAL_PRIORITY} if IS_WINDOWS else {}
+        process = subprocess.Popen([str(python), "-I", str(script), "serve", "--protocol", "1"], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd=str(directory), **flags)
+        if not IS_WINDOWS:
+            with contextlib.suppress(OSError):
+                os.setpriority(os.PRIO_PROCESS, process.pid, 10)
+        try:
+            out, _ = process.communicate(timeout=FIRST_START_WAIT_S)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            out, _ = process.communicate()
+            result["stopped"] = True
+        frame = next((f for f in _worker_frames(out or b"") if f.get("t") in ("ready", "fatal")), {})
+        result.update(said=str(frame.get("t") or "nothing"), exit=process.returncode)
+        if frame.get("t") == "ready":
+            result["ready_ms"] = frame.get("warm_ms")
+        elif frame.get("t") == "fatal":
+            result["code"] = frame.get("code")
+    except Exception as exc:  # noqa: BLE001  a head start only: never an install's failure
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        result["ms"] = int((time.monotonic() - began) * 1000)
+        if result["said"] != "not started" or "error" in result:
+            detail = {"ready": f"ready (its own start {result.get('ready_ms')} ms)", "fatal": f"fatal {result.get('code')}",
+                      "nothing": "no answer"}.get(result["said"], "not started")
+            core.log(f"engine {name}: started once as a worker at its install, {result['ms']} ms: {detail}"
+                     f"{'; stopped after ' + str(int(FIRST_START_WAIT_S)) + ' s' if result.get('stopped') else ''}"
+                     f"{'; ' + result['error'] if result.get('error') else ''}")
+    return result
+
+
+def compile_client(folder: Path | None = None) -> int:
+    """This client's own Python files (or those under `folder`) compiled where one is not yet: the service's modules
+    are first loaded by the first command ever. Returns how many were compiled; never fails."""
+    done = 0
+    with contextlib.suppress(Exception):
+        import importlib.util
+        import py_compile
+        for source in sorted((folder or Path(__file__).resolve().parent).rglob("*.py")):
+            with contextlib.suppress(Exception):
+                compiled = importlib.util.cache_from_source(str(source))
+                if os.path.exists(compiled):
+                    continue
+                if py_compile.compile(str(source), cfile=compiled, doraise=False, quiet=2):
+                    done += 1
+    return done
+
+
 ENGINE_KINDS = ("engine-native", "engine-source")
 
 
@@ -694,6 +790,7 @@ def stage_engine(entry: dict, job: Job | None = None, lock_timeout: float = 600.
             _hoist(partial, "package.json")
             _prepare_engine(partial, runtime_id)
             _self_test(partial, runtime_id)
+            first_start(partial, runtime_id, label=version)
         except EngineError as exc:
             core.remove_tree(partial)
             core.remove_tree(archive)
