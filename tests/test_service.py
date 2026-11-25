@@ -278,15 +278,21 @@ class Pool(ServiceCase):
         log = (self.box.home / "logs" / "service.log").read_text()
         self.assertIn("ended: exit 9, its process ended; a call was running on it", log)
 
-    def test_a_call_never_waits_past_the_ceiling_or_on_a_stuck_worker(self):
-        self.env.update({"THEODORE_CALL_CEILING_S": "4", "THEODORE_WORKER_HEARTBEAT_S": "1",
-                         "THEODORE_WORKER_HEARTBEAT_GRACE_S": "1"})
+    def test_a_call_never_waits_past_the_ceiling(self):
+        self.env["THEODORE_CALL_CEILING_S"] = "2"
         self.service()
         client, got = self.connect()
-        frames_ = self.call(client, got, "slow", ["sleep", "20"])
+        frames_ = self.call(client, got, "slow", ["sleep", "20"])        # it answers, it progresses, it never ends
         self.assertEqual(Collector.done(frames_)["exit"], 78)
         self.assertIn("was stopped: it did not finish in time", Collector.stdout(frames_))
-        frozen = self.call(client, got, "frozen", ["echo", "--freeze"])
+        after = self.call(client, got, "after", ["echo"])
+        self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
+
+    def test_a_call_never_waits_on_a_worker_that_stopped_answering(self):
+        self.env.update({"THEODORE_WORKER_HEARTBEAT_S": "1", "THEODORE_WORKER_HEARTBEAT_GRACE_S": "3"})
+        self.service()
+        client, got = self.connect()
+        frozen = self.call(client, got, "frozen", ["echo", "--freeze"])   # alive, answering nothing, not even stats
         self.assertEqual(Collector.done(frozen)["exit"], 78)
         self.assertIn("stopped answering", Collector.stdout(frozen))
         after = self.call(client, got, "after", ["echo"])

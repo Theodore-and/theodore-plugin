@@ -465,7 +465,7 @@ class Worker:
             if now - started > CALL_CEILING_S:
                 self._stop(f"did not finish within {int(CALL_CEILING_S)} s", "was stopped: it did not finish in time")
                 break
-            if asked is None and now - self.last_frame > HEARTBEAT_S:
+            if asked is None and now - max(self.last_frame, started) > HEARTBEAT_S:     # silent during this call
                 asked = now
                 self.ask_stats()
             elif asked is not None and self.last_frame >= asked:
