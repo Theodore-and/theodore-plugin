@@ -2204,11 +2204,39 @@ def _libreoffice_failed(failed: dict) -> Status:
 RENDERING_CALLS = (("apply",), ("render",), ("slide", "add"))
 
 
+# The 2.0 engine draws its own slides: its renderer ships inside it (pptx_runtime/js/render, entry index.js); rc.33 and
+# earlier have none. Read from the installed engine's own files, so no version number is assumed.
+OWN_RENDERER = ("skills", "pptx", "scripts", "pptx_runtime", "js", "render", "index.js")
+
+
+def engine_draws_its_own(version: str | None) -> bool:
+    return bool(version) and engine_installed(version) and engine_dir(version).joinpath(*OWN_RENDERER).is_file()
+
+
+def _call_engine(args: list[str]) -> str | None:
+    """The engine a call would run, read only (engine_for may restore or align): a workspace's pin, or its deck's for a
+    slide's part, else the selected engine."""
+    for workspace in _workspaces(args):
+        for place in (workspace, deck_of(workspace)):
+            pinned = core.read_json(place / ".pptx-state" / "theodore-engine.json").get("version") if place else None
+            if pinned:
+                return str(pinned)
+    return selected_engine()
+
+
 def wait_for_renderer(args: list[str], wait: float = 25.0) -> None:
     """A rendering call on a Windows computer with no converter: fetch LibreOffice (in the background, as on macOS at
     install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, and started again
-    when its failure passes by itself (resumable_failure)."""
+    when its failure passes by itself (resumable_failure). An engine that draws its own slides (2.0) needs none of it:
+    the fetch still starts in the background, for the exact tier, and the call goes on at once (lane S2 on rig 10: all
+    15 designers' first applies waited 25 s, then failed with 67, on a fresh Windows computer)."""
     if not any(tuple(args[:len(call)]) == call for call in RENDERING_CALLS) or not needs_libreoffice():
+        return
+    if engine_draws_its_own(_call_engine(args)):
+        job = Job("libreoffice")
+        state = job.read()
+        if not job.alive() and not (state.get("failed") and not resumable_failure(state)):
+            job.spawn(["tools", "install", "libreoffice", "--job"])
         return
     if core.is_loopback_api() and os.environ.get("THEODORE_TEST_RENDERER_WAIT"):
         wait = float(os.environ["THEODORE_TEST_RENDERER_WAIT"])
