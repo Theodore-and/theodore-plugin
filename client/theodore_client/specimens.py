@@ -20,16 +20,17 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import secrets
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 from . import core
 from .core import Status
+
+secrets = core.LazyModule("secrets")         # only when sheets are written
+tempfile = core.LazyModule("tempfile")
 
 PREFIX = "theodore-specimens-"
 KEEP_SECONDS = 3600
@@ -452,14 +453,39 @@ def _folders() -> list[tuple[Path, float]]:
     return found
 
 
-def sweep(everything: bool = False) -> list[Path]:
+# A command's own sweep (quick) reads the record alone, with no lock, and sweeps only when a folder it names is past its
+# hour: every folder a call makes is recorded before a sheet goes in, so the record finds them all, at the same moment as
+# before. The listing of the temporary folders, for one no record names (a record lost, an earlier client), runs at every
+# command that is no engine verb, and on the verbs' path at most every SCAN_EVERY_S (state/specimens-scan): listing the
+# temporary folder (thousands of entries) and its probe file cost 20 to 100 ms a verb on Windows.
+SCAN_EVERY_S = 600
+SCAN_STAMP = "specimens-scan"
+
+
+def _scan_due(now: float) -> bool:
+    try:
+        last = float(core.read_text(core.home().state / SCAN_STAMP) or 0)
+    except ValueError:
+        return True
+    return not 0 <= now - last < SCAN_EVERY_S
+
+
+def _expired_on_record(now: float) -> bool:
+    return any(now - made > KEEP_SECONDS or made - now > AHEAD_SECONDS for made, _folder in _read_registry())
+
+
+def sweep(everything: bool = False, quick: bool = False) -> list[Path]:
     """Remove the specimen folders older than an hour (or dated more than a minute ahead of the clock); with `everything`,
     all of them.
     Both what the registry records (wherever it is: a changed TMPDIR cannot strand one) and what is in the current
-    roots. Returns the folders that should be gone and are still there. Never raises: it runs before every command."""
+    roots. Returns the folders that should be gone and are still there. Never raises: it runs before every command.
+    `quick` (an engine verb's path): nothing but a read of the record while no recorded folder has expired and the
+    roots were listed less than SCAN_EVERY_S ago (see above)."""
     left: list[Path] = []
     try:
         now = core.now()
+        if quick and not everything and not _expired_on_record(now) and not _scan_due(now):
+            return left
         # A folder a moment ahead of `now` is one another Theodore call made, or put a sheet in, after this call read
         # the time (it then waits for the record's lock and reads the folders): never expired. Removed as "dated ahead",
         # it went from under that call's next sheet (TR-S9N9N8: INTERNAL FileNotFoundError naming a sheet of the batch).
@@ -492,6 +518,8 @@ def sweep(everything: bool = False) -> list[Path]:
             for empty in (cache_root(), cache_root().parent):
                 with contextlib.suppress(OSError):
                     empty.rmdir()
+        elif core.home().state.is_dir() and _scan_due(now):        # written at most every SCAN_EVERY_S
+            core.write_atomic(core.home().state / SCAN_STAMP, f"{int(now)}\n", 0o600)
     except Exception:       # noqa: BLE001  a cleanup must not stop the command it precedes
         pass
     return left

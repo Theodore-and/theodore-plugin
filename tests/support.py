@@ -49,6 +49,9 @@ HERE = Path(__file__).resolve()
 ROOT = HERE.parents[3]
 VERSION = (ROOT / "VERSION").read_text().strip()
 args = sys.argv[1:]
+if os.environ.get("THEODORE_TEST_ENGINE_STARTS"):      # every start of this engine, one line each (a test counts them)
+    with open(os.environ["THEODORE_TEST_ENGINE_STARTS"], "a", encoding="utf-8") as starts:
+        starts.write(json.dumps(args) + "\n")
 LEDGER = os.environ.get("THEODORE_USAGE_LEDGER")
 if LEDGER and args and args[0] in ("start", "apply", "finish", "render"):      # one usage line per command, as the engine
     import time, uuid
@@ -57,7 +60,8 @@ if LEDGER and args and args[0] in ("start", "apply", "finish", "render"):      #
                                  "deck_id": None, "workspace": "task", "kind": "blank", "outcome": "ok", "code": None,
                                  "duration_ms": 5}) + "\n")
 if (ROOT / "REFUSE").exists():          # stands in for the real engine's licence check: one JSON object, exit code 1
-    print(json.dumps({"ok": False, "error": "refused for the test", "code": (ROOT / "REFUSE").read_text().strip()})); sys.exit(1)
+    print(json.dumps({"ok": False, "error": "refused for the test", "code": (ROOT / "REFUSE").read_text().strip()}))
+    sys.exit(int((ROOT / "REFUSE_EXIT").read_text()) if (ROOT / "REFUSE_EXIT").exists() else 1)   # 77 from engine rc.34
 if "--help" in args or not args:
     if (ROOT / "BROKEN").exists():
         print("engine is broken", file=sys.stderr); sys.exit(3)
@@ -84,7 +88,8 @@ elif verb == "env":
     print(json.dumps({"path0": os.environ["PATH"].split(os.pathsep)[0], "home": os.environ.get("THEODORE_HOME"),
                       "usage_ledger": os.environ.get("THEODORE_USAGE_LEDGER"),
                       "soffice": os.environ.get("SOFFICE_BIN"), "node_modules": (ROOT / "node_modules").is_dir(),
-                      "venv": sys.prefix != sys.base_prefix, "exe": sys.executable}))
+                      "venv": sys.prefix != sys.base_prefix, "exe": sys.executable, "engine": str(ROOT),
+                      "runtime_python": os.environ.get("THEODORE_TEST_STARTED_BY") == "runtime-python", "ppid": os.getppid()}))
 else:
     print(json.dumps({"verb": verb, "args": args[1:], "engine": VERSION}))
 '''
@@ -149,7 +154,9 @@ def fake_runtime_parts() -> dict[str, tuple[str, bytes | Path]]:
         return {p["part"]: (p["file"], Path(REAL_BUNDLE) / p["file"]) for p in _manifest["parts"] if p["part"] != "client"}
     if IS_WINDOWS:
         raise unittest.SkipTest("on Windows the tests need the real runtime bundle: set THEODORE_TEST_BUNDLE")
-    wrapper = f'#!/bin/sh\nexec "{sys.executable}" "$@"\n'.encode()
+    # The runtime's python names itself to what it runs (THEODORE_TEST_STARTED_BY), so a test can tell it from the
+    # engine's venv, whose interpreter is the test's own Python directly.
+    wrapper = f'#!/bin/sh\nTHEODORE_TEST_STARTED_BY=runtime-python exec "{sys.executable}" "$@"\n'.encode()
     node = shutil.which("node")
     node_script = (f'#!/bin/sh\nexec "{node}" "$@"\n' if node else '#!/bin/sh\necho v24.0.0-fake\n').encode()
     return {

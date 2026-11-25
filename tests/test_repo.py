@@ -48,19 +48,19 @@ def frontmatter(text: str) -> dict[str, str]:
     return {line.split(":", 1)[0]: line for line in lines[1:end]}
 
 
-# The engine commit whose skill descriptions the stubs copy, while it is not yet on the engine's main (it lands there
-# with engine rc.6; then set this to None and the test reads the checked-out files again). Read with `git show`, so
-# whatever branch the engine checkout is on does not matter.
-ENGINE_DESCRIPTIONS_COMMIT = "600768ee"
+# The engine commit whose skill description each stub copies, read with `git show`, so whatever branch the engine checkout
+# is on does not matter (None: the checked-out file). deck-design's "... data or file mechanics alone." comes from
+# f681ddb6 (lane/method-fixes, engine rc.34): a request that mixes figures with new slides is design work too.
+ENGINE_DESCRIPTIONS_COMMITS = {"pptx": "600768ee", "deck-design": "f681ddb6"}
 
 
 def engine_skill(source_root: Path, skill: str) -> str:
-    if ENGINE_DESCRIPTIONS_COMMIT:
-        shown = subprocess.run(["git", "-C", str(source_root), "show", f"{ENGINE_DESCRIPTIONS_COMMIT}:skills/{skill}/SKILL.md"],
-                               capture_output=True)
+    commit = ENGINE_DESCRIPTIONS_COMMITS.get(skill)
+    if commit:
+        shown = subprocess.run(["git", "-C", str(source_root), "show", f"{commit}:skills/{skill}/SKILL.md"], capture_output=True)
         if shown.returncode == 0:
             return shown.stdout.decode("utf-8")
-        raise unittest.SkipTest(f"the engine checkout does not have commit {ENGINE_DESCRIPTIONS_COMMIT} yet")
+        raise unittest.SkipTest(f"the engine checkout does not have commit {commit} yet")
     return (source_root / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
 
 
@@ -405,7 +405,7 @@ class HostLimits(unittest.TestCase):
         self.assertNotIn('if not "%WRC%"=="0" if not "%WRC%"=="67" exit /b 1', cmd)
         self.assertIn('set "SETUP_WAIT_DEFAULT=180"', cmd)
         for text, setup, marker, register, doctor in (
-                (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\ntheodore hosts register\n", "doctor_out=$(theodore doctor)"),
+                (sh, 'sh "$LAUNCHER" setup --wait "$SETUP_WAIT"', 'state/hosts.pending', "\nhosts_out=$(theodore hosts register)\n", "doctor_out=$(theodore doctor)"),
                 (cmd, 'call "%%LAUNCHER%%" setup --wait %SETUP_WAIT% >"%WORK%\\setup.txt"', 'state\\hosts.pending', '\ncall "%%T%%" hosts register',
                  'call "%%T%%" doctor >"%WORK%\\doctor.txt"')):
             self.assertLess(text.index(marker), text.index(setup), "the marker is written before the long step")

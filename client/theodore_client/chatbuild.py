@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -38,8 +39,8 @@ from . import account, core, install, usage
 from .core import Status
 
 # The engine's verbs (`pptx --help`). Nothing else can be run.
-VERBS = ("start", "apply", "finish", "render", "slide", "comments", "assets", "list", "doctor", "split", "rebase", "task",
-         "project", "cache")
+VERBS = ("start", "apply", "check", "finish", "render", "slide", "comments", "assets", "list", "doctor", "split", "rebase",
+         "task", "project", "cache")
 # Options that would make the engine drive another application (PowerPoint through AppleScript or COM).
 REFUSED_OPTIONS = ("--powerpoint", "--oracle")
 # Option values that are text, never paths: a brief with a slash in it is not a path.
@@ -86,10 +87,22 @@ OPEN: set[str] = set()
 CHANGING = ("apply", "finish", "slide", "comments", "split", "rebase", "task", "project")
 READING_SLIDE_OPS = ("list", "show")
 
-# Set by the server for each call: the request's _meta (Codex sends its thread id there).
-META: dict = {}
-# Set by the server: sends a progress notification for the call being answered (None outside a call).
-PROGRESS = None
+# Set by the server for each call, in the call's own thread (the server answers calls side by side): the request's
+# _meta (Codex sends its thread id there) and the sender of progress notifications for the call (None outside a call).
+_CALL = threading.local()
+
+
+def set_call(progress, meta: dict | None) -> None:
+    _CALL.progress, _CALL.meta = progress, (meta if isinstance(meta, dict) else {})
+
+
+def call_meta() -> dict:
+    meta = getattr(_CALL, "meta", None)
+    return meta if isinstance(meta, dict) else {}
+
+
+def call_progress():
+    return getattr(_CALL, "progress", None)
 
 # The Claude app's chat sends a plain "make a presentation" to its own slide tool until the person has said once, in
 # their own words, that Theodore is to be used; the chat then keeps that in its memory (measured 3 of 3). The chat
@@ -223,7 +236,7 @@ def host_folder() -> str | None:
     """The folder the host's conversation works in, when the host says so without the model: Codex sends its thread
     id in _meta (threadId, or x-codex-turn-metadata.thread_id), and the thread's session file names its cwd (the first
     line, type session_meta, payload.id equal to the thread id). None otherwise; the folder still passes check_folder."""
-    meta = META if isinstance(META, dict) else {}
+    meta = call_meta()
     turn = meta.get("x-codex-turn-metadata") if isinstance(meta.get("x-codex-turn-metadata"), dict) else {}
     thread = meta.get("threadId") or turn.get("thread_id")
     if not isinstance(thread, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,64}", thread):
@@ -634,9 +647,10 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
             break
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - started
-            if PROGRESS:
+            progress = call_progress()
+            if progress:
                 with contextlib.suppress(Exception):
-                    PROGRESS(elapsed, f"pptx {args[0]} running ({int(elapsed)} s)")
+                    progress(elapsed, f"pptx {args[0]} running ({int(elapsed)} s)")
             if elapsed > RUN_TIMEOUT_S:
                 proc.kill()
                 code = proc.wait()
@@ -648,12 +662,12 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
             note.unlink()
     output = b"".join(chunks).decode("utf-8", errors="replace")
     install._pin_workspaces(args, version)
-    if code == 1:
-        refusal = install._engine_refusal(directory)
+    if code in (1, install.LICENCE_EXIT):        # a licence refusal is the engine's last JSON object: no second start to ask
+        refusal = install.refusal_in_output(output, code)
         if refusal is not None:
             raise refusal
     if args[0] == "finish":
-        usage.flush(force=True)
+        usage.send_in_background(force=True)
     if args[0] == "start":
         _remember(output)
         opened = _field(output, "WORKSPACE") or next((a for a in reversed(args[1:]) if not a.startswith("-") and _is_dir(a)), None)
@@ -714,8 +728,9 @@ def _start_key(args, stdin_text, folder: Path) -> str:
         return ""
     del stdin_text
     name = value("--name").strip().lower() or value("--from") or value("--template")
-    turn = META.get("x-codex-turn-metadata") if isinstance(META.get("x-codex-turn-metadata"), dict) else {}
-    thread = META.get("threadId") or turn.get("thread_id") or ""          # the conversation, when the host names it
+    meta = call_meta()
+    turn = meta.get("x-codex-turn-metadata") if isinstance(meta.get("x-codex-turn-metadata"), dict) else {}
+    thread = meta.get("threadId") or turn.get("thread_id") or ""          # the conversation, when the host names it
     return json.dumps([str(folder), name, "--translate" in args, "--extract" in args, str(thread)], ensure_ascii=False)
 
 

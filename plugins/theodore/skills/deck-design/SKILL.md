@@ -1,8 +1,8 @@
 ---
 name: deck-design
-description: "Use before creating, restructuring, adapting or visually redesigning a deck, section or slide, and to critique its argument or design. Not for typos, translation, data or file mechanics."
+description: "Use before creating, restructuring, adapting or visually redesigning a deck, section or slide, and to critique its argument or design. Not for typos, translation, data or file mechanics alone."
 effort: high
-allowed-tools: mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodore__specimen, Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *)
+allowed-tools: Bash(theodore *), PowerShell(theodore *), PowerShell(& theodore *), Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *), PowerShell(& "${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *), mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodore__specimen, mcp__plugin_theodore_theodore__list, Edit(//**/.theodore/workspaces/**), Write(//**/.theodore/workspaces/**), Read(//**/.theodore/workspaces/**), Read(//**/theodore-specimens-*/**), Read(//**/Library/Caches/Theodore/**), Read(//**/.cache/theodore/**), Read(//**/AppData/Local/Theodore/**), Read(//**/LocalCache/Local/Theodore/**), Read(//**/.claude/plugins/cache/theodore/**)
 ---
 
 If the instructions below are cut short or are no longer in your context (a compacted or resumed conversation, a subagent), load them again with `theodore guide deck-design` before you work from them.

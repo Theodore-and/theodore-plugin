@@ -87,6 +87,10 @@ class Paths(unittest.TestCase):
         self.assertEqual(out[6], "a/b")
         self.assertEqual(out[-1], "-")
         self.assertEqual(check("assets", "search", "icons", "electric bus"), ["assets", "search", "icons", "electric bus"])
+        # `pptx check` (engine rc.34): the deck's checks without finishing it; its workspace is a path in the folder.
+        ws = self.folder / ".theodore" / "workspaces" / "d"
+        self.assertEqual(check("check", ".theodore/workspaces/d"), ["check", str(ws)])
+        self.assertNotIn("check", chatbuild.CHANGING, "it reads the workspace: no started workspace needed")
 
     def test_every_step_names_the_next_one_through_to_the_file(self):
         ws = self.folder / ".theodore" / "workspaces" / "d"
@@ -256,6 +260,23 @@ class Desktop(McpCase):
         outside = server.call("theodore", action="read", folder=str(folder), path=str(self.box.home / "state" / "entitlement.json"))
         self.assertTrue(outside.get("isError"))
         self.assertEqual(server.close(), b"")
+
+    def test_a_licence_refusal_is_read_from_the_run_and_the_engine_starts_once(self):
+        """0.4.34: the chat route reads the refusal from the engine's own output (exit 1, or 77 from engine rc.34)."""
+        self.ready()
+        folder = self.box.tmp / "Documents" / "Board"
+        folder.mkdir(parents=True)
+        starts = self.box.tmp / "engine-starts.jsonl"
+        engine = self.box.home / "engines" / self.ENGINE_VERSION
+        (engine / "REFUSE").write_text("entitlement_clock_rollback")
+        server = self.server(args=("--for", "claude-desktop"), env={"HOME": str(self.box.tmp), "THEODORE_TEST_ENGINE_STARTS": str(starts)})
+        for exit_code in ("1", "77"):
+            (engine / "REFUSE_EXIT").write_text(exit_code)
+            answer = server.call("theodore", action="run", folder=str(folder), args=["list", "--json"])
+            self.assertTrue(answer.get("isError"), answer)
+            self.assertIn("THEODORE NO_ENTITLEMENT: ", answer["content"][0]["text"], exit_code)
+        self.assertEqual(len(starts.read_text().splitlines()), 2, "one engine start per run, never a second with --help")
+        server.close()
 
     def test_starting_the_same_deck_twice_continues_the_first(self):
         """ONESTEP saw a chat call start twice: the user got name-2.pptx beside an orphan. The second start of the same

@@ -1,5 +1,55 @@
 # Changes
 
+## 0.4.34
+
+Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side. Setting
+Theodore up changes no permission setting and needs no restart of the app.
+
+- Setting Theodore up writes no permission rule into the assistant's settings. The two skills carry the permissions
+  Theodore's own work needs (its short command and launchers, its tools, edits inside a deck's workspace, reads of
+  Theodore's own folders), so its commands run without a rule; a person who wants the rules written can still ask
+  for them (`theodore hosts settings --apply`).
+- The set-up no longer asks to quit and reopen the app. The first deck goes in a new conversation, where Theodore's
+  skills are loaded from its start (in Codex, a new session). The installers keep the registration's own output out
+  of what the assistant reads, and the set-up page asks for its installer line to be run on its own.
+- When Theodore is ready, the welcome, `doctor` and `status` say in one sentence whether Studio is on, instead of
+  asking and waiting for an answer.
+
+- `theodore …` starts Theodore's client straight from its own Python: the short command and the launchers in the
+  skill folders start no other program once Theodore is set up. In Git Bash a command started about twenty small
+  programs before the client (about a second on a fast Windows computer, several seconds on a laptop whose security
+  software checks every program that starts); on a Mac, eighteen. The shell then hands over to the client instead of
+  waiting beside it, so in Git Bash no second copy of it starts. The full launcher still runs whenever something it
+  needs is missing, and on first use.
+- A command to the engine loads only the parts of Theodore's client it uses: not the network, the archives, the
+  signature checks or the command table (tens of milliseconds a command on the Windows test computer).
+- A command on a deck no longer reads the deck's whole script to learn which icon, flag, map or background libraries
+  it needs: once every library is installed (always, after the first minutes) it reads nothing. That read took most of
+  a `slide list` on a large deck (1.4 s of 1.7 s on the Windows test computer).
+- The engine runs on Theodore's own Python directly, one program fewer per command on Windows.
+- A command that fails no longer starts the engine a second time to learn whether the licence refused it: the answer
+  is read from what the engine printed.
+- The engine's help (`pptx --help`, `pptx <verb> --help`) is printed from a copy kept beside the engine after its
+  first time.
+- Nothing on a command's own time waits for the network or reads more than it needs: usage counts go in a background
+  send, which waits longer after a failed one (from 15 minutes up to 6 hours); an engine command reads no stored
+  sign-in while the licence holds (on a Mac each read started a keychain program); where LibreOffice is installed is
+  remembered for an hour; each command takes a fixed lock file instead of creating and deleting one; and specimen
+  sheets older than an hour still go at the next command, without listing the temporary folder on every command.
+- The design guidance's tool server answers each call as it comes, side by side with the others (five designers'
+  calls used to wait for one another), over connections kept open between calls, with the sign-in read once. It opens
+  five at its start, each set up on its own, so calls made at once no longer wait for one another's connection. Every
+  call still asks Theodore's service for its text or sheets, so a computer whose access ended is refused at its next
+  call; an unchanged text or sheet costs one short exchange and no new connection.
+- Many designers starting at once on Windows no longer get "THEODORE OFFLINE" when the connection is fine. Windows'
+  certificate check could fail under that load, and the code that freed its result then crashed, which was read as a
+  network failure (two of nine designers in a session on 24 November). Now the check is tried again; if it still
+  fails, the same check runs through Python's own TLS against Windows' certificate store; a failure that is this
+  computer's own is answered as an internal error, which Theodore reports to itself, never as a lost connection. The
+  design guidance's tool server also writes its files safely when its calls run side by side.
+- The deck-design skill's description ends "... data or file mechanics alone.", as the engine's: a request that
+  mixes figures with new slides is design work too.
+
 ## 0.4.33
 
 - The Studio agent reads, for its slide, Theodore's design text and build text first, then the steps for one slide from the design text (`in-a-part`), and each text those steps name at the step that names it, from the design text or the build text. Its description says the message that starts it comes from the design text's deck steps. This is the reading list of Theodore's next texts (the engine's `agents/studio.md`), where the steps for one slide move into the design text. Where the design text has no text named `in-a-part`, the agent follows the texts its message names, as before.

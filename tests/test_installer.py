@@ -13,6 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # also when r
 from support import RUNTIME_ID, IS_WINDOWS, ROOT, FakeApi, Sandbox, cmd_command, engine_zip, fake_runtime_parts, pack_zip, status_lines
 
 STABLE = "theodore.cmd" if IS_WINDOWS else "theodore"
+# An assistant runs the installer: Claude Code sets its session's id for the commands it runs (a person's terminal has
+# none); CLAUDECODE is left out so the activation still names the host the test home makes (Codex, by CODEX_HOME).
+ASSISTANT = {"CLAUDE_CODE_SESSION_ID": "s-installer"}
 
 
 class Installer(unittest.TestCase):
@@ -131,16 +134,18 @@ class Installer(unittest.TestCase):
 
     def test_install_with_a_code_then_again_then_uninstall(self):
         self.api.issue_activation_code("ABCD-1234")
-        result = self.install("--code", "ABCD-1234")
+        result = self.install("--code", "ABCD-1234", env=ASSISTANT)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         out = result.stdout
         self.assertRegex(out.splitlines()[0], r"^theodore-install: installer sha256 [0-9a-f]{64} ")
         self.assertNotIn("ABCD-1234", out + result.stderr)
         first, nxt, tell = status_lines(out)
-        # Lane ONBOARD: doctor's check is printed, then the welcome is the last status, with the Studio question once.
-        self.assertIn("THEODORE OK: Theodore is ready: engine 1.0.0-rc.3", out)
+        # Lanes ONBOARD and L3: doctor's checks are printed, then the welcome is the only status (doctor's own ready line
+        # is left out), saying Studio's state and the asset packs' state.
+        self.assertRegex(out, r"(?m)^OK +engine: 1\.0\.0-rc\.3")
+        self.assertNotIn("THEODORE OK: Theodore is ready", out)
         self.assertEqual(first, "THEODORE OK: Theodore is set up and signed in (the check above).")
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore."), tell)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore:"), tell)
         self.assertIn("Studio is on", tell)
         self.assertIn("studio off", nxt)
         self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
@@ -164,11 +169,10 @@ class Installer(unittest.TestCase):
         self.assertIn(f"claude plugin install theodore --marketplace {self.api.base}/marketplace.json", calls)
         self.assertIn(f"codex plugin marketplace add {home / 'plugin'}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
-        self.assertIn(f"Theodore's own commands, and the assistant's edits of a deck's files in .theodore{os.sep}workspaces, run without asking each time; to turn that off:", out)
-        self.assertIn("hosts settings --remove", out)
-        applied = json.loads((self.box.user_home / ".claude" / "settings.json").read_text())
-        self.assertTrue(applied["extraKnownMarketplaces"]["theodore"]["autoUpdate"], "the settings come with the set-up")
-        self.assertIn(f"Bash({home / 'bin' / ('theodore.cmd' if IS_WINDOWS else 'theodore')} *)", applied["permissions"]["allow"])
+        # Lane L3: no permission rule and no other setting goes into Claude Code's settings (the skills carry them).
+        self.assertNotIn("without asking", out)
+        settings_file = self.box.user_home / ".claude" / "settings.json"
+        self.assertFalse(settings_file.exists() and "permissions" in json.loads(settings_file.read_text()), "no rule written")
         self.box.wait_jobs()
         self.assertEqual({v["status"] for v in json.loads((home / "packs" / "state.json").read_text()).values()}, {"ready"})
         self.assertEqual([p.name for p in (home / "staging").iterdir() if p.name.startswith("install")], [], "the installer removed its own files")
@@ -178,14 +182,13 @@ class Installer(unittest.TestCase):
             self.assertNotIn("(I)", acl, acl)
             self.assertNotIn("BUILTIN\\Users", acl, acl)
 
-        again = self.install("--code", "ABCD-1234", "--accept-settings")          # idempotent; the spent code is harmless
+        again = self.install("--code", "ABCD-1234", "--accept-settings", env=ASSISTANT)   # idempotent; the spent code is harmless
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertIn("the one-time code was not accepted", again.stdout)
         first, _n, tell = status_lines(again.stdout)
         self.assertEqual(first, "THEODORE OK: Theodore is set up and signed in (the check above).")
-        self.assertNotIn("Studio", tell, "the question is asked once")
-        settings = json.loads((self.box.user_home / ".claude" / "settings.json").read_text())
-        self.assertTrue(settings["extraKnownMarketplaces"]["theodore"]["autoUpdate"])
+        self.assertIn("Studio is on", tell, "every welcome says it")
+        self.assertFalse(settings_file.exists() and "permissions" in json.loads(settings_file.read_text()), "still no rule")
         self.box.wait_jobs()
 
         removed = self.install("--uninstall")
@@ -229,7 +232,7 @@ class Installer(unittest.TestCase):
         self.api.issue_activation_code("ABCD-1234")
         result = self.install("--code", "ABCD-1234", env={"CODEX_THREAD_ID": "01a1df00-test"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("THEODORE OK: Theodore is ready: engine", result.stdout, "doctor's check is still printed")
+        self.assertRegex(result.stdout, r"(?m)^OK +engine: ", "doctor's checks are still printed")
         first, nxt, tell = status_lines(result.stdout)
         self.assertEqual(first, "THEODORE OK: Theodore is set up and signed in (the check above).")
         self.assertIn("Apart from that, run no Theodore command in this session", nxt)
@@ -267,7 +270,7 @@ class Installer(unittest.TestCase):
             if part["part"] != "python":
                 self.api.dl_delays[part["url"].split("/dl/", 1)[1]] = 20      # 8 s was over before a loaded machine's installer looked (2026-11-19)
         began = time.monotonic()
-        result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2"})
+        result = self.install("--code", "ABCD-1234", env={"THEODORE_INSTALL_WAIT": "2", **ASSISTANT})
         took = time.monotonic() - began
         # WINHOME: every step of the installer succeeded and only the background download goes on, so the installer exits
         # 0 (67 showed as "command failed with exit code 67"); the status still says what is arriving and waits for it.
@@ -293,12 +296,12 @@ class Installer(unittest.TestCase):
         self.assertEqual(given.returncode, 0, given.stdout + given.stderr)
         first, nxt, tell = status_lines(given.stdout)
         self.assertTrue(first.startswith("THEODORE OK: ") and "Set-up is finished." in first, first)
-        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore."), tell)
+        self.assertTrue(tell.startswith("TELL THE USER: Welcome to Theodore:"), tell)
         self.assertNotIn("A last download", tell)
         self.assertTrue(nxt.endswith("This welcome is your whole closing message: say nothing about permissions, settings or "
                                      "uninstalling unless the user asks."), nxt)
         again = self.box.run_launcher("status", launcher=stable)
-        self.assertEqual(status_lines(again.stdout)[2], "TELL THE USER: Theodore is ready.", again.stdout)
+        self.assertTrue(status_lines(again.stdout)[2].startswith("TELL THE USER: Theodore is ready. Studio is on"), again.stdout)
         doctor = self.box.run_launcher("doctor", launcher=stable)
         self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
         self.assertTrue(status_lines(doctor.stdout)[0].startswith("THEODORE OK: Theodore is ready"), doctor.stdout)
@@ -382,7 +385,7 @@ class Installer(unittest.TestCase):
         again = self.install("--code", "ABCD-1234", installer=self.box.installer(**broken))
         self.assertIn("the login that run saved is kept", again.stdout)
         self.assertEqual(pending.read_bytes(), saved, "a refused code leaves the saved sign-in as it was")
-        done = self.install("--code", "ABCD-1234")
+        done = self.install("--code", "ABCD-1234", env=ASSISTANT)       # as an assistant runs it: its ending is a status
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertTrue(status_lines(done.stdout)[0].startswith("THEODORE OK: Theodore is set up and signed in"), done.stdout)
         self.assertEqual(len(self.api.activations), 1, "one code, one installation")
@@ -456,6 +459,27 @@ class Installer(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertFalse(cache.exists())
 
+    def test_run_by_a_person_the_installer_ends_in_plain_words_and_leaves_the_welcome_owed(self):
+        """Lane L3: the set-up of 24 November 2026 was run by the person in a terminal; its ending, written for an
+        assistant, never reached the conversation. A person now gets plain words, and the welcome is owed to the
+        assistant they go back to (status, doctor or its first instructions give it)."""
+        self.api.issue_activation_code("ABCD-1234")
+        result = self.install("--code", "ABCD-1234")          # no assistant's variables: a person's terminal
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tail = result.stdout.strip().splitlines()[-4:]
+        # The first line says whether a download still goes on after the installer: on Windows the rest of the runtime
+        # (or LibreOffice) is often still downloading in the background when it ends; elsewhere here it is done.
+        self.assertIn(tail[0], ("Theodore is set up and signed in on this computer.",
+                                "Theodore is installed on this computer and finishes a download by itself in the next few minutes."),
+                      result.stdout)
+        self.assertTrue(tail[1].startswith("Studio is on: "), tail)
+        self.assertEqual(tail[-1], "Go back to your assistant (Claude or Codex) and ask for your presentation there.")
+        self.assertNotIn("TELL THE USER:", "\n".join(tail))
+        self.assertTrue(json.loads((self.box.home / "state" / "welcome.json").read_text())["owed"])
+        self.box.wait_jobs()                       # the welcome is given by the first status that says OK
+        given = self.box.run_launcher("status", launcher=self.box.home / "bin" / STABLE)
+        self.assertTrue(status_lines(given.stdout)[2].startswith("TELL THE USER: Welcome to Theodore:"), given.stdout)
+
     def test_install_uninstall_install_again_at_once_stays_signed_in(self):
         # ACCEPT-LOCAL2 observation (b): a second install on the same profile right after an uninstall said "signed in"
         # and ended with SIGN_IN_REQUIRED. On Windows the first uninstall's cleanup was still running and removed the new
@@ -466,7 +490,7 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
         self.assertEqual(self.install("--uninstall").returncode, 0)
         self.api.issue_activation_code("ABCD-2345")
-        again = self.install("--code", "ABCD-2345")
+        again = self.install("--code", "ABCD-2345", env=ASSISTANT)     # as an assistant runs it: its ending is a status
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertTrue(status_lines(again.stdout)[0].startswith("THEODORE OK: Theodore is set up and signed in"), again.stdout)
         self.box.wait_jobs()
@@ -648,10 +672,10 @@ class Installer(unittest.TestCase):
         self.assertIn(f'the stable launcher is "{new / "bin" / STABLE}"', result.stdout)
         self.assertTrue((new / "bin" / STABLE).is_file())
         self.assertTrue((new / "runtime" / "current.txt").is_file())
-        settings = json.loads((self.box.user_home / ".claude" / "settings.json").read_text(encoding="utf-8"))
-        allowed = settings["permissions"]["allow"]
-        self.assertIn(f'Bash("{new / "bin" / STABLE}" *)', allowed)
-        self.assertFalse([rule for rule in allowed if str(old) in rule], "nothing names the earlier folder")
+        settings_file = self.box.user_home / ".claude" / "settings.json"
+        settings = json.loads(settings_file.read_text(encoding="utf-8")) if settings_file.exists() else {}
+        self.assertNotIn("permissions", settings, "lane L3: no rule is written")
+        self.assertNotIn(str(old), json.dumps(settings), "nothing names the earlier folder")
         again = self.install("--code", "ABCD-1234")       # the earlier one is not found again: nothing more is retired
         self.assertEqual(len(record.read_text().splitlines()), 1, again.stdout)
 

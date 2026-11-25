@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import contextlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tarfile
 import time
-import zipfile
 from pathlib import Path
-from urllib.parse import urlparse
 
-from . import __version__, account, api, core, credentials, usage
+from . import __version__, account, core, credentials, usage
 from .contract import (CHANNEL_MANIFEST_SCHEMA, ENGINE_KEEP_MAX, ENGINE_KEEP_PINNED_DAYS, ENGINE_KEEP_USED_DAYS, ENGINE_REFUSALS,
                        PACK_ORDER, RUNTIME_MANIFEST_SCHEMA, RUNTIME_PARTS, UPDATE_CHECK_INTERVAL_S, UPDATE_CHECK_TIMEOUT_S)
 from .core import IS_WINDOWS, Job, Status, quoted_launcher
+
+# Loaded when first used: an engine command's path needs neither the network nor the archives (core.LazyModule).
+api = core.LazyModule(__package__ + ".api")
+tarfile = core.LazyModule("tarfile")
+zipfile = core.LazyModule("zipfile")
+concurrent = core.LazyModule("concurrent.futures")
+shutil = core.LazyModule("shutil")
+urlparse = core.urlparse
 
 DAY = 86400
 
@@ -114,7 +117,7 @@ class _Writers:
     a later call, by drain or at the end of the with block."""
 
     def __init__(self, workers: int):
-        self.pool = concurrent.futures.ThreadPoolExecutor(workers)
+        self.pool = concurrent.ThreadPoolExecutor(workers)
         self.pending: list = []
         self.names: set[str] = set()
         self.bytes = 0
@@ -467,7 +470,27 @@ def current_engine() -> str | None:
 
 
 def engine_python(directory: Path) -> Path:
-    return directory / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+    """The interpreter an engine runs on: its runtime's own Python. The venv beside the engine adds nothing (made with
+    --system-site-packages, nothing installed into it), and on Windows its python.exe is a redirector that starts the
+    runtime's python.exe as a second process (45 to 50 ms a command on the Windows test machine). The runtime is the
+    one the engine was installed for (.theodore-engine.json), else the one its venv names (pyvenv.cfg); the venv's own
+    interpreter only when neither is on disk."""
+    venv = directory / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+    runtime_id = str(core.read_json(directory / ".theodore-engine.json").get("runtime_id") or "")
+    if runtime_id and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", runtime_id) and runtime_id not in (".", ".."):
+        base = core.home().runtime_python(runtime_id)
+        if base is not None and base.is_file():
+            return base
+    try:
+        for line in (directory / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home" and value.strip():
+                base = Path(value.strip()) / ("python.exe" if IS_WINDOWS else "python3")
+                if base.is_file():
+                    return base
+    except OSError:
+        pass
+    return venv
 
 
 def engine_env(directory: Path) -> dict:
@@ -480,7 +503,7 @@ def engine_env(directory: Path) -> dict:
     # page, the engine's lines then differ in encoding from the client's around them, and a letter outside it fails.
     env["PYTHONIOENCODING"] = "utf-8"
     usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
-    if not system_libreoffice():
+    if not known_libreoffice():
         local = libreoffice_binary()
         if local:
             env["SOFFICE_BIN"] = str(local)
@@ -917,11 +940,18 @@ def announce(kind: str, version: str, note: str | None = None) -> None:
 
 def take_announcement() -> str | None:
     """The one line saying what updated itself since the last one, then forgotten. After access came back, first the
-    line saying why Theodore downloads its engine again (withdraw.py)."""
-    from . import withdraw
+    line saying why Theodore downloads its engine again (withdraw.py). Before an update's line, the welcome an installer
+    run by a person left owed (welcome.owed_notice), once."""
+    from . import welcome, withdraw
     restored = withdraw.notice_line()
     if restored:
         return restored
+    owed = welcome.owed_notice()
+    updated = _update_announcement()
+    return "\n".join(line for line in (owed, updated) if line) or None
+
+
+def _update_announcement() -> str | None:
     try:
         with update_lock():                 # taken and cleared in one step: two sessions never both print it
             pending = update_state().get("announce") or {}
@@ -1426,8 +1456,7 @@ def _pin_record(version: str) -> dict:
 
 
 def _pin_key(workspace: Path) -> str:
-    import hashlib
-    return hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]     # a hash: no folder name is stored
+    return core.sha256_hex(str(workspace).encode("utf-8"))[:16]     # a hash: no folder name is stored
 
 
 def _pin_workspaces(args: list[str], version: str) -> None:
@@ -1464,8 +1493,21 @@ def _run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
     touch_used(version)
     python = engine_python(directory)
     command = [str(python), *args] if python_passthrough else [str(python), str(directory / "skills" / "pptx" / "scripts" / "pptx.py"), *args]
+    # The engine's standard output passes through this process as it comes (an assistant's shell reads a pipe either
+    # way), so a licence refusal is read from the engine's own last JSON object instead of starting the engine a second
+    # time with --help to ask (0.25 s on the Windows test machine, 1 to 1.5 s on a laptop, per failing verb). A person's
+    # terminal keeps the engine's own terminal output; there the second start stays. `theodore python` runs as it is.
+    help_file = None if python_passthrough else _help_file(directory, args)
+    if help_file is not None and help_file.is_file():
+        return _print_help(help_file)
+    output = None
     try:
-        code = subprocess.call(command, env=engine_env(directory))
+        if python_passthrough or _stdout_is_terminal():
+            code = subprocess.call(command, env=engine_env(directory))
+        else:
+            code, output, whole = _call_passing_output(command, engine_env(directory))
+            if help_file is not None and code == 0 and whole and output:
+                _keep_help(help_file, output)
     except KeyboardInterrupt:
         return 130
     except OSError as exc:
@@ -1475,18 +1517,148 @@ def _run_engine(args: list[str], *, python_passthrough: bool = False) -> int:
                      else f"run {quoted_launcher()} doctor.",
                      "This computer's security policy blocked Theodore's engine. Your IT team can allow it, or you can use Theodore through its connector." if blocked
                      else "Theodore's engine could not start. I am checking why.") from None
-    if not python_passthrough:
-        _pin_workspaces(args, version)
-    if code == 1:
-        refusal = _engine_refusal(directory)
+    if python_passthrough:
+        return code
+    _pin_workspaces(args, version)
+    if code in (1, LICENCE_EXIT):
+        refusal = refusal_in_output(output, code) if output is not None else _engine_refusal(directory)
         if refusal is not None:
             raise refusal
     return code
 
 
+# The engine's reserved exit code for a licence refusal (contracts/README "Exit codes": 77, with today's licence JSON on
+# standard output; engines from rc.34). Earlier engines refuse with exit code 1 and the same JSON; both are read here.
+LICENCE_EXIT = 77
+OUTPUT_TAIL_BYTES = 64 << 10
+
+
+def _stdout_is_terminal() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+# The engine's help (`pptx --help`, `pptx <verb> --help`) is the same for every call to one engine build: printed from
+# a file kept beside it (.theodore-help/) once the engine has printed it, with no engine start (1.7 s on the Windows
+# test machine through the launcher, the engine's start 0.3 s of it). Kept per engine version and build, removed with
+# the engine. Only plain words before the flag: nothing that names a file or a folder. The file is named by the build's
+# digest and the words themselves (no hash to compute: hashlib loads OpenSSL's library on Windows).
+HELP_FLAGS = ("--help", "-h")
+_HELP_WORD = re.compile(r"[a-z][a-z0-9-]{0,24}")
+_BUILD = re.compile(r"[0-9a-f]{16,128}")
+
+
+def _help_file(directory: Path, args: list[str]) -> Path | None:
+    if not args or args[-1] not in HELP_FLAGS or len(args) > 4 or not all(_HELP_WORD.fullmatch(a) for a in args[:-1]):
+        return None
+    build = str(core.read_json(directory / ".theodore-engine.json").get("sha256") or "")
+    build = build[:16] if _BUILD.fullmatch(build) else "build"
+    return directory / ".theodore-help" / (".".join([build, "pptx", *args[:-1]]) + ".txt")
+
+
+def kept_help(args: list[str]) -> int | None:
+    """`pptx --help` (or `pptx <verb> --help`) printed from the engine's kept text, before anything else of an engine
+    command (no lock, no pack or renderer check): its exit code, or None when no text is kept yet (the engine then
+    prints it once and it is kept, _run_engine)."""
+    if not args or args[-1] not in HELP_FLAGS:
+        return None
+    enforce_restrictions()
+    version = engine_for(args)
+    enforce_restrictions(version)
+    path = _help_file(engine_dir(version), args)
+    if path is None or not path.is_file():
+        return None
+    return _print_help(path)
+
+
+def _keep_help(path: Path, output: bytes) -> None:
+    with contextlib.suppress(OSError):
+        core.write_atomic(path, output, 0o644)
+
+
+def _print_help(path: Path) -> int:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 1
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    sink = getattr(sys.stdout, "buffer", None)
+    if sink is not None:
+        sink.write(data)
+        sink.flush()
+    else:
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        sys.stdout.flush()
+    return 0
+
+
+def _call_passing_output(command: list[str], env: dict) -> tuple[int, bytes, bool]:
+    """Run the engine with its standard output passed on to ours as it arrives (standard input and error are its own,
+    as before). Returns the exit code, the output's last OUTPUT_TAIL_BYTES and whether that is the whole output. An
+    output nobody reads any more (a closed pipe) is still drained, so the engine never blocks on it."""
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    sink = getattr(sys.stdout, "buffer", None)
+    proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE)
+    tail, total = b"", 0
+    try:
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            tail = (tail + chunk)[-OUTPUT_TAIL_BYTES:]
+            if sink is not None:
+                try:
+                    sink.write(chunk)
+                    sink.flush()
+                except (OSError, ValueError):
+                    sink = None                     # the reader went away: drain the rest unseen
+        return proc.wait(), tail, total == len(tail)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=10)
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            proc.stdout.close()
+
+
+def refusal_in_output(output: bytes | str | None, exit_code: int) -> Status | None:
+    """The status for a licence refusal the engine printed: its last JSON object (one line, or a whole payload printed on
+    several lines) whose code is one of the engine's refusal codes. Exit code LICENCE_EXIT without a readable code is
+    a refusal all the same. None when the engine refused nothing."""
+    text = core.child_text(output).rstrip() if output is not None else ""
+    candidates = []
+    if text:
+        candidates.append(text.splitlines()[-1])
+        start = text.rfind("\n{")
+        candidates.append(text[start + 1:] if start >= 0 else text)
+    code = None
+    for candidate in candidates:
+        try:
+            answer = json.loads(candidate)
+        except ValueError:
+            continue
+        found = answer.get("code") if isinstance(answer, dict) else None
+        if isinstance(found, str) and ENGINE_REFUSALS.get(found):
+            code = found
+            break
+    if code is None and exit_code == LICENCE_EXIT:
+        code = "entitlement_refused"
+    if code is None:
+        return None
+    status = _refusal_status(code)
+    status.cause = code         # the engine's refusal code, for the usage counts
+    return status
+
+
 def _engine_refusal(directory: Path) -> Status | None:
-    """After an exit code 1: ask the engine's own licence check why (it answers one JSON object, offline) and turn
-    a refusal into a status the assistant can act on. Returns None when the engine is not refusing."""
+    """After a failing verb whose output went to a person's terminal: ask the engine's own licence check why (it answers
+    one JSON object, offline) and turn a refusal into a status the assistant can act on. None when it is not refusing."""
     script = directory / "skills" / "pptx" / "scripts" / "pptx.py"
     try:
         probe = subprocess.run([str(engine_python(directory)), str(script), "--help"], env=engine_env(directory),
@@ -1513,6 +1685,8 @@ def _refusal_status(code: str) -> Status:
         try:
             account.refresh()
         except api.NetworkError as error:
+            if error.cause == "LOCAL_FAULT":
+                return api.offline(error, "licence check")        # this computer's own fault: INTERNAL
             return Status("OFFLINE", f"the licence on this computer has expired and the Theodore service could not be reached ({error.detail}).",
                           "ask the user to connect to the internet, then run the same command again.",
                           "Theodore has been offline for more than 7 days and needs a connection to confirm your licence.")
@@ -1587,16 +1761,26 @@ NO_PACKS = "no asset packs are published for this channel yet"
 
 
 def remember_published_packs(packs) -> None:
-    """Which packs the last verified channel manifest publishes, so no text promises a download that cannot come."""
+    """Which packs the last verified channel manifest publishes, so no text promises a download that cannot come, and
+    their sizes, so a welcome can say about how much is left to download."""
     ids = [str(p.get("id")) for p in packs or [] if isinstance(p, dict) and p.get("id")]
-    if update_state().get("published_packs") != ids:
-        save_update_state(published_packs=ids)
+    sizes = {str(p["id"]): int(p.get("size") or p.get("size_bytes") or 0) for p in packs or []
+             if isinstance(p, dict) and p.get("id") and str(p.get("size") or p.get("size_bytes") or "").isdigit()}
+    known = update_state()
+    if known.get("published_packs") != ids or known.get("published_pack_sizes") != sizes:
+        save_update_state(published_packs=ids, published_pack_sizes=sizes)
 
 
 def published_packs() -> list[str] | None:
     """The ids of the packs the channel publishes; None while no manifest has been read on this computer."""
     known = update_state().get("published_packs")
     return [str(p) for p in known] if isinstance(known, list) else None
+
+
+def published_pack_sizes() -> dict[str, int]:
+    """Each published pack's size in bytes, as the last verified channel manifest gave it ({} when not known)."""
+    known = update_state().get("published_pack_sizes")
+    return {str(k): int(v) for k, v in known.items() if isinstance(v, int) and v > 0} if isinstance(known, dict) else {}
 
 
 def _pack_folder(pack_id: str) -> Path:
@@ -1676,15 +1860,44 @@ PACK_HELPERS = {
     "maps": ("addMap",),
     "backgrounds": ("backgroundToBase64", "getBackgroundMeta", "listBackgrounds"),
 }
-_PACK_LOOSE = {"icons": r"\w*[iI]con\w*\(", "flags": r"\w*[fF]lag\w*\(", "maps": r"\b[a-z]\w*Map\w*\(", "backgrounds": r"\w*[bB]ackground\w*\("}
+# The loose patterns start at a word boundary: a search then tries each word once instead of every position inside it
+# (2.5 times faster on a 2.3 MB deck.js), and finds the same calls, since a match inside a word extends to its start.
+_PACK_LOOSE = {"icons": r"\b\w*[iI]con\w*\(", "flags": r"\b\w*[fF]lag\w*\(", "maps": r"\b[a-z]\w*Map\w*\(", "backgrounds": r"\b\w*[bB]ackground\w*\("}
+_PACK_PATTERNS: dict = {}       # compiled at the first scan: an engine command with every pack ready makes none
 
 
 def packs_in_script(text: str) -> set[str]:
     """The packs a deck script calls into, judged from the helper names in its text."""
-    found = set()
-    for pack, names in PACK_HELPERS.items():
-        if re.search(r"\b(?:" + "|".join(names) + r")\s*\(", text) or re.search(_PACK_LOOSE[pack], text):
-            found.add(pack)
+    if not _PACK_PATTERNS:
+        _PACK_PATTERNS.update({pack: (re.compile(r"\b(?:" + "|".join(names) + r")\s*\("), re.compile(_PACK_LOOSE[pack]))
+                               for pack, names in PACK_HELPERS.items()})
+    return {pack for pack, (named, loose) in _PACK_PATTERNS.items() if named.search(text) or loose.search(text)}
+
+
+def all_packs_ready() -> bool:
+    """Every asset pack is installed (one read of packs/state.json and a folder test each): what a build finds after the
+    installation, so it never reads its scripts to learn which packs it needs."""
+    state = packs_state()
+    return all(isinstance(state.get(p), dict) and state[p].get("status") == "ready" and (core.home().packs / p).is_dir()
+               for p in PACK_ORDER)
+
+
+# A script's packs are remembered by its size and modification time (state/pack-scan.json, keyed by a hash of the path:
+# no folder name is stored), so while a pack is still arriving an unchanged deck.js is not read again on every call.
+PACK_SCAN_FILE = "pack-scan.json"
+PACK_SCAN_MAX = 256
+
+
+def _script_packs(script: Path, memo: dict) -> set[str]:
+    info = script.stat()
+    key = core.sha256_hex(str(script).encode("utf-8", "surrogateescape"))[:16]
+    stamp = [info.st_size, info.st_mtime_ns]
+    held = memo.get(key)
+    if isinstance(held, dict) and held.get("stamp") == stamp and isinstance(held.get("packs"), list):
+        return {p for p in held["packs"] if p in PACK_HELPERS}
+    found = packs_in_script(script.read_text(encoding="utf-8", errors="ignore"))
+    memo.pop(key, None)
+    memo[key] = {"stamp": stamp, "packs": sorted(found)}
     return found
 
 
@@ -1707,8 +1920,12 @@ def packs_needed(args: list[str]) -> set[str] | None:
     spaces = _workspaces(args)
     if not spaces:
         return needed or None
-    for workspace in spaces:
-        try:
+    memo_path = core.home().state / PACK_SCAN_FILE
+    memo = core.read_json(memo_path)
+    memo = memo if isinstance(memo, dict) else {}
+    before = json.dumps(memo, sort_keys=True)
+    try:
+        for workspace in spaces:
             scripts = {p for p in workspace.iterdir() if p.is_file() and p.suffix in (".js", ".mjs", ".cjs")}
             for pattern in ("deck.js", "*/deck.js", "*/*/deck.js", "*/*/*/deck.js"):
                 scripts |= {p for p in workspace.glob(pattern)
@@ -1716,14 +1933,25 @@ def packs_needed(args: list[str]) -> set[str] | None:
             if not any(p.name == "deck.js" for p in scripts):
                 return set(PACK_ORDER)
             for script in scripts:
-                needed |= packs_in_script(script.read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            return set(PACK_ORDER)
+                needed |= _script_packs(script, memo)
+    except OSError:
+        return set(PACK_ORDER)
+    finally:
+        if json.dumps(memo, sort_keys=True) != before:
+            while len(memo) > PACK_SCAN_MAX:            # the oldest entries go first (insertion order)
+                memo.pop(next(iter(memo)))
+            with contextlib.suppress(OSError):
+                core.write_json(memo_path, memo, 0o600)
     return needed
 
 
 def wait_for_packs(args: list[str], wait: float = 25.0) -> None:
-    """If this build reaches for a pack that is still arriving, wait for it; past `wait` seconds say so (67)."""
+    """If this build reaches for a pack that is still arriving, wait for it; past `wait` seconds say so (67).
+
+    Readiness first: once every pack is installed (always, after the installation's first minutes) nothing of the
+    workspace is read. Before that, the scripts are scanned, each one once per size and modification time."""
+    if all_packs_ready():
+        return
     wanted = packs_needed(args)
     if not wanted:
         return
@@ -1873,18 +2101,60 @@ def libreoffice_binary() -> Path | None:
     return None
 
 
-def system_libreoffice() -> str | None:
+def _given_libreoffice() -> tuple[bool, str | None]:
+    """(decided, what): what the environment itself says, before any lookup."""
     if os.environ.get("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE") and core.is_loopback_api():     # test seam: a computer without one
-        return None
+        return True, None
     if os.environ.get("SOFFICE_BIN") and Path(os.environ["SOFFICE_BIN"]).exists():
-        return os.environ["SOFFICE_BIN"]
+        return True, os.environ["SOFFICE_BIN"]
+    return False, None
+
+
+def system_libreoffice() -> str | None:
+    decided, given = _given_libreoffice()
+    if decided:
+        return given
     found = shutil.which("soffice")
-    if found:
-        return found
-    for candidate in ("/Applications/LibreOffice.app/Contents/MacOS/soffice", r"C:\Program Files\LibreOffice\program\soffice.exe"):
-        if Path(candidate).exists():
-            return candidate
-    return None
+    if not found:
+        for candidate in ("/Applications/LibreOffice.app/Contents/MacOS/soffice", r"C:\Program Files\LibreOffice\program\soffice.exe"):
+            if Path(candidate).exists():
+                found = candidate
+                break
+    _remember_libreoffice(found)
+    return found
+
+
+# Where the last lookup found the system's LibreOffice, for the commands' own path (state/renderer.json): a lookup walks
+# every PATH folder with every PATHEXT extension (about 400 file tests, 10 to 40 ms on Windows) and ran up to twice per
+# verb. A command reuses it while PATH is the same, for an hour, and while the program found is still there; doctor
+# and `tools install` look again (system_libreoffice), so a LibreOffice installed meanwhile is seen within the hour.
+RENDERER_FILE = "renderer.json"
+RENDERER_RECHECK_S = 3600
+
+
+def _path_key() -> str:
+    raw = "\0".join((os.environ.get("PATH") or "", os.environ.get("PATHEXT") or ""))
+    return core.sha256_hex(raw.encode("utf-8", "surrogateescape"))[:16]
+
+
+def _remember_libreoffice(found: str | None) -> None:
+    with contextlib.suppress(Exception):
+        record = {"soffice": found, "key": _path_key(), "at": int(core.now())}
+        if core.read_json(core.home().state / RENDERER_FILE) != record and core.home().state.is_dir():
+            core.write_json(core.home().state / RENDERER_FILE, record, 0o600)
+
+
+def known_libreoffice() -> str | None:
+    """system_libreoffice for a command's path: the last lookup's answer while it holds (see above), else a lookup."""
+    decided, given = _given_libreoffice()
+    if decided:
+        return given
+    record = core.read_json(core.home().state / RENDERER_FILE)
+    if isinstance(record, dict) and record.get("key") == _path_key() and 0 <= core.now() - float(record.get("at") or 0) < RENDERER_RECHECK_S:
+        found = record.get("soffice")
+        if found is None or (isinstance(found, str) and Path(found).exists()):
+            return found
+    return system_libreoffice()
 
 
 def powerpoint_registered() -> bool:
@@ -1902,7 +2172,7 @@ def powerpoint_registered() -> bool:
 def needs_libreoffice() -> bool:
     """On Windows, nothing can turn a deck into slide images: no LibreOffice anywhere and no PowerPoint, and Theodore
     has a LibreOffice to fetch. (macOS fetches it at install; Linux uses the system's.)"""
-    return IS_WINDOWS and not system_libreoffice() and not libreoffice_binary() and not powerpoint_registered() \
+    return IS_WINDOWS and not known_libreoffice() and not libreoffice_binary() and not powerpoint_registered() \
         and libreoffice_pin() is not None
 
 

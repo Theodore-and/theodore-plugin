@@ -6,15 +6,18 @@ import contextlib
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
 
-from . import __version__, api, core, credentials, ed25519
+from . import __version__, core, credentials
 from .contract import (ACTIVATION_CODE_PATTERN, DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, DEVICE_CLIENT_ID, ENTITLEMENT_AUD,
                        ENTITLEMENT_ENV, ENTITLEMENT_FILE_KEY)
 from .core import Status, quoted_launcher
+
+api = core.LazyModule(__package__ + ".api")     # the network stack only when a call needs it (an engine command does not)
+ed25519 = core.LazyModule(__package__ + ".ed25519")       # a signature is checked only when a licence or a release arrives
+socket = core.LazyModule("socket")
 
 
 # --- signed documents --------------------------------------------------------------------------------------------------
@@ -64,10 +67,12 @@ def _token_path():
 
 
 def decode_claims(token: str) -> dict:
-    """The claims of a JWS compact token. The engine verifies the signature; the client only reads the dates."""
+    """The claims of a JWS compact token. The engine verifies the signature; the client only reads the dates (with no
+    signature code loaded: ed25519 computes its curve's points when imported)."""
+    import base64
     try:
         _header, payload, _sig = token.split(".")
-        claims = json.loads(ed25519.b64url_decode(payload))
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         return claims if isinstance(claims, dict) else {}
     except (ValueError, AttributeError):
         return {}
@@ -296,9 +301,13 @@ def require(feature: str, *, allow_refresh: bool = True) -> dict:
     now = core.now()
     env_only = bool(os.environ.get(ENTITLEMENT_ENV))
     if not env_only:
-        if not credentials.load():
-            raise login_start()
         expired = not token or now >= float(claims.get("exp") or 0)
+        # An engine command (allow_refresh False) does not read the credential while the stored licence holds: on a Mac
+        # that read is a keychain process (21 to 62 ms, up to 10 s behind a keychain dialog), on Windows a DPAPI call,
+        # and the engine checks the licence itself. A credential removed meanwhile is learned at the next refresh (the
+        # hourly background check, or the next guide).
+        if (allow_refresh or expired) and not credentials.load():
+            raise login_start()
         stale = expired or now >= float(claims.get("rfa") or 0)
         if expired or (stale and allow_refresh):
             try:
@@ -310,6 +319,8 @@ def require(feature: str, *, allow_refresh: bool = True) -> dict:
                 raise api.status_from(error, "licence check") from None
             except api.NetworkError as error:
                 if not token or now >= float(claims.get("exp") or 0):
+                    if error.cause == "LOCAL_FAULT":
+                        raise api.offline(error, "licence check") from None     # this computer's own fault: INTERNAL
                     days = "the offline period (7 days since the last successful check) has ended"
                     raise Status("OFFLINE", f"{days} and the Theodore service could not be reached ({error.detail}).",
                                  "ask the user to connect to the internet, then run the same command again.",
@@ -410,7 +421,8 @@ def refusal_status() -> Status:
     """The one answer of a command that learned, on any authenticated call, that the device was revoked or the account
     suspended (core.refusal). It cannot raise: whatever fails while it is built, a fixed block is answered."""
     global _REFUSAL_STATUS
-    if _REFUSAL_STATUS is None:
+    held = getattr(core._SCOPE, "status", None) if core._SCOPED else _REFUSAL_STATUS     # the tool server: per call
+    if held is None:
         kind, code = core.refusal() or ("revoked", "unauthenticated")
         try:
             built = revoked_status() if kind == "revoked" else suspended_status(code)
@@ -418,8 +430,12 @@ def refusal_status() -> Status:
             built = _static_sign_in(kind)
         built.refusal = True
         from . import withdraw
-        _REFUSAL_STATUS = withdraw.annotate(built)
-    return _REFUSAL_STATUS
+        held = withdraw.annotate(built)
+        if core._SCOPED:
+            core._SCOPE.status = held
+        else:
+            _REFUSAL_STATUS = held
+    return held
 
 
 _REVOKED_REASON = ("this device was signed out of Theodore (from the portal, by a suspension of the account that has since "

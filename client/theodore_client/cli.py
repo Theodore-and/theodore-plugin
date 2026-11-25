@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import argparse
 import contextlib
+import os
 import sys
+from pathlib import Path
 
-from . import account, api, commands, core, specimens, usage, withdraw
+from . import account, core, specimens, usage, withdraw
 from .core import Status
+
+# An engine command (`pptx`, `python`) goes to verbs.py: the command table, the argument parser and the network stack
+# load only for the client's other commands (0.4.34; core.LazyModule).
+api = core.LazyModule(__package__ + ".api")
+commands = core.LazyModule(__package__ + ".commands")
 
 HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license] [--role lead|slide]   print the skill instructions
@@ -30,12 +36,13 @@ HELP = """Theodore client commands (run through the launcher):
 """
 
 
-class _Parser(argparse.ArgumentParser):
-    def error(self, message):  # argparse would print its own text and exit 2
-        raise core.usage(f"{self.prog}: {message}")
+def _parser():
+    import argparse
 
+    class _Parser(argparse.ArgumentParser):
+        def error(self, message):  # argparse would print its own text and exit 2
+            raise core.usage(f"{self.prog}: {message}")
 
-def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="theodore", add_help=False)
     sub = parser.add_subparsers(dest="command", parser_class=_Parser)
     g = sub.add_parser("guide", add_help=False)
@@ -124,6 +131,9 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("licence-check", add_help=False)        # the detached refresh an engine command starts: not for assistants
     us = sub.add_parser("usage", add_help=False)
     us.add_argument("--show", action="store_true")
+    us.add_argument("--send", action="store_true", help=argparse.SUPPRESS)       # the detached send a command starts
+    us.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    us.add_argument("--reports", action="store_true", help=argparse.SUPPRESS)
     so = sub.add_parser("studio", add_help=False)
     so.add_argument("action", nargs="?", choices=("on", "off"))
     we = sub.add_parser("welcome", add_help=False)              # the installers' last status: not for assistants
@@ -135,10 +145,9 @@ def _dispatch(argv: list[str]) -> int:
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(HELP, end="")
         return 0
-    if argv[0] == "pptx":
-        return commands.run_pptx(argv[1:])
-    if argv[0] == "python":
-        return commands.run_python(argv[1:])
+    if argv[0] in ("pptx", "python"):
+        from . import verbs
+        return verbs.run_pptx(argv[1:]) if argv[0] == "pptx" else verbs.run_python(argv[1:])
     args = _parser().parse_args(argv)
     cmd = args.command
     if cmd == "guide":
@@ -199,6 +208,8 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "install-plugin":
         return commands.install_plugin(args.dl_base, args.keys)
     if cmd == "usage":
+        if args.send:
+            return usage.send_job(args.force, args.reports)
         return usage.show(args.show)
     if cmd == "licence-check":
         return account.licence_check_job()
@@ -265,6 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         blocked = None
         try:
             core.check_environment("mcp")
+            _newest_launcher()
         except Status as status:
             blocked = status
         with contextlib.suppress(Exception):
@@ -283,19 +295,31 @@ def main(argv: list[str] | None = None) -> int:
     return _main(argv)
 
 
+def _newest_launcher() -> None:
+    """A launcher in a skill folder (THEODORE_SKILL_DIR) that is newer than <home>/bin's stable copy replaces it, as the
+    launcher's own step 2 did before its hot path (0.4.34) went straight to this client: a few small reads, and the
+    three files written only when that copy is older (core.refresh_stable_launcher, which never raises)."""
+    skill = os.environ.get("THEODORE_SKILL_DIR")
+    if skill:
+        core.refresh_stable_launcher([Path(skill) / "scripts"])
+
+
 def _main(argv: list[str]) -> int:
     try:
         core.check_environment(argv[0] if argv else None)      # before anything touches the folder
     except Status as status:
         return core.emit(status)
+    _newest_launcher()
     try:
         account.register_disk_secrets()     # before any server diagnostic can be printed
     except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run
         pass
-    specimens.sweep()       # specimen sheets older than an hour go before anything else is done
+    # Specimen sheets older than an hour go before anything else is done; an engine verb reads only the record unless
+    # one has expired (specimens.sweep, quick).
+    specimens.sweep(quick=bool(argv) and argv[0] in ("pptx", "python"))
     withdraw.resume()       # Theodore's files, when the service ended this computer's access and they are still here
     if argv[:1] and argv[0] not in _NO_USAGE_FLUSH:
-        usage.flush()           # only when the oldest waiting usage event is older than 15 minutes; never raises
+        usage.send_in_background()      # a detached send when the oldest waiting line is 15 minutes old; never waits
     code = _run(argv)
     withdraw.resume()       # learned by this command: removed now that it is done (never while an engine runs)
     last = core.last_emitted()

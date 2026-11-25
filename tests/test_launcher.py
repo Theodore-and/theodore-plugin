@@ -1199,5 +1199,215 @@ class WindowsHome(LauncherCase):
         self.assertFalse(self.new.exists(), "nothing went to the new folder")
 
 
+HELPERS = ("dirname", "basename", "grep", "sed", "head", "tail", "tr", "cat", "cut", "awk", "uname", "date", "find", "mkdir",
+           "rm", "mv", "cp", "chmod", "ln", "sleep", "ps", "kill", "curl", "wget", "cygpath", "readlink", "touch", "wc", "env")
+
+
+def windows_processes(command, env: dict, cwd: str, timeout: float = 180) -> tuple[int, object]:
+    """Run `command` in a Windows job object of its own and count every process started in it (the job's accounting:
+    the command itself and all it starts). (count, CompletedProcess)."""
+    import ctypes
+    import subprocess
+    from ctypes import wintypes
+
+    class Accounting(ctypes.Structure):
+        _fields_ = [("TotalUserTime", ctypes.c_int64), ("TotalKernelTime", ctypes.c_int64), ("ThisPeriodTotalUserTime", ctypes.c_int64),
+                    ("ThisPeriodTotalKernelTime", ctypes.c_int64), ("TotalPageFaultCount", wintypes.DWORD),
+                    ("TotalProcesses", wintypes.DWORD), ("ActiveProcesses", wintypes.DWORD), ("TotalTerminatedProcesses", wintypes.DWORD)]
+    kernel32, ntdll = ctypes.windll.kernel32, ctypes.windll.ntdll
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    job = kernel32.CreateJobObjectW(None, None)
+    proc = subprocess.Popen(command, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=0x00000004)                   # CREATE_SUSPENDED: in the job before it starts anything
+    try:
+        if not kernel32.AssignProcessToJobObject(wintypes.HANDLE(job), wintypes.HANDLE(int(proc._handle))):
+            raise unittest.SkipTest(f"this test runner cannot place a process in a job (error {kernel32.GetLastError()})")
+        ntdll.NtResumeProcess(wintypes.HANDLE(int(proc._handle)))
+        out, err = proc.communicate(timeout=timeout)
+        info = Accounting()
+        kernel32.QueryInformationJobObject(wintypes.HANDLE(job), 1, ctypes.byref(info), ctypes.sizeof(info), None)
+        return int(info.TotalProcesses), subprocess.CompletedProcess(command, proc.returncode, out.decode("utf-8", "replace"),
+                                                                     err.decode("utf-8", "replace"))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        kernel32.CloseHandle(wintypes.HANDLE(job))
+
+
+class HotPath(LauncherCase):
+    """0.4.34: once Theodore is set up, the launchers and the short command start the client straight from its Python,
+    with no helper program (the full launcher started about 20 in Git Bash: 1.14 s on the Windows test machine, 4.5 to 7 s
+    on a laptop); the engine then runs on the runtime's Python. Counted: helper programs by name and Python starts on
+    macOS and Linux; every process, through a job object's accounting, on Windows."""
+
+    def setUp(self):
+        super().setUp()
+        self.api.issue_activation_code("ABCD-1234")
+        self.assertStatus(self.run_launcher("login", "--code", "ABCD-1234"), "OK", 0)       # sets up and signs in
+        self.box.wait_jobs(600)
+        guide = self.run_launcher("guide", "pptx", timeout=600)      # installs the engine when the set-up did not
+        self.assertEqual(guide.returncode, 0, guide.stdout[-2000:] + guide.stderr)
+        self.box.wait_jobs(600)
+        self.log = self.box.tmp / "started.log"
+
+    def counting(self) -> dict:
+        """PATH wrappers that log each helper program by name, and the runtime's python logging each start."""
+        tools = self.box.tmp / "countbin"
+        tools.mkdir(exist_ok=True)
+        for name in HELPERS:
+            real = next((Path(d) / name for d in ("/usr/bin", "/bin", "/usr/sbin", "/sbin") if (Path(d) / name).is_file()), None)
+            if real:
+                (tools / name).write_text(f'#!/bin/sh\nprintf "%s\\n" "{name}" >> "{self.log}"\nexec "{real}" "$@"\n')
+                (tools / name).chmod(0o755)
+        rt = (self.box.home / "runtime" / "current.txt").read_text().strip()
+        python = self.box.home / "runtime" / rt / "python" / "bin" / "python3"
+        original = python.with_name("python3.original")
+        if not original.exists():
+            python.rename(original)
+            python.write_text(f'#!/bin/sh\nprintf "%s\\n" python >> "{self.log}"\nexec "{original}" "$@"\n')
+            python.chmod(0o755)
+        self.log.write_text("")
+        return {"PATH": f"{tools}{os.pathsep}{self.box.env['PATH']}"}
+
+    def started(self) -> list[str]:
+        return self.log.read_text().split()
+
+    def became_the_client(self, command: list[str], env: dict) -> bool:
+        """Whether the shell started with `command` became the client itself (exec), so no copy of it waits beside the
+        client: the engine's parent, the client, has the shell's own process id."""
+        import subprocess
+        proc = subprocess.Popen([*command, "pptx", "env"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, cwd=str(self.box.tmp))
+        out, err = proc.communicate(timeout=180)
+        self.assertEqual(proc.returncode, 0, out + err)
+        return json.loads(out)["ppid"] == proc.pid
+
+    @unittest.skipIf(IS_WINDOWS, "helper programs by name: the sh launcher on macOS and Linux")
+    def test_a_verb_through_the_launcher_starts_two_pythons_and_nothing_else(self):
+        env = self.counting()
+        result = self.run_launcher("pptx", "exit", "0", env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.started(), ["python", "python"], "the client, then the engine on the runtime's python")
+        if "dash" not in os.path.realpath("/bin/sh"):          # dash has no execfail: there the client runs as a child
+            self.assertTrue(self.became_the_client(["/bin/sh", str(self.box.launcher)], {**self.box.env, **env}),
+                            "the launcher's shell becomes the client (exec, where the shell has execfail)")
+        self.log.write_text("")
+        version = self.run_launcher("version", env=env)
+        self.assertIn("theodore client", version.stdout)
+        self.assertEqual(self.started(), ["python"], "a client command: one start")
+        # The full launcher, as before 0.4.34, for comparison: started without a path, it cannot take the hot path.
+        self.log.write_text("")
+        import subprocess
+        full = subprocess.run(["/bin/sh", self.box.launcher.name, "version"], env={**self.box.env, **env}, cwd=str(self.box.launcher.parent),
+                              capture_output=True, text=True, timeout=180)
+        self.assertEqual(full.returncode, 0, full.stdout + full.stderr)
+        helpers = [name for name in self.started() if name != "python"]
+        self.assertGreaterEqual(len(helpers), 8, f"the full launcher's helper programs: {helpers}")
+
+    @unittest.skipIf(IS_WINDOWS, "the POSIX short command")
+    def test_the_short_command_starts_the_client_with_no_other_program(self):
+        from theodore_client import core
+        from unittest import mock
+        env = self.counting()
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(self.box.home), "HOME": str(self.box.user_home)}), \
+                mock.patch.object(core, "_HOME", None):
+            texts = core.shim_texts()
+        shim = self.box.tmp / "shortbin" / "theodore"
+        shim.parent.mkdir()
+        shim.write_text(texts["theodore"])
+        shim.chmod(0o755)
+        import subprocess
+        run = lambda *args, **extra: subprocess.run([str(shim), *args], env={**self.box.env, **env, **extra}, capture_output=True,
+                                                    text=True, timeout=180, cwd=str(self.box.tmp))
+        result = run("pptx", "exit", "3")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.started(), ["python", "python"])
+        self.assertTrue(self.became_the_client([str(shim)], {**self.box.env, **env}), "the short command's shell becomes the client")
+        self.log.write_text("")
+        self.assertIn("theodore client", run("version").stdout)
+        self.assertEqual(self.started(), ["python"])
+        # A record that is not a plain name: the full launcher, which still works.
+        current = self.box.home / "client" / "current.txt"
+        good = current.read_text()
+        current.write_text("../elsewhere\n")
+        self.log.write_text("")
+        broken = run("version")
+        self.assertNotEqual(self.started(), ["python"], "not the hot path")
+        current.write_text(good)
+        self.assertIn(broken.returncode, (0, 67, 68, 78), broken.stdout + broken.stderr)
+
+    @unittest.skipIf(IS_WINDOWS, "the sh launcher")
+    def test_skill_through_the_hot_path_always_exits_0_and_says_everything_on_standard_output(self):
+        result = self.run_launcher("skill", "nonsense")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("THEODORE ", result.stdout)
+
+    def test_a_newer_launcher_in_a_skill_folder_still_reaches_the_stable_copy(self):
+        """The launcher's own step 2 (a newer copy replaces <home>/bin's) is skipped by the hot path: the client does it."""
+        stamp = self.box.home / "bin" / "launcher.json"
+        stamp.write_text(stamp.read_text().replace('"launcher_generation": 1,', '"launcher_generation": 0,'))
+        self.assertEqual(self.run_launcher("version").returncode, 0)
+        self.assertEqual(json.loads(stamp.read_text())["launcher_generation"], 1)
+        self.assertEqual((self.box.home / "bin" / self.box.launcher.name).read_bytes(), self.box.launcher.read_bytes())
+
+    def hot_trace(self, bash: str, script: str, env: dict | None = None, cwd=None) -> str:
+        """The script's run traced (sh -x) up to the client's start, for a count that failed: which check sent it on."""
+        import subprocess
+        traced = subprocess.run([bash, "-c", f'echo "OSTYPE=$OSTYPE"; sh -x "{script}" version 2>&1 | head -80'], env=env or self.box.env,
+                                cwd=str(cwd or self.box.tmp), capture_output=True, text=True, timeout=180)
+        return traced.stdout + traced.stderr
+
+    @unittest.skipUnless(IS_WINDOWS, "a job object's accounting: Windows")
+    def test_on_windows_a_verb_starts_the_client_and_the_engine_and_little_else(self):
+        import shutil
+        count, result = windows_processes(cmd_command(str(self.box.launcher), "pptx", "exit", "0"), self.box.env, str(self.box.tmp))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # cmd, the client's python.exe, the engine's python.exe (no venv redirector), and a console host at most.
+        self.assertLessEqual(count, 4, f"processes started through theodore.cmd: {count}")
+        bash = shutil.which("bash")
+        if bash:
+            sh_path = str(self.box.launcher.with_name("theodore")).replace("\\", "/")
+            count, result = windows_processes([bash, "-c", f'sh "{sh_path}" pptx exit 0'], self.box.env, str(self.box.tmp))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Git's bash.exe and the bash it starts, sh, the two python.exe: no cygpath, grep, tr, dirname or uname.
+            if count > 5:
+                self.fail(f"processes started through the sh launcher in Git Bash: {count} > 5\n{self.hot_trace(bash, sh_path)}")
+
+    @unittest.skipUnless(IS_WINDOWS, "the Windows short commands")
+    def test_on_windows_the_short_commands_start_the_client_straight(self):
+        import shutil
+        from theodore_client import core
+        from unittest import mock
+        # The short command exists only for a default folder: this sandbox's home is %USERPROFILE%\.theodore.
+        fresh = Sandbox(self.api, home_name=str(Path("user") / ".theodore"))
+        self.addCleanup(fresh.close)
+        self.assertEqual(fresh.run_launcher("version").returncode, 0)
+        fresh.wait_jobs(600)
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(fresh.home), "USERPROFILE": str(fresh.user_home),
+                                          "LOCALAPPDATA": str(fresh.tmp / "localappdata")}), mock.patch.object(core, "_HOME", None):
+            texts = core.shim_texts()
+        self.assertIsNotNone(texts)
+        folder = fresh.tmp / "shortbin"
+        folder.mkdir()
+        for name, text in texts.items():
+            (folder / name).write_bytes(text.encode("utf-8"))
+        env = {**fresh.env, "LOCALAPPDATA": str(fresh.tmp / "localappdata")}
+        env.pop("THEODORE_HOME", None)          # the folder by the rule, as a person's shell has it
+        # A client command (this home is set up, not signed in): cmd and the client's python.exe, a console host at most.
+        count, result = windows_processes(cmd_command(str(folder / "theodore.cmd"), "version"), env, str(fresh.tmp))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("theodore client", result.stdout)
+        self.assertLessEqual(count, 3, f"processes started through the batch short command: {count}")
+        bash = shutil.which("bash")
+        if bash:
+            script = str(folder / "theodore").replace("\\", "/")
+            count, result = windows_processes([bash, "-c", f'sh "{script}" version'], env, str(fresh.tmp))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("theodore client", result.stdout)
+            # Git's bash.exe and the bash it starts, sh, then exec: the client's python.exe in its place.
+            if count > 4:
+                self.fail(f"processes started through the Git Bash short command: {count} > 4\n{self.hot_trace(bash, script, env, fresh.tmp)}")
+
 if __name__ == "__main__":
     unittest.main()

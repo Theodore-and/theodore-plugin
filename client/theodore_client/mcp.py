@@ -11,18 +11,22 @@ else this process would print goes to standard error, so that nothing can break 
 library only, like the rest of the client; it needs the stage-1 client and the installation credential, not the
 engine (except `guide` with skill pptx, whose manual comes with the engine).
 
-Reuse within the session: this process keeps each sheet and each whole guide text it fetched in memory, never on
-disk, for as long as it runs; Claude Code's sub-agents call the same process. A held guide text is asked for again
-on every call with If-None-Match (the service answers 304 and does not count it as a fetch). Held sheets belong to
-the published guide version the index names: at most REVALIDATE_SECONDS after the last check, one conditional index
-request confirms the version and the device (304); a new version makes each held sheet be checked on its own
-(If-None-Match with its SHA-256); a refusal drops every held item. A revoked device is therefore refused on its next guide call at once and on its next sheet call within
-60 seconds; it is never served a held item after the service refused it.
+Served online on every call (contract C6; Carl, 24 November 2026): each guide text and each sheet a call returns is
+asked for again in that call, conditionally (If-None-Match with the held body's ETag or SHA-256), and the service
+answers 304 when it is unchanged; `list` asks for the index the same way. So every call is authorised by the service,
+and a revoked device is refused on its next call. What this process keeps is the bodies, in memory only, never on
+disk, for as long as it runs (Claude Code's sub-agents call the same process); a refusal drops them all.
+
+Fast (0.4.34): the calls go over kept-alive HTTPS connections (api.KEPT, one opened at the server's start), so a call
+pays one round trip and no new TLS set-up; the credential is kept in memory (credentials.keep_in_memory); and each
+`tools/call` runs in a thread of its own, its answer written under one lock, so a lead and its designers never queue
+behind each other's network waits. A call with several sheets asks for them side by side.
 """
 
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import contextlib
 import hashlib
 import io
@@ -30,6 +34,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 from . import __version__, account, api, chatbuild, commands, core, credentials, install, specimens, withdraw
@@ -38,8 +43,8 @@ from .core import Status
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 GUIDE_MAX_RESULT_CHARS = 400_000
-SPECIMEN_MAX_PER_CALL = 6          # sheets one specimen call returns; each sheet not held is one fetch
-REVALIDATE_SECONDS = 60.0          # held sheets are served for at most this long after the service last confirmed them
+SPECIMEN_MAX_PER_CALL = 6          # sheets one specimen call returns; each is one conditional request, side by side
+CALLS_AT_ONCE = 32                 # tools/call answered side by side at most; more wait for a free thread
 # What one process holds at most: the sheets and the references of one guide version. A version holds at most 64
 # sheets of at most 1 MiB each (the service's limits); references are whole sections of at most 400,000 characters.
 HELD_SHEETS_MAX = 64
@@ -217,36 +222,29 @@ def _plugin_tools(index: dict | None = None) -> list[dict]:
 
 INDEX: dict | None = None          # {"version", "sections", "specimens", "etag"} of deck-design, when known
 NOTIFY: list[dict] = []            # notifications the server sends after its next answer
-SHEETS: dict[str, tuple[str, bytes, str | None]] = {}       # name -> (sha256, bytes, index ETag it was fetched under)
+SHEETS: dict[str, tuple[str, bytes]] = {}                   # name -> (sha256 of the published sheet, bytes as served)
 GUIDES: dict[tuple[str, str, str], tuple[str, str]] = {}    # (skill, section, role or "") -> (ETag, whole text)
-VALIDATED_AT: float | None = None  # time.monotonic() of the service's last confirmation of INDEX (and of this device)
-
-
-def _revalidate_seconds() -> float:
-    """REVALIDATE_SECONDS. Test seam: THEODORE_TEST_REVALIDATE_SECONDS, honoured only when the API base is loopback."""
-    raw = os.environ.get("THEODORE_TEST_REVALIDATE_SECONDS")
-    if raw and core.is_loopback_api():
-        with contextlib.suppress(ValueError):
-            return float(raw)
-    return REVALIDATE_SECONDS
+# Calls run side by side (one thread each): what they share is read and changed under this lock, never across a
+# network wait.
+STATE = threading.RLock()
 
 
 def forget(refused: bool = False) -> None:
     """Drop everything held: after a refusal nothing held is served again. After a refusal of the device or the
     account (`refused`), the launcher's specimen folders on this computer go too: it keeps no sheet anywhere."""
-    global INDEX, VALIDATED_AT, INDEX_TRIED
-    SHEETS.clear()
-    GUIDES.clear()
-    VALIDATED_AT = None
-    INDEX = None                    # fetched again (and confirmed) before anything is held again
-    INDEX_TRIED = False
+    global INDEX, INDEX_TRIED
+    with STATE:
+        SHEETS.clear()
+        GUIDES.clear()
+        INDEX = None                # fetched again before its names are used
+        INDEX_TRIED = False
     if refused:
         specimens.sweep(everything=True)
         chatbuild.drop_licence_copy()
 
 
 def _hold(store: dict, key, value, size, max_entries: int, max_size: int) -> None:
-    """Keep `value` under `key`, newest last; evict the oldest entries beyond the count or the total size."""
+    """Keep `value` under `key`, newest last; evict the oldest entries beyond the count or the total size. Under STATE."""
     store.pop(key, None)
     store[key] = value
     while len(store) > max_entries or (len(store) > 1 and sum(size(v) for v in store.values()) > max_size):
@@ -255,12 +253,14 @@ def _hold(store: dict, key, value, size, max_entries: int, max_size: int) -> Non
         store.pop(key, None)
 
 
-def _hold_sheet(name: str, value: tuple[str, bytes, str | None]) -> None:
-    _hold(SHEETS, name, value, lambda v: len(v[1]), HELD_SHEETS_MAX, HELD_SHEET_BYTES_MAX)
+def _hold_sheet(name: str, value: tuple[str, bytes]) -> None:
+    with STATE:
+        _hold(SHEETS, name, value, lambda v: len(v[1]), HELD_SHEETS_MAX, HELD_SHEET_BYTES_MAX)
 
 
 def _hold_guide(key: tuple[str, str, str], value: tuple[str, str]) -> None:
-    _hold(GUIDES, key, value, lambda v: len(v[1]), HELD_GUIDES_MAX, HELD_GUIDE_CHARS_MAX)
+    with STATE:
+        _hold(GUIDES, key, value, lambda v: len(v[1]), HELD_GUIDES_MAX, HELD_GUIDE_CHARS_MAX)
 
 
 def _names(items, key: str, pattern) -> list[str]:
@@ -306,71 +306,72 @@ def fetch_index() -> dict | None:
 
 
 def _adopt(fresh: dict | None) -> None:
-    """Take a newly fetched index: held sheets of another version are no longer served unchecked, and the host is told
-    when the names changed."""
-    global INDEX, VALIDATED_AT
+    """Take a newly fetched index, and tell the host when the names changed (the held bodies are asked for again on
+    every call anyway; another version keeps none of the old one's)."""
+    global INDEX
     if fresh is None:
         return
-    if INDEX is not None and fresh.get("etag") != INDEX.get("etag"):      # another version: nothing of the old one is kept
-        SHEETS.clear()
-        GUIDES.clear()
-    changed = INDEX is not None and {k: v for k, v in fresh.items() if k != "etag"} != {k: v for k, v in INDEX.items() if k != "etag"}
-    INDEX = fresh
-    VALIDATED_AT = time.monotonic() if fresh.get("etag") else None
-    if changed:
-        NOTIFY.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+    with STATE:
+        if INDEX is not None and fresh.get("etag") != INDEX.get("etag"):      # another version: nothing of the old one is kept
+            SHEETS.clear()
+            GUIDES.clear()
+        changed = INDEX is not None and {k: v for k, v in fresh.items() if k != "etag"} != {k: v for k, v in INDEX.items() if k != "etag"}
+        INDEX = fresh
+        if changed:
+            NOTIFY.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
 
 
 INDEX_TRIED = False                # a specimen call asks for a missing index once, not on every call
 
 
 def _index() -> dict | None:
-    global INDEX, VALIDATED_AT, INDEX_TRIED
-    if INDEX is None:
+    """The index for the tools' names: fetched once, then kept (a guide answer that names another version, and every
+    `list` call, ask for it again)."""
+    global INDEX_TRIED
+    with STATE:
+        if INDEX is not None:
+            return INDEX
         INDEX_TRIED = True
-        INDEX = fetch_index()
-        VALIDATED_AT = time.monotonic() if INDEX and INDEX.get("etag") else None
-    return INDEX
+    fresh = fetch_index()
+    with STATE:
+        if INDEX is None and fresh is not None:
+            _adopt(fresh)
+        return INDEX
 
 
 def _seen_version(version: str | None) -> None:
     """A guide answer named its guide version: when it is not the index's, fetch the index again and tell the host
     that the tools changed."""
-    if not version or INDEX is None or not INDEX.get("version") or version == INDEX["version"]:
+    with STATE:
+        known = INDEX
+    if not version or known is None or not known.get("version") or version == known["version"]:
         return
     fresh = fetch_index()
-    if fresh and fresh != INDEX:
+    if fresh and fresh != known:
         _adopt(fresh)
 
 
-def _validate() -> str | None:
-    """The index ETag under which held sheets may be served now, or None (no index: each held sheet is checked on its
-    own). Past the interval, one conditional index request: 304 confirms; a new version demotes the held sheets; a
-    refusal or a failure raises its status (call_tool then drops everything held after a refusal)."""
-    global VALIDATED_AT, INDEX
-    etag = (INDEX or {}).get("etag")
-    if not etag:
-        return None
-    if VALIDATED_AT is not None and 0 <= time.monotonic() - VALIDATED_AT < _revalidate_seconds():
-        return etag
+def _index_now() -> dict | None:
+    """The index, asked for in this call (`list`): conditionally when one is held (304 keeps it). A refusal raises its
+    status (call_tool then drops everything held); no index served (an older service): None."""
+    with STATE:
+        held = INDEX
+    etag = (held or {}).get("etag")
     try:
-        status, headers, raw = commands._api("guide", "specimen", skill="deck-design", query={"form": "index"},
-                                             headers={"If-None-Match": etag})
-    except Status as status:
-        if status.name not in ("OFFLINE", "RETRY"):         # refused, or no published version: nothing held is kept
+        status, headers, raw = commands._api("guide", "list deck-design", skill="deck-design", query={"form": "index"},
+                                             headers={"If-None-Match": etag} if etag else None)
+    except Status as refusal:
+        if refusal.name not in ("OFFLINE", "RETRY"):        # refused, or no published version: nothing held is kept
             forget()
         raise
     if core.refused():
         raise api.sign_in_required()
-    if status == 304:
-        VALIDATED_AT = time.monotonic()
-        return etag
+    if status == 304 and held is not None:
+        return held
     fresh = _parse_index(headers, raw)
-    if fresh is None:               # the service no longer serves the index: check sheets one by one
-        INDEX = {k: v for k, v in (INDEX or {}).items() if k != "etag"}
-        return None
-    _adopt(fresh)
-    return fresh.get("etag")
+    if fresh is not None:
+        _adopt(fresh)
+    return fresh
 
 
 def _text(text: str, error: bool = False) -> dict:
@@ -403,14 +404,16 @@ def _fetch_whole(skill: str, section: str | None, role: str | None = None) -> st
         if not commands.SECTION_NAME.fullmatch(name):
             raise commands._no_such_section(skill, name, role)
     key = (skill, name if section else "", role or "")
-    held = GUIDES.get(key)
+    with STATE:
+        held = GUIDES.get(key)
     conditional = {"If-None-Match": held[0]} if held else None
     if section:
         try:
             status, headers, raw = commands._api("guide_section", what, passing=("not_found",), skill=skill, section=name,
                                                  query=query, headers=conditional)
         except api.ApiError:
-            GUIDES.pop(key, None)
+            with STATE:
+                GUIDES.pop(key, None)
             # a text of the manual the service does not serve: the selected engine's own file (an engine up to rc.28)
             on_disk = commands._pptx_disk_section(name) if skill == "pptx" else None
             if on_disk is None:
@@ -441,7 +444,8 @@ def _fetch_whole(skill: str, section: str | None, role: str | None = None) -> st
     if total == 1 and etag:
         _hold_guide(key, (etag, text))
     else:
-        GUIDES.pop(key, None)
+        with STATE:
+            GUIDES.pop(key, None)
     return text
 
 
@@ -451,10 +455,8 @@ def _pptx_manual(role: str | None = None) -> str:
     say what changed since the last skill load, at any earlier time (an install's plugin update minutes before), and a
     chat told it mid-build said "Theodore updated itself while building" when nothing had. Nothing is applied during a
     build, so a chat says nothing about versions; the notice stays for the coding hosts' next skill load."""
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP, role=role, pointers=FOR != DESKTOP)
-    return buffer.getvalue()
+    return _captured(lambda: commands._guide_pptx(1, whole=True, opening=False, notices=FOR != DESKTOP, role=role,
+                                                  pointers=FOR != DESKTOP))
 
 
 def tool_guide(args: dict) -> dict:
@@ -473,13 +475,11 @@ def tool_guide(args: dict) -> dict:
 
 # --- specimen ------------------------------------------------------------------------------------------------------------
 
-def _sheet(name: str, current: str | None) -> bytes:
-    """One sheet's bytes, checked (JPEG, at most 1 MiB, the SHA-256 the service sent). Held under the index ETag
-    `current` (just confirmed): served from memory. Held otherwise: one conditional request (304: served from memory).
-    Not held: one fetch."""
-    held = SHEETS.get(name)
-    if held and current and held[2] == current:
-        return held[1]
+def _sheet(name: str) -> bytes:
+    """One sheet's bytes, checked (JPEG, at most 1 MiB, the SHA-256 the service sent), asked for in this call: held,
+    one conditional request (304: served from memory); not held, one fetch."""
+    with STATE:
+        held = SHEETS.get(name)
     what = f"specimen {name}"
     asked = {"Accept": "image/jpeg, application/json;q=0.9"}
     if held:
@@ -490,16 +490,17 @@ def _sheet(name: str, current: str | None) -> bytes:
     except api.TooLarge:
         raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused.") from None
     except api.ApiError as error:       # passed through only for not_found: said beside the sheets that came
-        SHEETS.pop(name, None)
+        with STATE:
+            SHEETS.pop(name, None)
         if error.code != "not_found":
             raise api.status_from(error, what) from None
         raise specimens.NoSuchSheet(name) from None
     if core.refused():
         raise api.sign_in_required()
     if status == 304 and held:
-        _hold_sheet(name, (held[0], held[1], current))
         return held[1]
-    SHEETS.pop(name, None)
+    with STATE:
+        SHEETS.pop(name, None)
     if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
         raise core.internal(f"{what}: the answer is not a JPEG image; it was refused.")
     if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest() \
@@ -507,8 +508,42 @@ def _sheet(name: str, current: str | None) -> bytes:
         raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing).",
                      "call the same tool again once. If it fails again, continue without the sheet.",
                      "A design specimen arrived damaged. I am trying once more.")
-    _hold_sheet(name, (specimens.content_sha256(raw), raw, current))     # the published sheet's hash: If-None-Match
+    _hold_sheet(name, (specimens.content_sha256(raw), raw))     # the published sheet's hash: If-None-Match
     return raw
+
+
+def _sheet_or_missing(name: str) -> bytes | None:
+    try:
+        return _sheet(name)
+    except specimens.NoSuchSheet:
+        return None
+
+
+def _side_by_side(work, items: list) -> list:
+    """work(item) for each item, in threads of their own (each on a kept-alive connection), results in order. The
+    calling thread's refusals hold for the whole call: a refusal learned in a helper thread is carried back, and the
+    first failure (in the order asked) is raised once every request has ended."""
+    if len(items) <= 1:
+        return [work(item) for item in items]
+    learned: list = []
+    scoped = core._SCOPED                   # per-thread refusals (the server): carried back; else they are shared already
+
+    def one(item):
+        if scoped:
+            core.begin_call()
+        try:
+            return work(item)
+        finally:
+            found = core.refusal() if scoped else None
+            if found is not None:
+                learned.append(found)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(items), SPECIMEN_MAX_PER_CALL), thread_name_prefix="theodore-sheet") as pool:
+        futures = [pool.submit(one, item) for item in items]
+        concurrent.futures.wait(futures)
+    for kind, code in learned:
+        core.mark_refused(kind, code)
+    return [future.result() for future in futures]
 
 
 def _image(raw: bytes) -> dict:
@@ -529,18 +564,18 @@ def tool_specimen(args: dict) -> dict:
     if not all(isinstance(name, str) and specimens.valid_name(name) for name in names):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
     account.require("deck-design")
-    if INDEX is None and not INDEX_TRIED:
+    with STATE:
+        ask_index = INDEX is None and not INDEX_TRIED
+    if ask_index:
         _index()
     sheets: dict[str, bytes] = {}
     missing: list[str] = []
-    for name in names:
-        if name not in sheets and name not in missing:
-            # The confirmation's age is checked for every sheet served, so no batch serves a held sheet more than
-            # REVALIDATE_SECONDS after the service last confirmed it.
-            try:
-                sheets[name] = _sheet(name, _validate())
-            except specimens.NoSuchSheet:
-                missing.append(name)
+    distinct = list(dict.fromkeys(names))
+    for name, got in zip(distinct, _side_by_side(_sheet_or_missing, distinct)):
+        if got is None:
+            missing.append(name)
+        else:
+            sheets[name] = got
     if core.refused():
         raise api.sign_in_required()
     notes = {name: specimens.missing_note(name, (INDEX or {}).get("specimens") or None) for name in missing}
@@ -574,7 +609,7 @@ def tool_list(args: dict) -> dict:
                        if p.is_file() and "__pycache__" not in p.parts and not p.name.startswith("."))
         return _text("\n".join(names) + "\n")
     account.require("deck-design")
-    index = _index()
+    index = _index_now()
     if index is None:
         raise Status("RETRY", "the list of the deck-design files could not be fetched just now.",
                      "call the same tool again once; the files are also named by the links in the skill's text.",
@@ -584,13 +619,62 @@ def tool_list(args: dict) -> dict:
 
 
 HANDLERS = {"list": tool_list, "guide": tool_guide, "specimen": tool_specimen}
+class _ThreadOutput(io.TextIOBase):
+    """sys.stdout while the server runs: what a call prints goes to that call's own capture (_captured), anything else
+    to standard error. The protocol stream itself is written to the binary standard output, never through this."""
+
+    def __init__(self, default):
+        super().__init__()
+        self.default = default
+        self.local = threading.local()
+
+    def _target(self):
+        return getattr(self.local, "capture", None) or self.default
+
+    def write(self, text):
+        return self._target().write(text)
+
+    def flush(self):
+        with contextlib.suppress(Exception):
+            self._target().flush()
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def isatty(self):
+        return False
+
+
 def _captured(run) -> str:
     """What a launcher command prints (its lines and its status), as text: this process's standard output is the
-    protocol stream."""
+    protocol stream. Per thread while the server runs (calls side by side); else redirect_stdout as before."""
     buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
+    router = sys.stdout if isinstance(sys.stdout, _ThreadOutput) else None
+    if router is None:
+        with contextlib.redirect_stdout(buffer):
+            run()
+        return buffer.getvalue()
+    previous = getattr(router.local, "capture", None)
+    router.local.capture = buffer
+    try:
         run()
+    finally:
+        router.local.capture = previous
     return buffer.getvalue()
+
+
+def _captured_call(run):
+    """A tool call: whatever it prints by accident goes to standard error, never to another call's capture."""
+    router = sys.stdout if isinstance(sys.stdout, _ThreadOutput) else None
+    if router is None:
+        return run()
+    previous = getattr(router.local, "capture", None)
+    router.local.capture = None
+    try:
+        return run()
+    finally:
+        router.local.capture = previous
 
 
 def _desktop_report(args: dict) -> dict:
@@ -716,8 +800,8 @@ def call_tool(name: str, args) -> dict:
         return _text(f"unknown tool {name!r}.", error=True)
     if BLOCKED is not None:
         return _status(BLOCKED)
-    core._REFUSAL, core._REFUSAL_EMITTED = None, False      # each call learns afresh (a device may sign in again meanwhile)
-    specimens.sweep()               # the launcher's folders older than an hour go, as before any launcher command
+    core.begin_call()               # each call learns afresh (a device may sign in again meanwhile)
+    specimens.sweep(quick=True)     # the launcher's folders older than an hour go, as before any launcher command
     try:
         result = handler(args if isinstance(args, dict) else {})
     except Status as status:
@@ -770,13 +854,12 @@ def handle(message: dict) -> dict | None:
     elif method == "tools/call":
         params = message.get("params") or {}
         token = (params.get("_meta") or {}).get("progressToken") if isinstance(params.get("_meta"), dict) else None
-        chatbuild.PROGRESS = _progress(token) if token is not None and OUT is not None else None
-        chatbuild.META = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        chatbuild.set_call(_progress(token) if token is not None and OUT is not None else None,
+                           params.get("_meta") if isinstance(params.get("_meta"), dict) else {})
         try:
-            result = call_tool(str(params.get("name") or ""), params.get("arguments") or {})
+            result = _captured_call(lambda: call_tool(str(params.get("name") or ""), params.get("arguments") or {}))
         finally:
-            chatbuild.PROGRESS = None
-            chatbuild.META = {}
+            chatbuild.set_call(None, {})
     elif not is_request:                    # notifications/initialized, notifications/cancelled, ...
         return None
     else:
@@ -794,7 +877,11 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None, for_host: str 
     FOR = DESKTOP if for_host in (DESKTOP, CODEX) else None
     raw_in = stdin or sys.stdin.buffer
     out = stdout or sys.stdout.buffer
-    sys.stdout = sys.stderr                 # anything printed by accident goes to standard error
+    sys.stdout = _ThreadOutput(sys.stderr)  # a call's prints go to its own capture; anything else to standard error
+    core.scope_refusals_per_thread()        # calls run side by side: each learns its own refusals
+    credentials.keep_in_memory()            # read once (a keychain process on a Mac), again when it changes
+    api.DEFAULT_POOL = api.KEPT             # every call over kept-alive connections; a few opened now, in the background,
+    api.KEPT.warm(api.KEPT_WARM)            # so the calls of a lead and its designers at once each find one
     # Named by its process id while it runs, so `theodore uninstall` can stop it (Windows cannot delete the runtime a
     # running server uses). Removed at exit; one left by a killed server names a dead process, which is ignored.
     marker = None
@@ -812,21 +899,56 @@ def serve(stdin=None, stdout=None, blocked: Status | None = None, for_host: str 
 
 
 OUT = None                          # the protocol stream, for progress notifications sent during a long call
+WRITING = threading.Lock()          # one writer on the protocol stream: an answer, a progress line, never interleaved
+CALLS_DONE_WAIT_S = 600.0           # at the end of the input, calls still running get this long to answer
+
+
+def _write(items: list) -> None:
+    """Write protocol messages, then any notification waiting (tools/list_changed), as one unit."""
+    if OUT is None:
+        return
+    with WRITING:
+        with STATE:
+            waiting = list(NOTIFY)
+            NOTIFY.clear()
+        for item in [*items, *waiting]:
+            OUT.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+        OUT.flush()
 
 
 def _progress(token):
     """A long engine command sends progress while it runs, so a host that resets its timeout on progress waits."""
     def send(elapsed: float, message: str) -> None:
-        item = {"jsonrpc": "2.0", "method": "notifications/progress",
-                "params": {"progressToken": token, "progress": round(elapsed, 1), "message": message}}
-        OUT.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-        OUT.flush()
+        _write([{"jsonrpc": "2.0", "method": "notifications/progress",
+                 "params": {"progressToken": token, "progress": round(elapsed, 1), "message": message}}])
     return send
 
 
+def _answer(message) -> None:
+    try:
+        answer = handle(message)
+    except Exception as exc:  # noqa: BLE001  a message answers; it never ends the server
+        core.log(f"mcp: {exc.__class__.__name__}: {exc}")
+        answer = {"jsonrpc": "2.0", "id": message.get("id"), "error": {"code": -32603, "message": "internal error"}} \
+            if "id" in message else None
+    _write([answer] if answer is not None else [])
+
+
 def _serve_lines(raw_in, out) -> int:
+    """Read messages until the input ends. A tools/call runs in a thread of its own (at most CALLS_AT_ONCE at once)
+    and answers when it is done, in any order; everything else is answered at once, in order. At the end of the input
+    the calls still running finish and answer first."""
     global OUT
     OUT = out
+    slots = threading.BoundedSemaphore(CALLS_AT_ONCE)
+    running: list[threading.Thread] = []
+
+    def in_thread(message: dict) -> None:
+        try:
+            _answer(message)
+        finally:
+            slots.release()
+
     for line in raw_in:
         line = line.strip()
         if not line:
@@ -834,17 +956,22 @@ def _serve_lines(raw_in, out) -> int:
         try:
             message = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            answer = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}
+            _write([{"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}])
+            continue
+        if isinstance(message, dict) and message.get("method") == "tools/call" and "id" in message:
+            slots.acquire()
+            running[:] = [thread for thread in running if thread.is_alive()]
+            thread = threading.Thread(target=in_thread, args=(message,), name="theodore-call", daemon=True)
+            running.append(thread)
+            thread.start()
+        elif isinstance(message, list):           # a batch (older protocol versions): answered in order, here
+            answers = [a for a in (handle(m) for m in message if isinstance(m, dict)) if a is not None]
+            _write([answers] if answers else [])
+        elif isinstance(message, dict):
+            _answer(message)
         else:
-            if isinstance(message, list):           # a batch (older protocol versions)
-                answers = [a for a in (handle(m) for m in message if isinstance(m, dict)) if a is not None]
-                answer = answers or None
-            elif isinstance(message, dict):
-                answer = handle(message)
-            else:
-                answer = {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
-        for item in ([answer] if answer is not None else []) + NOTIFY:
-            out.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-        NOTIFY.clear()
-        out.flush()
+            _write([{"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}])
+    deadline = time.monotonic() + CALLS_DONE_WAIT_S
+    for thread in running:
+        thread.join(max(0.0, deadline - time.monotonic()))
     return 0

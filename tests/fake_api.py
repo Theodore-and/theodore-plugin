@@ -152,6 +152,8 @@ class FakeApi:
         self.dl_damaged: dict[str, int] = {}          # /dl/<key> -> how many next answers arrive with a flipped byte
         self.dl_status: dict[str, int] = {}           # /dl/<key> -> forced HTTP status (for example 407)
         self.dl_redirect: dict[str, str] = {}         # /dl/<key> -> Location of a 302
+        self.latency = 0.0                            # seconds every /v1 request waits before it is answered, outside the
+                                                      # server's lock: a network round trip, so requests overlap as on a real one
         self.dl_delay = 0.0                           # seconds to stall every /dl/ download (a slow connection)
         self.dl_delays: dict[str, float] = {}         # /dl/<key> -> seconds to stall that one download (a large file on a slow link)
         self.activation_codes: dict[str, dict] = {}   # code -> {used: bool}
@@ -249,7 +251,14 @@ class FakeApi:
             def do_HEAD(self):
                 api._handle(self, "HEAD")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        class Server(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):
+                # A kept-alive connection the client closed or reset (a tool server ended while its connection idled):
+                # nothing to report. Anything else is printed as before.
+                if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+                    super().handle_error(request, client_address)
+
+        self.server = Server(("127.0.0.1", port), Handler)
         self.server.daemon_threads = True
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         if tls:
@@ -458,6 +467,8 @@ class FakeApi:
             except OSError:
                 pass
             return
+        if self.latency and path.startswith("/v1/"):
+            time.sleep(self.latency)
         if path == "/v1/reports" and self.report_delay:
             time.sleep(self.report_delay)
         with self.lock:

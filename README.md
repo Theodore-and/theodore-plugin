@@ -84,16 +84,21 @@ Outside that folder:
 - **Claude Desktop**, when the app is on the computer: one entry, `theodore`, in its `claude_desktop_config.json`,
   which starts `~/.theodore/bin/theodore mcp --for claude-desktop` so the app's chat can read Theodore's design
   guidance through one tool, `theodore` (it loads once the app is quit and opened again). Nothing else in that file changes.
-- **Theodore's host settings**, applied by the installer (the person asked their assistant to set Theodore up):
-  in Claude Code's `settings.json` (shared by the CLI, the desktop app's Code tab and the VS Code extension),
-  automatic plugin updates for the Theodore marketplace and permission rules for Theodore's own commands only, by
-  their exact installed paths (on Windows for the PowerShell tool too), so they run without a prompt; the short
-  command `theodore` and its rule (below); and `Edit(//**/.theodore/workspaces/**)`, which lets the assistant write and
-  edit a deck's working files (`deck.js`, its notes) in the `.theodore/workspaces` folder Theodore's engine makes
-  inside the folders you work in (wherever they are), and nothing else; in Codex, the file `~/.codex/rules/theodore.rules`,
-  which allows Theodore's launcher by its exact paths (and `theodore`). With the Codex rules, Theodore's commands run outside Codex's
-  sandbox without asking each time. Leave them out with the installer's `--no-settings`, take them back with
-  `theodore hosts settings --remove`; an organisation's managed policy always wins.
+- **No permission rule in your assistants' settings** (from 0.4.34): in Claude Code, Theodore's two skills carry the
+  permissions their work needs (their `allowed-tools`: Theodore's own commands, the plugin's three tools, a deck's
+  working files in the `.theodore/workspaces` folder Theodore's engine makes inside the folders you work in, and reads
+  of Theodore's own folders), which Claude Code applies while a Theodore skill is active, for the session and the
+  agents it starts; in its default permission mode it asks once to load each skill. Versions 0.4.1 to 0.4.33 wrote
+  rules into Claude Code's `settings.json` and a rules file in Codex instead; an installation that has them keeps them
+  up to date, and `theodore hosts settings --remove` takes them back.
+- **Theodore's host settings, only when you ask for them** (`theodore hosts settings --apply`): in Claude Code's
+  `settings.json` (shared by the CLI, the desktop app's Code tab and the VS Code extension), automatic plugin updates
+  for the Theodore marketplace and permission rules for Theodore's own commands only, by their exact installed paths
+  (on Windows for the PowerShell tool too), so they run without a prompt in every session, with or without a skill;
+  `Edit(//**/.theodore/workspaces/**)` for a deck's working files; in Codex, the file `~/.codex/rules/theodore.rules`,
+  which allows Theodore's launcher by its exact paths (and `theodore`), with which Theodore's commands run outside
+  Codex's sandbox without asking each time. `theodore hosts settings --remove` takes them back; an organisation's
+  managed policy always wins.
 - **One line in your assistants' instructions**, written when Theodore is set up (the sentence asks for it: "Set up
   Theodore and use it for all my presentations"; the plugin added alone writes it at its first use): between `<!-- theodore:begin -->` and `<!-- theodore:end -->` in
   `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` (`CLAUDE_CONFIG_DIR` and `CODEX_HOME` when set), for each of the two
@@ -108,13 +113,15 @@ Outside that folder:
   PortableGit, unmodified, into Theodore's folder (from Theodore's download host, otherwise from the project's own
   release on github.com; pinned SHA-256) and names it in Claude Code's user settings (`env.CLAUDE_CODE_GIT_BASH_PATH`;
   a value you set is never replaced, and the uninstall takes Theodore's back).
-- **The short command `theodore`** (with the host settings, from 0.4.1): a two-line script that only runs the stable
-  launcher, written into the first of `~/.local/bin` (the folder Claude Code's own installer uses) or `~/bin` that is
+- **The short command `theodore`** (with the registration from 0.4.34; with the host settings from 0.4.1 to 0.4.33): a
+  short script that starts Theodore's client straight from Theodore's own Python (from 0.4.34; or, when anything it
+  needs is missing, the stable launcher), written into the first of `~/.local/bin` (the folder Claude Code's own
+  installer uses) or `~/bin` that is
   on the PATH of the shell that ran the installer; on Windows `theodore.cmd` (and a `theodore` script for Git Bash) in
   `%USERPROFILE%\.local\bin` or else `%LOCALAPPDATA%\Microsoft\WindowsApps`, which Windows puts on every user's PATH.
   It is never written over a file that is not Theodore's or where another `theodore` comes first on PATH, and the
-  rules `Bash(theodore *)` (on Windows also `PowerShell(theodore *)` and `PowerShell(& theodore *)`) exist only while it
-  does. Texts then name `theodore …` instead of the launcher's long path, which the assistant otherwise kept in a
+  rules `Bash(theodore *)` (on Windows also `PowerShell(theodore *)` and `PowerShell(& theodore *)`), in the skills and,
+  with the host settings, in Claude Code's settings, match it. Texts then name `theodore …` instead of the launcher's long path, which the assistant otherwise kept in a
   variable that no permission rule can match. `theodore hosts settings --remove` and the uninstall delete it.
 
 - **Two settings of LibreOffice on a Mac**, in LibreOffice's own preferences (`org.libreoffice.script`), written by
@@ -132,11 +139,9 @@ Outside that folder:
   to allow it.
 
 **The plugin alone.** Added with the Claude Code or Codex command only, without the installer, Theodore sets itself up
-at its first use, so that it works as it does after the sentence: the host settings above (Theodore's own commands run
-without a prompt, the short command, automatic updates) and the line in `CLAUDE.md` and `AGENTS.md`. It does not
-register the plugin in your other assistants or add the Claude Desktop entry; `theodore hosts register` does. To have
-none of it: `theodore hosts settings --remove` takes the settings back and keeps them off, and a line you delete is
-not written again. (Versions 0.4.18 to 0.4.20 left all of this to the installer; 0.4.21 does it again.)
+at its first use, so that it works as it does after the sentence: the line in `CLAUDE.md` and `AGENTS.md` (its skills
+carry their own permissions, as above). It does not register the plugin in your other assistants or add the Claude
+Desktop entry; `theodore hosts register` does. A line you delete is not written again. (Versions 0.4.18 to 0.4.20 left all of this to the installer; 0.4.21 does it again.)
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
 download or an update in the background, which ends when it is done. Two helpers of the engine outlive the command

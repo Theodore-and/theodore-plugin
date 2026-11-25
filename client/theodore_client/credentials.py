@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import core
+
+hashlib = core.LazyModule("hashlib")
 
 SERVICE = "ai.theodoreand.theodore"
 SECURITY = "/usr/bin/security"
@@ -209,6 +211,7 @@ def _migrate_legacy_item() -> str | None:
 
 def store(installation_id: str, installation_secret: str, device_key: str | None = None) -> str:
     """Save the credential (with the installation's device key when given). Returns the backend that holds it."""
+    _forget_kept()
     value = {"installation_id": installation_id, "installation_secret": installation_secret, "api_base": _service_base()}
     if device_key:
         core.register_secret(device_key)
@@ -230,7 +233,52 @@ def store(installation_id: str, installation_secret: str, device_key: str | None
     return "file"
 
 
+# The tool server (one process for a whole assistant session) keeps the credential in memory once read (keep_in_memory):
+# on a Mac each read is a keychain process (21 to 62 ms, two per guide call before 0.4.34), on Windows a DPAPI call. It
+# is read again when this process stores or deletes one, and when another process did: the stamp of the files that
+# change with every store and delete (the 0600 file, the keychain markers) differs from the one it was read under.
+_KEEP = False
+_KEPT: tuple | None = None          # (stamp, credential or None)
+_KEPT_LOCK = threading.Lock()
+
+
+def keep_in_memory() -> None:
+    global _KEEP
+    _KEEP = True
+
+
+def _forget_kept() -> None:
+    global _KEPT
+    with _KEPT_LOCK:
+        _KEPT = None
+
+
+def _stamp() -> tuple:
+    out = []
+    for path in (_file(), _holds_marker(), _tombstone(), _skip_marker()):
+        try:
+            info = os.stat(path)
+            out.append((info.st_mtime_ns, info.st_size, info.st_ino))
+        except OSError:
+            out.append(None)
+    return (core.home().root, _service_base(), *out)
+
+
 def load() -> dict | None:
+    global _KEPT
+    if not _KEEP:
+        return _load()
+    stamp = _stamp()
+    with _KEPT_LOCK:
+        if _KEPT is not None and _KEPT[0] == stamp:
+            return dict(_KEPT[1]) if _KEPT[1] else None
+    found = _load()
+    with _KEPT_LOCK:
+        _KEPT = (stamp, dict(found) if found else None)
+    return found
+
+
+def _load() -> dict | None:
     # The file wins when it exists: a successful keychain store deletes it, so a file beside a keychain item is
     # always the newer credential (saved while the keychain was locked).
     raw: str | None = None
@@ -269,6 +317,7 @@ def load() -> dict | None:
 
 def delete() -> bool:
     """Remove the credential. False when the keychain item could not be deleted (it is then still there)."""
+    _forget_kept()
     gone = _keychain_delete() if backend() == "keychain" else True
     core.remove_tree(_file())
     return gone and not _file().exists()

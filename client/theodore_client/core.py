@@ -3,25 +3,71 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
-import locale
 import os
 import re
-import platform as _platform
-import shutil
 import stat
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 
 from . import __version__
 from .contract import CLIENT_STATUSES, EXIT
 
 IS_WINDOWS = os.name == "nt"
+
+
+class LazyModule:
+    """A module imported at its first use (any attribute read): an engine command's path then never loads what only the
+    network and the archives need (ssl, http, email, tarfile, zipfile: about 100 ms of the client's start on the
+    Windows test machine). Attribute writes and deletions go to the module itself, so a test that patches the module
+    through this name patches the module."""
+
+    def __init__(self, name: str):
+        object.__setattr__(self, "_lazy_name", name)
+
+    def _lazy_module(self):
+        import importlib
+        return importlib.import_module(object.__getattribute__(self, "_lazy_name"))
+
+    def __getattr__(self, attr):
+        return getattr(self._lazy_module(), attr)
+
+    def __setattr__(self, attr, value):
+        setattr(self._lazy_module(), attr, value)
+
+    def __delattr__(self, attr):
+        delattr(self._lazy_module(), attr)
+
+    def __repr__(self) -> str:
+        return f"<lazy module {object.__getattribute__(self, '_lazy_name')}>"
+
+
+# Used here only off an engine command's path (each loads more modules, some of them DLLs on Windows).
+hashlib = LazyModule("hashlib")
+locale = LazyModule("locale")
+_platform = LazyModule("platform")
+shutil = LazyModule("shutil")
+
+
+def urlparse(url: str):
+    from urllib.parse import urlparse as parse
+    return parse(url)
+
+
+def sha256_hex(data: bytes) -> str:
+    """A sha256 digest without hashlib, whose first import loads OpenSSL's library (several MB on Windows): CPython's
+    own implementation, the same digest."""
+    try:
+        from _sha2 import sha256        # CPython 3.12 and later
+    except ImportError:
+        try:
+            from _sha256 import sha256  # CPython 3.11 and earlier
+        except ImportError:
+            from hashlib import sha256
+    return sha256(data).hexdigest()
 
 
 # --- statuses ---------------------------------------------------------------------------------------------------------
@@ -63,7 +109,7 @@ def emit(status: Status) -> int:
     status printed is that refusal's block instead (account.refusal_status, which cannot raise), once, whatever else
     happened afterwards."""
     global _REFUSAL_EMITTED
-    if _REFUSAL and not getattr(status, "refusal", False):
+    if refused() and not getattr(status, "refusal", False):
         from . import account          # imported here: account imports this module
         status = account.refusal_status()
     elif status.name == "SETUP_IN_PROGRESS":
@@ -72,7 +118,7 @@ def emit(status: Status) -> int:
     elif getattr(status, "auto_report", False):
         from . import commands         # imported here: commands imports this module
         status = commands.report_internal(status)      # sent before the status is printed; never raises
-    if _REFUSAL or (status.name in SHEET_REFUSALS and not getattr(status, "keeps_sheets", False)):
+    if refused() or (status.name in SHEET_REFUSALS and not getattr(status, "keeps_sheets", False)):
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
     if getattr(status, "refusal", False):
@@ -100,20 +146,43 @@ def last_emitted() -> Status | None:
 
 _REFUSAL: tuple[str, str] | None = None
 _REFUSAL_EMITTED = False
+# The tool server answers calls side by side (one thread each): there a refusal belongs to the call that learned it,
+# and each call learns afresh (a device may sign in again between calls). scope_refusals_per_thread() turns that on;
+# begin_call() starts a call's own record.
+_SCOPED = False
+_SCOPE = threading.local()
+
+
+def scope_refusals_per_thread() -> None:
+    global _SCOPED
+    _SCOPED = True
+
+
+def begin_call() -> None:
+    """A tool call starts: nothing refused yet in this thread (with per-thread scope), else in this process."""
+    global _REFUSAL, _REFUSAL_EMITTED
+    if _SCOPED:
+        _SCOPE.refusal, _SCOPE.status = None, None
+    else:
+        _REFUSAL, _REFUSAL_EMITTED = None, False
 
 
 def mark_refused(kind: str, code: str) -> None:
     global _REFUSAL
-    if _REFUSAL is None or (kind == "revoked" and _REFUSAL[0] != "revoked"):
-        _REFUSAL = (kind, code)
+    current = refusal()
+    if current is None or (kind == "revoked" and current[0] != "revoked"):
+        if _SCOPED:
+            _SCOPE.refusal = (kind, code)
+        else:
+            _REFUSAL = (kind, code)
 
 
 def refusal() -> tuple[str, str] | None:
-    return _REFUSAL
+    return getattr(_SCOPE, "refusal", None) if _SCOPED else _REFUSAL
 
 
 def refused() -> bool:
-    return _REFUSAL is not None
+    return refusal() is not None
 
 
 # --- secrets never reach a log or a printed line ------------------------------------------------------------------------
@@ -516,28 +585,97 @@ def _sh_quote(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+# The run line's end in the batch launcher (theodore.cmd, :run_client) and in the batch short command: an error level
+# of 131 or more, or below 0, is Windows refusing to start the interpreter (a policy such as AppLocker), never the
+# client's (its codes end at 130); `call exit /b` gives cmd's own exit code the client's. The client tells an argument of
+# several lines by this text (cli.LAUNCHER_TAIL), which cmd then carries into the last argument.
+_BLOCKED = ("echo THEODORE BLOCKED_BY_POLICY: Theodore's Python could not be started: a security policy on this computer may "
+            "block programs in the user folder.& echo NEXT: do not retry. Tell the user; their IT team can allow programs in "
+            "Theodore's folder, or they can use Theodore through its connector.& echo TELL THE USER: This computer's security "
+            "policy blocked Theodore's runtime. Your IT team can allow it, or you can use Theodore through its connector.& exit /b 73")
+RUN_LINE_TAIL = f" & if not errorlevel 0 ({_BLOCKED}) else if errorlevel 131 ({_BLOCKED}) else call exit /b %%ERRORLEVEL%%"
+
+
+def _msys_path(path: str) -> str | None:
+    """C:\\Users\\x as Git Bash names it (/c/Users/x); None for a path it names otherwise (a share, a relative path)."""
+    if len(path) < 3 or not path[0].isascii() or not path[0].isalpha() or path[1] != ":" or path[2] not in "\\/":
+        return None
+    return "/" + path[0].lower() + path[2:].replace("\\", "/")
+
+
 def shim_texts() -> dict[str, str] | None:
     """{file name: content} of the short command for this installation, or None when it cannot be written safely. On
     Windows only for a default folder (the one windows_default_home finds): the batch file finds it by the same rule,
-    from %USERPROFILE% and %LOCALAPPDATA% (no path baked in, so no code page question), and the Git Bash script runs
-    Theodore's sh launcher, which carries every argument exactly."""
+    from %USERPROFILE% and %LOCALAPPDATA% (no path baked in, so no code page question), and the Git Bash script by the
+    folder's paths baked in, with that rule's own lines when they no longer hold.
+
+    Since 0.4.34 each starts Theodore's client straight from its Python, with no other program (the launcher before it
+    started about 20 in Git Bash: 1.14 s on the Windows test machine, 4.5 to 7 s on a laptop): the runtime and client
+    are read from the folder's records (runtime/current.txt, client/current.txt) by the shell itself, so an update needs
+    no new short command. When anything is missing or not a plain name, it runs the full launcher, as before."""
     head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
+    # The records hold plain names; a carriage return (a record written on Windows) is dropped, anything else is refused.
+    read = ('r= c= ok=1\n'
+            '{ IFS= read -r r || [ -n "$r" ]; } 2>/dev/null <"$h/runtime/current.txt"\n'
+            '{ IFS= read -r c || [ -n "$c" ]; } 2>/dev/null <"$h/client/current.txt"\n'
+            'case $r in *[!A-Za-z0-9._+-]) r=${r%?} ;; esac\n'
+            'case $c in *[!A-Za-z0-9._+-]) c=${c%?} ;; esac\n'
+            'case $r in ""|*[!A-Za-z0-9._+-]*) ok= ;; esac\n'
+            'case $c in ""|*[!A-Za-z0-9._+-]*) ok= ;; esac\n')
     if IS_WINDOWS:
         new, old = windows_homes()
         root = os.path.normcase(os.path.abspath(home().root))
         same = lambda path: root == os.path.normcase(os.path.abspath(path))     # noqa: E731
         if not (same(new) or (same(old) and same(windows_default_home()))):
             return None
+        windows = str(home().root)
+        msys, msys_new = _msys_path(windows), _msys_path(str(new))
         # The rule of windows_default_home, as the batch file and the Git Bash script read it.
+        batch = (f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
+                 "setlocal EnableExtensions DisableDelayedExpansion\r\n"
+                 'set "THEODORE_SHIM_HOME=%USERPROFILE%\\.theodore"\r\n'
+                 'if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" '
+                 'set "THEODORE_SHIM_HOME=%LOCALAPPDATA%\\Theodore"\r\n'
+                 'if defined THEODORE_HOME set "THEODORE_SHIM_HOME=%THEODORE_HOME%"\r\n'
+                 "rem Theodore's client straight from its Python, by cmd's own reads of the folder's records; else the launcher.\r\n"
+                 'set "THEODORE_SHIM_RT="\r\n'
+                 'set "THEODORE_SHIM_CV="\r\n'
+                 'if exist "%THEODORE_SHIM_HOME%\\runtime\\current.txt" set /p THEODORE_SHIM_RT=<"%THEODORE_SHIM_HOME%\\runtime\\current.txt"\r\n'
+                 'if exist "%THEODORE_SHIM_HOME%\\client\\current.txt" set /p THEODORE_SHIM_CV=<"%THEODORE_SHIM_HOME%\\client\\current.txt"\r\n'
+                 "if not defined THEODORE_SHIM_RT goto :launcher\r\n"
+                 "if not defined THEODORE_SHIM_CV goto :launcher\r\n"
+                 'if not exist "%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" goto :launcher\r\n'
+                 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" goto :launcher\r\n'
+                 'if not exist "%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" goto :launcher\r\n'
+                 'set "THEODORE_HOME=%THEODORE_SHIM_HOME%"\r\n'
+                 'set "THEODORE_LAUNCHER=%THEODORE_SHIM_HOME%\\bin\\theodore.cmd"\r\n'
+                 # One line, then the batch ends: this file may be replaced while the client runs (an update rewrites it).
+                 '"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%" %*'
+                 + RUN_LINE_TAIL + "\r\n"
+                 ":launcher\r\n"
+                 '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n')
+        hot = ""
+        if msys and msys_new:
+            # Only this folder, found by the rule: THEODORE_HOME unset (or naming it), and for a folder of 0.4.14 or earlier,
+            # none in %USERPROFILE%\.theodore. The client gets the Windows forms; MSYS converts each argument as before.
+            claim = ('[ -z "${THEODORE_HOME:-}" ] || [ "$THEODORE_HOME" = "$w" ] || [ "$THEODORE_HOME" = "$h" ]' if same(new) else
+                     f'{{ [ -z "${{THEODORE_HOME:-}}" ] && [ ! -f {_sh_quote(msys_new + "/bin/launcher.json")} ]; }} || '
+                     '[ "$THEODORE_HOME" = "$w" ] || [ "$THEODORE_HOME" = "$h" ]')
+            hot = (f"w={_sh_quote(windows)} h={_sh_quote(msys)}\n"
+                   f"if {claim}; then\n"
+                   + "".join("  " + line + "\n" for line in read.splitlines()) +
+                   '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
+                   '    THEODORE_HOME=$w THEODORE_LAUNCHER="$w\\\\bin\\\\theodore.cmd"\n'
+                   '    export THEODORE_HOME THEODORE_LAUNCHER\n'
+                   # exec: no copy of this shell waits beside the client (in MSYS each one is a process started);
+                   # execfail: a start the system refuses (a policy) returns here, and the launcher says so.
+                   '    shopt -s execfail 2>/dev/null\n'
+                   '    exec "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n'
+                   '  fi\n'
+                   'fi\n')
         return {
-            "theodore.cmd": f"@echo off\r\nrem {SHIM_MARK}, written by Theodore's set-up; its uninstall removes it.\r\n"
-                            "setlocal\r\n"
-                            'set "THEODORE_SHIM_HOME=%USERPROFILE%\\.theodore"\r\n'
-                            'if not exist "%USERPROFILE%\\.theodore\\bin\\launcher.json" if exist "%LOCALAPPDATA%\\Theodore\\bin\\launcher.json" '
-                            'set "THEODORE_SHIM_HOME=%LOCALAPPDATA%\\Theodore"\r\n'
-                            'if defined THEODORE_HOME set "THEODORE_SHIM_HOME=%THEODORE_HOME%"\r\n'
-                            '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n',
-            "theodore": "#!/bin/sh\n" + head
+            "theodore.cmd": batch,
+            "theodore": "#!/bin/sh\n" + head + hot
                         + 'h=$(cygpath -u "$USERPROFILE" 2>/dev/null)/.theodore\n'
                         + 'o=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null)/Theodore\n'
                         + '[ ! -f "$h/bin/launcher.json" ] && [ -f "$o/bin/launcher.json" ] && h=$o\n'
@@ -546,9 +684,22 @@ def shim_texts() -> dict[str, str] | None:
                         + '[ -f "$b/theodore" ] && exec sh "$b/theodore" "$@"\n'
                         + 'exec "$b/theodore.cmd" "$@"\n',
         }
-    lines = "#!/bin/sh\n" + head
-    if os.path.abspath(home().root) != os.path.abspath(Path.home() / ".theodore"):     # the launchers set THEODORE_HOME always
-        lines += f"THEODORE_HOME={_sh_quote(str(home().root))}\nexport THEODORE_HOME\n"
+    root = str(home().root)
+    default = os.path.abspath(root) == os.path.abspath(Path.home() / ".theodore")
+    lines = "#!/bin/sh\n" + head + f"h={_sh_quote(root)}\n"
+    # A folder elsewhere is this short command's own (THEODORE_HOME set always); the default one yields to another.
+    body = (read + 'p=$h/runtime/$r/python/bin/python3\n'
+            'if [ -n "$ok" ] && [ -f "$p" ] && [ -x "$p" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore" ]; then\n'
+            '  THEODORE_HOME=$h THEODORE_LAUNCHER=$h/bin/theodore\n'
+            '  export THEODORE_HOME THEODORE_LAUNCHER\n'
+            '  exec "$p" -I "$h/client/$c" "$@"\n'
+            'fi\n')
+    if default:
+        lines += 'if [ "${THEODORE_HOME:-$h}" = "$h" ]; then\n' + "".join("  " + line + "\n" for line in body.splitlines()) + "fi\n"
+    else:
+        lines += body
+    if not default:                 # the launchers set THEODORE_HOME always
+        lines += "THEODORE_HOME=$h\nexport THEODORE_HOME\n"
     return {"theodore": lines + f'exec {_sh_quote(str(home().launcher()))} "$@"\n'}
 
 
@@ -836,14 +987,21 @@ def read_json(path: Path, default=None):
 
 def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # Named by the thread too: the tool server's calls run side by side (0.4.34), and two of them writing one file
+    # shared one name, so one moved the other's half-written copy into place or found it gone.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(tmp, flags, 0o600 if mode is None else mode)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data.encode("utf-8") if isinstance(data, str) else data)
-    if mode is not None and not IS_WINDOWS:
-        os.chmod(tmp, mode)
-    replace(tmp, path)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data.encode("utf-8") if isinstance(data, str) else data)
+        if mode is not None and not IS_WINDOWS:
+            os.chmod(tmp, mode)
+        replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def replace(src: Path, dest: Path) -> None:
