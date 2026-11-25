@@ -227,8 +227,9 @@ def _log_timing(service, call, args: list[str], gathered: bool, begun: float, ad
                          f"{timing.get('worker')}, call {int(timing.get('worker_calls') or 0) + 1} on it)")
         if getattr(call, "ran_until", None):
             pictures = timing.get("pictures")
+            from_worker = f", {timing['pictures_from_worker']} from the worker" if timing.get("pictures_from_worker") else ""
             parts.append(f"after {int((now - call.ran_until) * 1000)}"
-                         f"{f' (pictures read {pictures[0]}, sent {pictures[1]})' if pictures else ''}")
+                         f"{f' (pictures read {pictures[0]}, sent {pictures[1]}{from_worker})' if pictures else ''}")
         spawned = (call.counters or {}).get("spawned")
         engine = list(getattr(call, "engine_timings", []) or []) + list(timing.get("engine_lines") or [])
         phases = _last_json("".join(call.stdout_kept)).get("timings")     # its own answer's phases (lanes F, G)
@@ -348,34 +349,50 @@ def pending_of(output: str) -> list[dict]:
 
 
 def attach_pictures(call, output: str) -> None:
-    """The pictures an apply or render is about, as image frames (at most 12; 3 MiB each, 12 MiB in all). The time to
-    read them and to send them goes in the call's timing line ("after N (pictures read R, sent S)", lane S2b)."""
+    """The pictures an apply or render is about, as image frames (at most 12; 3 MiB each, 12 MiB in all). A picture the
+    worker sent from its memory with a run of several parts (`call.held_pictures`, by the path the answer names) is
+    sent on as it came; the others are read from their files. The time to read them and to send them goes in the
+    call's timing line ("after N (pictures read R, sent S[, M from the worker])", lane S2b)."""
     total = 0
     read_s = sent_s = 0.0
+    held = getattr(call, "held_pictures", None) or {}
+    from_worker = 0
     try:
         for raw in pictures_of(call.args, output):
             path = Path(raw) if Path(raw).is_absolute() else Path(call.cwd or ".") / raw
-            began = time.perf_counter()
-            try:
-                if not path.is_file():
+            sent_ahead = held.get(raw)
+            if sent_ahead is not None:              # the worker's own bytes: no file is read for it
+                mime, encoded = sent_ahead
+                size = len(encoded) * 3 // 4
+            else:
+                began = time.perf_counter()
+                try:
+                    if not path.is_file():
+                        continue
+                    data = path.read_bytes()
+                except OSError:
                     continue
-                data = path.read_bytes()
-            except OSError:
+                finally:
+                    read_s += time.perf_counter() - began
+                size = len(data)
+            if size > IMAGE_BYTES_MAX or total + size > IMAGES_BYTES_MAX:
                 continue
-            finally:
-                read_s += time.perf_counter() - began
-            if len(data) > IMAGE_BYTES_MAX or total + len(data) > IMAGES_BYTES_MAX:
-                continue
-            total += len(data)
-            mime = IMAGE_TYPES.get(path.suffix.lower(), "image/jpeg")
+            total += size
             began = time.perf_counter()
-            kept = call.image(mime, str(path), base64.b64encode(data).decode("ascii"))
+            if sent_ahead is None:
+                mime = IMAGE_TYPES.get(path.suffix.lower(), "image/jpeg")
+                encoded = base64.b64encode(data).decode("ascii")
+            else:
+                from_worker += 1
+            kept = call.image(mime, str(path), encoded)
             sent_s += time.perf_counter() - began
             if not kept:
                 break
     finally:
         if isinstance(getattr(call, "timing", None), dict):
             call.timing["pictures"] = (int(read_s * 1000), int(sent_s * 1000))
+            if from_worker:
+                call.timing["pictures_from_worker"] = from_worker
 
 
 # --- theodore ------------------------------------------------------------------------------------------------------------

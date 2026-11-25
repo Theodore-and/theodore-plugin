@@ -246,6 +246,24 @@ while True:
     elif verb == "apply" and FEATURES and len(targets) > 1 and os.environ.get("FAKE_PARTS_REFUSED"):
         code = 2                            # the call itself refused (lane G): one object, no parts
         say(json.dumps({"ok": False, "summary": "refused", "error": "parts of two decks"}) + "\n")
+    elif verb == "apply" and FEATURES and os.environ.get("FAKE_PARTS_PICTURES"):
+        # An engine that holds its answers' pictures in memory (lane S2): each part's answer names its picture's path,
+        # where no file is, and the picture's bytes come as an `image` frame with the run when it takes pictures.
+        import base64 as _b64
+        rows = []
+        for part in targets:
+            name = os.path.basename(part)
+            picture = os.path.join(os.environ["FAKE_PARTS_PICTURES"], name + ".jpg")
+            own = {"argv": ["apply", part], "batch": len(targets), "images": run.get("images"),
+                   "pictures": [{"slide": name, "page": 1, "path": picture}], "pending": []}
+            rows.append({"part": part, "exit": 0, "stdout": json.dumps(own) + "\n"})
+            if run.get("images"):
+                send({"t": "image", "id": call, "index": 0, "mime": "image/jpeg", "path": picture, "slide": name,
+                      "page": 1, "data": _b64.b64encode(("the picture of " + name).encode()).decode("ascii")})
+        if len(targets) > 1:
+            say(json.dumps({"ok": True, "summary": f"{len(rows)} parts applied in 1 build(s)", "builds": 1, "parts": rows}) + "\n")
+        else:
+            say(rows[0]["stdout"])
     elif verb == "apply" and FEATURES and len(targets) > 1:
         # lane G's several parts in one build: one object, each part's own exit and stdout (what it alone prints)
         rows = [{"part": part, "exit": 0, "stdout": json.dumps({"argv": ["apply", part], "pid": os.getpid(),

@@ -766,6 +766,39 @@ class PicturesOut(unittest.TestCase):
         self.assertGreaterEqual(sent_ms, 45)
         self.assertLess(read_ms, 45)
 
+    def test_a_picture_the_worker_sent_is_passed_on_as_it_came_and_the_others_are_read(self):
+        # Lane S2's S2-23: a run of several parts keeps the pictures its worker sent from memory (`held_pictures`, by
+        # the path each answer names); an answer's picture found there is sent on without its file being read, the
+        # others from their files, in the answer's order and within the same limits.
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import tools
+        folder = Path(tempfile.mkdtemp(prefix="theodore-pictures-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        on_disk = folder / "slide-2.png"
+        on_disk.write_bytes(b"\x89PNG" + b"y" * 1000)
+        in_memory, too_big = str(folder / "never-written.jpg"), str(folder / "huge.jpg")
+        held = {in_memory: ("image/jpeg", base64.b64encode(b"from the worker").decode("ascii")),
+                too_big: ("image/jpeg", "A" * (4 * (tools.IMAGE_BYTES_MAX + 3) // 3)),
+                str(folder / "another-parts.jpg"): ("image/jpeg", "QUJD")}
+        sent = []
+        call = SimpleNamespace(args=["apply", str(folder)], cwd=str(folder), timing={}, held_pictures=held,
+                               image=lambda mime, path, data: sent.append((mime, path, data)) or True)
+        rows = [{"slide": "s001", "path": in_memory}, {"slide": "s002", "path": str(on_disk)},
+                {"slide": "s003", "path": too_big}, {"slide": "s004", "pending": True}]
+        tools.attach_pictures(call, json.dumps({"ok": True, "pictures": rows}))
+        self.assertEqual(sent, [("image/jpeg", in_memory, base64.b64encode(b"from the worker").decode("ascii")),
+                                ("image/png", str(on_disk), base64.b64encode(on_disk.read_bytes()).decode("ascii"))])
+        self.assertEqual(call.timing["pictures_from_worker"], 1)
+        self.assertEqual(len(call.timing["pictures"]), 2, "read and sent, as before")
+        del sent[:]
+        plain = SimpleNamespace(args=["apply", str(folder)], cwd=str(folder), timing={},
+                                image=lambda mime, path, data: sent.append(path) or True)
+        tools.attach_pictures(plain, json.dumps({"ok": True, "pictures": rows}))   # nothing held: every file read
+        self.assertEqual(sent, [str(on_disk)])
+        self.assertNotIn("pictures_from_worker", plain.timing)
+
     @unittest.skipIf(os.name == "nt", "the Unix socket's send buffer")
     def test_the_service_may_write_a_client_more_than_a_picture_before_it_reads(self):
         import socket
@@ -1240,6 +1273,41 @@ class StudioParts(ServiceCase):
         self.assertEqual(lone["render_threads"], lone["build_threads"], "THEODORE_RENDER_THREADS, the same cap")
         log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
         self.assertRegex(log, r"parts: \d+ of a deck in \d+ build\(s\)", "the log says how a burst was built")
+
+    def test_each_designer_gets_its_own_picture_from_the_workers_memory_and_no_file_is_read(self):
+        # Lane S2's S2-23: the service's first read of a picture a worker drew moments before cost 32 to 476 ms of a
+        # designer's answer on Windows. A worker that holds the pictures sends their bytes with the run; a run of
+        # several parts keeps them by path and each designer's answer carries its own. No file exists here at all.
+        import base64
+        pictures = self.box.tmp / "no-such-store"
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1", "FAKE_PARTS_PICTURES": str(pictures),
+                         "THEODORE_SERVICE_TIMINGS": "1"})
+        self.service()
+        lead = self.prepared(6)
+        names = [f"s{i:02d}" for i in range(1, 7)]
+        for name in names:
+            self.call(self.client_, self.got, name, ["apply", str(lead / "parts" / name), "--hold", "0.3"], wait=False,
+                      images=True)
+        batches = []
+        for name in names:
+            frames_ = self.got.wait(name, 60)
+            self.assertEqual(Collector.done(frames_)["exit"], 0, frames_)
+            answer = json.loads(Collector.stdout(frames_).splitlines()[0])
+            self.assertTrue(answer["images"], "the run was asked for its pictures, alone or with others")
+            batches.append(answer["batch"])
+            images = [f for f in frames_ if f["t"] == "image"]
+            self.assertEqual([(f["index"], f["path"], f["mime"]) for f in images],
+                             [(0, str(pictures / f"{name}.jpg"), "image/jpeg")], "its own picture, once")
+            self.assertEqual(base64.b64decode(images[0]["data"]), f"the picture of {name}".encode())
+        self.assertFalse(pictures.exists(), "no file was there to read")
+        self.assertGreaterEqual(max(batches), 2, f"some went in a build of several: {batches}")
+        quiet = self.call(self.client_, self.got, "quiet", ["apply", str(lead / "parts" / "s01"), "--hold", "0"],
+                          images=False)
+        self.assertEqual([f for f in quiet if f["t"] == "image"], [], "a caller that takes no pictures gets none")
+        self.assertFalse(json.loads(Collector.stdout(quiet).splitlines()[0])["images"])
+        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(log, r"timing: pptx apply s0\d: .*\(pictures read 0, sent \d+, 1 from the worker\)",
+                         "the timing line says the picture came from the worker")
 
     def test_a_lone_part_apply_runs_at_once_as_a_plain_apply(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
