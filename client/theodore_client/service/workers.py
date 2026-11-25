@@ -1021,7 +1021,10 @@ class Pool:
                     call.timing.update(run_ms=int((time.monotonic() - started) * 1000), engine_ms=result.get("elapsed_ms"))
                 if time.monotonic() - started > STATS_AFTER_S:
                     worker.ask_stats()
-                if result.get("key") and key and result["key"] != key:
+                if result.get("key") and result["key"] != key:
+                    # The workspace the call resolved, a new one too (`start` names none before it runs): its next
+                    # calls find it here, in this worker's memory (K's r61: the first `slide list` after five starts
+                    # went to a fresh worker, 554 ms against 9 ms warm).
                     with self.cond:
                         self.affinity[result["key"]] = worker
                 for name, value in (result.get("counters") or {}).items():

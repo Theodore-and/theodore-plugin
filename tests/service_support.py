@@ -183,6 +183,12 @@ while True:
         say(json.dumps({"slept": argv[1], "cancelled": code == 130}) + "\n")
     elif verb == "--ahead-done":
         pass
+    elif verb == "start" and targets:          # a new workspace: its key is known only once made (C3 marker)
+        os.makedirs(targets[0], exist_ok=True)
+        with open(os.path.join(targets[0], ".theodore.json"), "w") as marker:
+            marker.write(json.dumps({"key": "0a1b2c3d4e5f6a7b"}))
+        run["key"] = "0a1b2c3d4e5f6a7b"
+        say(json.dumps({"ok": True, "workspace": targets[0], "pid": os.getpid()}) + "\n")
     elif verb == "fail":
         code = int(argv[1])
         say(json.dumps({"ok": False}) + "\n")

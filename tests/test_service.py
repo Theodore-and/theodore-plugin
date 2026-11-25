@@ -288,6 +288,24 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
+    def test_a_new_workspaces_next_calls_go_to_the_worker_that_made_it(self):
+        # K's r61: after five starts on one worker, the first `slide list` went to a fresh worker (the new workspace's
+        # key was not remembered: it has none before `start` runs), 554 ms against 9 ms warm.
+        self.service()
+        client, got = self.connect()
+        # two workers, both idle after: a long call holds the first while a second starts for another call
+        self.call(client, got, "hold", ["sleep", "1.5"], wait=False)
+        time.sleep(0.2)
+        self.call(client, got, "w", ["echo"])
+        got.wait("hold", 30)
+        live = [p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]]
+        self.assertEqual(len(live), 2, live)
+        folder = str(self.box.tmp / "new-deck")
+        made = json.loads(Collector.stdout(self.call(client, got, "s", ["start", folder])))
+        for n in range(3):
+            answer = json.loads(Collector.stdout(self.call(client, got, f"l{n}", ["echo", folder])))
+            self.assertEqual(answer["pid"], made["pid"], "on the worker that holds the new workspace")
+
     def test_a_stopped_worker_is_never_given_the_next_call(self):
         # Seen at load 35: a call sent right after a worker was stopped found it still idle in the pool (its process not
         # yet seen gone), failed to reach it and was answered 78 with the stopped call's reason.
