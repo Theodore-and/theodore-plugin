@@ -1544,9 +1544,9 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
         notes.append("See the check list above for details.")
     note = (" " + " ".join(notes)) if notes else ""
     from . import chatbuild
-    # "Start a new session" only in Codex (welcome._new_session_needed: in Claude Code the first deck works in the
-    # conversation that installed Theodore); the Claude app's chats only when the user asks.
-    new_session = welcome._new_session_needed(welcome._host())
+    # "Start a new session" only in Codex here: doctor also runs in conversations that have Theodore (the welcome sends
+    # Claude Code's first deck to a new session, welcome._new_session_needed); the Claude app's chats only when asked.
+    new_session = welcome._new_session_needed(welcome._host(), first_deck=False)
     return (Status("OK", f"Theodore is ready: engine {snap['engine']}, plan {snap['plan']}.{note}",
                    ("tell the user the line below; it is the whole answer about Theodore's state. "
                     + ("They start a new session, then ask for a deck there." if new_session else "Then go on with what they asked for.")
