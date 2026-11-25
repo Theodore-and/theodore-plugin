@@ -326,6 +326,25 @@ class PoolSizing(unittest.TestCase):
         self.assertEqual(workers.rank(["render", "/deck"], "/"), 2)
 
 
+class HostsStep(unittest.TestCase):
+    def test_the_service_checks_the_hosts_every_five_minutes_not_every_guide(self):
+        from unittest import mock
+
+        from theodore_client import commands
+        with mock.patch.object(commands.front, "refresh") as refresh, mock.patch.object(commands, "ensure_settings"), \
+                mock.patch.object(commands, "_follow_claude_app"), mock.patch.object(commands, "_hosts_pending_path",
+                                                                                   return_value=Path("/nonexistent/x")):
+            with mock.patch.object(commands, "HOSTS_EVERY_S", 0.0), mock.patch.object(commands, "_hosts_checked", []):
+                commands.ensure_hosts()
+                commands.ensure_hosts()
+                self.assertEqual(refresh.call_count, 2, "a one-shot command: every time")
+            refresh.reset_mock()
+            with mock.patch.object(commands, "HOSTS_EVERY_S", 300.0), mock.patch.object(commands, "_hosts_checked", []):
+                for _ in range(15):
+                    commands.ensure_hosts()
+                self.assertEqual(refresh.call_count, 1, "the service: once in five minutes")
+
+
 class Burst(ServiceCase):
     """Many designers at once (lane G's 15 part applies; the coordinator's sizing, 25 Nov)."""
 
@@ -471,6 +490,20 @@ class Lifecycle(ServiceCase):
         self.assertTrue(wait_gone(record["pid"], 10), "the service exits after its linger")
         self.assertTrue(wait_gone(worker_pid, 5), "its worker ends with it")
         self.assertFalse((self.box.home / "state" / "run" / "service.json").exists())
+
+    def test_after_a_relay_detaches_earlier_shell_commands_keep_no_idle_window(self):
+        # K's A4 re-run (25 Nov): shell commands with no relay attached, then a relay's session: the service stayed
+        # 10 minutes after the shell commands. A relay's session now holds the service; after it, the linger alone.
+        self.env["THEODORE_SERVICE_IDLE_S"] = "60"
+        record = self.service()
+        front, got_front = self.connect(role="front", session="sh")
+        front.send_call({"t": "call", "id": "f", "tool": "pptx", "cwd": "/", "args": ["echo"]}, start=False)
+        got_front.wait("f", 60)
+        front.close()
+        relay, _got = self.connect()
+        time.sleep(0.3)
+        relay.close()
+        self.assertTrue(wait_gone(record["pid"], 15), "gone after the relay's linger, not 60 s after the shell command")
 
     def test_a_removed_home_ends_the_service_and_stays_removed(self):
         record = self.service()

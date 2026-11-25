@@ -129,6 +129,8 @@ class Service:
         from .. import api, core, credentials
         from . import chat, licence, parts, texts, timers, workers
         core.scope_refusals_per_thread()        # a refusal belongs to the call that learned it (core.begin_call per call)
+        from .. import commands
+        commands.HOSTS_EVERY_S = 300.0          # the hosts' registration and settings: every 5 minutes, not every guide
         credentials.keep_in_memory()            # read once, again when the files that change with it change
         if getattr(api, "KEPT", None) is not None and hasattr(api, "DEFAULT_POOL"):
             api.DEFAULT_POOL = api.KEPT         # every request of this process over the kept-alive connections
@@ -229,6 +231,10 @@ class Service:
             self.clients.add(client)
         if client.role == "relay":
             self.relay_ever = True
+            # A relay's session now holds the service; when the last relay detaches it lingers LINGER_S, whatever
+            # shell commands came before (PLAN §3 A: nothing 2 minutes after the last relay detaches). Shell commands
+            # with no relay attached after that start the IDLE_S rule again.
+            self.last_unattached_request = None
             self.sessions.attach(client)
         try:
             while not self.stopping.is_set():
