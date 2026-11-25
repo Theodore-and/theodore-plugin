@@ -262,12 +262,16 @@ def _text(text: str, error: bool = False) -> dict:
     return result
 
 
+RELAY_TIMINGS = os.environ.get("THEODORE_SERVICE_TIMINGS") == "1"     # one line a tools/call in client.log (rig proofs)
+
+
 class _Pending:
     """One tools/call waiting for its answer from the service."""
 
-    __slots__ = ("request_id", "tool", "token", "blocks", "stderr", "many", "cancelled", "started")
+    __slots__ = ("request_id", "tool", "token", "blocks", "stderr", "many", "cancelled", "started", "label",
+                 "received", "forwarded", "first", "images", "image_bytes")
 
-    def __init__(self, request_id, tool: str, token, many: bool):
+    def __init__(self, request_id, tool: str, token, many: bool, label: str = ""):
         self.request_id = request_id
         self.tool = tool
         self.token = token
@@ -276,6 +280,12 @@ class _Pending:
         self.many = many
         self.cancelled = False
         self.started = time.monotonic()
+        self.label = label                      # what the relay's timing line names (THEODORE_SERVICE_TIMINGS)
+        self.received = time.perf_counter()     # the request read from the host
+        self.forwarded: float | None = None     # the call frame sent to the service
+        self.first: float | None = None         # the service's first frame for it
+        self.images = 0
+        self.image_bytes = 0
 
 
 class Relay:
@@ -317,11 +327,12 @@ class Relay:
 
     # --- output -------------------------------------------------------------------------------------------------------
 
-    def write(self, message: dict) -> None:
+    def write(self, message: dict) -> int:
         data = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
         with self.out_lock:
             self.out.write(data)
             self.out.flush()
+        return len(data)
 
     # --- the service -------------------------------------------------------------------------------------------------
 
@@ -383,6 +394,7 @@ class Relay:
             from .service import endpoint
             try:
                 client.send_call(frame)
+                waiting.forwarded = time.perf_counter()
                 return
             except endpoint.Unreachable:
                 with self.lock:
@@ -410,6 +422,8 @@ class Relay:
             waiting = self.pending.get(call_id)
         if waiting is None:
             return
+        if waiting.first is None:
+            waiting.first = time.perf_counter()
         if kind == "out":
             data = str(frame.get("data") or "")
             if frame.get("stream") == "stderr":
@@ -419,6 +433,8 @@ class Relay:
             else:
                 waiting.blocks.append({"type": "text", "text": data})
         elif kind == "image":
+            waiting.images += 1
+            waiting.image_bytes += len(frame.get("data") or "")
             if frame.get("data") and len([b for b in waiting.blocks if b["type"] == "image"]) < 12:
                 if waiting.many:
                     waiting.blocks.append({"type": "text", "text": str(frame.get("path") or ""), "_name": True})
@@ -438,7 +454,22 @@ class Relay:
                 return
             if waiting.cancelled:
                 return                  # MCP: no answer to a request the host cancelled
-            self.write({"jsonrpc": "2.0", "id": waiting.request_id, "result": self._result(waiting, frame)})
+            done = time.perf_counter()
+            written = self.write({"jsonrpc": "2.0", "id": waiting.request_id, "result": self._result(waiting, frame)})
+            if RELAY_TIMINGS:
+                self._log_timing(waiting, frame, done, written)
+
+    def _log_timing(self, waiting: _Pending, frame: dict, done: float, written: int) -> None:
+        """`relay: <tool> <label>: <total> ms = forwarded F + first frame +X + done +Y + written +Z; <bytes>`: where a
+        tools/call's time goes between the host and the service (lane S2: the harness saw 62 to 100 ms beyond the
+        service's own total). Times from the request's arrival, in ms."""
+        with contextlib.suppress(Exception):
+            now = time.perf_counter()
+            ms = lambda t: "-" if t is None else str(int((t - waiting.received) * 1000))   # noqa: E731
+            core.log(f"relay: {waiting.tool} {waiting.label}: {ms(now)} ms = forwarded {ms(waiting.forwarded)}, first frame "
+                     f"{ms(waiting.first)}, done {ms(done)}, written {ms(now)}; exit {frame.get('exit')}, response {written} "
+                     f"bytes, {waiting.images} image(s) of {waiting.image_bytes} bytes; the service's own "
+                     f"{frame.get('elapsed_ms')} ms")
 
     def _result(self, waiting: _Pending, frame: dict) -> dict:
         if frame.get("t") == "error":
@@ -582,7 +613,8 @@ class Relay:
         else:
             frame.update(tool=name, params={k: v for k, v in arguments.items() if k in ("skill", "section", "role", "file")})
             many = name == "specimen" and isinstance(arguments.get("file"), list)
-        self._send(frame, _Pending(ident, frame["tool"], token, many))
+        label = " ".join(str(a) for a in (frame.get("args") or [])[:2])[:120] if frame.get("args") else ""
+        self._send(frame, _Pending(ident, frame["tool"], token, many, label))
 
     def close(self) -> None:
         """The host closed our input: answer what is about to be answered (the first tools/list, calls finishing),
