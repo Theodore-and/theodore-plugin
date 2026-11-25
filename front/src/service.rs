@@ -31,6 +31,8 @@ pub struct Hello {
     pub session_id: String,
     pub host: String,
     pub pid: Option<u32>,
+    /// A relay's working folder (absolute): the service primes it when the session opens (C1 hello.session.cwd).
+    pub cwd: Option<String>,
     pub plugin_root: Option<String>,
 }
 
@@ -39,6 +41,9 @@ impl Hello {
         let mut session = Json::obj().with("id", Json::str(self.session_id.chars().take(128).collect::<String>())).with("host", Json::str(&*self.host));
         if let Some(pid) = self.pid {
             session.set("pid", Json::int(i64::from(pid)));
+        }
+        if let Some(cwd) = &self.cwd {
+            session.set("cwd", Json::str(&**cwd));
         }
         let mut hello = Json::obj()
             .with("t", "hello".into())

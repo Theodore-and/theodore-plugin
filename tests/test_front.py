@@ -148,6 +148,7 @@ class Front(FrontCase):
         self.assertIsNone(answer["deadline_ms"])
         hello = self.events("hello")[-1]
         self.assertEqual((hello["role"], hello["client"]["name"], hello["protocol"]), ("front", "theodore-front", 1))
+        self.assertNotIn("cwd", hello["session"], "a front's calls carry their own folder")
         self.assertEqual(hello["client"]["version"], plugin_version())
         self.assertEqual(hello["session"]["host"], "shell")
         self.assertFalse(self.events("oneshot"))
@@ -569,6 +570,7 @@ class RelayTests(FrontCase):
         hello = self.events("hello")[0]
         self.assertEqual((hello["role"], hello["client"]["name"], hello["session"]["host"]), ("relay", "theodore-relay", "claude-code"))
         self.assertEqual(hello["plugin_root"], str(self.tmp))
+        self.assertEqual(Path(hello["session"]["cwd"]).resolve(), self.work.resolve(), "the relay names its folder (C1 hello.session.cwd)")
 
     def test_a_cancelled_call_is_stopped_and_never_answered(self):
         self.start_service()
