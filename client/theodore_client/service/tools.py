@@ -244,18 +244,27 @@ def _after_finish() -> None:
 
 
 def _last_json(output: str) -> dict:
-    """The engine's answer: its stdout as one JSON object, else the last object printed (one line or several)."""
+    """The engine's answer: the last JSON object its stdout holds at the start of a line, on one line or over several,
+    with any lines before or after it. `prepare` prints its object indented and then one SLIDE line per part (lane G's
+    form: the SLIDE lines are the last a reader sees), so the object is followed by lines, not alone on the last one."""
     text = output.strip()
-    for candidate in (text, text[text.rfind("\n{") + 1:] if "\n{" in text else "", text.splitlines()[-1] if text else ""):
-        if not candidate:
-            continue
+    decoder = json.JSONDecoder()
+    found: dict = {}
+    position = 0
+    while True:
+        start = text.find("{", position)
+        while start > 0 and text[start - 1] != "\n":          # an object that starts a line, never one nested in it
+            start = text.find("{", start + 1)
+        if start < 0:
+            return found
         try:
-            value = json.loads(candidate)
+            value, end = decoder.raw_decode(text, start)
         except ValueError:
+            position = start + 1
             continue
         if isinstance(value, dict):
-            return value
-    return {}
+            found = value
+        position = end
 
 
 _PAGE = re.compile(r"slide-0*(\d+)")
@@ -277,12 +286,20 @@ def pictures_of(argv: list[str], output: str) -> list[str]:
         chosen = [row["path"] for row in payload["pictures"] if isinstance(row, dict) and isinstance(row.get("path"), str)]
     elif verb == "apply":
         images = strings(payload.get("rendered_images"))
-        drawn = {int(p) for p in (payload.get("render_summary") or {}).get("regenerated_pages") or [] if isinstance(p, int)}
-        chosen = []
-        for position, path in enumerate(images, 1):
-            match = _PAGE.search(Path(path).name)
-            if (int(match.group(1)) if match else position) in drawn:
-                chosen.append(path)
+        summary = payload.get("render_summary") or {}
+        if "regenerated_pages" in summary:
+            drawn = {int(p) for p in summary.get("regenerated_pages") or [] if isinstance(p, int)}
+            chosen = []
+            for position, path in enumerate(images, 1):
+                match = _PAGE.search(Path(path).name)
+                if (int(match.group(1)) if match else position) in drawn:
+                    chosen.append(path)
+        elif summary.get("scoped"):
+            # A deck past the full auto-render cap (40 slides): the engine drew only the changed or in-scope slides,
+            # and `rendered_images` lists just those (rc.34 and rc.35's apply_auto_render, `render_summary.scoped`).
+            chosen = images
+        else:
+            chosen = []
     elif verb == "render":
         chosen = strings(payload.get("rendered_images"))
     else:

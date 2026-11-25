@@ -135,7 +135,8 @@ class Platform(PlatformCase):
         print(f"\n[platform] cold start and connect {cold:.2f} s; warm calls at the C1 boundary (ms): "
               f"{', '.join(f'{t:.1f}' for t in timed)}", file=sys.stderr)
         crashed = self.call(client, got, "c", ["crash"])
-        self.assertEqual(Collector.done(crashed)["exit"], 75)
+        self.assertEqual(Collector.done(crashed)["exit"], 78, "a worker gone during a call: 78 and what to do")
+        self.assertIn("THEODORE INTERNAL: Theodore's engine ended", Collector.stdout(crashed))
         after = json.loads(Collector.stdout(self.call(client, got, "d", ["echo"])).splitlines()[0])
         self.assertNotEqual(after["pid"], first["pid"])
         # theodore stop: the service and its worker end

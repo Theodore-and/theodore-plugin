@@ -30,13 +30,13 @@ set -u
 PIN_API_BASE="https://api.theodoreand.ai"
 PIN_DL_BASE="https://dl.theodoreand.ai"
 PIN_MANIFEST_KEYS="man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
-PIN_RUNTIME_ID="b77f7d4ca2d43955"
+PIN_RUNTIME_ID="875c13a60af59e66"
 PIN_CLIENT_VERSION="0.5.0"
-PIN_CLIENT="client/client-0.5.0.tar d72ceab79f384bc5067295122130baa8587d44dc28a4b5c9ab34a0ec7483d50d"
-PIN_PYTHON_darwin_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
-PIN_PYTHON_darwin_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
-PIN_PYTHON_linux_arm64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
-PIN_PYTHON_linux_x64="runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20"
+PIN_CLIENT="client/client-0.5.0.tar 593794370199e43595d696b3dc87a08be73054449c5060db73add31da8730a23"
+PIN_PYTHON_darwin_arm64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz 353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
+PIN_PYTHON_darwin_x64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-x86_64-apple-darwin-install_only_stripped.tar.gz 37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
+PIN_PYTHON_linux_arm64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz bb4b6392670c5d3f93876996fcaa19858a4a413a0c7720144c18b0d6f1f0db2d"
+PIN_PYTHON_linux_x64="runtime/875c13a60af59e66/cpython-3.12.16+20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20"
 # --- end of pins --------------------------------------------------------------------------------------------------
 
 API_BASE=$PIN_API_BASE

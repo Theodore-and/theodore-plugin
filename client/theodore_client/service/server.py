@@ -330,6 +330,8 @@ class Service:
     def _session_closed(self, session) -> None:
         self.log(f"session closed ({session.host})")
         with contextlib.suppress(Exception):
+            self.router.abandon_session(session.id)
+        with contextlib.suppress(Exception):
             self.texts.session_closed(session.id)
         from . import chat
         with contextlib.suppress(Exception):

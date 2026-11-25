@@ -80,6 +80,9 @@ def reader():
             send({"t": "stats", "rss_mb": float(os.environ.get("FAKE_WORKER_RSS") or 20.0), "workspaces": [],
                   "requests": state["calls"], "uptime_s": 1})
         elif kind == "exit":
+            if os.environ.get("FAKE_EXITS"):        # the exit frames this worker was sent, one JSON line each
+                with open(os.environ["FAKE_EXITS"], "a", encoding="utf-8") as record:
+                    record.write(json.dumps(frame) + "\n")
             runs.put(None)
 threading.Thread(target=reader, daemon=True).start()
 while True:
@@ -100,6 +103,16 @@ while True:
         send({"t": "out", "id": call, "stream": stream, "data": text})
     verb = argv[0] if argv else "--help"
     targets = [a for i, a in enumerate(argv[1:], 1) if not a.startswith("-") and argv[i - 1] != "--hold"]
+    if "--pid-file" in argv:                # where the test finds the worker to kill
+        open(argv[argv.index("--pid-file") + 1], "w").write(str(os.getpid()))
+    if "--orphan" in argv:                  # a child that keeps this worker's output pipe open after it is gone
+        import subprocess as _sp
+        _sp.Popen([sys.executable, "-c", "import time; time.sleep(60)", argv[argv.index("--orphan") + 1]],
+                  stdin=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        os._exit(9)
+    if "--freeze" in argv:                  # stuck: alive, answering nothing
+        import signal as _signal
+        os.kill(os.getpid(), _signal.SIGSTOP)
     t0 = time.time()
     if "--hold" in argv:                    # any verb: busy this long first (a long call, a part's build)
         hold_end = time.monotonic() + float(argv[argv.index("--hold") + 1])
@@ -159,7 +172,10 @@ while True:
                  "status": "created"} for i in range(1, n + 1)]
         for row in rows:
             os.makedirs(row["workspace"], exist_ok=True)
-        say(json.dumps({"ok": True, "prepared": "parts", "in_turn": "--in-turn" in argv, "parts": rows}) + "\n")
+        # The engine's own form (cli_output.print_payload): the object indented, then one SLIDE line per part.
+        lines = [f"SLIDE {i} of {n} (redesigned): \"Part {i}\"  WORKSPACE: {row['workspace']}" for i, row in enumerate(rows, 1)]
+        say(json.dumps({"ok": True, "prepared": "parts", "parts": rows, "lines": lines, "in_turn": "--in-turn" in argv},
+                       indent=2) + "\n" + "".join(line + "\n" for line in lines))
     elif verb == "apply" and FEATURES and len(targets) > 1 and os.environ.get("FAKE_PARTS_REFUSED"):
         code = 2                            # the call itself refused (lane G): one object, no parts
         say(json.dumps({"ok": False, "summary": "refused", "error": "parts of two decks"}) + "\n")
@@ -177,9 +193,13 @@ while True:
         except FileNotFoundError:
             tup = [path, -1, 0, 0, "0"]
         send({"t": "inputs", "id": call, "files": [tup]})
+        if "--hold-before-commit" in argv:
+            time.sleep(float(argv[argv.index("--hold-before-commit") + 1]))
         with open(path, "a") as handle:
             handle.write("x")
         send({"t": "committed", "id": call, "key": "written-workspace"})
+        if "--hold-after-commit" in argv:
+            time.sleep(float(argv[argv.index("--hold-after-commit") + 1]))
         say(json.dumps({"ok": True}) + "\n")
     else:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))

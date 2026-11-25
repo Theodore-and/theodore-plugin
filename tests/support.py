@@ -145,7 +145,7 @@ ENGINE_DEPENDENCY = "fakedep"
 if REAL_BUNDLE:
     _manifest = json.loads(next(Path(REAL_BUNDLE).glob("*.manifest.json")).read_text(encoding="utf-8"))
     RUNTIME_ID = _manifest["runtime_id"]
-    ENGINE_DEPENDENCY = "pptxgenjs"
+    ENGINE_DEPENDENCY = "sharp"     # in every runtime; 2.0 has no npm pptxgenjs
 
 
 def fake_runtime_parts() -> dict[str, tuple[str, bytes | Path]]:

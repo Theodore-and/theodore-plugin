@@ -47,9 +47,21 @@ RECYCLE_CALLS = 2000
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
 CREATE_NO_WINDOW = 0x08000000
-RETRY_TEXT = ("THEODORE RETRY: Theodore's engine restarted during this command; nothing of it was written.\n"
-              "NEXT: run the same command again.\n"
-              "TELL THE USER: nothing; do not mention this to the user.\n")
+# A call never waits for a worker that is gone or stuck (the coordinator, 25 Nov, after K's A3b hang on rig 1):
+CALL_CEILING_S = float(os.environ.get("THEODORE_CALL_CEILING_S") or 900.0)   # no engine command runs longer
+HEARTBEAT_S = float(os.environ.get("THEODORE_WORKER_HEARTBEAT_S") or 60.0)   # silent this long during a call: stats
+HEARTBEAT_GRACE_S = float(os.environ.get("THEODORE_WORKER_HEARTBEAT_GRACE_S") or 30.0)   # no answer: it is stuck
+
+
+def lost_text(how: str, wrote: bool) -> str:
+    """The answer to a call whose worker ended or stuck and that is not run again (exit 78)."""
+    if wrote:
+        return (f"THEODORE INTERNAL: Theodore's engine {how} while this command was writing; part of its result may be "
+                f"on disk.\nNEXT: run the same command again: it starts from what is on disk.\n"
+                f"TELL THE USER: nothing unless it happens again.\n")
+    return (f"THEODORE INTERNAL: Theodore's engine {how} during this command; nothing of it was written.\n"
+            f"NEXT: run the same command again; if it happens again, run theodore doctor.\n"
+            f"TELL THE USER: nothing unless it happens again.\n")
 
 # --- what a call is -----------------------------------------------------------------------------------------------------
 
@@ -247,6 +259,11 @@ class Worker:
         self._inputs: list | None = None
         self._committed = False
         self._lock = threading.Lock()
+        self._gone_lock = threading.Lock()
+        self._gone_done = False
+        self.exit_code: int | None = None
+        self.last_frame = time.monotonic()
+        self.lost: str | None = None                # why a call it held was lost (ended, stuck, past the ceiling)
 
     @classmethod
     def _next_id(cls) -> str:
@@ -279,6 +296,14 @@ class Worker:
         self.channel = frames.Channel(self.process.stdout, writer=self.process.stdin, name=f"worker {self.spec.version}")
         threading.Thread(target=self._read_loop, name=f"worker-read-{self.process.pid}", daemon=True).start()
         threading.Thread(target=self._stderr_loop, name=f"worker-err-{self.process.pid}", daemon=True).start()
+        # Its end is seen from its process, not only from its output: a child of it (an office it started) may hold
+        # that pipe open after it is gone (K's A3b on rig 1: a LibreOffice crash, the worker gone, its call waiting).
+        threading.Thread(target=self._watch_exit, name=f"worker-exit-{self.process.pid}", daemon=True).start()
+
+    def _watch_exit(self) -> None:
+        with contextlib.suppress(Exception):
+            self.process.wait()
+        self._gone("its process ended")
 
     def wait_ready(self, timeout: float = READY_WAIT_S) -> bool:
         end = time.monotonic() + timeout
@@ -319,20 +344,37 @@ class Worker:
         except (frames.FrameError, OSError, ValueError) as exc:
             self.pool.service.log(f"[worker {self.spec.version}] frames ended: {exc}")
         finally:
-            self.dead.set()
             with contextlib.suppress(Exception):
                 self.process.wait(timeout=5)
-            if not self.ready.is_set() and self.fatal is None and self.process.returncode == 77:
-                # A release build refuses the licence as its compiled container loads, before any frame: today's
-                # licence JSON line and exit 77 (lane B, B-A-worker.md 3).
-                self.fatal = {"t": "fatal", "code": "LICENCE", "message": "the engine refused the licence", "exit": 77}
-            for stream in (self.process.stdin, self.process.stdout):
-                with contextlib.suppress(Exception):
-                    stream.close()
-            self._result_ready.set()        # a call waiting for its done learns the worker is gone
-            self.pool.worker_died(self)
+            with contextlib.suppress(Exception):
+                self.process.stdout.close()
+            self._gone("its output ended")
+
+    def _gone(self, why: str) -> None:
+        """The worker is gone (its process ended, or its output did): once, whichever is seen first. Logged with its
+        exit code; a call waiting on it wakes (Worker.run raises WorkerFailed) and is run again or answered."""
+        with self._gone_lock:
+            if self._gone_done:
+                return
+            self._gone_done = True
+        self.dead.set()
+        with contextlib.suppress(Exception):
+            self.exit_code = self.process.poll()
+        if not self.ready.is_set() and self.fatal is None and self.exit_code == 77:
+            # A release build refuses the licence as its compiled container loads, before any frame: today's
+            # licence JSON line and exit 77 (lane B, B-A-worker.md 3).
+            self.fatal = {"t": "fatal", "code": "LICENCE", "message": "the engine refused the licence", "exit": 77}
+        with contextlib.suppress(Exception):
+            running = self._call is not None
+            self.pool.service.log(f"worker {self.spec.version} (pid {self.process.pid}) ended: exit {self.exit_code}, "
+                                  f"{why}{'; a call was running on it' if running else ''}")
+        with contextlib.suppress(Exception):
+            self.process.stdin.close()
+        self._result_ready.set()            # a call waiting for its done learns the worker is gone
+        self.pool.worker_died(self)
 
     def _on_frame(self, frame: dict) -> None:
+        self.last_frame = time.monotonic()
         kind = frame.get("t")
         if kind == "ready":
             self.info = frame
@@ -401,7 +443,7 @@ class Worker:
             # Cancelled after the pool chose this worker and before the router could see it here: the cancel goes now
             # (a second one, when the router's also went, is harmless).
             self.cancel(call)
-        self._result_ready.wait()
+        self._wait_done()
         call.worker = None
         self._call = None
         result = self._result
@@ -412,6 +454,32 @@ class Worker:
         if result.get("key"):
             self.keys.add(result["key"])
         return {**result, "inputs": self._inputs, "committed": self._committed}
+
+    def _wait_done(self) -> None:
+        """Wait for this run's done, never past CALL_CEILING_S, and never on a worker that stopped answering: one
+        silent for HEARTBEAT_S is asked for its stats, and one that does not answer them within HEARTBEAT_GRACE_S
+        is stopped. Either way the call is answered (Pool.run), and the next runs on a fresh worker."""
+        started, asked = time.monotonic(), None
+        while not self._result_ready.wait(1.0):
+            now = time.monotonic()
+            if now - started > CALL_CEILING_S:
+                self._stop(f"did not finish within {int(CALL_CEILING_S)} s", "was stopped: it did not finish in time")
+                break
+            if asked is None and now - max(self.last_frame, started) > HEARTBEAT_S:     # silent during this call
+                asked = now
+                self.ask_stats()
+            elif asked is not None and self.last_frame >= asked:
+                asked = None                # it answered: alive
+            elif asked is not None and now - asked > HEARTBEAT_GRACE_S:
+                self._stop("stopped answering", "stopped answering")
+                break
+
+    def _stop(self, why: str, how: str) -> None:
+        self.lost = how
+        with contextlib.suppress(Exception):
+            self.pool.service.log(f"worker {self.spec.version} (pid {self.process.pid}) {why} during a call; stopping it")
+        self.kill()
+        self._result_ready.set()
 
     def cancel(self, call) -> None:
         if self._call is call and self._run_id:
@@ -426,10 +494,15 @@ class Worker:
         with contextlib.suppress(Exception):
             self.channel.send({"t": "drop", "key": key})
 
-    def retire(self, grace_ms: int = EXIT_GRACE_MS) -> None:
+    def retire(self, grace_ms: int = EXIT_GRACE_MS, final: bool = False) -> None:
+        """`exit`. A recycle or a shrink lets go of the office the workers share (R's one office per user); the
+        service's own end (`final`) says `"offices": "stop"`, and the worker stops it (C2; B and R, 25 Nov)."""
         self.retiring = True
+        frame = {"t": "exit", "grace_ms": int(grace_ms)}
+        if final:
+            frame["offices"] = "stop"
         with contextlib.suppress(Exception):
-            self.channel.send({"t": "exit", "grace_ms": int(grace_ms)})
+            self.channel.send(frame)
 
     def kill(self) -> None:
         """End the process; its reader thread then sees the end of its stdout and closes it (a buffered stream closed
@@ -832,7 +905,7 @@ class Pool:
             workers = [w for ws in self.workers.values() for w in ws]
             self.cond.notify_all()
         for worker in workers:
-            worker.retire(2000)
+            worker.retire(2000, final=True)     # the service ends: no office stays behind it
         end = time.monotonic() + 3.0
         for worker in workers:
             with contextlib.suppress(Exception):
@@ -887,12 +960,18 @@ class Pool:
                 try:
                     result = worker.run(call, argv, env, stdin, key, priority)
                 except WorkerFailed as exc:
-                    self.service.log(f"worker {version} failed during {argv[:2]}: {exc}")
                     self._release(worker)
-                    if attempt == 1 and _may_rerun(priority, getattr(worker, "_inputs", None), getattr(worker, "_committed", False)):
+                    committed = bool(getattr(worker, "_committed", False))
+                    lost = getattr(worker, "lost", None)
+                    if lost is None and attempt == 1 and _may_rerun(priority, getattr(worker, "_inputs", None), committed):
+                        self.service.log(f"worker {version} lost {argv[:2]} ({exc}); nothing of it was written: run again "
+                                         f"on a fresh worker")
                         continue
-                    call.out(RETRY_TEXT)
-                    return 75, []
+                    how = lost or f"ended (exit {getattr(worker, 'exit_code', None)})"
+                    self.service.log(f"worker {version} lost {argv[:2]} ({exc}); answered 78"
+                                     f"{', part of it may be written' if committed else ''}")
+                    call.out(lost_text(how, committed))
+                    return 78, []
                 self._release(worker)
                 with contextlib.suppress(Exception):
                     call.timing.update(run_ms=int((time.monotonic() - started) * 1000), engine_ms=result.get("elapsed_ms"))
@@ -925,8 +1004,9 @@ class Pool:
             result = worker.run(call, argv, env, stdin, None, classify(argv))
         except WorkerFailed:
             self._release(worker)
-            call.out(RETRY_TEXT)
-            return 75, []
+            call.out(lost_text(getattr(worker, "lost", None) or f"ended (exit {getattr(worker, 'exit_code', None)})",
+                               bool(getattr(worker, "_committed", False))))
+            return 78, []
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
 
