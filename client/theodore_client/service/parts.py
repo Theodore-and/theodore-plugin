@@ -16,6 +16,7 @@ of the engine lists "apply-parts" in `ready.features` (C2); otherwise each part'
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -214,6 +215,10 @@ class Gatherer:
                 free -= 1
             lead.last_dispatch = time.monotonic()
             argv, env = list(lead.argv), dict(lead.env)
+            left = len(lead.pending)
+        with contextlib.suppress(Exception):     # what the proof reads: a burst's parts, in how many builds
+            self.pool.service.log(f"parts: {sum(len(b) for b in launch)} of a deck in {len(launch)} build(s) "
+                                  f"({', '.join(str(len(b)) for b in launch)}){f', {left} waiting' if left else ''}")
         for batch in launch:
             threading.Thread(target=self._run_batch, args=(version, argv, env, batch), name="parts-batch",
                              daemon=True).start()
