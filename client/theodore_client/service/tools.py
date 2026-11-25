@@ -146,7 +146,6 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
         install.require_runtime()
         if not READINESS.packs_ready():
             install.wait_for_packs(args)
-        install.wait_for_renderer(args)
         from .. import sessions as session_notes
         session_notes.engine_notice(args[0])
         install.enforce_restrictions()

@@ -44,14 +44,14 @@ with `THEODORE_HOME`, or uninstall the other first.
 | `runtime/<id>/` | Python 3.12, the engine's Python packages, Node 24 and its modules | about 358 to 466 MB (84 to 111 MB to download; table below) |
 | `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); the current and previous versions and every version a deck used in the last 30 days are kept, others up to four versions in all | 43 to 58 MB each (15 to 21 MB to download) |
 | `packs/` | Icon, flag, map and background libraries | about 145 MB (about 95 MB to download) |
-| `tools/libreoffice/` | LibreOffice, only on a Mac or Windows PC that has none (it renders slide previews) | about 800 MB (about 300 MB to download) |
+| `tools/libreoffice/` | Only where a Theodore before 0.5.0 fetched LibreOffice (on a Mac or Windows PC that had none); still used while it is there. Theodore fetches no LibreOffice now | about 800 MB |
 | `plugin/` | A copy of this repository's plugin, which Codex adds as a local marketplace | under 100 KB |
 | `state/` | Sign-in state (see below), update state, locks, the session note (`sessions.json`, below) | a few KB |
 | `logs/`, `staging/` | Client log; downloads in progress | small |
 
 In all, about 100 to 130 MB is downloaded before the first deck (the runtime, 84 to 111 MB, and the engine, 15 to
 21 MB) and about 95 MB of asset packs follow in the background; a full install takes about 560 to 670 MB on disk
-(runtime, packs, one engine), plus LibreOffice where it is fetched. Engine sizes are those of the compiled
+(runtime, packs, one engine); Theodore installs no LibreOffice. Engine sizes are those of the compiled
 `1.0.0-rc.2` builds (download, then unpacked): macOS Apple silicon 14.6 / 42.7 MB, macOS Intel 16.5 / 45.9 MB,
 Windows x64 17.9 / 54.6 MB, Linux x64 21.2 / 58.5 MB, Linux arm64 18.5 / 48.9 MB. The runtime by platform (runtime `b77f7d4ca2d43955`, built by `ci/run.sh`):
 

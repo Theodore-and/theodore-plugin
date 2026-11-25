@@ -16,7 +16,6 @@ def run_pptx(args: list[str]) -> int:
     if kept is not None:
         return kept
     install.wait_for_packs(args)
-    install.wait_for_renderer(args)
     sessions.engine_notice(args[0] if args else "")
     code = install.run_engine(args)
     if args[:1] == ["finish"]:

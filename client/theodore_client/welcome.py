@@ -175,9 +175,9 @@ def _new_session_needed(host: str | None, first_deck: bool = True) -> bool:
 
 
 def _downloading() -> bool:
-    """A download of the runtime, the engine, LibreOffice or Git still going on (the packs have their own sentence)."""
+    """A download of the runtime, the engine or Git still going on (the packs have their own sentence)."""
     from .core import Job
-    return any(Job(name).alive() for name in ("setup", "libreoffice", "git"))
+    return any(Job(name).alive() for name in ("setup", "git"))
 
 
 CLOSING = ("This welcome is your whole closing message: say nothing about permissions, settings or uninstalling unless "

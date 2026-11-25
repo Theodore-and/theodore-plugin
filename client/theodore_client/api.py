@@ -243,7 +243,7 @@ def _domain(host: str) -> str:
 def _own_host(host: str) -> bool:
     """Theodore's site, API and download hosts and the other names of their domain (the staging forms): the domain of
     the bases this installation was set up for (launcher.json) or given (OWN_BASES). A third party's host
-    (LibreOffice's mirror) is reached as before."""
+    (PortableGit's release) is reached as before."""
     bases = list(OWN_BASES)
     try:
         cfg = core.config()
@@ -538,7 +538,7 @@ def sandbox_blocked(detail: str) -> bool:
 
 DEFAULT_LIMIT = 8 << 20          # an API answer (manifest, guide part, list) is far smaller
 ERROR_LIMIT = 64 << 10           # an error answer is a short JSON object
-DOWNLOAD_LIMIT = 2 << 30         # a download without a published size (none is larger than LibreOffice)
+DOWNLOAD_LIMIT = 2 << 30         # a download without a published size (none comes near it)
 
 
 def _read_bounded(response, limit: int) -> bytes:

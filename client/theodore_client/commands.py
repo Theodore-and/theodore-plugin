@@ -1423,19 +1423,20 @@ def doctor(as_json: bool) -> int:
     return core.emit(final)
 
 
-# On Windows the engine turns decks into slide images with an installed PowerPoint when no LibreOffice is found
-# (install.powerpoint_registered); LibreOffice is then not needed, so nothing offers it or says it is missing.
-POWERPOINT_RENDERER = "Microsoft PowerPoint, installed on this computer, turns decks into slide images"
+# Theodore's own renderer draws the slides. A feature it cannot draw is drawn by PowerPoint where it is installed
+# (Windows), else by a LibreOffice already on this computer, else pictured by Theodore and marked approximate (the
+# engine's order). Nothing is missing either way: this line never warns, and nothing offers to install anything.
+POWERPOINT_RENDERER = "Microsoft PowerPoint, installed on this computer, draws what Theodore's renderer cannot"
 
 
 def _renderer_check(snap: dict) -> tuple[str, str, str]:
-    """doctor's renderer line: LibreOffice when found, else PowerPoint on Windows when registered, else what installs one."""
+    """doctor's renderer line: Theodore's own renderer, and what draws the features it cannot. Never a warning."""
+    if snap["renderer"].get("powerpoint"):
+        return "ok", "renderer", f"Theodore's own; {POWERPOINT_RENDERER}"
     office = snap["renderer"]["libreoffice"]
     if office:
-        return "ok", "renderer", f"LibreOffice at {office}"
-    if snap["renderer"].get("powerpoint"):
-        return "ok", "renderer", f"{POWERPOINT_RENDERER}; LibreOffice is not needed"
-    return "warn", "renderer", f"no LibreOffice found: slide previews are unavailable until it is installed; {install.libreoffice_install_action()}"
+        return "ok", "renderer", f"Theodore's own; the LibreOffice at {office} draws what it cannot"
+    return "ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so"
 
 
 def _still_missing(snap: dict) -> list[str]:
@@ -1459,18 +1460,6 @@ def _still_missing(snap: dict) -> list[str]:
     if waiting and snap["runtime_ready"]:
         missing.append(f"the asset packs {', '.join(waiting)}: " + ("downloading in the background now" if Job("packs").alive()
                        else "the next guide or catalogue call starts their download again"))
-    lo = Job("libreoffice")
-    lo_state = lo.read()
-    if not snap["renderer"].get("powerpoint") and (install.needs_libreoffice() or (
-            lo_state and not lo_state.get("done") and not (install.system_libreoffice() or install.libreoffice_binary()))):
-        if lo.alive():
-            missing.append("LibreOffice (slide previews): downloading in the background now")
-        elif lo_state.get("failed") and not install.resumable_failure(lo_state):
-            missing.append(f"LibreOffice (slide previews): its download failed ({lo_state['failed'].get('detail') or lo_state['failed'].get('cause')}); "
-                           f"`{launcher} tools install libreoffice` tries again once that is fixed")
-        else:
-            missing.append(f"LibreOffice (slide previews): the next guide, doctor or rendering call starts its download again, "
-                           f"or `{launcher} tools install libreoffice` now")
     if needs_git_bash():
         fetching = _git_fetching()
         missing.append("Git Bash for Claude Code: " + (f"PortableGit is downloading in the background now ({fetching}); nothing to install"
@@ -1528,9 +1517,6 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     from . import welcome
     notes = [line for line in (welcome.studio_sentence(welcome.studio_state(timeout=DOCTOR_STUDIO_READ_S)),
                                welcome.packs_sentence()) if line]
-    if "renderer" in warned:
-        notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
-                     else "Slide previews need LibreOffice, which is not installed.")
     if "claude git bash" in warned:
         notes.append("Theodore is fetching Git Bash for Claude Code in the background; nothing for you to install. Start a new "
                      "session once it is there." if _git_fetching() else
@@ -1841,48 +1827,12 @@ def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) ->
     if name == "git":
         return _tools_git(if_needed, as_job)
     if name != "libreoffice":
-        raise core.usage(f"unknown tool '{name}'. The tools are: libreoffice, git.")
-    if if_needed and not install.needs_libreoffice():      # the Windows installer's call: only when nothing can render
-        return core.emit(Status("OK", f"LibreOffice is not needed here: {POWERPOINT_RENDERER}." if install.powerpoint_registered()
-                                and not (install.system_libreoffice() or install.libreoffice_binary()) else
-                                "LibreOffice is not needed here: a converter is available or none is fetched on this system.",
-                                "nothing to do.", "Nothing to install."))
-    existing = install.system_libreoffice() or install.libreoffice_binary()
-    if existing and not as_job:
-        return core.emit(Status("OK", f"LibreOffice is already available at {existing}.", "nothing to do.", "LibreOffice is already installed."))
-    pin = install.libreoffice_pin() or {}
-    megabytes = int(pin.get("size", 0) / 1e6) or 300
-    if background:
-        if not Job("libreoffice").alive():
-            Job("libreoffice").spawn(["tools", "install", "libreoffice", "--job"])
-        return core.emit(Status("OK", f"LibreOffice {pin.get('version', '')} is downloading in the background (about {megabytes} MB, from The Document Foundation) into {core.home().tools}.",
-                                "continue; slide previews work once it has arrived.",
-                                f"Theodore is downloading LibreOffice (about {megabytes} MB) in the background so it can preview slides. Nothing is installed system-wide."))
-    running = Job("libreoffice")
-    if running.alive() and int(running.read().get("pid") or 0) != os.getpid():
-        # W-15: one install at a time. A second one (the installer's background job plus `tools install libreoffice`)
-        # raced the first over the same .part file and ended INTERNAL; it now reports the first one's progress.
-        if as_job:
-            return 0
-        state = running.read()
-        percent = state.get("percent")
-        how = f"{state.get('phase') or 'downloading'}" + (f", {int(percent)}%" if isinstance(percent, (int, float)) and percent > 0 else "")
-        return core.emit(Status("OK", f"LibreOffice is already being installed in the background ({how}) into {core.home().tools}.",
-                                "nothing to do; slide previews work once it has arrived. Do not start it again.",
-                                "Theodore is already downloading LibreOffice for its slide previews."))
-    job = Job("libreoffice") if as_job else None
-    if job:
-        job.begin("libreoffice")
-    try:
-        with core.lock("libreoffice", timeout=3600.0):      # and one at a time also when both start in the same instant
-            binary = install.install_libreoffice(job)
-    except Status as status_:
-        if job:
-            job.fail(_failure_cause(status_), status_.summary)
-        raise
-    if job:
-        job.finish()
-    return core.emit(Status("OK", f"LibreOffice is installed at {binary}.", "nothing to do.", "LibreOffice is installed for Theodore's slide previews."))
+        raise core.usage(f"unknown tool '{name}'. The tool is: git.")
+    # Theodore installs no LibreOffice (Carl's rule, 25 November 2026): an earlier installer or script that still asks
+    # gets a plain answer and nothing is fetched.
+    return core.emit(Status("OK", "Theodore installs no LibreOffice: its own renderer draws the slides "
+                                  f"({_renderer_check(_snapshot())[2]}).",
+                            "nothing to do; do not install LibreOffice for Theodore.", "Nothing to install."))
 
 
 def _failure_cause(status_: Status) -> str:
@@ -2902,8 +2852,8 @@ def _take_back_instructions(left: list[str]) -> None:
 
 
 # Downloads in the background that stopped before they finished (the computer slept, the user signed out, the process
-# was killed) are started again by the next guide, skill or doctor, as the asset packs are (0.3.3): LibreOffice and
-# PortableGit here; the runtime and the first engine by the setup job, which every command restarts when it is not
+# was killed) are started again by the next guide, skill or doctor, as the asset packs are (0.3.3): PortableGit
+# here; the runtime and the first engine by the setup job, which every command restarts when it is not
 # running. Only a fetch that was started and did not finish: one that never started is not begun here. A failure that
 # needs the user (a proxy sign-in, TLS inspection, a full disk, a refusal) is not retried; doctor names it.
 def resume_background() -> list[str]:
@@ -2911,8 +2861,6 @@ def resume_background() -> list[str]:
     started: list[str] = []
     try:
         for name, argv, present in (
-                ("libreoffice", ["tools", "install", "libreoffice", "--job"],
-                 lambda: install.system_libreoffice() or install.libreoffice_binary()),
                 ("git", ["tools", "install", "git", "--if-needed", "--job"],
                  lambda: install.theodore_git_bash() or not needs_git_bash())):
             job = Job(name)
