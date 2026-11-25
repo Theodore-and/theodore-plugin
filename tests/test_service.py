@@ -416,6 +416,8 @@ class RouterCeiling(unittest.TestCase):
         self.assertTrue(any(line.startswith("slow call pptx apply /w (c1)") and "stuck_somewhere" in line
                             for line in logged), logged)
         self.assertTrue(any("past the ceiling" in line for line in logged))
+        said = "".join(f.get("data", "") for f in call.replay)
+        self.assertIn("part of its result may be on disk", said, "not known whether it wrote: it may have")
         call.out("late output\n")
         self.assertNotIn("late output", "".join(f.get("data", "") for f in call.replay), "dropped after the answer")
         stuck.set()
