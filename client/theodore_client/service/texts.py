@@ -47,12 +47,14 @@ BATCH_ANSWER_MAX = 24 << 20         # 8 sheets of at most 1 MiB, 16 texts of at 
 TEXT_MAX_BYTES = 400_000            # a whole section (GUIDE_WHOLE_MAX_BYTES)
 HELD_MAX_BYTES = 64 << 20           # what one process holds, least recently used first
 SINGLE_ROUTES_SECONDS = 600.0       # after a 404 for the batch route, the single routes for this long, then the batch again
+SERVER_BLIPS = (500, 502, 503, 504)  # a batch answered with one of these is sent once more (it only reads)
+BLIP_PAUSE_SECONDS = 1.0           # the moment before that second request
 # How a text names its links: "tool" (the MCP tools' wording), "launcher" (the shell route's), "chat" (the tool wording,
 # and the pptx manual without update notices or launcher pointers, as the chat's one tool has it).
 BINDINGS = ("tool", "launcher", "chat")
 SHEET_FILES_KEEP_S = specimens.SHEET_FILES_KEEP_S   # the shell route's transient sheet files
 WARM_IDLE_S = 60.0                  # keep_warm(): a connection idle this long gets one cheap request
-REQUEST_SECONDS = 20.0              # one request's time; a call answers OFFLINE past it (no second attempt: one request per call)
+REQUEST_SECONDS = 20.0              # one request's time; a call answers OFFLINE past it (no second attempt; only a 5xx batch is sent twice)
 MANUAL_SECTION = "manual"           # the pptx manual, served for engines from rc.29
 
 
@@ -246,6 +248,8 @@ class Texts:
         except api.ApiError as error:
             if error.code in passing or error.http_status in statuses:
                 raise
+            if error.http_status >= 500:
+                raise api.status_from(error, what) from None     # the service failed, it refused nothing: held bodies stay
             raise self._refused(error, what) from None
 
     def fetch(self, items: list[Item], what: str) -> list[Got]:
@@ -290,9 +294,19 @@ class Texts:
             if held[item] is not None and held[item][0].startswith('"b1-'):
                 entry["etag"] = held[item][0]
             body_items.append(entry)
-        _status, _headers, raw = self._send("POST", api.url_for("guide_batch"), what, body={"v": 1, "items": body_items},
-                                            headers={"Accept": "application/zip"}, limit=BATCH_ANSWER_MAX,
-                                            statuses=(404, 405), again=True)
+        for attempt in (1, 2):
+            try:
+                _status, _headers, raw = self._send("POST", api.url_for("guide_batch"), what, body={"v": 1, "items": body_items},
+                                                    headers={"Accept": "application/zip"}, limit=BATCH_ANSWER_MAX,
+                                                    statuses=(404, 405) + (SERVER_BLIPS if attempt == 1 else ()), again=True)
+                break
+            except api.ApiError as error:
+                if attempt == 2 or error.http_status not in SERVER_BLIPS:
+                    raise
+                # A failure of the service, not an answer (25 Nov: fifteen 500s in four seconds on production, then
+                # none): the batch only reads, so it is sent once more, a moment later.
+                core.log(f"texts: the batch answered {error.http_status}; once more in {BLIP_PAUSE_SECONDS:g} s")
+                time.sleep(BLIP_PAUSE_SECONDS)
         return self._read_batch(raw, items, held, what)
 
     def _read_batch(self, raw: bytes, items: list[Item], held: dict, what: str) -> list[Got]:

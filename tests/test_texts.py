@@ -217,6 +217,45 @@ class Refusals(TextsCase):
         self.assertEqual(caught.exception.name, "NO_ENTITLEMENT")
 
 
+class ServerBlips(TextsCase):
+    """A batch answered 500, 502, 503 or 504 is a failure of the service, not a refusal: sent once more a moment later
+    (it only reads), and nothing held is dropped (25 Nov: fifteen 500s in four seconds on production, then none)."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.object(texts_module, "BLIP_PAUSE_SECONDS", 0.0))
+
+    def test_one_5xx_is_sent_once_more_and_the_call_answers(self):
+        self.texts.guide("deck-design", ["critique"], None)
+        self.fake.batch_failures = [500]
+        again = self.texts.guide("deck-design", ["critique"], None)
+        self.assertIn("CRITIQUE TEXT", again[0])
+        self.assertEqual(len(self.posts()), 3, "the first call, then the failed batch and the one sent again")
+        self.assertEqual(self.fake.batches[1], [], "the failed one was not answered")
+        self.assertEqual(self.fake.batches[2][0]["etag"][:4], '"b1-', "still conditional: what was held stayed")
+        self.assertEqual(self.fake.served["guide", "critique", 304], 1)
+
+    def test_two_in_a_row_answer_retry_and_what_is_held_stays(self):
+        self.texts.guide("deck-design", ["critique"], None)
+        self.fake.batch_failures = [503, 503]
+        with self.assertRaises(core.Status) as caught:
+            self.texts.guide("deck-design", ["critique"], None)
+        self.assertEqual(caught.exception.name, "RETRY")
+        self.assertIn("Something went wrong.", caught.exception.summary)
+        self.assertEqual(len(self.posts()), 3, "sent once more, never a third time")
+        self.assertEqual(len(self.texts._held), 1, "a failure of the service drops nothing held")
+        self.texts.guide("deck-design", ["critique"], None)
+        self.assertEqual(self.fake.batches[-1][0]["etag"][:4], '"b1-', "the next call is still conditional")
+
+    def test_a_refusal_is_not_sent_again(self):
+        self.texts.guide("deck-design", ["critique"], None)
+        self.fake.features = ["pptx"]
+        with mock.patch.object(texts_module.account, "delete_token"), mock.patch.object(api, "_signed_out"):
+            with self.assertRaises(core.Status):
+                self.texts.guide("deck-design", ["critique"], None)
+        self.assertEqual(len(self.posts()), 2, "a 4xx answer is the service's word: asked once")
+
+
 class OlderService(TextsCase):
     def test_without_the_batch_route_the_single_routes_answer_and_are_kept_for_a_while(self):
         self.fake.batch_route = False
