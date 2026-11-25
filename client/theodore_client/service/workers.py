@@ -494,10 +494,15 @@ class Worker:
         with contextlib.suppress(Exception):
             self.channel.send({"t": "drop", "key": key})
 
-    def retire(self, grace_ms: int = EXIT_GRACE_MS) -> None:
+    def retire(self, grace_ms: int = EXIT_GRACE_MS, final: bool = False) -> None:
+        """`exit`. A recycle or a shrink lets go of the office the workers share (R's one office per user); the
+        service's own end (`final`) says `"offices": "stop"`, and the worker stops it (C2; B and R, 25 Nov)."""
         self.retiring = True
+        frame = {"t": "exit", "grace_ms": int(grace_ms)}
+        if final:
+            frame["offices"] = "stop"
         with contextlib.suppress(Exception):
-            self.channel.send({"t": "exit", "grace_ms": int(grace_ms)})
+            self.channel.send(frame)
 
     def kill(self) -> None:
         """End the process; its reader thread then sees the end of its stdout and closes it (a buffered stream closed
@@ -900,7 +905,7 @@ class Pool:
             workers = [w for ws in self.workers.values() for w in ws]
             self.cond.notify_all()
         for worker in workers:
-            worker.retire(2000)
+            worker.retire(2000, final=True)     # the service ends: no office stays behind it
         end = time.monotonic() + 3.0
         for worker in workers:
             with contextlib.suppress(Exception):

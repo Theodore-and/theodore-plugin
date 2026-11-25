@@ -228,6 +228,9 @@
         "grace_ms": {
           "type": "integer",
           "minimum": 0
+        },
+        "offices": {
+          "const": "stop"
         }
       }
     },

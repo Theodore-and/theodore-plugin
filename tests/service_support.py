@@ -80,6 +80,9 @@ def reader():
             send({"t": "stats", "rss_mb": float(os.environ.get("FAKE_WORKER_RSS") or 20.0), "workspaces": [],
                   "requests": state["calls"], "uptime_s": 1})
         elif kind == "exit":
+            if os.environ.get("FAKE_EXITS"):        # the exit frames this worker was sent, one JSON line each
+                with open(os.environ["FAKE_EXITS"], "a", encoding="utf-8") as record:
+                    record.write(json.dumps(frame) + "\n")
             runs.put(None)
 threading.Thread(target=reader, daemon=True).start()
 while True:
