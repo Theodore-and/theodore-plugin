@@ -627,14 +627,22 @@ class Burst(ServiceCase):
 
 class Timings(ServiceCase):
     def test_with_timings_on_each_pptx_call_and_each_worker_say_their_time_in_the_log(self):
-        self.env["THEODORE_SERVICE_TIMINGS"] = "1"
+        self.env.update({"THEODORE_SERVICE_TIMINGS": "1", "FAKE_APPLY_PARTS": "1"})
         self.service()
         client, got = self.connect()
         self.call(client, got, "t", ["echo"], env={"THEODORE_TIMINGS": "1"})
         log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
-        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: none\)")
-        self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own")
+        self.assertRegex(log, r"worker \S+ ready \d+ ms after its start \(its warm-up .*features: apply-parts\)")
+        self.assertRegex(log, r"timing: pptx echo : \d+ ms = admission \d+ \+ queue \d+ \+ worker \d+ \(the engine's own"
+                              r"[^)]*\) \+ after \d+;")
         self.assertIn("timings: echo 5 ms (fake.step 5)", log, "the engine's own line, under the call's")
+        # A Studio part's apply: what it waited in the gathering, as its own term (lane S2)
+        (self.box.tmp / "deck").mkdir()
+        self.call(client, got, "prep", ["prepare", str(self.box.tmp / "deck"), "--parts", "2"])
+        self.call(client, got, "p1", ["apply", str(self.box.tmp / "deck" / "parts" / "s01")])
+        log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
+        self.assertRegex(log, r"timing: pptx apply s01: \d+ ms = admission \d+ \+ gathering \d+ \(1 part\(s\) in its "
+                              r"build\) \+ queue")
 
 
 class StudioParts(ServiceCase):
@@ -659,6 +667,23 @@ class StudioParts(ServiceCase):
         for name in names:
             self.call(self.client_, self.got, tag + name, ["apply", str(lead / "parts" / name), "--hold", hold], wait=False)
         return {name: self.got.wait(tag + name, 60) for name in names}
+
+    def test_a_build_takes_at_most_the_burst_over_the_pool_and_the_rest_go_as_workers_free(self):
+        # Lane S2's rig 7: with three workers busy, 12 parts went to the one free worker as one build of 2 to 4 s while
+        # the others came free within 0.5 s. A build now takes at most ceil(parts / workers): 4 here (8 on 2).
+        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
+        self.service()
+        lead = self.prepared(8)
+        self.call(self.client_, self.got, "busy", ["sleep", "1.0"], wait=False)     # one worker held for a while
+        time.sleep(0.3)
+        names = [f"s{i:02d}" for i in range(1, 9)]
+        frames_ = self.burst(lead, names)
+        batches = []
+        for name in names:
+            self.assertEqual(Collector.done(frames_[name])["exit"], 0, frames_[name])
+            batches.append(json.loads(Collector.stdout(frames_[name]).splitlines()[0]).get("batch", 1))
+        self.assertLessEqual(max(batches), 4, f"at most ceil(8 parts / 2 workers) in one build: {batches}")
+        self.got.wait("busy", 30)
 
     def test_a_burst_goes_in_one_build_per_free_worker_and_each_gets_its_own_answer(self):
         self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_APPLY_PARTS": "1"})
@@ -702,8 +727,10 @@ class StudioParts(ServiceCase):
         lead = self.prepared(5)
         frames_ = self.burst(lead, [f"s{i:02d}" for i in range(1, 6)])
         exits = sorted(Collector.done(got)["exit"] for got in frames_.values())
-        self.assertIn(exits, ([2] * 5, [0] + [2] * 4), "every designer gathered got the run's own refusal (the first "
-                                                         "may have run alone, before the others came)")
+        # Every designer in a build of several parts gets the run's own refusal. A part in a build alone runs as a plain
+        # apply (exit 0): the first, when it came before the others, and one the cap of ceil(5 parts / 2 workers) = 3
+        # left over when one worker was free.
+        self.assertTrue(set(exits) <= {0, 2} and exits.count(0) <= 2 and exits.count(2) >= 3, exits)
         refused = [got for got in frames_.values() if Collector.done(got)["exit"] == 2]
         self.assertTrue(all('"ok": false' in Collector.stdout(got) for got in refused))
 
@@ -813,6 +840,37 @@ class BuildAhead(ServiceCase):
                 self.client_.close()
                 self.stop_service()
                 self.env.update({"FAKE_APPLY_AHEAD": "1", "THEODORE_SERVICE_WORKERS": "2"})
+
+
+class AheadUnit(unittest.TestCase):
+    def test_an_apply_waiting_for_its_own_ahead_stops_being_on_its_way_before_it_waits(self):
+        # Lane S2's rig 7: every apply of 8 reused its ahead, yet each waited ~160 ms in the gathering for the parts
+        # still waiting on theirs (counted on their way, they held the cut up to GATHER_CAP_S).
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import ahead
+        service = SimpleNamespace(log=lambda _m: None, stopping=threading.Event(), relays_attached=lambda: 1)
+        builder = ahead.Ahead(service, SimpleNamespace(on_starved=[], has_feature=lambda _v, _n: True))
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "deck" / "parts" / "s01"
+            folder.mkdir(parents=True)
+            (folder / "deck.js").write_text("slide one\n")
+            part = ahead._Part(os.path.realpath(folder), "9.9", {}, tmp, ahead._Burst(str(Path(tmp) / "deck")))
+            builder.parts[part.path] = part
+            running = ahead._Call(part, ahead._stat(part.deck))
+            running.started = time.monotonic()
+            part.ahead = running
+            told = []
+            waiter = threading.Thread(target=builder.before_apply, args=(["apply", str(folder)], tmp),
+                                      kwargs={"on_wait": lambda: told.append(running.done.is_set())})
+            waiter.start()
+            time.sleep(0.3)
+            self.assertEqual(told, [False], "told before it waits, while its ahead still runs")
+            self.assertTrue(waiter.is_alive(), "and it waits for its own ahead")
+            running.done.set()
+            waiter.join(5)
+            self.assertFalse(waiter.is_alive())
 
 
 class Lifecycle(ServiceCase):

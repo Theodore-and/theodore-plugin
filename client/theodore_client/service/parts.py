@@ -53,6 +53,8 @@ class _Member:
         self.counters: dict = {}
         self.pending: list = []
         self.timing: dict = {}
+        self.entered = time.perf_counter()    # into the gathering
+        self.sent: float | None = None        # its build went out (the timing line's "gathering")
 
 
 class _BatchCall:
@@ -106,6 +108,7 @@ class Gatherer:
         self.pool = pool
         self.lock = threading.Lock()
         self.bursts: dict[str, float] = {}          # lead (real path) -> when its prepare announced a burst
+        self.sizes: dict[str, int] = {}             # lead (real path) -> how many parts its prepare announced
         self.leads: dict[tuple, _Lead] = {}          # (version, lead, the rest of argv, env) -> its gathering
         self.claimed: dict[str, int] = {}            # per version: free workers promised to runs not yet started
         self.on_way: dict[str, int] = {}             # per lead: part applies arrived at the service, not yet here
@@ -113,13 +116,27 @@ class Gatherer:
 
     # --- what prepare said -----------------------------------------------------------------------------------------
 
-    def prepared(self, lead: str, at_once: bool) -> None:
+    def prepared(self, lead: str, at_once: bool, count: int | None = None) -> None:
         real = os.path.realpath(lead)
         with self.lock:
             if at_once:
                 self.bursts[real] = time.monotonic()
+                if isinstance(count, int) and count > 0:
+                    self.sizes[real] = count
+                else:
+                    self.sizes.pop(real, None)
             else:
                 self.bursts.pop(real, None)
+                self.sizes.pop(real, None)
+
+    def _cap(self, lead: str) -> int:
+        """The most parts one build takes: the burst over the pool, ceil(parts / workers) (4 for 15 parts on 4 workers;
+        lane S2's rig 7: with build-aheads holding three workers, 12 dropped parts went to the one free worker as one
+        build of 2 to 4 s while the others came free within 0.5 s). The rest wait for the next worker to come free."""
+        size = self.sizes.get(lead)
+        if not size:
+            return MOST_IN_BATCH
+        return max(1, min(MOST_IN_BATCH, -(-size // max(1, int(getattr(self.pool, "most", 1) or 1)))))
 
     # --- a part's apply --------------------------------------------------------------------------------------------
 
@@ -196,7 +213,11 @@ class Gatherer:
         if twice:                               # after the waiting one: the part's key lock keeps them in turn
             return self.pool.run(call, version, argv, env, None)
         if alone:
-            return self._alone(call, version, argv, env)
+            answer = self._alone(call, version, argv, env)
+            with contextlib.suppress(Exception):
+                if isinstance(getattr(call, "timing", None), dict):
+                    call.timing["gathering_ms"] = 0     # a lone part apply: at once
+            return answer
         waited_since = time.monotonic()
         while not member.done.wait(0.25):
             with self.lock:
@@ -263,7 +284,7 @@ class Gatherer:
                 if free <= 0 and force:
                     free = 1
                 if free > 0:
-                    share = max(1, min(MOST_IN_BATCH, -(-len(lead.pending) // free)))
+                    share = max(1, min(self._cap(shape[1]), -(-len(lead.pending) // free)))
                     while lead.pending and free > 0:
                         batch, lead.pending = lead.pending[:share], lead.pending[share:]
                         launch.append(batch)
@@ -288,7 +309,10 @@ class Gatherer:
         with contextlib.suppress(Exception):     # what the proof reads: a burst's parts, in how many builds
             self.pool.service.log(f"parts: {sum(len(b) for b in launch)} of a deck in {len(launch)} build(s) "
                                   f"({', '.join(str(len(b)) for b in launch)}){f', {left} waiting' if left else ''}")
+        sent = time.perf_counter()
         for batch in launch:
+            for member in batch:
+                member.sent = sent
             threading.Thread(target=self._run_batch, args=(version, argv, env, batch), name="parts-batch",
                              daemon=True).start()
 
@@ -325,6 +349,9 @@ class Gatherer:
                                                           env, keys=[member.key] if member.key else [])
             except Exception as exc:  # noqa: BLE001
                 member.exit, member.output = 78, f"THEODORE INTERNAL: the Studio part's apply failed: {exc}\n"
+            with contextlib.suppress(Exception):
+                if member.sent is not None and isinstance(getattr(member.call, "timing", None), dict):
+                    member.call.timing["gathering_ms"] = int((member.sent - member.entered) * 1000)
             member.done.set()
             return
         call = _BatchCall(batch)
@@ -368,6 +395,8 @@ class Gatherer:
             if position == 0:
                 member.counters = dict(call.counters)   # the run's own counts, once
             member.timing = dict(getattr(call, "timing", None) or {}, batch=len(batch))
+            if member.sent is not None:
+                member.timing["gathering_ms"] = int((member.sent - member.entered) * 1000)
             # the run's own line (`timings: apply-parts ...`); each part's phases are in its own answer (`timings`)
             member.timing["engine_lines"] = [line for line in call.engine_timings if line.startswith("timings: apply-parts")]
             member.done.set()

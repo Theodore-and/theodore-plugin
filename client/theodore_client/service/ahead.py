@@ -149,9 +149,11 @@ class Ahead:
             part.burst.until = time.monotonic() + WATCH_FOR_S
         self._schedule(part)
 
-    def before_apply(self, argv: list[str], cwd: str | None) -> None:
+    def before_apply(self, argv: list[str], cwd: str | None, on_wait=None) -> None:
         """The designer's own apply of a part: an ahead not started yet is dropped; one running on the deck.js the
-        apply will read is waited for (the apply then reuses it); one running on another is cancelled."""
+        apply will read is waited for (the apply then reuses it); one running on another is cancelled. `on_wait` is
+        called before it waits: the gathering then stops counting this part as on its way, so the parts that are
+        ready go out without it (lane S2's rig 7: they waited up to 250 ms for parts blocked here)."""
         part = self._part_of(argv, cwd)
         if part is None:
             return
@@ -172,6 +174,9 @@ class Ahead:
             self._cancel(call, "the designer's apply reads a newer deck.js")
             return
         self._count("ahead_waited")
+        if on_wait is not None:
+            with contextlib.suppress(Exception):
+                on_wait()
         if not call.done.wait(WAIT_OWN_S):
             self._cancel(call, f"the designer's apply waited {int(WAIT_OWN_S)} s for it")
 
