@@ -288,6 +288,24 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
+    def test_a_stopped_worker_is_never_given_the_next_call(self):
+        # Seen at load 35: a call sent right after a worker was stopped found it still idle in the pool (its process not
+        # yet seen gone), failed to reach it and was answered 78 with the stopped call's reason.
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from theodore_client.service import workers
+        with mock.patch.object(workers, "pool_sizes", return_value=(1, 2)):
+            pool = workers.Pool(SimpleNamespace(log=lambda _m: None))
+            worker = workers.Worker.__new__(workers.Worker)
+            worker.pool, worker.spec, worker.retiring, worker.lost = pool, SimpleNamespace(version="9.9"), False, None
+            worker.dead, worker._result_ready = threading.Event(), threading.Event()
+            worker.process = SimpleNamespace(pid=1, poll=lambda: 0, kill=lambda: None, stdin=SimpleNamespace(close=lambda: None))
+            pool.workers["9.9"] = [worker]
+            self.assertEqual(pool._live("9.9"), [worker])
+            worker._stop("stopped answering", "stopped answering")
+            self.assertEqual(pool._live("9.9"), [], "out of the pool at once, before its process is seen gone")
+
     def test_a_call_never_waits_on_a_worker_that_stopped_answering(self):
         self.env.update({"THEODORE_WORKER_HEARTBEAT_S": "1", "THEODORE_WORKER_HEARTBEAT_GRACE_S": "3"})
         self.service()
