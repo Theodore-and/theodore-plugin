@@ -3,10 +3,14 @@ nearest stamped ancestor. A release that changes only text and bumps the version
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import os
+import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -146,6 +150,62 @@ class Plan(unittest.TestCase):
         self.write("runtime/locks/versions.json", '{"x": 1}\n')
         self.commit("lock")
         self.assertEqual(self.plan(), "runtime")
+
+
+@unittest.skipIf(os.name == "nt" or not all(shutil.which(tool) for tool in ("sh", "git", "shasum", "tar")),
+                 "ci/run.sh runs on the Mac (sh, git, shasum, tar)")
+class ExitStatus(unittest.TestCase):
+    """A target exits 0 only when its result is pass, and record and stamp only when the stamp was written (2026-11-25:
+    the runner exited 0 after a failed target, so a caller reading the status took a failed check for a green one).
+    The secret scan, with a stand-in gitleaks, in the throwaway repository of the plan's tests."""
+
+    setUp, write, release, git, commit = Plan.setUp, Plan.write, Plan.release, Plan.git, Plan.commit
+
+    def run_target(self, target: str, leak: bool = False) -> subprocess.CompletedProcess:
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "CODEX", "THEODORE_"))}
+        env.update(THEODORE_CI_LOGS=str(self.logs), FAKE_LEAK="1" if leak else "")
+        return subprocess.run(["sh", "ci/run.sh", target], cwd=self.repo, capture_output=True, text=True, env=env, timeout=120)
+
+    def result(self, name: str) -> str:
+        path = self.repo / "ci" / "out" / (name + ".result")
+        return path.read_text().strip() if path.is_file() else "absent"
+
+    def fake_gitleaks(self):
+        """The archive run_secrets would download, already in its cache: a gitleaks that finds a leak when FAKE_LEAK is set."""
+        version = re.search(r"^GITLEAKS_VERSION=(\S+)", (ROOT / "ci" / "run.sh").read_text(encoding="utf-8"), re.M).group(1)
+        asset = "darwin_arm64" if os.uname().machine == "arm64" else "darwin_x64"
+        cache = self.repo / "ci" / "out" / "cache"
+        cache.mkdir(parents=True)
+        body = b'#!/bin/sh\n[ -z "${FAKE_LEAK:-}" ] || { echo "leaks found: 1"; exit 1; }\necho "no leaks found"\n'
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            info = tarfile.TarInfo("gitleaks")
+            info.size, info.mode = len(body), 0o755
+            tar.addfile(info, io.BytesIO(body))
+        name = "gitleaks_%s_%s.tar.gz" % (version, asset)
+        (cache / name).write_bytes(buffer.getvalue())
+        (cache / ("gitleaks_%s_checksums.txt" % version)).write_text("%s  %s\n" % (hashlib.sha256(buffer.getvalue()).hexdigest(), name))
+
+    def test_a_target_exits_zero_only_when_its_result_is_pass(self):
+        self.write("client/theodore_client/cli.py", "print('hello')\n")
+        self.commit("a commit without a stamp")
+        self.fake_gitleaks()
+        done = self.run_target("secrets")
+        self.assertEqual((self.result("secrets/scan"), done.returncode), ("pass", 0), done.stdout + done.stderr)
+        done = self.run_target("secrets", leak=True)
+        self.assertEqual(self.result("secrets/scan"), "fail", done.stdout + done.stderr)
+        self.assertNotEqual(done.returncode, 0, "secrets scan: fail, and the runner exited 0")
+
+    def test_record_and_stamp_exit_non_zero_without_the_stamp(self):
+        self.write("client/theodore_client/cli.py", "print('hello')\n")
+        self.commit("a commit without a stamp")
+        self.fake_gitleaks()
+        self.assertEqual(self.run_target("secrets").returncode, 0)
+        self.assertEqual(self.run_target("summary").returncode, 0)
+        for target in ("record", "stamp", "require"):  # one green record of many: no stamp
+            done = self.run_target(target)
+            self.assertNotEqual(done.returncode, 0, target + ": " + done.stdout + done.stderr)
+        self.assertIn("checks NOT green", self.run_target("record").stdout)
 
 
 if __name__ == "__main__":
