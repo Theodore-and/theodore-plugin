@@ -9,6 +9,7 @@ import os
 from contextlib import ExitStack
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -154,8 +155,18 @@ class SheetFiles(TextsCase):
         folder = self.home / "work" / "scratch" / "sheets" / "session-1"
         self.assertEqual([path.parent for _n, path, _note in got], [folder, folder])
         self.assertEqual(got[0][1].read_bytes(), JPEG)
-        self.assertEqual(stat.S_IMODE(os.stat(folder).st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(os.stat(got[0][1]).st_mode), 0o600)
+        if sys.platform == "win32":
+            # Windows has no POSIX modes: the folder's access list is this user alone, set whole, nothing inherited
+            # (specimens._make_private), and the file inherits it; as test_hardening checks the shell route's sheets.
+            for target in (folder, got[0][1]):
+                acl = subprocess.run(["icacls", str(target)], capture_output=True, text=True).stdout
+                for other in ("BUILTIN\\Users", "Everyone", "Authenticated Users", "BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"):
+                    self.assertNotIn(other, acl, acl)
+                self.assertEqual(len([line for line in acl.splitlines() if ":(" in line]), 1, acl)
+            self.assertNotIn("(I)", subprocess.run(["icacls", str(folder)], capture_output=True, text=True).stdout)
+        else:
+            self.assertEqual(stat.S_IMODE(os.stat(folder).st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(os.stat(got[0][1]).st_mode), 0o600)
         self.assertTrue(got[0][1].name.endswith("-a.jpg"))
         again = self.texts.sheet_files(["a.jpg"], session="session-1")
         self.assertEqual(again[0][1], got[0][1], "the same sheet: the same file, after its request was answered 304")
