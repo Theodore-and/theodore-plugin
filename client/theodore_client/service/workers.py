@@ -476,6 +476,9 @@ class Worker:
 
     def _stop(self, why: str, how: str) -> None:
         self.lost = how
+        # Out of the pool before its call is answered: until its process is seen gone (_gone), the next call would
+        # otherwise find it idle, fail to reach it, and be answered 78 with this call's reason, not run on a fresh one.
+        self.retiring = True
         with contextlib.suppress(Exception):
             self.pool.service.log(f"worker {self.spec.version} (pid {self.process.pid}) {why} during a call; stopping it")
         self.kill()
