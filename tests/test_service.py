@@ -1173,9 +1173,11 @@ class Burst(ServiceCase):
 
 
 class FirstCall(ServiceCase):
-    """A new user's first command gets the machine (lane firstrun, 26 Nov): the service just started, its one worker
-    still in its warm-up, and the command a long one (`start --from`). Rig 9 (2 processors, a restart, a fresh store)
-    answered it in 18 to 29 s with a spare worker started beside it, against 0.2 to 3 s the same command 30 s later."""
+    """A long call that takes the pool's last idle worker has the machine (lane firstrun, 26 Nov): the spare for the
+    short calls to come never starts beside it. A new user's first command (`start --from` as the service starts) took
+    18 to 29 s on rig 9 (2 processors) with a spare worker started beside it, against 0.2 to 3 s the same command 30 s
+    later; a `start` 30 s after its session opened took 2.2 to 2.3 s on rig 6 (4 processors) against 1.7 to 1.9 s with
+    no spare (starts-f)."""
 
     def answer(self, got, call_id: str) -> dict:
         return json.loads(Collector.stdout(got.wait(call_id, 60)).splitlines()[0])
@@ -1183,61 +1185,34 @@ class FirstCall(ServiceCase):
     def serving(self) -> int:
         return len([p for p in sandbox_processes(self.box.tmp.name) if "engine.py serve" in p[1]])
 
-    def test_no_worker_starts_beside_a_cold_starts_long_call_and_a_call_that_waits_gets_one_at_once(self):
-        # The worker says `warm` only after a minute: the whole test is its warm-up. A start would take 30 s to be
-        # decided by the cold-start estimate: the call that waits must not wait for that.
-        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_WARM_AFTER": "60", "THEODORE_COLD_START_S": "30"})
-        self.service()
-        client, got = self.connect()
-        deck = self.box.tmp / "deck"
-        deck.mkdir()
-        self.call(client, got, "first", ["render", str(deck), "--hold", "6"], wait=False)
-        time.sleep(1.5)
-        self.assertEqual(self.serving(), 1, "a second worker started beside the cold start's long call")
-        self.assertFalse(got.event("first").is_set())
-        began = time.monotonic()
-        done = self.call(client, got, "next", ["echo"])
-        self.assertLess(time.monotonic() - began, 4.0, "a call that found the one worker busy waited for the estimate")
-        self.assertEqual(int((Collector.done(done).get("counters") or {}).get("spawned") or 0), 1)
-        first = self.answer(got, "first")
-        self.assertNotEqual(json.loads(Collector.stdout(done).splitlines()[0])["pid"], first["pid"])
-
-    def test_a_long_call_on_a_worker_past_its_warm_up_starts_its_spare_at_once_as_before(self):
-        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_WARM_AFTER": "0.1"})
-        self.service()
-        client, got = self.connect()
-        deck = self.box.tmp / "deck"
-        deck.mkdir()
-        self.call(client, got, "w", ["echo"])
-        self.wait_log(r"warm: its warm-up ended")
-        self.assertEqual(self.serving(), 1)
-        self.call(client, got, "long", ["render", str(deck), "--hold", "3"], wait=False)
-        deadline = time.monotonic() + 2.5
-        while self.serving() < 2 and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertEqual(self.serving(), 2, "the spare for the short calls to come")
-        self.assertFalse(got.event("long").is_set(), "it started while the long call ran")
-        got.wait("long", 30)
-
-    def test_the_spare_held_back_starts_when_the_worker_says_warm_with_its_long_call_still_running(self):
-        self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_WARM_AFTER": "1.5"})
-        self.service()
-        client, got = self.connect()
-        deck = self.box.tmp / "deck"
-        deck.mkdir()
-        self.call(client, got, "long", ["render", str(deck), "--hold", "6"], wait=False)
-        time.sleep(0.8)
-        self.assertEqual(self.serving(), 1, "held back while the worker warms")
-        deadline = time.monotonic() + 4.0
-        while self.serving() < 2 and time.monotonic() < deadline:
-            time.sleep(0.05)
-        self.assertEqual(self.serving(), 2, "started at the worker's `warm`")
-        self.assertFalse(got.event("long").is_set())
-        got.wait("long", 30)
+    def test_no_worker_starts_beside_a_long_call_and_a_call_that_waits_gets_one_at_once(self):
+        # A start would take 30 s to be decided by the cold-start estimate: the call that waits must not wait for that.
+        # Both on a worker still in its warm-up (the first command ever) and on one long past it.
+        for warming in ("60", "0.1"):
+            with self.subTest(warm_after=warming):
+                self.env.update({"THEODORE_SERVICE_WORKERS": "2", "FAKE_WARM_AFTER": warming, "THEODORE_COLD_START_S": "30"})
+                self.service()
+                client, got = self.connect()
+                deck = self.box.tmp / f"deck {warming}"
+                deck.mkdir()
+                if warming == "0.1":
+                    self.call(client, got, "w", ["echo"])
+                    self.wait_log(r"warm: its warm-up ended")
+                self.call(client, got, "first", ["render", str(deck), "--hold", "6"], wait=False)
+                time.sleep(1.5)
+                self.assertEqual(self.serving(), 1, "a second worker started beside the long call")
+                self.assertFalse(got.event("first").is_set())
+                began = time.monotonic()
+                done = self.call(client, got, "next", ["echo"])
+                self.assertLess(time.monotonic() - began, 4.0, "a call that found the one worker busy waited for the estimate")
+                self.assertEqual(int((Collector.done(done).get("counters") or {}).get("spawned") or 0), 1)
+                first = self.answer(got, "first")
+                self.assertNotEqual(json.loads(Collector.stdout(done).splitlines()[0])["pid"], first["pid"])
+                self.stop_service()
 
 
 class FirstCallUnit(unittest.TestCase):
-    """The spare's rule on the pool itself (workers.Pool._spare, worker_warmed, _release), no process started."""
+    """The spare's rule on the pool itself (workers.Pool._spare, _acquire's wait, _release), no process started."""
 
     def pool(self, cores: int, most: int = 3):
         from types import SimpleNamespace
@@ -1270,54 +1245,34 @@ class FirstCallUnit(unittest.TestCase):
         time.sleep(0.1)
         return started
 
-    def test_a_long_call_on_a_warming_worker_holds_its_spare_back(self):
+    def test_a_long_call_starts_no_spare_beside_it_whether_its_worker_warms_or_not(self):
         workers, pool, started = self.pool(cores=8)
         how = ("spec", "9.9", None, 3)
-        cold, warm = self.worker(warmed=False), self.worker(warmed=True)
-        with pool.cond:
-            pool._spare(warm, how)
-            pool._spare(cold, how)
-        self.assertEqual(self.settle(started, 1), [how], "past its warm-up: the spare at once; warming: none")
-        self.assertIsNone(warm.spare_due)
-        self.assertEqual(cold.spare_due, how)
+        for warmed in (False, True):
+            taken = self.worker(warmed=warmed)
+            with pool.cond:
+                pool._spare(taken, how)
+            self.assertEqual(self.settle(started, 0), [], f"warmed {warmed}")
+            self.assertEqual(taken.spare_due, how)
 
-    def test_it_starts_at_the_workers_warm_only_while_the_long_call_runs_and_no_other_worker_is_free(self):
-        workers, pool, started = self.pool(cores=2)
-        how = ("spec", "9.9", None, 3)
-        cold = self.worker(warmed=False)
-        cold.spare_due = how
-        pool.workers["9.9"] = [cold]
-        pool.worker_warmed(cold)
-        self.assertEqual(self.settle(started, 1), [how])
-        self.assertIsNone(cold.spare_due)
-        for case in ("the call ended", "another worker is free", "the pool is full", "none was held back"):
-            del started[:]
-            cold, other = self.worker(warmed=False), self.worker(warmed=True, busy=case != "another worker is free")
-            cold.spare_due = None if case == "none was held back" else how
-            cold.busy = case != "the call ended"
-            pool.workers["9.9"] = [cold, other] + ([self.worker(True)] if case == "the pool is full" else [])
-            pool.worker_warmed(cold)
-            self.assertEqual(self.settle(started, 0), [], case)
-            self.assertIsNone(cold.spare_due, case)
-
-    def test_once_the_cold_call_has_answered_it_starts_only_where_the_machine_has_the_processors(self):
+    def test_once_the_long_call_has_answered_it_starts_only_where_the_machine_has_the_processors(self):
         how = ("spec", "9.9", None, 3)
         for cores, expected in ((1, []), (2, []), (3, []), (4, [how]), (8, [how])):
             workers, pool, started = self.pool(cores=cores)
-            self.assertEqual(workers.SPARE_AFTER_COLD_CORES, 4)
-            cold = self.worker(warmed=False)
-            cold.spare_due = how
-            pool.workers["9.9"] = [cold]
-            pool._release(cold)
+            self.assertEqual(workers.SPARE_AFTER_CALL_CORES, 4)
+            taken = self.worker(warmed=cores % 2 == 0)
+            taken.spare_due = how
+            pool.workers["9.9"] = [taken]
+            pool._release(taken)
             self.assertEqual(self.settle(started, len(expected)), expected, f"{cores} processors")
-            self.assertIsNone(cold.spare_due)
-            self.assertFalse(cold.busy)
+            self.assertIsNone(taken.spare_due)
+            self.assertFalse(taken.busy)
         # never a third worker for it, and nothing owed where none was held back
         workers, pool, started = self.pool(cores=8)
-        cold, other = self.worker(warmed=False), self.worker(warmed=True, busy=False)
-        cold.spare_due = how
-        pool.workers["9.9"] = [cold, other]
-        pool._release(cold)
+        taken, other = self.worker(warmed=False), self.worker(warmed=True, busy=False)
+        taken.spare_due = how
+        pool.workers["9.9"] = [taken, other]
+        pool._release(taken)
         pool._release(other)
         self.assertEqual(self.settle(started, 0), [])
 
