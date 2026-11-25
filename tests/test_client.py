@@ -3230,6 +3230,39 @@ class Internals(unittest.TestCase):
             self.assertFalse(ed25519.verify(pub_b, msg_b, sig_b[:-1] + bytes([sig_b[-1] ^ 1])))
         self.assertFalse(ed25519.verify(b"\x00" * 31, b"", b"\x00" * 64))
 
+    def test_a_job_record_held_unreadable_past_two_seconds_is_read_again_not_taken_for_an_ended_job(self):
+        # release/0.5.0's Windows runtime target (7 suites side by side, 25 Nov): the setup's record, held by another
+        # process past read_json's 2 s, read as {} and so as "the job ended"; the setup's wait ended early and a second
+        # job started. Read again instead, as long as it is held (Windows), and never taken for an ended job.
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from theodore_client import core
+        with tempfile.TemporaryDirectory() as tmp:
+            job = core.Job.__new__(core.Job)
+            job.name, job.path = "setup", Path(tmp) / "setup.json"
+            job.path.write_text(json.dumps({"pid": os.getpid(), "phase": "runtime", "percent": 40}))
+            real_read = Path.read_text
+            held_until = time.monotonic() + 2.5
+
+            def read_text(path, *args, **kwargs):
+                if path == job.path and time.monotonic() < held_until:
+                    raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+                return real_read(path, *args, **kwargs)
+            with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core, "pid_alive", return_value=True), \
+                    mock.patch.object(Path, "read_text", read_text):
+                began = time.monotonic()
+                self.assertTrue(job.alive(), "held, then read: the job is running")
+                self.assertGreaterEqual(time.monotonic() - began, 2.4, "it was read again until it could be")
+                held_until = time.monotonic() + 60
+                with mock.patch.object(core.Job, "UNREADABLE_WAIT_S", 0.5):
+                    self.assertTrue(job.alive(), "held past the wait: still not taken for an ended job")
+                held_until = 0
+                job.path.write_text(json.dumps({"pid": 0, "phase": "done", "done": True}))
+                self.assertFalse(job.alive(), "a readable record of an ended job: ended, at once")
+            job.path.unlink()
+            self.assertFalse(job.alive(), "no record: no job")
+
     def test_pack_detection_for_every_documented_helper(self):
         from theodore_client.install import PACK_HELPERS, packs_in_script
         self.assertEqual(sorted(PACK_HELPERS), ["backgrounds", "flags", "icons", "maps"])
