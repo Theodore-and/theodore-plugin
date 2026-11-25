@@ -1,20 +1,24 @@
 """Build-ahead for a Studio deck's parts (the coordinator, 25 Nov; lanes S2 and G).
 
 When `prepare` announced that a deck's parts come at once (Studio), the service watches each part's deck.js while a
-relay is attached. A part whose deck.js changed and then held still for one poll (or that a write verb through the
-service just changed) gets `pptx apply <part> --ahead` on an idle worker at the lowest priority. The engine builds the
-part into its content store and writes nothing visible (lane G: no record, no built.json, at the end the part's
-ahead.json), so the designer's own apply a moment later finds the build done and reuses it on an exact key match (the
-engine's check, never the service's).
+relay is attached. Parts whose deck.js changed and then held still for one poll (or that a write verb through the
+service just changed) are built ahead: as one several-part call per idle worker allowed, `pptx apply <p1> <p2> ...
+--ahead` (lane G: one build for its parts, apply_many's answer form), so a burst's parts all start building at once
+instead of a few at a time (lane S2's rig 7: single-part aheads ran three at a time and 12 of 15 were still queued when
+their designers applied). The engine builds each part into its content store and writes nothing visible (no record,
+no built.json; at the end the part's ahead.json), so the designer's own apply a moment later finds the build done and
+reuses it on an exact key match (the engine's check, never the service's).
 
 The conditions (the coordinator):
 - only for an engine whose workers list "apply-ahead" in `ready.features` (C2); otherwise nothing is watched or sent;
-- an ahead takes a worker only when another stays idle and no call waits for one (Pool.run_ahead);
-- one ahead per part; a newer change of the part cancels its ahead in flight (C2 `cancel`) and waits for the next still
-  poll;
+- aheads take workers only while another stays idle and no call waits for one (Pool.take_for_ahead), and never a part
+  whose workspace another command holds;
+- a part is in one ahead at a time; a newer save of a part alone in its ahead cancels it (C2 `cancel`), and a part
+  saved again while others are built with it is built again after them;
 - a foreground call that finds no idle worker cancels the youngest ahead running (Pool's `on_starved`);
-- the designer's apply of a part drops that part's ahead not started yet; one running on the same deck.js is waited
-  for (it is that part's own work: the apply then reuses it); one running on another deck.js is cancelled;
+- the designer's apply of a part takes it out of the next ahead; it waits for an ahead running on the same deck.js
+  (it is that part's own work: the apply then reuses it), not counted meanwhile as on its way in the gathering; an
+  ahead on an older deck.js it does not wait for;
 - no Studio deck announced, or no relay attached: no thread, no polling.
 """
 
@@ -32,8 +36,10 @@ from . import workers
 FEATURE = "apply-ahead"
 FLAG = "--ahead"
 POLL_S = 0.1                     # lane S2: a save seen 100 to 200 ms after it, for an apply 1.5 s later
+SETTLE_S = 0.3                   # a burst's saves still coming: its ready parts wait at most this to go together
 WATCH_FOR_S = 20 * 60.0          # a burst is watched this long after its prepare or its last change
 WAIT_OWN_S = 15.0                # the designer's apply waits at most this for its part's own ahead
+MOST_IN_AHEAD = 32
 
 
 def _stat(path: Path) -> tuple | None:
@@ -45,14 +51,16 @@ def _stat(path: Path) -> tuple | None:
 
 
 class _Call:
-    """What a worker needs of a call, for an ahead: nothing it prints is shown to anyone; its answer is read for the
-    log (lane G: {ok, ahead: built | kept | skipped, reason, part, slides, ms})."""
+    """What a worker needs of a call, for an ahead of one or several parts: nothing it prints is shown to anyone; its
+    answer is read for the log (lane G: one part's {ok, ahead: built | kept | skipped, reason, part, slides, ms}, or
+    apply_many's {ok, summary, builds, parts: [{part, exit, stdout}]} with each stdout one part's object)."""
 
-    def __init__(self, part: "_Part", stat: tuple):
-        self.part = part
-        self.stat = stat
-        self.id = f"ahead-{os.path.basename(part.path)}-{int(time.monotonic() * 1000)}"
-        self.cwd = part.cwd
+    def __init__(self, members: list["_Part"]):
+        self.members = members
+        self.stats = {part.path: part.seen for part in members}     # the deck.js each part is built from
+        first = members[0]
+        self.id = f"ahead-{os.path.basename(first.path)}-{len(members)}-{int(time.monotonic() * 1000)}"
+        self.cwd = first.cwd
         self.images = False
         self.deadline_ms = None
         self.cancelled = threading.Event()
@@ -61,12 +69,11 @@ class _Call:
         self.counters: dict = {}
         self.stdout: list[str] = []
         self.phase = "ahead"
-        self.queued = time.monotonic()
-        self.started: float | None = None
+        self.started = time.monotonic()
         self.done = threading.Event()
 
     def out(self, text: str, stream: str = "stdout") -> None:
-        if stream == "stdout" and sum(len(t) for t in self.stdout) < 65536:
+        if stream == "stdout" and sum(len(t) for t in self.stdout) < 1 << 20:
             self.stdout.append(text)
 
     def image(self, *_args, **_kwargs) -> bool:
@@ -78,9 +85,26 @@ class _Call:
     def count(self, name: str, value: int = 1) -> None:
         self.counters[name] = int(self.counters.get(name, 0)) + int(value)
 
-    def answer(self) -> dict:
+    def outcomes(self, code: int) -> dict[str, str]:
+        """Each member's outcome: built, kept, skipped, or failed."""
         from .tools import _last_json
-        return _last_json("".join(self.stdout))
+        answer = _last_json("".join(self.stdout)) if code == 0 else {}
+        found: dict[str, str] = {}
+        rows = answer.get("parts") if isinstance(answer.get("parts"), list) else None
+        if rows is None:
+            if len(self.members) == 1 and isinstance(answer.get("ahead"), str):
+                found[self.members[0].path] = answer["ahead"]
+        else:
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get("part"), str):
+                    continue
+                path = os.path.realpath(row["part"] if os.path.isabs(row["part"]) else os.path.join(self.cwd or ".", row["part"]))
+                one = {}
+                with contextlib.suppress(ValueError, TypeError):
+                    one = json.loads(row.get("stdout") or "{}")
+                if int(row.get("exit") or 0) == 0 and isinstance(one, dict) and isinstance(one.get("ahead"), str):
+                    found[path] = one["ahead"]
+        return {part.path: found.get(part.path, "failed") for part in self.members}
 
 
 class _Part:
@@ -91,7 +115,8 @@ class _Part:
         self.seen = _stat(self.deck)          # the stat at the last poll
         self.built = self.seen                # the stat an ahead or the designer's apply last took (nothing to do)
         self.still = 0                        # polls the stat has held since it changed
-        self.ahead: _Call | None = None       # queued or running
+        self.ready_since: float | None = None # ready for an ahead since then (still, and not built from this stat)
+        self.ahead: _Call | None = None       # the ahead running with it
         self.key: str | None = None           # its workspace key, once read ("" when it has none)
 
 
@@ -99,6 +124,7 @@ class _Burst:
     def __init__(self, lead: str):
         self.lead = lead
         self.until = time.monotonic() + WATCH_FOR_S
+        self.changed = 0.0                    # the last time one of its parts' deck.js changed
 
 
 class Ahead:
@@ -107,10 +133,12 @@ class Ahead:
         self.lock = threading.Lock()
         self.parts: dict[str, _Part] = {}            # real path of a part -> its watch
         self.bursts: dict[str, _Burst] = {}          # real path of a lead -> its burst
+        self.running: list[_Call] = []
         self.thread: threading.Thread | None = None
         self.count_lock = threading.Lock()
-        self.counts = {"ahead_queued": 0, "ahead_started": 0, "ahead_built": 0, "ahead_kept": 0, "ahead_skipped": 0,
-                       "ahead_cancelled": 0, "ahead_dropped": 0, "ahead_failed": 0, "ahead_waited": 0, "ahead_reused": 0}
+        self.counts = {"ahead_calls": 0, "ahead_parts": 0, "ahead_built": 0, "ahead_kept": 0, "ahead_skipped": 0,
+                       "ahead_failed": 0, "ahead_cancelled": 0, "ahead_dropped": 0, "ahead_waited": 0,
+                       "ahead_reused": 0}
         pool.on_starved.append(self.starved)
 
     # --- what the service tells it ------------------------------------------------------------------------------------
@@ -127,14 +155,18 @@ class Ahead:
                 paths.append(os.path.realpath(where if os.path.isabs(where) else os.path.join(cwd or ".", where)))
         if not paths:
             return
+        stale = []
         with self.lock:
             for path, part in list(self.parts.items()):          # the deck's next prepare replaces its burst
                 if part.burst.lead == real_lead:
-                    self._drop(part, "the deck was prepared again")
+                    if part.ahead is not None:
+                        stale.append(part.ahead)
                     del self.parts[path]
             burst = self.bursts[real_lead] = _Burst(real_lead)
             for path in paths:
                 self.parts[path] = _Part(path, version, dict(env), cwd, burst)
+        for call in stale:
+            self._cancel(call, "the deck was prepared again")
         self.service.log(f"ahead: watching {len(paths)} part(s) of {os.path.basename(real_lead)}")
         self._ensure_thread()
 
@@ -144,40 +176,44 @@ class Ahead:
         if part is None:
             return
         with self.lock:
-            part.seen = _stat(part.deck)
-            part.still = 1
+            stat = _stat(part.deck)
+            if stat != part.seen:
+                part.burst.changed = time.monotonic()
+            part.seen, part.still = stat, 1
             part.burst.until = time.monotonic() + WATCH_FOR_S
-        self._schedule(part)
+            if stat is not None and stat != part.built and part.ready_since is None:
+                part.ready_since = time.monotonic()
+        self._dispatch()
 
     def before_apply(self, argv: list[str], cwd: str | None, on_wait=None) -> None:
-        """The designer's own apply of a part: an ahead not started yet is dropped; one running on the deck.js the
-        apply will read is waited for (the apply then reuses it); one running on another is cancelled. `on_wait` is
-        called before it waits: the gathering then stops counting this part as on its way, so the parts that are
-        ready go out without it (lane S2's rig 7: they waited up to 250 ms for parts blocked here)."""
+        """The designer's own apply of a part: the part leaves the next ahead; an ahead running with it on the
+        deck.js the apply will read is waited for (the apply then reuses it), one on an older deck.js is not (and,
+        when the part is its only one, is cancelled). `on_wait` is called before it waits: the gathering then stops
+        counting this part as on its way, so the parts that are ready go out without it (lane S2's rig 7)."""
         part = self._part_of(argv, cwd)
         if part is None:
             return
         now = _stat(part.deck)
         with self.lock:
-            call = part.ahead
+            if part.ready_since is not None:
+                part.ready_since = None
+                self._count("ahead_dropped")
             part.built = now
             part.burst.until = time.monotonic() + WATCH_FOR_S
+            call = part.ahead
             if call is None:
                 return
-            if call.started is None:
-                part.ahead = None
-                self._count("ahead_dropped")
-                self._log(call, "dropped: the designer's apply came first")
-                return
-            same = call.stat == now
+            same = call.stats.get(part.path) == now
+            alone = len(call.members) == 1
         if not same:
-            self._cancel(call, "the designer's apply reads a newer deck.js")
+            if alone:
+                self._cancel(call, "the designer's apply reads a newer deck.js")
             return
         self._count("ahead_waited")
         if on_wait is not None:
             with contextlib.suppress(Exception):
                 on_wait()
-        if not call.done.wait(WAIT_OWN_S):
+        if not call.done.wait(WAIT_OWN_S) and alone:
             self._cancel(call, f"the designer's apply waited {int(WAIT_OWN_S)} s for it")
 
     def applied(self, argv: list[str], cwd: str | None, answer: dict) -> None:
@@ -189,16 +225,14 @@ class Ahead:
         if row.get("built_ahead") is True:
             self._count("ahead_reused")
             with contextlib.suppress(Exception):
-                self.service.log(f"ahead: {os.path.basename(part.path)} reused by its apply; "
-                                 + json.dumps({k: v for k, v in self.counts.items() if v}, separators=(",", ":")))
+                self.service.log(f"ahead: {os.path.basename(part.path)} reused by its apply; {self._counts_text()}")
 
     def starved(self, group: str) -> None:
         """A foreground call found no idle worker: the youngest ahead running on that engine is cancelled."""
         with self.lock:
-            running = [p.ahead for p in self.parts.values()
-                       if p.ahead is not None and p.ahead.started is not None and not p.ahead.done.is_set()
-                       and p.version == group]
-            youngest = max(running, key=lambda c: c.started or 0, default=None)
+            mine = [c for c in self.running if not c.done.is_set() and not c.cancelled.is_set()
+                    and c.members[0].version == group]
+            youngest = max(mine, key=lambda c: c.started, default=None)
         if youngest is not None:
             self._cancel(youngest, "a call waits for a worker")
 
@@ -216,102 +250,120 @@ class Ahead:
             now = time.monotonic()
             with self.lock:
                 for path, part in list(self.parts.items()):
-                    if now > part.burst.until:
-                        self._drop(part, "its burst ended")
+                    if now > part.burst.until and part.ahead is None:
                         del self.parts[path]
                 for lead, burst in list(self.bursts.items()):
                     if now > burst.until:
                         del self.bursts[lead]
                 parts = list(self.parts.values())
-            if not parts:
-                with self.lock:
-                    if not self.parts:
-                        self.thread = None
-                        return
-                time.sleep(POLL_S)
-                continue
+                if not parts:
+                    self.thread = None
+                    return
             if self.service.relays_attached():
                 for part in parts:
                     self._poll(part)
-                for part in parts:
-                    self._start_queued(part)
+                self._dispatch()
             time.sleep(POLL_S)
 
     def _poll(self, part: _Part) -> None:
         stat = _stat(part.deck)
+        cancel = None
         with self.lock:
             if stat != part.seen:
-                part.seen, part.still = stat, 0
+                part.seen, part.still, part.ready_since = stat, 0, None
+                part.burst.changed = part.burst.until = time.monotonic()
+                part.burst.until += WATCH_FOR_S
                 call = part.ahead
-                part.burst.until = time.monotonic() + WATCH_FOR_S
+                if call is not None and len(call.members) == 1:
+                    cancel = call                   # saved again while built alone: that build is of no use now
             else:
                 part.still += 1
-                call = None
-        if call is not None:                        # changed again while its ahead was queued or running
-            if call.started is None:
-                with self.lock:
-                    if part.ahead is call:
-                        part.ahead = None
-                self._count("ahead_dropped")
-                self._log(call, "dropped: deck.js changed again")
-            else:
-                self._cancel(call, "deck.js changed again")
-            return
-        if part.still >= 1 and stat is not None and stat != part.built:
-            self._schedule(part)
+                if part.still >= 1 and stat is not None and stat != part.built and part.ahead is None \
+                        and part.ready_since is None:
+                    part.ready_since = time.monotonic()
+        if cancel is not None:
+            self._cancel(cancel, "deck.js changed again")
 
-    def _schedule(self, part: _Part) -> None:
+    def _dispatch(self) -> None:
+        """The ready parts of each burst, once its saves have settled (no change in the last poll, or the oldest ready
+        for SETTLE_S): one several-part ahead per worker allowed, in equal shares."""
+        now = time.monotonic()
+        launches: list[tuple[_Call, object, list]] = []
         with self.lock:
-            stat = part.seen
-            if stat is None or stat == part.built or (part.ahead is not None and part.ahead.stat == stat):
-                return
-            if part.ahead is not None:              # an older one: the poll cancels or drops it first
-                return
-            part.ahead = _Call(part, stat)
-            part.built = stat
-            self._count("ahead_queued")
-        self._start_queued(part)
+            groups: dict[tuple[str, str], list[_Part]] = {}
+            for part in self.parts.values():
+                if part.ready_since is not None and part.ahead is None and part.seen == _stat(part.deck):
+                    groups.setdefault((part.version, part.burst.lead), []).append(part)
+            for (version, _lead), ready in groups.items():
+                burst = ready[0].burst
+                oldest = min(p.ready_since for p in ready)
+                if now - burst.changed < POLL_S and now - oldest < SETTLE_S:
+                    continue                        # its saves are still coming: they go together
+                slots = self.pool.ahead_slots(version)
+                if slots <= 0:
+                    continue
+                for part in ready:                  # a part whose workspace another command holds waits
+                    if part.key is None:
+                        part.key = workers.workspace_key(["apply", part.path], part.cwd) or ""
+                tokens, free = [], []
+                for part in ready:
+                    token = self.pool.keys.try_take(part.key or None)
+                    if token is not None:
+                        tokens.append((part, token))
+                        free.append(part)
+                if not free:
+                    continue
+                count = max(1, min(slots, len(free)))
+                share = max(1, min(MOST_IN_AHEAD, -(-len(free) // count)))
+                chunks = [free[i:i + share] for i in range(0, len(free), share)]
+                for chunk in chunks:
+                    worker = self.pool.take_for_ahead(version)
+                    held = [(p, t) for p, t in tokens if p in chunk]
+                    if worker is None:
+                        for _p, token in held:
+                            self.pool.keys.give(_p.key or None, token)
+                        continue
+                    call = _Call(chunk)
+                    for part in chunk:
+                        part.ahead, part.built, part.ready_since = call, part.seen, None
+                    self.running.append(call)
+                    launches.append((call, worker, held))
+        for call, worker, held in launches:
+            self._count("ahead_calls")
+            for _ in call.members:
+                self._count("ahead_parts")
+            self._log(call, "started")
+            threading.Thread(target=self._run, args=(call, worker, held), name="service-ahead-run", daemon=True).start()
 
-    def _start_queued(self, part: _Part) -> None:
-        if part.ahead is None or part.ahead.started is not None:
-            return
-        argv = ["apply", part.path, FLAG]
-        if part.key is None:
-            part.key = workers.workspace_key(argv, part.cwd) or ""
-        with self.lock:                             # the pool never calls in here while it holds its own locks
-            call = part.ahead
-            if call is None or call.started is not None:
-                return
-            taken = self.pool.take_for_ahead(part.version, part.key or None)
-            if taken is None:
-                return                              # not now: tried again at the next poll
-            call.started = time.monotonic()
-        self._count("ahead_started")
-        self._log(call, f"started (queued {int((call.started - call.queued) * 1000)} ms)")
-        threading.Thread(target=self._run, args=(part, call, taken, argv), name="service-ahead-run", daemon=True).start()
-
-    def _run(self, part: _Part, call: _Call, taken, argv: list[str]) -> None:
+    def _run(self, call: _Call, worker, held: list) -> None:
+        first = call.members[0]
+        argv = ["apply", *[part.path for part in call.members], FLAG]
         code = 78
         try:
-            code = self.pool.run_ahead(call, taken, argv, part.env)
+            code = self.pool.run_ahead(call, worker, argv, first.env)
         finally:
-            elapsed = int((time.monotonic() - (call.started or call.queued)) * 1000)
-            answer = call.answer() if code == 0 else {}
-            outcome = answer.get("ahead") if isinstance(answer.get("ahead"), str) else None
+            for part, token in held:
+                self.pool.keys.give(part.key or None, token)
+            elapsed = int((time.monotonic() - call.started) * 1000)
             if call.cancelled.is_set():
                 self._count("ahead_cancelled")
                 self._log(call, f"cancelled after {elapsed} ms (exit {code})")
-            elif code == 0 and outcome in ("built", "kept", "skipped"):
-                self._count(f"ahead_{outcome}")
-                reason = f" ({answer.get('reason')})" if answer.get("reason") else ""
-                self._log(call, f"done: {outcome}{reason} in {elapsed} ms")
-            else:                                   # not tried again on the same deck.js: its designer's apply builds it
-                self._count("ahead_failed")
-                self._log(call, f"failed: exit {code} in {elapsed} ms")
+            else:
+                outcomes = call.outcomes(code)
+                for outcome in outcomes.values():
+                    self._count(f"ahead_{outcome}" if outcome in ("built", "kept", "skipped") else "ahead_failed")
+                summary = ", ".join(f"{n} {o}" for o, n in sorted(_tally(outcomes.values()).items()))
+                self._log(call, f"done in {elapsed} ms (exit {code}): {summary}")
             with self.lock:
-                if part.ahead is call:
-                    part.ahead = None
+                for part in call.members:
+                    if part.ahead is call:
+                        part.ahead = None
+                        if part.seen != call.stats.get(part.path) and part.seen is not None:
+                            part.ready_since = None     # saved again meanwhile: ready again at its next still poll
+                with contextlib.suppress(ValueError):
+                    self.running.remove(call)
             call.done.set()
+            self._dispatch()
 
     # --- helpers --------------------------------------------------------------------------------------------------------
 
@@ -335,23 +387,23 @@ class Ahead:
                 worker.cancel(call)
         self._log(call, f"cancelling: {why}")
 
-    def _drop(self, part: _Part, why: str) -> None:
-        call = part.ahead
-        if call is None:
-            return
-        if call.started is None:
-            part.ahead = None
-            self._count("ahead_dropped")
-            self._log(call, f"dropped: {why}")
-        else:
-            threading.Thread(target=self._cancel, args=(call, why), daemon=True).start()
-
     def _count(self, name: str) -> None:
         with self.count_lock:
             self.counts[name] = self.counts.get(name, 0) + 1
 
+    def _counts_text(self) -> str:
+        with self.count_lock:
+            return json.dumps({k: v for k, v in self.counts.items() if v}, separators=(",", ":"))
+
     def _log(self, call: _Call, what: str) -> None:
         with contextlib.suppress(Exception):
-            size, mtime = call.stat if call.stat else (None, None)
-            self.service.log(f"ahead: {os.path.basename(call.part.path)} (deck.js {size} bytes, {mtime}) {what}; "
-                             + json.dumps({k: v for k, v in self.counts.items() if v}, separators=(",", ":")))
+            names = ", ".join(os.path.basename(p.path) for p in call.members[:8])
+            more = f" and {len(call.members) - 8} more" if len(call.members) > 8 else ""
+            self.service.log(f"ahead: {len(call.members)} part(s) ({names}{more}) {what}; {self._counts_text()}")
+
+
+def _tally(values) -> dict[str, int]:
+    found: dict[str, int] = {}
+    for value in values:
+        found[value] = found.get(value, 0) + 1
+    return found

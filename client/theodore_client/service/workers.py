@@ -627,13 +627,6 @@ class _KeyLock:
         mine.set()
 
 
-class _Taken:
-    """An idle worker and a part's workspace key, taken together for an ahead (Pool.take_for_ahead)."""
-
-    def __init__(self, worker: "Worker", key: str | None, token: threading.Event):
-        self.worker, self.key, self.token = worker, key, token
-
-
 class Pool:
     def __init__(self, service):
         self.service = service
@@ -1061,37 +1054,38 @@ class Pool:
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
 
-    def take_for_ahead(self, version: str, key: str | None) -> _Taken | None:
-        """An idle worker for a build-ahead (ahead.py), or None: only when no call waits for a worker of the engine,
-        another worker stays idle after it, and no command holds or waits for the part's workspace. Never the
-        always-warm worker while another is idle (it serves leads' applies and renders)."""
-        token = self.keys.try_take(key)
-        if token is None:
-            return None
+    def ahead_slots(self, version: str) -> int:
+        """How many build-aheads (ahead.py) may start now: the idle workers but one, and none while a call waits."""
+        with self.cond:
+            if self.closed or self.waiting.get(version):
+                return 0
+            idle = [w for w in self._live(version) if w.ready.is_set() and not w.busy and not w.fatal]
+            return max(0, len(idle) - 1)
+
+    def take_for_ahead(self, version: str) -> "Worker | None":
+        """An idle worker for a build-ahead, or None: only when no call waits for a worker of the engine and another
+        stays idle after it. Never the always-warm worker while another is idle (it serves leads' applies and
+        renders). The part's workspace keys are the caller's to hold (Pool.keys.try_take)."""
         with self.cond:
             live = self._live(version)
             idle = [w for w in live if w.ready.is_set() and not w.busy and not w.fatal]
-            if not self.closed and not self.waiting.get(version) and len(idle) >= 2:
-                others = [w for w in idle if getattr(w, "build_threads", None) != full_threads()] or idle
-                chosen = min(others, key=lambda w: (len(w.keys), w.calls))
-                chosen.busy = True
-                chosen.rank = RANKS["ahead"]
-                return _Taken(chosen, key, token)
-        self.keys.give(key, token)
-        return None
+            if self.closed or self.waiting.get(version) or len(idle) < 2:
+                return None
+            others = [w for w in idle if getattr(w, "build_threads", None) != full_threads()] or idle
+            chosen = min(others, key=lambda w: (len(w.keys), w.calls))
+            chosen.busy = True
+            chosen.rank = RANKS["ahead"]
+            return chosen
 
-    def run_ahead(self, call, taken: _Taken, argv: list[str], env: dict) -> int:
+    def run_ahead(self, call, worker: "Worker", argv: list[str], env: dict) -> int:
         """Run a build-ahead on the worker take_for_ahead gave; never re-run, never one-shot. Returns its exit."""
         try:
-            try:
-                result = taken.worker.run(call, argv, env, None, taken.key, "write")
-            except WorkerFailed:
-                self._release(taken.worker)
-                return 78
-            self._release(taken.worker)
-            return int(result.get("exit", 78))
-        finally:
-            self.keys.give(taken.key, taken.token)
+            result = worker.run(call, argv, env, None, None, "write")
+        except WorkerFailed:
+            self._release(worker)
+            return 78
+        self._release(worker)
+        return int(result.get("exit", 78))
 
     def close_confined(self) -> None:
         """Every chat's workers end now (the licence was refused or withdrawn)."""

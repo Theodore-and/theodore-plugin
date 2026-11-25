@@ -143,18 +143,29 @@ while True:
     if verb == "crash":
         os._exit(9)
     if verb == "apply" and "--ahead" in argv and targets:
-        # lane G's build-ahead: the part built into the store, nothing visible; a cancel ends it with 130
-        note("ahead-start", targets[0])
+        # lane G's build-ahead: the parts built into the store in one build, nothing visible; a cancel ends it with 130.
+        # One part answers its own object; several, apply_many's form with each part's object as its stdout.
+        for target in targets:
+            note("ahead-start", target)
         end = time.monotonic() + float(os.environ.get("FAKE_AHEAD_S") or 0.3)
         while time.monotonic() < end and call not in cancelled:
             time.sleep(0.01)
         if call in cancelled:
             code = 130
-            note("ahead-cancelled", targets[0])
+            for target in targets:
+                note("ahead-cancelled", target)
             say(json.dumps({"ok": False, "cancelled": True}) + "\n")
         else:
-            note("ahead-built", targets[0])
-            say(json.dumps({"ok": True, "ahead": "built", "part": targets[0], "slides": 1, "ms": 300}, indent=2) + "\n")
+            rows = []
+            for target in targets:
+                note("ahead-built", target)
+                rows.append({"ok": True, "ahead": "built", "part": target, "slides": 1, "ms": 300})
+            if len(rows) == 1:
+                say(json.dumps(rows[0], indent=2) + "\n")
+            else:
+                say(json.dumps({"ok": True, "summary": f"{len(rows)} parts built ahead in 1 build(s)", "builds": 1,
+                                "parts": [{"part": r["part"], "exit": 0, "stdout": json.dumps(r) + "\n"} for r in rows]})
+                    + "\n")
         verb = "--ahead-done"
     elif verb == "apply" and targets:
         for target in targets:
