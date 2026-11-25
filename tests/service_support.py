@@ -185,6 +185,7 @@ while True:
         names = sorted(k for k in os.environ if k.startswith(("THEODORE_", "CLAUDE")))
         say(json.dumps({"argv": argv, "cwd": run.get("cwd"), "pid": os.getpid(), "priority": run.get("priority"),
                         "t0": t0, "t1": time.time(), "build_threads": os.environ.get("THEODORE_BUILD_THREADS"),
+                        "render_threads": os.environ.get("THEODORE_RENDER_THREADS"),
                         "key": run.get("key"), "env": {k: os.environ[k] for k in names if k in (run.get("env") or {})},
                         "resident": os.environ.get("THEODORE_RESIDENT"), "home": os.environ.get("THEODORE_HOME"),
                         "node_options": os.environ.get("NODE_OPTIONS"), "work": os.environ.get("THEODORE_WORK_DIR")}) + "\n")

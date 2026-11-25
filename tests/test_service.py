@@ -307,14 +307,18 @@ class PoolSizing(unittest.TestCase):
 
         from theodore_client.service import workers
         gb = 1 << 30
+        # (64 cores, 256 GB): 16 workers of 4 render threads each, 1,350 MB a worker, fit within 40% of the memory;
+        # (64 cores, 32 GB): 16 by the plain share, but at 1,350 MB a worker 9 fit; (16 cores, 8 GB): 2 of 4 threads.
         for cores, ram, most in ((4, 16 * gb, 4), (12, 16 * gb, 10), (8, 8 * gb, 5), (2, 4 * gb, 2), (1, 2 * gb, 2),
-                                 (64, 256 * gb, 16)):
+                                 (64, 256 * gb, 16), (64, 32 * gb, 9), (16, 8 * gb, 2)):
             with self.subTest(cores=cores, ram=ram), mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": ""}), \
                     mock.patch.object(workers.os, "cpu_count", return_value=cores), \
                     mock.patch.object(workers, "_ram_bytes", return_value=ram):
                 self.assertEqual(workers.pool_sizes(), (1, most))
         with mock.patch.dict(os.environ, {"THEODORE_SERVICE_WORKERS": "3"}):
             self.assertEqual(workers.pool_sizes(), (3, 3))
+        with mock.patch.object(workers.os, "cpu_count", return_value=64):
+            self.assertEqual((workers.worker_threads(16), workers.worker_threads(9), workers.worker_threads(64)), (4, 4, 1))
 
     def test_the_queue_goes_by_expected_cost(self):
         from theodore_client.service import workers
@@ -460,7 +464,8 @@ class StudioParts(ServiceCase):
         self.assertLessEqual(len(set(batches) - {1}), 2, f"in equal shares: {batches}")
         lone = json.loads(Collector.stdout(self.burst(lead, ["s01"], hold="0", tag="later-")["s01"]).splitlines()[0])
         self.assertNotIn("batch", lone, "a part alone afterwards: the plain apply")
-        self.assertEqual(lone["build_threads"], str(max(1, (os.cpu_count() or 2) // 2)), "THEODORE_BUILD_THREADS")
+        self.assertEqual(lone["build_threads"], str(min(4, max(1, (os.cpu_count() or 2) // 2))), "THEODORE_BUILD_THREADS")
+        self.assertEqual(lone["render_threads"], lone["build_threads"], "THEODORE_RENDER_THREADS, the same cap")
         log = (self.box.home / "logs" / "service.log").read_text(encoding="utf-8", errors="replace")
         self.assertRegex(log, r"parts: \d+ of a deck in \d+ build\(s\)", "the log says how a burst was built")
 
