@@ -16,9 +16,10 @@ fetched.
 
 The runtime bundle is the Python, the Node and the open-source packages that Theodore downloads into
 `<home>/runtime/<runtime-id>/` so the engine can run. Every component is shipped unmodified, as its project
-published it. This section was written from the darwin-arm64 build of runtime `f0c496e365236046` and updated for
-`43be74ecf52f9321`, which adds skia-canvas's native binary and nothing else (recipe in
-`runtime/build/`, pins in `runtime/locks/`). The other four platforms carry the same packages at the same
+published it. This section was written from the darwin-arm64 build of runtime `f0c496e365236046`, updated for
+`43be74ecf52f9321`, which adds skia-canvas's native binary and nothing else, and for `875c13a60af59e66` (engine 2.0),
+which drops pptx-automizer and npm pptxgenjs and the packages only they used (recipe in `runtime/build/`, pins in
+`runtime/locks/`). The other four platforms carry the same packages at the same
 versions with that platform's binaries.
 
 The licence texts travel with the bundle, in `<home>/runtime/<runtime-id>/licenses/`:
@@ -128,14 +129,14 @@ pypdfium2 is the PDF rasteriser. Poppler (GPL) is not part of the bundle.
 
 ### npm packages
 
-Installed with `npm ci --omit=dev --ignore-scripts` from `runtime/locks/package-lock.json`: 156 package
-versions (150 names) on darwin-arm64.
+Installed with `npm ci --omit=dev --ignore-scripts` from `runtime/locks/package-lock.json`: 53 package
+versions (51 names) on darwin-arm64.
 
 | Licence | Packages |
 | --- | --- |
-| MIT | 141 |
+| MIT | 39 |
 | Apache-2.0 | 8: `sharp`, `@img/sharp-<platform>`, `mathjax-full`, `mhchemparser`, `mj-context-menu`, `speech-rule-engine`, `@swc/helpers`, `detect-libc` |
-| ISC | 3: `semver`, `inherits`, `https` |
+| ISC | 2: `semver`, `inherits` |
 | 0BSD | 1: `tslib` |
 | LGPL-3.0-or-later | 1: `@img/sharp-libvips-<platform>` |
 | MIT OR GPL-3.0-or-later | 1: `jszip` (used under MIT) |
@@ -143,8 +144,7 @@ versions (150 names) on darwin-arm64.
 
 | Notable package | Version | Licence | Note |
 | --- | --- | --- | --- |
-| pptxgenjs | 4.0.1 (and 3.12.0 inside pptx-automizer) | MIT | |
-| pptx-automizer | 0.9.4 | MIT | |
+| jszip, pako | 3.10.1, 1.0.11 | MIT OR GPL-3.0-or-later (used under MIT), MIT AND Zlib | What the engine's own copy of pptxgenjs writes a deck's zip with |
 | sharp | 0.35.5 | Apache-2.0 | Loads the prebuilt `@img/sharp-<platform>` binary |
 | `@img/sharp-libvips-<platform>` | 1.3.4 | LGPL-3.0-or-later | libvips 8.18.7 as a separate shared library; see the table at the top. On Windows it is inside `@img/sharp-win32-x64` (Apache-2.0 AND LGPL-3.0-or-later) |
 | mathjax-full | 3.2.2 | Apache-2.0 | |
