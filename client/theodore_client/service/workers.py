@@ -42,6 +42,7 @@ RENDER_THREAD_MB = 250.0          # each warm render thread beyond the first (la
 MEMORY_SHARE = 0.4                # at most this share of the computer's memory goes to workers
 MOST_WORKERS = 16
 RANKS = {"read": 0, "write": 1, "long": 2}      # the queue's order: expected cost (B-A-worker 12)
+WARM_WAIT_S = 0.5                 # a long call waits this long for the always-warm worker to finish a short call
 RECYCLE_CALLS = 2000
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
@@ -627,6 +628,28 @@ class Pool:
                     self._spawn(spec)
         threading.Thread(target=warm, name="pool-warm", daemon=True).start()
 
+    def _choose(self, live: list, idle: list, key: str | None, rank: int, waited: float):
+        """Which idle worker takes a call, or None to wait a moment. The always-warm worker (the machine's full thread
+        counts: lane R's warm render threads) is kept for long calls, a lead's apply and a render: a long call takes it
+        when it is idle, and waits up to WARM_WAIT_S for it while it runs a short call; short calls take another idle
+        worker first, and it only when it is the one idle. Otherwise the workspace's own worker, else the least used."""
+        def warm(worker) -> bool:
+            return getattr(worker, "build_threads", None) == full_threads() and \
+                any(getattr(w, "build_threads", None) != full_threads() for w in live)
+        if rank == RANKS["long"]:
+            for worker in idle:
+                if warm(worker):
+                    return worker
+            if waited < WARM_WAIT_S and any(warm(w) and w.busy and (w.rank or 0) < RANKS["long"] for w in live):
+                return None
+        else:
+            others = [w for w in idle if not warm(w)]
+            if others:
+                idle = others
+        if key and self.affinity.get(key) in idle:
+            return self.affinity[key]
+        return min(idle, key=lambda w: (len(w.keys), w.calls))
+
     def _threads_for_new(self, live: list) -> int:
         """Full counts for the only worker of an engine (or the first again after one died); the per-worker cap for
         one started beside others, unless none of those holds the full counts (it went: the new one takes them)."""
@@ -700,6 +723,7 @@ class Pool:
         rank = RANKS.get(priority, RANKS["write"]) if rank is None else rank
         long_most = max(1, most - 1)
         spawned = False
+        waited_from = time.monotonic()
         with self.cond:
             self._arrivals += 1
             ticket = (rank, self._arrivals)
@@ -716,9 +740,10 @@ class Pool:
                     ahead = sum(1 for other in waiting if other < ticket)
                     allowed = rank < RANKS["long"] or \
                         sum(1 for w in live if w.busy and w.rank == RANKS["long"]) < long_most
+                    chosen = None
                     if idle and ahead < len(idle) and allowed:
-                        chosen = self.affinity.get(key) if key and self.affinity.get(key) in idle else \
-                            min(idle, key=lambda w: (len(w.keys), w.calls))
+                        chosen = self._choose(live, idle, key, rank, time.monotonic() - waited_from)
+                    if chosen is not None:
                         chosen.busy = True
                         chosen.rank = rank
                         if key:
@@ -728,6 +753,9 @@ class Pool:
                             threading.Thread(target=self._spawn, args=(spec, group, env, most), name="pool-spare",
                                              daemon=True).start()
                         return chosen
+                    if idle and ahead < len(idle) and allowed:
+                        self.cond.wait(0.02)             # a long call waiting a moment for the warm worker
+                        continue
                     starting = [w for w in live if not w.ready.is_set()]
                     if not spawned and len(live) < most and len(starting) < len(waiting):
                         spawned = True
