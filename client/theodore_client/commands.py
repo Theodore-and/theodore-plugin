@@ -2236,9 +2236,19 @@ def _follow_claude_app() -> None:
         core.log(f"hosts: the Claude app's moved folder was not followed ({exc.__class__.__name__}: {exc})")
 
 
+HOSTS_EVERY_S = 0.0             # the resident service sets 300: a process that runs many commands does this that often
+_hosts_checked: list[float] = []
+
+
 def ensure_hosts() -> None:
     """Finish the registration an installer left undone (see above), then the settings (ensure_settings). Never fails
-    or prints in the command it runs in."""
+    or prints in the command it runs in. A one-shot command does it once; the resident service, whose every guide,
+    skill and doctor comes here, at most every HOSTS_EVERY_S (a burst of designers' first guides did it fifteen times
+    at once, each reading and checking the hosts' settings files)."""
+    now = time.monotonic()
+    if HOSTS_EVERY_S and _hosts_checked and now - _hosts_checked[-1] < HOSTS_EVERY_S:
+        return
+    _hosts_checked[:] = [now]
     front.refresh()             # the native front and launch.json in step with what is installed (front.py)
     ensure_settings()
     _follow_claude_app()
