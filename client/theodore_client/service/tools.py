@@ -158,12 +158,17 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
     call.set_phase(f"pptx {args[0]}")
     admitted = time.perf_counter()
     env = _engine_env(call)
-    if args[0] == "apply":                  # a part's own build-ahead: dropped, waited for or cancelled (ahead.py)
-        service.ahead.before_apply(args, call.cwd)
+    here: list[bool] = []
+
+    def not_coming() -> None:               # once: no longer counted on its way to the gathering
+        if coming is not None and not here:
+            here.append(True)
+            service.parts.arrived(coming)
+            call.arrived = True
+    if args[0] == "apply":                  # a part's own build-ahead: dropped, waited for or cancelled (ahead.py);
+        service.ahead.before_apply(args, call.cwd, on_wait=not_coming)  # waiting, it holds no ready part back
     wanted = service.parts.wants(version, args, call)
-    if coming is not None:                  # here now: no longer on its way
-        service.parts.arrived(coming)
-        call.arrived = True
+    not_coming()                            # here now
     if wanted is not None:                  # a Studio part arriving with the others: one build for several (parts.py)
         code, pending = service.parts.run(call, version, args, env, wanted)
     else:

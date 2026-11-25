@@ -832,6 +832,37 @@ class BuildAhead(ServiceCase):
                 self.env.update({"FAKE_APPLY_AHEAD": "1", "THEODORE_SERVICE_WORKERS": "2"})
 
 
+class AheadUnit(unittest.TestCase):
+    def test_an_apply_waiting_for_its_own_ahead_stops_being_on_its_way_before_it_waits(self):
+        # Lane S2's rig 7: every apply of 8 reused its ahead, yet each waited ~160 ms in the gathering for the parts
+        # still waiting on theirs (counted on their way, they held the cut up to GATHER_CAP_S).
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import ahead
+        service = SimpleNamespace(log=lambda _m: None, stopping=threading.Event(), relays_attached=lambda: 1)
+        builder = ahead.Ahead(service, SimpleNamespace(on_starved=[], has_feature=lambda _v, _n: True))
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "deck" / "parts" / "s01"
+            folder.mkdir(parents=True)
+            (folder / "deck.js").write_text("slide one\n")
+            part = ahead._Part(os.path.realpath(folder), "9.9", {}, tmp, ahead._Burst(str(Path(tmp) / "deck")))
+            builder.parts[part.path] = part
+            running = ahead._Call(part, ahead._stat(part.deck))
+            running.started = time.monotonic()
+            part.ahead = running
+            told = []
+            waiter = threading.Thread(target=builder.before_apply, args=(["apply", str(folder)], tmp),
+                                      kwargs={"on_wait": lambda: told.append(running.done.is_set())})
+            waiter.start()
+            time.sleep(0.3)
+            self.assertEqual(told, [False], "told before it waits, while its ahead still runs")
+            self.assertTrue(waiter.is_alive(), "and it waits for its own ahead")
+            running.done.set()
+            waiter.join(5)
+            self.assertFalse(waiter.is_alive())
+
+
 class Lifecycle(ServiceCase):
     def test_nothing_runs_after_the_last_relay_detaches(self):
         exits = self.box.tmp / "exit-frames.jsonl"
