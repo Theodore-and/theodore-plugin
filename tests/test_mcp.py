@@ -833,6 +833,23 @@ class WindowsLauncher(unittest.TestCase):
         self.box = Sandbox(self.api)
         self.addCleanup(self.box.close)
 
+    def _login_after_setup(self):
+        """Sign in once the setup job a launch started is done. That job is started detached (Start-Process) and takes
+        state\\bootstrap\\job.lock from its first lines, so it can take it after wait_jobs looked; the launcher then
+        answers SETUP_IN_PROGRESS (67), as it rightly would to a person whose setup is still running (the job writes
+        the ready marks before it lets the lock go, and `login` reads those first). The same command again once the
+        job has ended, within a bound."""
+        self.box.wait_jobs(600)
+        self.api.issue_activation_code("ABCD-1234")
+        deadline = time.monotonic() + 600
+        while True:
+            login = self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600)
+            if login.returncode != 67 or time.monotonic() > deadline:
+                break
+            self.box.wait_jobs(600)
+            time.sleep(1)
+        self.assertEqual(login.returncode, 0, login.stdout + login.stderr)
+
     def _mcp(self, env=None):
         command = cmd_command(str(self.box.launcher.with_suffix("")), "mcp")      # no extension, as the host spawns it
         return subprocess.Popen(command, env={**self.box.env, **(env or {})}, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -840,9 +857,7 @@ class WindowsLauncher(unittest.TestCase):
 
     def test_the_skill_body_with_characters_outside_the_code_page(self):
         self.box.run_launcher("version", timeout=600)
-        self.box.wait_jobs(600)
-        self.api.issue_activation_code("ABCD-1234")
-        self.assertEqual(self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600).returncode, 0)
+        self._login_after_setup()
         self.api.guides["deck-design"][""] = "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n"
         done = subprocess.run(cmd_command(str(self.box.launcher), "skill", "deck-design"), env=self.box.env, capture_output=True,
                               timeout=600, cwd=str(self.box.tmp))
@@ -854,9 +869,7 @@ class WindowsLauncher(unittest.TestCase):
         proc = self._mcp({"THEODORE_BOOTSTRAP_WAIT": "1"})
         out, err = proc.communicate(b"", timeout=600)
         self.assertNotIn(b"THEODORE ", out, "the protocol stream gets no status")
-        self.box.wait_jobs(600)
-        self.api.issue_activation_code("ABCD-1234")
-        self.assertEqual(self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600).returncode, 0)
+        self._login_after_setup()
         proc = self._mcp()
         message = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
