@@ -158,6 +158,8 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
     call.set_phase(f"pptx {args[0]}")
     admitted = time.perf_counter()
     env = _engine_env(call)
+    if args[0] == "apply":                  # a part's own build-ahead: dropped, waited for or cancelled (ahead.py)
+        service.ahead.before_apply(args, call.cwd)
     wanted = service.parts.wants(version, args, call)
     if coming is not None:                  # here now: no longer on its way
         service.parts.arrived(coming)
@@ -167,7 +169,11 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
     else:
         code, pending = service.pool.run(call, version, args, env, call.stdin)
     if args[0] == "prepare" and code == 0:
-        _parts_coming(service, version, args, call)
+        _parts_coming(service, version, args, call, env)
+    elif args[0] == "slide" and code == 0:
+        service.ahead.wrote(args, call.cwd)     # a part's deck.js written through the service: still now
+    elif args[0] == "apply" and code == 0:
+        service.ahead.applied(args, call.cwd, _last_json("".join(call.stdout_kept)))     # reused its ahead?
     with contextlib.suppress(Exception):
         install._pin_workspaces(args, version)          # noqa: SLF001  the workspace's pin, as the client wrote it
     if code in (1, install.LICENCE_EXIT):     # the engine's licence refusal, read from its last JSON object (L1)
@@ -209,7 +215,7 @@ def _log_timing(service, call, args: list[str], gathered: bool, begun: float, ad
                     + "".join(f"\n    {line}" for line in engine[:16]))
 
 
-def _parts_coming(service, version: str, args: list[str], call) -> None:
+def _parts_coming(service, version: str, args: list[str], call, env: dict | None = None) -> None:
     """`prepare`'s answer says how its parts come (lane G): all at once (`in_turn` false; Studio) warms a worker per
     part up to the pool's size and gathers their applies; one at a time (`in_turn` true) needs neither. An answer
     without these (an engine before them) warms the pool to its size, as a burst may follow."""
@@ -231,6 +237,8 @@ def _parts_coming(service, version: str, args: list[str], call) -> None:
         return
     if lead and answer.get("prepared") == "parts":
         service.parts.prepared(lead, at_once=True)
+        with contextlib.suppress(Exception):
+            service.ahead.announced(version, lead, parts, env or {}, call.cwd)
     service.pool.warm_up(version, count)
 
 
