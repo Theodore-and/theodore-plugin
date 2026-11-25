@@ -290,18 +290,30 @@ class Ahead:
 
     def _dispatch(self) -> None:
         """The ready parts of each burst, once its saves have settled (no change in the last poll, or the oldest ready
-        for SETTLE_S): one several-part ahead per worker allowed, in equal shares."""
+        for SETTLE_S), or at once when every part of the burst has been saved since its last ahead or apply (lane
+        S2's S2-7: all fifteen land within milliseconds, and the still poll cost each ahead ~100 ms of its head
+        start): one several-part ahead per worker allowed, in equal shares."""
         now = time.monotonic()
         launches: list[tuple[_Call, object, list]] = []
         with self.lock:
+            every: dict[str, list[_Part]] = {}
+            for part in self.parts.values():
+                every.setdefault(part.burst.lead, []).append(part)
+            complete = set()                        # bursts whose every part is saved anew and in no ahead
+            for lead, members in every.items():
+                if len(members) > 1 and all(p.seen is not None and p.seen != p.built and p.ahead is None for p in members):
+                    complete.add(lead)
+                    for part in members:
+                        if part.ready_since is None:
+                            part.ready_since = now
             groups: dict[tuple[str, str], list[_Part]] = {}
             for part in self.parts.values():
                 if part.ready_since is not None and part.ahead is None and part.seen == _stat(part.deck):
                     groups.setdefault((part.version, part.burst.lead), []).append(part)
-            for (version, _lead), ready in groups.items():
+            for (version, lead), ready in groups.items():
                 burst = ready[0].burst
                 oldest = min(p.ready_since for p in ready)
-                if now - burst.changed < POLL_S and now - oldest < SETTLE_S:
+                if lead not in complete and now - burst.changed < POLL_S and now - oldest < SETTLE_S:
                     continue                        # its saves are still coming: they go together
                 slots = self.pool.ahead_slots(version)
                 if slots <= 0:
