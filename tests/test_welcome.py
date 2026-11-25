@@ -166,9 +166,9 @@ class Welcome(ClientCase):
         self.assertIn("ask them to start a new session first", nxt)
 
     def test_claude_code_sends_the_first_deck_to_a_new_session(self):
-        """Lane L3 (25 Nov): the conversation that installed Theodore has neither its skills nor its instructions line
-        (Claude Code loads them when a conversation starts); there Opus made the first deck as the Claude app's own
-        slide artifact. Whatever the installer's own `guide pptx` recorded for the session."""
+        """Lane L3 (25 Nov): the conversation that installed Theodore has neither its plugin nor its instructions line
+        (Claude Code loads them when a conversation starts); there the first deck ran without Studio's designers, and
+        in default mode every command asked. Whatever the installer's own `guide pptx` recorded for the session."""
         for sid in ("s-new", "s-loaded"):
             _f, nxt, tell = self.assertStatus(self.welcome(env={"CLAUDE_CODE_SESSION_ID": sid}), "OK", 0)
             self.assertIn("Start a new session, then ask for your first deck.", tell, sid)
