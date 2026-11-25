@@ -1,7 +1,7 @@
 """The verb path (0.4.34): what a `pptx` command does in the client before and after the engine, in-process. Each case
 names the cost it keeps off the path: the asset-pack scan of the deck's scripts, the venv redirector, the second
-engine start after a failing verb, the help text, the specimen sweep, the usage send, the credential read, the
-LibreOffice lookup and the per-run lock file."""
+engine start after a failing verb, the help text, the specimen sweep, the usage send, the credential read, any
+program lookup on PATH and the per-run lock file."""
 
 from __future__ import annotations
 
@@ -197,7 +197,7 @@ class RefusalFromOutput(HomeCase):
         self.assertEqual(len(tail), install.OUTPUT_TAIL_BYTES)
 
 class CredentialAndLookups(HomeCase):
-    """An engine command reads no credential while the licence holds, and finds LibreOffice from the last lookup."""
+    """An engine command reads no credential while the licence holds, and looks for no other program."""
 
     def token(self, exp_in: float) -> None:
         import base64
@@ -227,34 +227,12 @@ class CredentialAndLookups(HomeCase):
                 with self.assertRaises(core.Status):
                     account.require("pptx")
 
-    def test_libreoffice_is_looked_up_once_an_hour_per_path(self):
-        office = self.tmp / "bin" / "soffice"
-        office.parent.mkdir()
-        office.write_text("", encoding="utf-8")
-        lookups = []
-        which = lambda name: lookups.append(name) or str(office)
-        with mock.patch.object(install.shutil, "which", side_effect=which), mock.patch.dict(os.environ, {"PATH": "/one"}):
-            os.environ.pop("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE", None)
+    def test_an_engine_command_looks_for_no_other_program(self):
+        # Until 0.5.1 each command looked for a LibreOffice on PATH (10 to 40 ms on Windows) and handed one to the engine.
+        with mock.patch.object(install.shutil, "which", side_effect=AssertionError("a lookup on PATH")), \
+                mock.patch.dict(os.environ, {"PATH": "/one"}):
             os.environ.pop("SOFFICE_BIN", None)
-            self.assertEqual(install.known_libreoffice(), str(office))
-            self.assertEqual(install.known_libreoffice(), str(office))
-            self.assertEqual(len(lookups), 1, "the second command reuses the first lookup")
-            env = install.engine_env(self.home)
-            self.assertNotIn("SOFFICE_BIN", env)
-            self.assertEqual(len(lookups), 1, "the engine's environment too")
-            with mock.patch.dict(os.environ, {"PATH": "/two"}):
-                install.known_libreoffice()
-            self.assertEqual(len(lookups), 2, "another PATH: looked up again")
-            install.known_libreoffice()
-            with mock.patch.dict(os.environ, {"THEODORE_TEST_CLOCK_OFFSET": str(install.RENDERER_RECHECK_S + 5)}), \
-                    mock.patch.object(core, "is_loopback_api", return_value=True):
-                install.known_libreoffice()
-            self.assertEqual(len(lookups), 4, "an hour on: looked up again")
-            office.unlink()
-            install.known_libreoffice()
-            self.assertEqual(len(lookups), 5, "the program found is gone: looked up again")
-            install.system_libreoffice()
-            self.assertEqual(len(lookups), 6, "doctor and tools install always look")
+            self.assertNotIn("SOFFICE_BIN", install.engine_env(self.home))
 
 class RunLock(HomeCase):
     """Each engine run held a lock file of its own (engine-run-<pid>-<thread>.lock), created and deleted per run: one more

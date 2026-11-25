@@ -1183,8 +1183,7 @@ def _snapshot() -> dict:
         "offline_until": int(claims.get("exp") or 0),
         "packs": {p: {"status": packs_state.get(p, {}).get("status", "missing"), "version": packs_state.get(p, {}).get("version"),
                       "percent": packs_state.get(p, {}).get("percent", 0)} for p in PACK_ORDER},
-        "renderer": {"libreoffice": install.system_libreoffice() or (str(install.libreoffice_binary()) if install.libreoffice_binary() else None),
-                     "powerpoint": install.powerpoint_registered(),
+        "renderer": {"powerpoint": install.powerpoint_registered(),
                      "pdftoppm": shutil.which("pdftoppm")},
     }
 
@@ -1424,8 +1423,8 @@ def doctor(as_json: bool) -> int:
 
 
 # Theodore's own renderer draws the slides. A feature it cannot draw is drawn by PowerPoint where it is installed
-# (Windows), else by a LibreOffice already on this computer, else pictured by Theodore and marked approximate (the
-# engine's order). Nothing is missing either way: this line never warns, and nothing offers to install anything.
+# (Windows), else pictured by Theodore and marked approximate (the engine's order). Nothing is missing either way: this
+# line never warns, and nothing offers to install anything.
 POWERPOINT_RENDERER = "Microsoft PowerPoint, installed on this computer, draws what Theodore's renderer cannot"
 
 
@@ -1433,9 +1432,6 @@ def _renderer_check(snap: dict) -> tuple[str, str, str]:
     """doctor's renderer line: Theodore's own renderer, and what draws the features it cannot. Never a warning."""
     if snap["renderer"].get("powerpoint"):
         return "ok", "renderer", f"Theodore's own; {POWERPOINT_RENDERER}"
-    office = snap["renderer"]["libreoffice"]
-    if office:
-        return "ok", "renderer", f"Theodore's own; the LibreOffice at {office} draws what it cannot"
     return "ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so"
 
 
@@ -1824,15 +1820,9 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
 
 
 def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) -> int:
-    if name == "git":
-        return _tools_git(if_needed, as_job)
-    if name != "libreoffice":
+    if name != "git":
         raise core.usage(f"unknown tool '{name}'. The tool is: git.")
-    # Theodore installs no LibreOffice (Carl's rule, 25 November 2026): an earlier installer or script that still asks
-    # gets a plain answer and nothing is fetched.
-    return core.emit(Status("OK", "Theodore installs no LibreOffice: its own renderer draws the slides "
-                                  f"({_renderer_check(_snapshot())[2]}).",
-                            "nothing to do; do not install LibreOffice for Theodore.", "Nothing to install."))
+    return _tools_git(if_needed, as_job)
 
 
 def _failure_cause(status_: Status) -> str:
@@ -3349,7 +3339,7 @@ def _remove_old_engine_caches(left: list[str]) -> list[str]:
     return removed
 
 
-# What the engine keeps in the temporary folder (Python's tempfile.gettempdir(), the engine's own rule): LibreOffice's
+# What engines before 2.0 kept in the temporary folder (Python's tempfile.gettempdir(), the engine's own rule): an office
 # profile and its warm copy, the profile's lock file, and the folder of empty lock files. ACCEPT-LOCAL2 D-B.
 _TEMP_PROFILE = ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed")
 _TEMP_PROFILE_LOCK = "pptx-soffice-profile.lock"
@@ -3371,7 +3361,7 @@ def _remove_engine_temp(left: list[str]) -> list[str]:
         folder = base / name
         if folder.is_dir() and mine(folder):
             core.remove_tree(folder)
-            (left.append(f"the LibreOffice profile Theodore's engine used in {folder}") if folder.exists() else removed.append(str(folder)))
+            (left.append(f"the profile Theodore's engine used in {folder}") if folder.exists() else removed.append(str(folder)))
     lock = base / _TEMP_PROFILE_LOCK
     if lock.is_file() and mine(lock):
         with contextlib.suppress(OSError):
@@ -3436,7 +3426,7 @@ def _inside(text: str, root: Path) -> bool:
 def _recorded_is_ours(pid: int, record: Path, root: Path, job_word: str | None = None) -> tuple[bool, str]:
     """Whether the process holding `pid` now is the one Theodore wrote `record` for, with the reason when it is not.
     Both must hold (0.4.32):
-    - it runs from inside Theodore's folder: on Windows its program file (Theodore's Python, Node or LibreOffice), on
+    - it runs from inside Theodore's folder: on Windows its program file (Theodore's Python or Node), on
       the other systems its command line (Theodore's Python and client; for the launcher's job, `job_word`, which its
       command line carries whichever copy of the launcher started it);
     - it started no later than the record's last write. The process a record was written for, or a parent for it
@@ -3496,8 +3486,8 @@ def _theodore_pids() -> dict[int, float | None]:
 
 
 def _processes_in_folder(root: Path) -> list[int]:
-    """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, LibreOffice, Git
-    Bash), whatever started them; never this process or any process above it. Read with WMI. Empty elsewhere."""
+    """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, Git Bash, anything
+    it fetched), whatever started them; never this process or any process above it. Read with WMI. Empty elsewhere."""
     if not core.IS_WINDOWS or not root.exists():
         return []
     ps = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -3750,7 +3740,7 @@ def _uninstall(keep_hosts: bool) -> int:
         edits.append(f"the engine's former caches were removed ({', '.join(old_caches)})")
     temp = _remove_engine_temp(left)
     if temp:
-        edits.append(f"the engine's LibreOffice profile and lock files were removed from the temporary folder ({', '.join(temp)})")
+        edits.append(f"the engine's profile and lock files were removed from the temporary folder ({', '.join(temp)})")
     specimens_left = specimens.sweep(everything=True)
     for folder in specimens_left:
         left.append(f"the specimen folder {folder} (its record is kept in {specimens.registry()}; running uninstall again retries it)")

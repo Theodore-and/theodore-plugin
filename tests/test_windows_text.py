@@ -378,8 +378,7 @@ class ChildText(unittest.TestCase):
 
     def test_the_engine_writes_utf8(self):
         from theodore_client import install
-        with mock.patch.object(install, "system_libreoffice", lambda: True):
-            self.assertEqual("utf-8", install.engine_env(Path(tempfile.mkdtemp()))["PYTHONIOENCODING"])
+        self.assertEqual("utf-8", install.engine_env(Path(tempfile.mkdtemp()))["PYTHONIOENCODING"])
 
     def test_the_self_test_error_names_the_path_as_written(self):
         from theodore_client import install

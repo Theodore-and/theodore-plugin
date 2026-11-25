@@ -676,26 +676,24 @@ class HostTest(unittest.TestCase):
 
 class NoLibreOfficeInstalled(unittest.TestCase):
     """Carl's rule (25 November 2026): Theodore installs no LibreOffice. Its own renderer draws the slides; a feature it
-    cannot draw is drawn by PowerPoint where installed (Windows), else by a LibreOffice already on the computer, else
-    pictured approximately and marked so. Nothing installs, fetches, offers or asks for LibreOffice. In process."""
+    cannot draw is drawn by PowerPoint where installed (Windows), else pictured approximately and marked so. From 0.5.1
+    (engine 2.0 calls none) the client neither looks for one nor names one, and a copy an earlier Theodore fetched is
+    neither used nor kept (service/cleanup.py). In process."""
 
     @contextlib.contextmanager
-    def machine(self, *, office=None, powerpoint=False, windows=True):
+    def machine(self, *, powerpoint=False, windows=True):
         from theodore_client import install
-        with mock.patch.object(install, "IS_WINDOWS", windows), mock.patch.object(install, "system_libreoffice", return_value=office), \
+        with mock.patch.object(install, "IS_WINDOWS", windows), \
                 mock.patch.object(install, "powerpoint_registered", return_value=powerpoint):
             yield install
 
     def test_doctor_names_what_draws_what_theodore_cannot_and_never_warns(self):
         from theodore_client import commands, install, welcome
-        office = r"C:\Program Files\LibreOffice\program\soffice.exe"
-
         def answer(**case):
             """doctor's renderer line, its still-missing parts and its last status, on this machine's answers."""
             with self.machine(**case) as win:
                 snap = {"engine": "1.0.0", "plan": "beta", "runtime_ready": True, "signed_in": True, "packs": {},
-                        "renderer": {"libreoffice": win.system_libreoffice() or (str(win.libreoffice_binary()) if win.libreoffice_binary() else None),
-                                     "powerpoint": win.powerpoint_registered(), "pdftoppm": None}}
+                        "renderer": {"powerpoint": win.powerpoint_registered(), "pdftoppm": None}}
                 check = commands._renderer_check(snap)
                 with mock.patch.object(install, "published_packs", return_value=[]):
                     missing = commands._still_missing(snap)
@@ -707,8 +705,6 @@ class NoLibreOfficeInstalled(unittest.TestCase):
                 mock.patch.object(welcome, "_new_session_needed", return_value=True):
             powerpoint = ("ok", "renderer", "Theodore's own; Microsoft PowerPoint, installed on this computer, draws what Theodore's renderer cannot")
             for case, expected in (({"powerpoint": True}, powerpoint),
-                                   ({"powerpoint": True, "office": office}, powerpoint),          # PowerPoint first
-                                   ({"office": office}, ("ok", "renderer", f"Theodore's own; the LibreOffice at {office} draws what it cannot")),
                                    ({}, ("ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so")),
                                    ({"windows": False}, ("ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so"))):
                 check, missing, verdict = answer(**case)
@@ -719,22 +715,33 @@ class NoLibreOfficeInstalled(unittest.TestCase):
                 self.assertNotIn("tools install libreoffice", verdict.render(), case)
                 self.assertNotIn("LibreOffice", verdict.render(), case)
 
-    def test_tools_install_libreoffice_fetches_nothing_and_says_so(self):
-        # An earlier installer or script that still asks gets a plain answer; no job, no download.
+    def test_tools_install_knows_only_git(self):
+        # `tools install libreoffice` is an unknown tool like any other: no job, no download, no answer naming it.
         from theodore_client import commands, install
         with client_home(), self.machine(), mock.patch.object(install.Job, "spawn", side_effect=AssertionError("nothing to fetch")), \
                 mock.patch.object(install.api, "download", side_effect=AssertionError("nothing to download")):
-            for kwargs in ({"background": True, "as_job": False, "if_needed": True}, {"background": False, "as_job": False},
-                           {"background": False, "as_job": True}):
-                with mock.patch("builtins.print") as shown:
-                    self.assertEqual(commands.tools("libreoffice", **kwargs), 0, kwargs)
-                text = "\n".join(str(c.args[0]) for c in shown.call_args_list)
-                self.assertIn("THEODORE OK: Theodore installs no LibreOffice", text, kwargs)
-                self.assertIn("TELL THE USER: Nothing to install.", text, kwargs)
+            for name in ("libreoffice", "vlc"):
+                with self.assertRaises(core.Status) as raised:
+                    commands.tools(name, False, False)
+                self.assertIn("The tool is: git.", raised.exception.summary, name)
             self.assertFalse((core.home().tools / "libreoffice").exists())
-            with self.assertRaises(core.Status) as raised:
-                commands.tools("vlc", False, False)
-            self.assertIn("The tool is: git.", raised.exception.summary)
+
+    def test_the_engine_is_never_pointed_at_a_libreoffice(self):
+        # Before 0.5.1 a copy an earlier Theodore fetched into tools/libreoffice was handed to the engine (SOFFICE_BIN).
+        from theodore_client import install
+        with client_home():
+            program = core.home().tools / "libreoffice" / "program"
+            program.mkdir(parents=True)
+            (program / "soffice.exe").write_text("")
+            with mock.patch.dict(os.environ, {"SOFFICE_BIN": ""}):
+                os.environ.pop("SOFFICE_BIN")
+                self.assertNotIn("SOFFICE_BIN", install.engine_env(core.home().root))
+        for gone in ("libreoffice_binary", "system_libreoffice", "known_libreoffice", "RENDERER_FILE"):
+            self.assertFalse(hasattr(install, gone), gone)
+        for module in ("install.py", "commands.py", "verbs.py", "welcome.py", "chatbuild.py", "service/tools.py"):
+            text = (CLIENT_DIR / "theodore_client" / module).read_text(encoding="utf-8")
+            self.assertNotIn("LibreOffice", text, module)
+            self.assertNotIn("SOFFICE_BIN", text, module)
 
     def test_no_installer_or_engine_call_fetches_or_waits_for_libreoffice(self):
         from theodore_client import install

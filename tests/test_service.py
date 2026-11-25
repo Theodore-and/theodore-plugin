@@ -528,6 +528,119 @@ class FolderWatch(ServiceCase):
         watches.stop()
 
 
+class Cleanup(unittest.TestCase):
+    """The LibreOffice a Theodore before 0.5.0 fetched into <home>/tools, removed by the 0.5.1 service (the coordinator,
+    25 Nov: engine 2.0 calls none): only there, never through a link, yielding to calls, never in a session's way."""
+
+    def setUp(self):
+        import tempfile
+        from types import SimpleNamespace
+        self.root = Path(tempfile.mkdtemp(prefix="theodore-cleanup-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.home = self.root / "home"
+        self.tools = self.home / "tools"
+        self.tools.mkdir(parents=True)
+        self.outside = self.root / "not Theodore's"
+        (self.outside / "program").mkdir(parents=True)
+        (self.outside / "program" / "soffice").write_bytes(b"someone else's" * 100)
+        self.logged: list[str] = []
+        self.service = SimpleNamespace(home=self.home, log=self.logged.append, router=SimpleNamespace(running=0),
+                                       stopping=threading.Event())
+
+    def fetched(self, name: str = "libreoffice", megabytes: int = 3) -> Path:
+        top = self.tools / name
+        for i in range(3):
+            folder = top / "program" / f"part{i}"
+            folder.mkdir(parents=True)
+            (folder / "lib.bin").write_bytes(b"x" * (megabytes * 1_000_000 // 3))
+        locked = top / "program" / "read-only.txt"
+        locked.write_text("kept read-only")
+        os.chmod(locked, 0o444)
+        return top
+
+    def link(self, path: Path, to: Path) -> None:
+        try:
+            os.symlink(to, path, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"no symbolic link here: {exc}")
+
+    def test_the_copy_an_earlier_theodore_fetched_is_removed_and_the_space_logged(self):
+        from theodore_client.service import cleanup
+        top, partial = self.fetched(), self.fetched("libreoffice.partial", 1)
+        (self.tools / "git" / "bin").mkdir(parents=True)
+        cleanup.run(self.service)
+        self.assertFalse(top.exists())
+        self.assertFalse(partial.exists(), "an interrupted fetch's folder beside it too")
+        self.assertTrue((self.tools / "git" / "bin").is_dir(), "the rest of the tools folder stays")
+        self.assertTrue(any(f"removed {top}" in line and "3 MB freed" in line for line in self.logged), self.logged)
+        self.logged.clear()
+        cleanup.run(self.service)
+        self.assertEqual(self.logged, [], "nothing there: nothing done, nothing said")
+
+    def test_a_link_in_its_place_is_refused_and_what_it_leads_to_kept(self):
+        from theodore_client.service import cleanup
+        self.link(self.tools / "libreoffice", self.outside)
+        cleanup.run(self.service)
+        self.assertTrue((self.tools / "libreoffice").is_symlink(), "the link is left")
+        self.assertTrue((self.outside / "program" / "soffice").is_file(), "and nothing it leads to is touched")
+        self.assertTrue(any("is a link" in line and "left as it is" in line for line in self.logged), self.logged)
+
+    def test_a_link_inside_it_is_removed_as_a_link_and_never_followed(self):
+        from theodore_client.service import cleanup
+        top = self.fetched()
+        self.link(top / "program" / "share", self.outside)
+        cleanup.run(self.service)
+        self.assertFalse(os.path.lexists(top))
+        self.assertTrue((self.outside / "program" / "soffice").is_file(), "the folder the link led to is untouched")
+
+    def test_a_folder_whose_real_path_is_outside_the_tools_folder_is_refused(self):
+        from unittest import mock
+
+        from theodore_client.service import cleanup
+        top = self.fetched()
+        real = os.path.realpath
+
+        def elsewhere(path):
+            return str(self.outside) if str(path).endswith("libreoffice") else real(path)
+        with mock.patch.object(cleanup.os.path, "realpath", side_effect=elsewhere):
+            cleanup.run(self.service)
+        self.assertTrue((top / "program" / "part0" / "lib.bin").is_file(), "nothing removed")
+        self.assertTrue((self.outside / "program" / "soffice").is_file())
+        self.assertTrue(any("leads outside Theodore's tools folder" in line for line in self.logged), self.logged)
+
+    def test_it_yields_to_calls_and_a_failure_never_stops_the_service(self):
+        from unittest import mock
+
+        from theodore_client.service import cleanup
+        top = self.fetched()
+        self.service.router.running = 1             # a call runs: the removal waits
+        began = time.monotonic()
+        thread = cleanup.start(self.service)
+        self.assertLess(time.monotonic() - began, 0.5, "the service's start never waits for it")
+        time.sleep(0.6)
+        self.assertTrue(top.exists(), "nothing removed while a call runs")
+        self.service.router.running = 0
+        thread.join(30)
+        self.assertFalse(top.exists())
+        top = self.fetched()
+        with mock.patch.object(cleanup, "_delete_tree", side_effect=RuntimeError("a disk error")):
+            cleanup.start(self.service).join(30)        # no exception out of it
+        self.assertTrue(any("not removed (RuntimeError: a disk error); the next start tries again" in line
+                            for line in self.logged), self.logged)
+
+
+class CleanupAtStart(ServiceCase):
+    def test_the_service_answers_while_it_removes_the_old_copy(self):
+        top = self.box.home / "tools" / "libreoffice" / "program"
+        top.mkdir(parents=True)
+        (top / "soffice.bin").write_bytes(b"x" * 2_000_000)
+        self.service()
+        client, got = self.connect()
+        self.assertEqual(Collector.done(self.call(client, got, "e", ["echo"]))["exit"], 0)
+        self.assertIn("2 MB freed", self.wait_log(r"cleanup: removed .*MB freed"))
+        self.assertFalse((self.box.home / "tools" / "libreoffice").exists())
+
+
 class Fatal(ServiceCase):
     def test_a_worker_that_cannot_start_falls_back_to_oneshot(self):
         self.env["FAKE_WORKER_FATAL"] = "1"

@@ -1662,7 +1662,7 @@ class StatusDoctorUninstall(ClientCase):
         for folder in folders[:4]:
             self.assertIn(str(folder), first)
 
-    def test_uninstall_removes_the_engines_libreoffice_profile_and_lock_files_from_the_temporary_folder(self):
+    def test_uninstall_removes_the_engines_office_profile_and_lock_files_from_the_temporary_folder(self):
         # ACCEPT-LOCAL2 D-B: pptx-soffice-profile/, its .warm-seed/, its .lock, theodore-pptx-locks/*.lock stayed.
         self.ready()
         temp = Path(self.box.env["TMPDIR"])
@@ -1675,7 +1675,7 @@ class StatusDoctorUninstall(ClientCase):
             (temp / "theodore-pptx-locks" / f"{n}.lock").write_text("")
         (temp / "someone-elses").mkdir()
         first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
-        self.assertIn("LibreOffice profile and lock files were removed", first)
+        self.assertIn("the engine's profile and lock files were removed", first)
         for name in ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed", "pptx-soffice-profile.lock", "theodore-pptx-locks"):
             self.assertFalse((temp / name).exists(), name)
         self.assertTrue((temp / "someone-elses").exists())
@@ -2486,12 +2486,11 @@ class BackgroundResume(ClientCase):
         self.assertTrue(json.loads(self.client("status", "--json").stdout)["engine"], "the engine came with it")
 
     def test_a_libreoffice_download_an_earlier_version_left_is_not_started_again_or_named(self):
-        self.box.env["THEODORE_TEST_NO_SYSTEM_LIBREOFFICE"] = "1"
         self.ready()
         self.dead_job("libreoffice")
         out = self.client("doctor").stdout
         self.assertNotIn("restarted:", out)
-        self.assertNotIn("LibreOffice (slide previews)", out)
+        self.assertNotIn("LibreOffice", out)
         self.assertIn("still missing: nothing", out)
         self.assertFalse([r for r in self.api.requests if "LibreOffice" in r["path"]], "nothing fetched")
 
@@ -2687,16 +2686,15 @@ class AutoUpdate(ClientCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")
 class LibreOfficeNotInstalled(ClientCase):
-    """Carl's rule (25 November 2026): `tools install libreoffice`, still asked by an earlier installer or script, fetches
-    nothing and says so; an unknown tool is a usage error."""
+    """Carl's rule (25 November 2026): `tools install libreoffice` fetches nothing; from 0.5.1 it is an unknown tool like
+    any other (a usage error naming the one tool, git)."""
 
     def test_tools_install_libreoffice_fetches_nothing(self):
         self.ready()
         for args in (("tools", "install", "libreoffice"), ("tools", "install", "libreoffice", "--background", "--if-needed"),
                      ("tools", "install", "libreoffice", "--job")):
-            first, _n, tell = self.assertStatus(self.client(*args), "OK", 0)
-            self.assertIn("Theodore installs no LibreOffice", first, args)
-            self.assertEqual(tell, "TELL THE USER: Nothing to install.", args)
+            first, _n, _tell = self.assertStatus(self.client(*args), "USAGE", 64)
+            self.assertIn("The tool is: git.", first, args)
         self.assertFalse([r for r in self.api.requests if "LibreOffice" in r["path"] or "tools/" in r["path"]], "nothing fetched")
         self.assertFalse((self.box.home / "tools" / "libreoffice").exists())
         self.assertFalse((self.box.home / "state" / "jobs" / "libreoffice.json").exists())

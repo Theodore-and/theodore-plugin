@@ -332,7 +332,7 @@ class Worker:
         threading.Thread(target=self._read_loop, name=f"worker-read-{self.process.pid}", daemon=True).start()
         threading.Thread(target=self._stderr_loop, name=f"worker-err-{self.process.pid}", daemon=True).start()
         # Its end is seen from its process, not only from its output: a child of it (an office it started) may hold
-        # that pipe open after it is gone (K's A3b on rig 1: a LibreOffice crash, the worker gone, its call waiting).
+        # that pipe open after it is gone (K's A3b on rig 1: an office crash, the worker gone, its call waiting).
         threading.Thread(target=self._watch_exit, name=f"worker-exit-{self.process.pid}", daemon=True).start()
 
     def _watch_exit(self) -> None:
