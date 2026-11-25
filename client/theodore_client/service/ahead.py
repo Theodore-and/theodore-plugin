@@ -336,7 +336,7 @@ class Ahead:
                 # Shares by what each worker's build and render threads make of a part (`shares`): every worker's
                 # last picture as early as the split allows, so no designer waits for the fullest worker's.
                 sizes = shares(len(free), [(getattr(w, "build_threads", None) or 1, getattr(w, "render_threads", None) or 1)
-                                           for w in taken], MOST_IN_AHEAD)
+                                           for w in taken], MOST_IN_AHEAD, os.cpu_count() or 2)
                 start = 0
                 for worker, size in zip(taken, sizes):
                     chunk, start = free[start:start + size], start + size
@@ -440,11 +440,19 @@ def last_picture(parts: int, build_threads: int, render_threads: int) -> float:
     return parts * (PART_SERIAL + PART_BUILD / max(1, build_threads)) + rounds * PICTURE_ROUND
 
 
-def shares(parts: int, threads: list[tuple[int, int]], most: int) -> list[int]:
+# With this many processors or fewer the workers get equal shares whatever their threads (lane S2's S2-28, rig 7, 4
+# processors on 2 cores, one boot): its 8 parts as 6 and 2 gave round 1 at 0.304 to 0.387 s on a fresh store, as 4 and
+# 4 at 0.188 to 0.275 s. A worker's threads share the machine's few cores with the other worker's, so the fuller
+# worker's builds and pictures hold the other's back and its own threads gain it nothing.
+EQUAL_SHARES_PROCESSORS = 4
+
+
+def shares(parts: int, threads: list[tuple[int, int]], most: int, processors: int = 8) -> list[int]:
     """`parts` split over workers, given each one's (build threads, render threads), so that the latest worker's last
     picture comes as early as possible: each next part goes to the worker that would be done with it soonest, the
-    earlier worker on a tie. Each gets at least one part when there are as many parts as workers, at most `most`
-    (what the cap leaves waits for the next ahead).
+    earlier worker on a tie. On a machine of EQUAL_SHARES_PROCESSORS `processors` or fewer, equal shares instead. Each
+    gets at least one part when there are as many parts as workers, at most `most` (what the cap leaves waits for the
+    next ahead).
 
     Shares in proportion to the build threads alone (S2-23) gave the always-warm worker 9 of rig 10's 15 parts (4
     threads against 1, 1, 1) and 6 of rig 7's 8: its build ended at 1.33 s against the others' 0.80 to 0.88, since
@@ -459,7 +467,10 @@ def shares(parts: int, threads: list[tuple[int, int]], most: int) -> list[int]:
         open_ = [k for k in range(n) if sizes[k] < most]
         if not open_:
             break
-        k = min(open_, key=lambda k: (last_picture(sizes[k] + 1, *threads[k]), k))
+        if processors <= EQUAL_SHARES_PROCESSORS:
+            k = min(open_, key=lambda k: (sizes[k], k))
+        else:
+            k = min(open_, key=lambda k: (last_picture(sizes[k] + 1, *threads[k]), k))
         sizes[k] += 1
         left -= 1
     return sizes
