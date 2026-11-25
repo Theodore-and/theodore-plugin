@@ -1341,8 +1341,31 @@ class Job:
     def read(self) -> dict:
         return read_json(self.path)
 
+    # On Windows a record another process holds (its replace, an antivirus scan of the new file) cannot be read for a
+    # moment, sometimes longer than read_json's 2 s on a loaded machine: read_json then gives {}, which read as "the
+    # job ended", and the setup's wait ended early and started a second job (release/0.5.0's Windows runtime target,
+    # 7 suites side by side, 25 Nov). A record that is there but held is read again; held this long, it is taken for
+    # a job still running (an ended job's record is readable).
+    UNREADABLE_WAIT_S = 30.0
+
+    def _state(self) -> dict | None:
+        """The record; {} when there is none or it is not a JSON object; None while it is there but held (Windows)."""
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except PermissionError:
+            return None if IS_WINDOWS else {}
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
     def alive(self) -> bool:
-        state = self.read()
+        deadline = time.monotonic() + self.UNREADABLE_WAIT_S
+        state = self._state()
+        while state is None:
+            if time.monotonic() >= deadline:
+                return True
+            time.sleep(0.1)
+            state = self._state()
         return bool(state) and not state.get("done") and not state.get("failed") and pid_alive(int(state.get("pid") or 0))
 
     def update(self, **fields) -> None:
