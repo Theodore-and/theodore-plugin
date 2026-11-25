@@ -64,6 +64,10 @@ RECYCLE_CALLS = 2000
 # a warm worker made every cold round's slowest 1.07-1.58 s against 0.13-0.21 s taking any idle one, since a new
 # worker's first calls are as fast as later ones). A worker silent past WARM_MAX_S counts as warm.
 WARM_MAX_S = 60.0
+# The spare a long call starts for the short calls to come is held back while that call's worker is in its warm-up (a
+# cold start: Pool._spare). On a machine with this many processors it starts once that call has answered; with fewer
+# (rig 9's 2) only when a call needs a worker.
+SPARE_AFTER_COLD_CORES = 4
 PRIME_WAIT_S = 20.0               # a session's folder is primed once a worker is ready, within this (Pool.prime_folder)
 EXIT_GRACE_MS = 30000
 STATS_AFTER_S = 5.0
@@ -281,6 +285,7 @@ class Worker:
         self.rank: int | None = None                # the rank of the call it runs (RANKS)
         self.build_threads: int | None = None       # THEODORE_BUILD_THREADS for its Node builds (lane F), when set
         self.render_threads: int | None = None      # THEODORE_RENDER_THREADS for its drawing pool (lane R), when set
+        self.spare_due: tuple | None = None         # the spare its long call would have started, held back (Pool._spare)
         self.started_perf = time.perf_counter()
         self.retiring = False
         self.calls = 0
@@ -468,6 +473,8 @@ class Worker:
         self.warmed.set()
         with contextlib.suppress(Exception):
             self.pool.service.log(f"worker {self.spec.version} warm: its warm-up ended {how} (pid {self.process.pid})")
+        with contextlib.suppress(Exception):
+            self.pool.worker_warmed(self)
 
     # --- calls ----------------------------------------------------------------------------------------------------------
 
@@ -1081,8 +1088,7 @@ class Pool:
                             self.affinity[key] = chosen
                         if rank == RANKS["long"] and len(idle) == 1 and len(live) < most:
                             # the last warm worker went to a long call: another starts for the short ones to come
-                            threading.Thread(target=self._spawn, args=(spec, group, env, most), name="pool-spare",
-                                             daemon=True).start()
+                            self._spare(chosen, (spec, group, env, most))
                         return chosen
                     if idle and ahead < len(idle) and allowed:
                         self.cond.wait(0.02)             # a long call waiting a moment for the warm worker
@@ -1092,6 +1098,11 @@ class Pool:
                     # With workers there, one comes free before a new one would be ready, or the call has waited
                     # that long already: only then does it start one (COLD_START_S).
                     wait_more = self.cold_start_s(spec.version) - (time.monotonic() - waited_from) if live else 0.0
+                    held_back = [w for w in live if getattr(w, "spare_due", None) is not None]
+                    if grow and held_back:      # the spare a cold start held back: a call needs it now, so it starts
+                        wait_more = 0.0
+                        for worker in held_back:
+                            worker.spare_due = None
                     if grow and wait_more <= 0:
                         spawned = True
                         self.cond.release()
@@ -1118,11 +1129,44 @@ class Pool:
                 waiting.remove(ticket)
                 self.cond.notify_all()
 
+    def _spare(self, taken: Worker, how: tuple) -> None:
+        """The worker a long call leaves for the short calls to come, started beside it (called with the pool's lock
+        held, the call's worker chosen). Not beside a cold start: while `taken` is still in its warm-up (a new
+        user's first command, the service just started), a second worker's start, its Nodes and its own warm-up would
+        take the machine from that call (rig 9, 2 processors, 25 Nov: the first `start --from` 18 to 29 s with the
+        spare and both warm-ups beside it, 0.2 to 3 s the same command 30 s later). Held back, it starts when the
+        worker says `warm` with the long call still running (`worker_warmed`), at once when a call waits for a worker
+        (`_acquire`), or when that call has answered (`_release`: the pool's second worker, as before, where the
+        machine has SPARE_AFTER_COLD_CORES processors; on a smaller one only a call that needs it starts it)."""
+        if taken.warmed.is_set():
+            threading.Thread(target=self._spawn, args=how, name="pool-spare", daemon=True).start()
+        else:
+            taken.spare_due = how
+
+    def worker_warmed(self, worker: Worker) -> None:
+        """A worker's warm-up ended: the spare held back while it warmed starts now, if its long call still runs, no
+        other worker is idle and the pool has room."""
+        with self.cond:
+            how, worker.spare_due = worker.spare_due, None
+            if how is None or not worker.busy or self.closed:
+                return
+            live = self._live(worker.group)
+            if len(live) >= how[3] or any(not w.busy for w in live):
+                return
+        threading.Thread(target=self._spawn, args=how, name="pool-spare", daemon=True).start()
+
     def _release(self, worker: Worker) -> None:
         with self.cond:
             worker.busy = False
             worker.rank = None
+            how, worker.spare_due = getattr(worker, "spare_due", None), None
+            # The spare a cold start held back: once that call has answered it starts where the machine has the
+            # processors for a second worker's start beside the first one's warm-up, and the pool has only the one.
+            spare = how is not None and not self.closed and (os.cpu_count() or 2) >= SPARE_AFTER_COLD_CORES \
+                and len(self._live(worker.group)) == 1
             self.cond.notify_all()
+        if spare:
+            threading.Thread(target=self._spawn, args=how, name="pool-spare", daemon=True).start()
         for hook in list(self.on_release):
             with contextlib.suppress(Exception):
                 hook(worker.group)
