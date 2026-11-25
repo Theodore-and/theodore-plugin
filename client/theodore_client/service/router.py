@@ -35,7 +35,9 @@ COUNTERS = ("spawned", "deck_hashes", "deckjs_full_parses", "packages_written", 
             "http_requests", "tls_handshakes")
 
 
-TIMING_LINES = ("timings: ",)       # the engine's own, under THEODORE_TIMINGS=1 (lanes F and G: one line a verb)
+# The engine's own lines under THEODORE_TIMINGS=1, kept for the call's timing line: one a verb (lanes F and G), and one
+# a full garbage collection of 20 ms or more (lane F's 2a53c15e, for lane S2: whether collections land inside aheads).
+TIMING_LINES = ("timings: ", "gc: ")
 
 
 ORPHAN_GRACE_S = float(os.environ.get("THEODORE_ORPHAN_GRACE_S") or 10.0)   # a dead session's call, cancelled, then this
@@ -117,7 +119,7 @@ class Call:
     def out(self, text: str, stream: str = "stdout") -> None:
         if not text:
             return
-        if stream == "stderr" and ("timings" in text) and len(self.engine_timings) < 64:
+        if stream == "stderr" and any(mark in text for mark in TIMING_LINES) and len(self.engine_timings) < 64:
             self.engine_timings.extend(line for line in text.splitlines() if line.startswith(TIMING_LINES))
         if stream == "stdout" and self.stdout_kept_size < KEEP_STDOUT:
             self.stdout_kept.append(text)
