@@ -33,6 +33,11 @@ IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 IMAGE_BYTES_MAX = 3 << 20
 IMAGES_BYTES_MAX = 12 << 20
 PICTURE_VERBS = ("apply", "render")
+
+
+def shows_pictures(args: list[str]) -> bool:
+    """A call whose answer is about pictures: apply and render, and `assets show ... --render` (the icon previews)."""
+    return bool(args) and (args[0] in PICTURE_VERBS or (args[0] == "assets" and "show" in args[1:3] and "--render" in args))
 NAMES_WAIT_S = 1.2
 # The MCP `theodore` tool (an agent's call) runs these; a shell's command line (role front) runs every command but
 # those that set up, remove or replace this installation, which the front runs in a client of its own (lane C).
@@ -205,7 +210,7 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
             return _status(service, call, refusal), pending
     if args[0] in PICTURE_VERBS and not pending:
         pending = pending_of("".join(call.stdout_kept))         # a 2.0 answer's pictures still being drawn
-    if call.images and args[0] in PICTURE_VERBS and not call.worker_images and code == 0:
+    if call.images and shows_pictures(args) and not call.worker_images and code == 0:
         attach_pictures(call, "".join(call.stdout_kept))
     if args[0] == "finish":
         threading.Thread(target=_after_finish, name="after-finish", daemon=True).start()
@@ -325,6 +330,14 @@ def pictures_of(argv: list[str], output: str) -> list[str]:
         chosen = strings(payload.get("grid") or payload.get("grid_files") or ([payload["grid_path"]] if payload.get("grid_path") else []))
     elif verb == "render" and "--zoom" in argv:
         chosen = strings(payload.get("zoom") or payload.get("zoom_images"))
+    elif verb == "assets":
+        # `assets show icons <id> ... --render`: the contact sheet of several icons, else each icon's preview. The
+        # agent looks at them here; the engine's cache folder is not one its own file tools may reach (a desktop host
+        # keeps an app's AppData apart: run 2, 26 Nov: "File does not exist" for a path the engine had just written).
+        groups = payload.get("by_id") if isinstance(payload.get("by_id"), dict) else {"": payload}
+        previews = [g["icon"]["png_path"] for g in groups.values()
+                    if isinstance(g, dict) and isinstance(g.get("icon"), dict) and isinstance(g["icon"].get("png_path"), str)]
+        chosen = [payload["sheet"]] if isinstance(payload.get("sheet"), str) else previews
     elif isinstance(payload.get("pictures"), list):
         chosen = [row["path"] for row in payload["pictures"] if isinstance(row, dict) and isinstance(row.get("path"), str)]
     elif verb == "apply":
