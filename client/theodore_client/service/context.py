@@ -7,6 +7,12 @@ command learns refusals into process globals (core.mark_refused). One service an
   CLAUDE_CODE_SESSION_ID, CLAUDE_PID, CLAUDE_PLUGIN_ROOT, CODEX_THREAD_ID, THEODORE_*), over the service's own environment, from
   which the host markers are removed at start. A value of None in the overlay hides a variable for the call.
 - `entered(ctx)` sets the call for this thread. Its refusal facts are core's per-thread scope (core.begin_call).
+- The calling client's proxy settings (the call's THEODORE_CALLER_PROXY, a name C1's allow-list takes as it stands)
+  are part of what the call's thread reads, and of nothing an engine is given: the service was started by whichever
+  command came first and kept that one's environment, and a proxy named there is that caller's alone (Claude Code's
+  sandbox gives each session its own, which ends with the session). urllib reads the proxy variables from
+  `os.environ` for each request, so a call's network work goes by its caller's settings; work outside any call goes
+  by the last caller's, not by the starter's for ever.
 """
 
 from __future__ import annotations
@@ -23,18 +29,24 @@ ALLOWED = re.compile(r"^(CLAUDECODE|CLAUDE_CODE_SESSION_ID|CLAUDE_PID|CLAUDE_PLU
 # Never taken from a call: they name the service's own home and its service, which one call cannot change.
 FIXED = ("THEODORE_HOME", "THEODORE_API_BASE", "THEODORE_CREDENTIAL_STORE", "THEODORE_WORK_DIR", "THEODORE_RESIDENT")
 HOST_MARKERS = ("CLAUDECODE", "CLAUDE_PID", "THEODORE_HOST")
+PROXY_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")  # hot.py's
+CALLER_PROXY = "THEODORE_CALLER_PROXY"      # hot.py's: the caller's proxy settings, a JSON object, in the call's env
 HOST_MARKER_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_")
 KEPT = ("CODEX_HOME",)             # where Codex keeps its configuration: the user's, whichever session asks
 
 
 class CallContext:
-    __slots__ = ("session", "host", "env", "cwd", "call_id", "tool", "progress", "cancelled", "call")
+    __slots__ = ("session", "host", "env", "view", "cwd", "call_id", "tool", "progress", "cancelled", "call")
 
     def __init__(self, *, session: str = "", host: str = "", env: dict | None = None, cwd: str | None = None,
-                 call_id: str = "", tool: str = "", progress=None, cancelled=None, call=None):
+                 call_id: str = "", tool: str = "", progress=None, cancelled=None, call=None, proxy: dict | None = None):
         self.session = session
         self.host = host
-        self.env = env if env is not None else {}
+        self.env = env if env is not None else {}           # C1's overlay: also what the call's engine is given
+        # What this thread's os.environ reads first: the overlay and the caller's proxy settings, or the last caller's
+        # for a call that brought none (a client from before 0.5.1, a timer's work, the service's own call).
+        layer = proxy or _OUTSIDE
+        self.view = {**layer, **self.env} if layer else self.env
         self.cwd = cwd
         self.call_id = call_id
         self.tool = tool
@@ -57,6 +69,38 @@ def entered(ctx: CallContext):
         _LOCAL.ctx = before
 
 
+_OUTSIDE: dict = {}         # the last caller's proxy settings: what a thread answering no call reads first
+
+
+def proxy_layer(sent: str | None) -> dict:
+    """A call's proxy settings (its THEODORE_CALLER_PROXY) as a layer over the environment: each proxy variable the
+    caller has, and None (hidden) for each it has not, so nothing of the service's own shows through. {} for a caller
+    that sent none (a client from before 0.5.1) or something unreadable: it reads the last caller's, or the service's.
+    Credentials in a proxy's address go to the scrubber before anything can be printed or logged, and the settings are
+    remembered for work outside any call."""
+    global _OUTSIDE
+    if not isinstance(sent, str):
+        return {}
+    try:
+        import json
+        proxy = json.loads(sent)
+    except ValueError:
+        return {}
+    if not isinstance(proxy, dict):
+        return {}
+    layer: dict = {}
+    for name in PROXY_NAMES:
+        value = proxy.get(name)
+        layer[name] = value if isinstance(value, str) and value else None
+        if layer[name] and "@" in layer[name]:
+            from .. import core
+            userinfo = layer[name].rpartition("@")[0].rpartition("//")[2]
+            core.register_secret(userinfo)
+            core.register_secret(userinfo.partition(":")[2])
+    _OUTSIDE = layer
+    return layer
+
+
 def overlay(env: dict | None) -> dict:
     """A call's environment, reduced to the allow-list (values as strings; "" hides the variable for the call)."""
     out: dict = {}
@@ -75,7 +119,9 @@ class _Environ(collections.abc.MutableMapping):
     @staticmethod
     def _overlay():
         ctx = getattr(_LOCAL, "ctx", None)
-        return ctx.env if ctx is not None and ctx.env else None
+        if ctx is None:
+            return _OUTSIDE or None
+        return ctx.view or None
 
     def __getitem__(self, key):
         layer = self._overlay()

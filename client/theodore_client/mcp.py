@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 
-from . import __version__, chatbuild, commands, core
+from . import __version__, chatbuild, commands, core, hot
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 GUIDE_MAX_RESULT_CHARS = 400_000
@@ -318,6 +318,7 @@ class Relay:
         from .service import context
         env = {k: v for k, v in os.environ.items() if context.ALLOWED.match(k) and k not in context.FIXED}
         env.setdefault("THEODORE_HOST", core.host_name())
+        env[hot.CALLER_PROXY] = hot.proxy_settings()    # the tool server's own proxy settings, as the host started it
         return env
 
     def host(self) -> str:

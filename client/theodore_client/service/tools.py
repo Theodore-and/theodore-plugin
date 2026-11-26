@@ -56,7 +56,8 @@ def run(service, call) -> tuple[int, list]:
     if call.client_role == "relay" or service.sessions.get(session) is not None:
         env["THEODORE_TOOLS"] = "1"
     ctx = context.CallContext(session=call.session, host=call.host, env=env, cwd=call.cwd, call_id=call.id,
-                              tool=call.tool, progress=call.set_phase, cancelled=call.cancelled, call=call)
+                              tool=call.tool, progress=call.set_phase, cancelled=call.cancelled, call=call,
+                              proxy=context.proxy_layer(getattr(call, "proxy", None)))
     core.begin_call()                   # this thread learns refusals afresh (core.scope_refusals_per_thread)
     with context.entered(ctx):
         handler = HANDLERS[call.tool]

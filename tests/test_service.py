@@ -2326,6 +2326,105 @@ class ChatWarm(ServiceCase):
         self.assertFalse((self.box.home / "state" / "chat" / "state" / "entitlement.json").exists(), "and goes with it")
 
 
+class CallersProxy(ServiceCase):
+    """One home has one service, and it starts with the whole environment of whichever command came first. A proxy
+    named there is that caller's alone: Claude Code's sandbox gives each session its own, which ends with the session,
+    and a terminal whose profile exports one sits beside an app that has none. So each call's network work uses the
+    calling client's proxy settings, sent in the call's env as THEODORE_CALLER_PROXY (a name C1's allow-list takes as
+    it stands) and kept from every engine: never the starter's, never another caller's."""
+
+    NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")
+    BODY = "ENTRY BODY THROUGH THE CALLER'S OWN NETWORK"
+
+    def setUp(self):
+        super().setUp()
+        self.api.guides["deck-design"][""] = f"# Deck design\n\n{self.BODY}\n"
+        self.env.update({name: "" for name in self.NAMES})
+
+    def guide(self, **proxy):
+        """`theodore guide deck-design` from a client whose environment names this proxy (none: no proxy at all)."""
+        return subprocess.run([sys.executable, "-I", str(CLIENT_DIR), "guide", "deck-design"], env={**self.env, **proxy},
+                              cwd=str(self.box.tmp), capture_output=True, text=True, timeout=90)
+
+    def test_a_caller_with_no_proxy_is_not_sent_through_the_starters_dead_one(self):
+        gone = socket.socket()
+        gone.bind(("127.0.0.1", 0))
+        dead = f"http://127.0.0.1:{gone.getsockname()[1]}"
+        gone.close()                                    # the starter's proxy: it ended with its session
+        self.record = start_service({**self.env, "HTTP_PROXY": dead, "http_proxy": dead}, self.box.home)
+        for front in ("the client's own front (the folder's first command)", "the hot path"):
+            with self.subTest(front):
+                result = self.guide()
+                self.assertEqual(result.returncode, 0, result.stdout[-1500:] + result.stderr[-1500:])
+                self.assertIn(self.BODY, result.stdout)
+        self.assertTrue(alive(self.record["pid"]))
+
+    def test_a_callers_own_proxy_carries_its_call_and_no_other_callers(self):
+        from test_client import _start_proxy
+        proxy, url, seen = _start_proxy()
+        self.addCleanup(proxy.shutdown)
+        own = url.replace("http://", "http://someone:hunter2-not-for-any-log@")
+        self.service()                                  # started by a command with no proxy
+        counts = []
+        for front in ("the client's own front (the folder's first command)", "the hot path"):
+            with self.subTest(front):
+                result = self.guide(HTTP_PROXY=own, http_proxy=own)
+                self.assertEqual(result.returncode, 0, result.stdout[-1500:] + result.stderr[-1500:])
+                self.assertIn(self.BODY, result.stdout)
+                self.assertTrue(any(self.api.base in line for line in seen[sum(counts):]),
+                                f"the service's requests for this call went past the caller's proxy: {seen}")
+                counts.append(len(seen) - sum(counts))
+                result = self.guide()                   # another caller, with no proxy: not through the first one's
+                self.assertEqual(result.returncode, 0, result.stdout[-1500:] + result.stderr[-1500:])
+                self.assertEqual(len(seen), sum(counts), "a caller with no proxy was sent through another caller's")
+        # The settings are the service's own for the call: the engine's environment for it holds neither them nor
+        # the variable that carried them, and its answer names no credential.
+        engine = subprocess.run([sys.executable, "-I", str(CLIENT_DIR), "pptx", "echo", "x"],
+                                env={**self.env, "HTTP_PROXY": own, "http_proxy": own}, cwd=str(self.box.tmp),
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(engine.returncode, 0, engine.stdout[-1500:] + engine.stderr[-1500:])
+        given = json.loads(engine.stdout.splitlines()[0])["env"]
+        self.assertIn("THEODORE_HOST", given)
+        self.assertEqual([name for name in given if "PROXY" in name.upper()], [])
+        self.assertNotIn("hunter2-not-for-any-log", engine.stdout + engine.stderr)
+        logs = "".join(path.read_text(errors="replace") for path in (self.box.home / "logs").rglob("*") if path.is_file())
+        self.assertTrue(logs)
+        self.assertNotIn("hunter2-not-for-any-log", logs, "a proxy's credentials are in no log")
+
+    def test_the_settings_a_call_brings_are_a_layer_for_its_thread_alone(self):
+        from theodore_client import hot
+        from theodore_client.service import context
+        self.assertEqual((hot.CALLER_PROXY, hot.PROXY_NAMES), (context.CALLER_PROXY, context.PROXY_NAMES))
+        self.assertTrue(context.ALLOWED.match(hot.CALLER_PROXY), "C1's allow-list takes the name as it stands")
+        from unittest import mock
+        with mock.patch.dict(os.environ, {**{name: "" for name in self.NAMES}, "HTTPS_PROXY": "http://u:secret-word@p:8"}):
+            sent = hot.proxy_settings()
+        self.assertEqual(json.loads(sent), {"HTTPS_PROXY": "http://u:secret-word@p:8"})
+        with mock.patch.dict(os.environ, {name: "" for name in self.NAMES}):
+            self.assertEqual(hot.proxy_settings(), "{}", "a caller with no proxy says so: two characters")
+        with mock.patch.object(context, "_OUTSIDE", {}):
+            layer = context.proxy_layer(sent)
+            self.assertEqual(layer, {**{name: None for name in self.NAMES}, "HTTPS_PROXY": "http://u:secret-word@p:8"})
+            self.assertEqual(context._OUTSIDE, layer, "work outside any call goes by the last caller's")     # noqa: SLF001
+            from theodore_client import core
+            self.assertEqual(core.scrub_secrets("via http://u:secret-word@p:8"), "via http://[redacted]@p:8")
+            base = {"HTTPS_PROXY": "http://the-starters:1", "http_proxy": "http://the-starters:2", "PATH": "/bin"}
+            environ = context._Environ(base)                                                                  # noqa: SLF001
+            ctx = context.CallContext(env={"THEODORE_STDIO": "shared"}, proxy=layer)
+            self.assertEqual(ctx.env, {"THEODORE_STDIO": "shared"}, "what an engine is given holds no proxy setting")
+            with context.entered(ctx):
+                self.assertEqual((environ.get("HTTPS_PROXY"), environ.get("http_proxy"), environ["PATH"]),
+                                 ("http://u:secret-word@p:8", None, "/bin"))
+                self.assertNotIn("http_proxy", dict(environ))
+            none = context.CallContext(env={}, proxy=context.proxy_layer("{}"))
+            with context.entered(none):
+                self.assertEqual([name for name in dict(environ) if name.lower().endswith("_proxy")], [],
+                                 "a caller with no proxy sees none of the service's")
+            for unreadable in (None, "", "not json", "[1]", 7):
+                self.assertEqual(context.proxy_layer(unreadable), {}, repr(unreadable))
+            self.assertEqual(context._OUTSIDE, {name: None for name in self.NAMES})                           # noqa: SLF001
+
+
 class ShellTexts(ServiceCase):
     def test_skill_and_guide_through_the_service(self):
         self.api.guides["deck-design"][""] = "# Deck design\n\nENTRY BODY FOR THE SHELL\n"
