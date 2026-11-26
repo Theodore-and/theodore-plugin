@@ -492,15 +492,19 @@ class Specimen(McpCase):
         # a list of one is the list form
         self.assertEqual([b["type"] for b in server.call("specimen", file=[names[0]])["content"]], ["text", "image"])
         # more than six, or none: refused, naming the limit, nothing fetched
-        before = len(self.api.requests)
+        # the session's own opening request for the index (service.texts.session_open, a background thread that can land
+        # at any moment of the test) is not a fetch of the call: only sheets and sections count
+        def fetched() -> int:
+            return sum(1 for items in self.api.batches for item in items if item["type"] != "index")
+        before = fetched()
         for bad in (names + ["s6.jpg"], []):
             text = server.call("specimen", file=bad)["content"][0]["text"]
             self.assertTrue(text.startswith("THEODORE USAGE: "), text)
             self.assertIn("1 to 6 files", text)
-        self.assertEqual(len(self.api.requests), before)
+        self.assertEqual(fetched(), before)
         # one bad name in a list: refused before any fetch
         self.assertTrue(server.call("specimen", file=[names[0], "../x"])["content"][0]["text"].startswith("THEODORE USAGE: "))
-        self.assertEqual(len(self.api.requests), before)
+        self.assertEqual(fetched(), before)
 
     def test_refusals_are_short_texts(self):
         self.sign_in()
