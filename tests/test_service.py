@@ -1617,6 +1617,31 @@ class BuildAhead(ServiceCase):
             self.assertEqual({answer["pid"]}, built_on, f"{name}: applied on the worker that built its ahead")
         self.assertIn("on the worker that built their ahead", (self.box.home / "logs" / "service.log").read_text())
 
+    def test_applies_that_wait_for_their_ahead_go_to_its_worker_together_when_it_ends(self):
+        # Lane S2's S2-31 on rig 7: the designers applied 30 to 80 ms before their 4-part ahead ended. They waited for
+        # it, then the first went alone to the ahead's worker and the rest to another worker. They now go together,
+        # to the worker that holds what the ahead built.
+        self.env["FAKE_AHEAD_S"] = "1.2"          # two workers (setUp): one ahead of the three, one worker idle
+        self.service()
+        lead = self.prepared(3)
+        names = ["s01", "s02", "s03"]
+        for name in names:
+            self.save(lead, name, f"slide {name}, saved\n")
+        self.assertTrue(all(self.wait_for(("ahead-start", name)) for name in names), self.events())
+        self.assertNotIn(("ahead-built", "s01"), self.events(), "the ahead is still running when they apply")
+        frames_ = self.burst(lead, names, hold="0")
+        rows = [json.loads(line) for line in self.aheads_file.read_text().splitlines()]
+        built_on = {row["pid"] for row in rows if row["event"] == "ahead-built"}
+        self.assertEqual(len(built_on), 1, rows)
+        for name, got in frames_.items():
+            self.assertEqual(Collector.done(got)["exit"], 0, got)
+            answer = json.loads(Collector.stdout(got).splitlines()[0])
+            self.assertEqual({answer["pid"]}, built_on, f"{name}: applied on the worker that built its ahead")
+            self.assertEqual(answer.get("batch"), 3, f"{name}: in one build with the others that waited: {answer}")
+        self.assertEqual([e for e in self.events() if e[0] == "ahead-cancelled"], [])
+        log = self.wait_log(r"parts: 3 of a deck in 1 build\(s\) \(3\) on the worker that built their ahead")
+        self.assertRegex(log, r"parts: 3 of a deck in 1 build\(s\) \(3\) on the worker that built their ahead")
+
     def test_a_designers_apply_never_waits_behind_another_parts_ahead(self):
         # Aheads take every idle worker but one (lane S2b's S2-18: the always-warm worker too), so the apply of a part
         # with no ahead of its own runs at once, and the ahead running goes on.
@@ -1695,6 +1720,43 @@ class GatheringUnit(unittest.TestCase):
         for thread in threads:
             thread.join(10)
         return members
+
+    def test_applies_that_waited_for_one_ahead_come_to_the_gathering_as_a_group(self):
+        # Lane S2's S2-31 on rig 7 (2 cores): four designers' applies waited 56 to 83 ms for their build-ahead, each
+        # counted off its way to the gathering meanwhile. When it ended, the first to wake found nobody coming and
+        # ran alone on the ahead's worker; the other three found that worker busy and went to another, which drew
+        # their pictures again (500 ms). The ahead now counts its waiting applies on their way again as it ends
+        # (Gatherer.expect), and each hands that count to the gathering with its apply.
+        from types import SimpleNamespace
+
+        def come(gatherer, lead, names, counted):
+            alone, threads = [], []
+            gatherer._alone = lambda call, *_a, **_k: alone.append(call.name) or (0, [])     # noqa: SLF001
+            for name in names:
+                call = SimpleNamespace(cwd="/decks", cancelled=threading.Event(), timing={}, env={}, stdin=None, name=name,
+                                       out=lambda *_a, **_k: None, count=lambda *_a, **_k: None)
+                shape = ("9.9", lead, ("apply", "--json"), ())
+                thread = threading.Thread(target=gatherer.run, args=(call, "9.9", ["apply", f"{lead}/parts/{name}"], {},
+                                                                    (shape, f"{lead}/parts/{name}"), lead if counted else None))
+                thread.start()
+                threads.append(thread)
+                time.sleep(0.005)
+            for thread in threads:
+                thread.join(10)
+            return alone
+        logged: list = []
+        gatherer, lead, sent = self.gatherer(logged)
+        gatherer.prepared(lead, at_once=True, count=8)                 # eight parts announced: these three are not all
+        self.assertTrue(gatherer.expect(["apply", f"{lead}/parts/s05"], "/decks", 3))
+        self.assertEqual(gatherer.on_way, {lead: 3})
+        self.assertEqual(come(gatherer, lead, ("s05", "s06", "s07"), counted=True), [], "none ran alone")
+        self.assertEqual(sorted(os.path.basename(name) for _t, names in sent for name in names), ["s05", "s06", "s07"])
+        self.assertEqual(len({round(t, 2) for t, _names in sent}), 1, f"one cut for the three: {sent}")
+        self.assertEqual(gatherer.on_way, {})
+        # A deck whose parts do not come at once, or a count of none, is not counted.
+        self.assertFalse(gatherer.expect(["apply", "/elsewhere/deck/parts/s01"], "/decks", 3))
+        self.assertFalse(gatherer.expect(["apply", f"{lead}/parts/s05"], "/decks", 0))
+        self.assertEqual(gatherer.on_way, {})
 
     def test_a_part_still_on_its_way_when_the_window_closes_is_waited_for(self):
         # Windows, 26 Nov (plugin 017e9b0): a burst of three went out as two parts, then one a second later. A part

@@ -168,8 +168,11 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
         service.pool.end_warm_up(version, f"its designers' first call (pptx {' '.join(args[:2])})")
     if args[0] == "apply":                  # a part's own build-ahead: dropped, waited for or cancelled (ahead.py);
         waiting = time.perf_counter()       # waiting, it holds no ready part back
-        service.ahead.before_apply(args, call.cwd, on_wait=not_coming)
+        again = service.ahead.before_apply(args, call.cwd, on_wait=not_coming)
         call.ahead_wait_ms = int((time.perf_counter() - waiting) * 1000)
+        if again and coming is not None:    # its ahead ended and counted its waiting applies on their way again
+            del here[:]
+            call.arrived = False
     wanted = service.parts.wants(version, args, call)
     if wanted is not None:                  # a Studio part arriving with the others: one build for several (parts.py)
         still_coming = coming if coming is not None and not here else None
