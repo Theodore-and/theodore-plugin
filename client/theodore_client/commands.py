@@ -2853,7 +2853,7 @@ def resume_background() -> list[str]:
     try:
         for name, argv, present in (
                 ("git", ["tools", "install", "git", "--if-needed", "--job"],
-                 lambda: install.theodore_git_bash() or not needs_git_bash())):
+                 lambda: install.theodore_git_bash() or not needs_git_bash()),):     # the comma: a tuple of rows
             job = Job(name)
             state = job.read()
             if not state or state.get("done") or job.alive():
