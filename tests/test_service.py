@@ -1817,7 +1817,10 @@ class GatheringUnit(unittest.TestCase):
         self.assertEqual(gatherer.on_way, {lead: 3})
         self.assertEqual(come(gatherer, lead, ("s05", "s06", "s07"), counted=True), [], "none ran alone")
         self.assertEqual(sorted(os.path.basename(name) for _t, names in sent for name in names), ["s05", "s06", "s07"])
-        self.assertEqual(len({round(t, 2) for t, _names in sent}), 1, f"one cut for the three: {sent}")
+        # One cut: every send of it within a few milliseconds (rounding the times to 0.01 s split one cut whose sends
+        # were 0.15 ms apart across a rounding edge, 133.01495 and 133.01510, on linux-arm64, 26 Nov).
+        times = [t for t, _names in sent]
+        self.assertLess(max(times) - min(times), 0.01, f"one cut for the three: {sent}")
         self.assertEqual(gatherer.on_way, {})
         # A deck whose parts do not come at once, or a count of none, is not counted.
         self.assertFalse(gatherer.expect(["apply", "/elsewhere/deck/parts/s01"], "/decks", 3))
