@@ -35,6 +35,16 @@ class FaultReports(ClientCase):
             self.addCleanup(other.stop)
         from theodore_client import faults
         self.faults = faults
+        # Registered last, so it runs first (cleanups run last-in first-out), before the environment and the homes are
+        # put back: a report still on its background thread would otherwise be sent with the real settings, to the
+        # real service (26 Nov: one such report reached production as TR-BBR7DB).
+        self.addCleanup(self._join_fault_threads)
+
+    def _join_fault_threads(self) -> None:
+        self.api.report_delay = 0.0
+        for thread in [t for t in threading.enumerate() if t.name == "fault-report"]:
+            thread.join(timeout=30)
+            self.assertFalse(thread.is_alive(), "a fault report still running after its test")
 
     def posts(self) -> list[dict]:
         self.faults.wait_idle()
