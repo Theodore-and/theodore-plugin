@@ -299,7 +299,11 @@ class Pool(ServiceCase):
         client, got = self.connect()
         frames_ = self.call(client, got, "slow", ["sleep", "20"])        # it answers, it progresses, it never ends
         self.assertEqual(Collector.done(frames_)["exit"], 78)
-        self.assertIn("was stopped: it did not finish in time", Collector.stdout(frames_))
+        said = Collector.stdout(frames_)
+        self.assertIn("did not finish in 2 s", said)
+        # TR-FGXBAS: what happened, that the engine restarted, and that the report was filed: not "tell the user nothing"
+        self.assertIn("filed a report", said)
+        self.assertNotIn("TELL THE USER: nothing", said)
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
@@ -588,6 +592,139 @@ class FolderWatch(ServiceCase):
         watches.open("s2", str(self.box.home))
         self.assertEqual(logged, [], "its workspaces and outputs are Theodore's own")
         watches.stop()
+
+
+class KeyLock(unittest.TestCase):
+    """A command does not wait behind a stuck one on its deck, and does wait behind a long one that is within its own
+    bound (TR-FGXBAS: the lead's `render` waited 12 minutes on the designer's hung `render --wait`; a 178-slide deck's
+    whole-deck apply is long and legitimate)."""
+
+    def setUp(self):
+        from theodore_client.service import workers
+        self.workers = workers
+        old = workers.KEY_GRACE_S
+        workers.KEY_GRACE_S = 0.0
+        self.addCleanup(setattr, workers, "KEY_GRACE_S", old)
+
+    def _hold(self, keys, verb, bound):
+        inside, free = threading.Event(), threading.Event()
+
+        def hang():
+            with keys.held("k", verb, bound):
+                inside.set()
+                free.wait(30)
+
+        threading.Thread(target=hang, daemon=True).start()
+        self.assertTrue(inside.wait(5))
+        return free
+
+    def test_a_command_behind_one_past_its_own_bound_is_told_the_engine_is_busy_at_once(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        free = self._hold(keys, "render", 0.5)
+        time.sleep(0.6)
+        try:
+            started = time.monotonic()
+            with self.assertRaises(self.workers.KeyBusy) as raised:
+                with keys.held("k", "render", 5):
+                    self.fail("it ran behind a stuck command")
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual((raised.exception.verb, raised.exception.bound), ("render", 0))
+            said = self.workers.busy_text("render", 61, 240)
+            self.assertIn("busy", said)
+            self.assertIn("past the 240 s it is expected to take", said)
+            self.assertTrue(keys.busy("k"), "the stuck command still holds the key")
+        finally:
+            free.set()
+
+    def test_a_command_waits_behind_a_long_one_still_within_its_bound_and_says_which_it_waited_for(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        free = self._hold(keys, "apply", 900)           # a whole-deck apply: long, and within its own bound
+        time.sleep(0.7)                                 # past the old flat limit of these tests, far inside 900 s
+        got = {}
+
+        def second():
+            with keys.held("k", "render", 240) as info:
+                got.update(info)
+
+        waiter = threading.Thread(target=second)
+        waiter.start()
+        waiter.join(1.0)
+        self.assertTrue(waiter.is_alive(), "it queued: it was not refused")
+        free.set()
+        waiter.join(10)
+        self.assertEqual(got["behind"], "apply")
+        self.assertGreater(got["waited"], 0.5)
+
+    def test_what_a_command_is_expected_to_take_by_its_kind(self):
+        w = self.workers
+        self.assertEqual(w.expected_bound(["apply", "--ahead", "/d/parts/s01"]), w.AHEAD_BOUND_S)
+        self.assertEqual(w.expected_bound(["apply", "/d/parts/s01"]), w.PART_CALL_CEILING_S)
+        self.assertEqual(w.expected_bound(["render", "/d/parts/s01", "--wait"]), w.RENDER_BOUND_S)
+        self.assertEqual(w.expected_bound(["apply", "/d"]), w.CALL_CEILING_S)      # a whole deck: the ceiling
+        self.assertEqual(w.expected_bound(["finish", "/d"]), w.CALL_CEILING_S)
+
+    def test_commands_queue_in_order_behind_one_that_is_still_within_its_bound(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        order = []
+
+        def run(name, hold):
+            with keys.held("k", "apply", 60):
+                order.append(name)
+                time.sleep(hold)
+
+        first = threading.Thread(target=run, args=("a", 0.3))
+        first.start()
+        time.sleep(0.05)
+        rest = [threading.Thread(target=run, args=(n, 0.05)) for n in "bc"]
+        for t in rest:
+            t.start()
+            time.sleep(0.02)
+        for t in [first, *rest]:
+            t.join(10)
+        self.assertEqual(order, ["a", "b", "c"])
+        self.assertFalse(keys.busy("k"))
+
+    def test_the_key_is_free_again_once_the_stuck_command_ends_and_a_busted_one_left_nothing_behind(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        free = self._hold(keys, "render", 0.3)
+        time.sleep(0.4)
+        ran = []
+        with self.assertRaises(self.workers.KeyBusy):
+            with keys.held("k", "render", 5):
+                ran.append("x")
+        free.set()
+        until = time.monotonic() + 5
+        while keys.busy("k") and time.monotonic() < until:
+            time.sleep(0.01)
+        with keys.held("k", "render", 5):
+            ran.append("after")
+        self.assertEqual(ran, ["after"])
+
+
+class EngineStack(unittest.TestCase):
+    """The engine's watchdog stack reaches the lost or ceiling answer and the automatic report."""
+
+    def test_the_latest_stack_line_is_in_the_answer_and_in_the_report(self):
+        from theodore_client import faults
+        from theodore_client.service import workers
+        line = ("engine stack (c9, 120 s into the call): [call thread] exact.py:480 wait <- pictures.py:300 pictures | "
+                "[theodore-exact-tier] exact.py:490 _run")
+        note = workers.stack_note(line)
+        self.assertTrue(note.startswith("Last engine stack: [call thread] exact.py:480 wait"))
+        self.assertEqual(workers.stack_note(None), "")
+        queued = []
+        original = faults.queue
+        faults.queue = lambda *args: queued.append(args)
+        try:
+            faults.call_lost("render", "was stopped: this command did not finish in 900 s", 900.0, "x.py:1 f",
+                             note.removeprefix("Last engine stack: ").strip())
+        finally:
+            faults.queue = original
+        self.assertIn("last engine stack: [call thread] exact:480 wait", queued[0][0])
+
+    def test_a_log_frame_from_the_engine_is_kept_on_the_worker_for_the_answer(self):
+        from theodore_client.service import workers
+        self.assertTrue("engine stack (c1, 60 s into the call): x".startswith(workers.ENGINE_STACK_PREFIX))
 
 
 class RemovedHome(unittest.TestCase):
