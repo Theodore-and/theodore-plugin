@@ -40,6 +40,10 @@ HOST_MARKERS = ("CLAUDECODE", "CLAUDE_PID", "THEODORE_HOST")
 HOST_MARKER_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_PLUGIN_", "CODEX_")
 for _name in [n for n in os.environ if n in HOST_MARKERS or n.startswith(HOST_MARKER_PREFIXES)]:
     del os.environ[_name]
+# Nor its Theodore home: outside a test's own box the client finds an empty home, no account and no service address,
+# so nothing a test leaves running (a background report, a late thread) can reach the real service (26 Nov: a report
+# outlived its test and reached production as TR-BBR7DB). A test that needs a home sets THEODORE_HOME itself.
+os.environ["THEODORE_HOME"] = tempfile.mkdtemp(prefix="theodore-tests-no-home-")
 import build_client  # noqa: E402
 
 FAKE_PPTX = r'''"""A stand-in engine entry for the client's tests. It only echoes what it was asked."""
