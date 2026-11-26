@@ -102,7 +102,7 @@ def _parser():
     pf.add_argument("action", choices=("add", "list", "remove"))
     pf.add_argument("value", nargs="?")
     pk = sub.add_parser("packs", add_help=False)
-    pk.add_argument("action", choices=("install", "status"))
+    pk.add_argument("action", nargs="?", default="status", choices=("install", "status", "list"))  # bare / list = status
     pk.add_argument("name", nargs="?")
     pk.add_argument("--all", action="store_true")
     pk.add_argument("--background", action="store_true")
@@ -195,7 +195,7 @@ def _dispatch(argv: list[str]) -> int:
     if cmd == "prefs":
         return commands.prefs(args.action, args.value)
     if cmd == "packs":
-        return commands.packs(args.action, args.name, args.all, args.background, args.job)
+        return commands.packs("status" if args.action == "list" else args.action, args.name, args.all, args.background, args.job)
     if cmd == "tools":
         return commands.tools(args.name, args.background, args.job, args.if_needed)
     if cmd == "setup":
