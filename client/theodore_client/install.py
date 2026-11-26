@@ -1159,6 +1159,8 @@ def start_plugin_update() -> None:
         Job("plugin-update").spawn(["update", "--plugin-job"])
     except Exception as exc:
         core.log(f"plugin update: not started ({exc.__class__.__name__}: {exc})")
+        from . import faults
+        faults.job_failed("plugin-update", exc)
 
 
 def plugin_update_action(host: str | None = None) -> str:

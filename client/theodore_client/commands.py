@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, desktop, front, install, outbox, routing, sessions, specimens
+from . import __version__, account, api, core, credentials, desktop, faults, front, install, outbox, routing, sessions, specimens
 from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
@@ -975,15 +975,17 @@ AUTO_REPORTS_PER_DAY = 5          # from one installation, whatever the errors
 AUTO_REPORTS = "auto-reports.json"   # in state/: {"day", "count", "sent": {fingerprint: reference}}
 
 
-def _auto_report(summary: str, verb: str) -> tuple[str, str | None]:
+def _auto_report(summary: str, verb: str, *, key: str | None = None, title: str | None = None, code: str = "INTERNAL",
+                 prefix: str = "THEODORE INTERNAL: ", wait_s: float | None = None) -> tuple[str, str | None]:
     """Send one automatic bug report for an internal error: ("sent", reference), ("already", reference) when the same
     error was sent today, ("queued", None) when the service said "later" or could not be reached and the report waits
     in the outbox (Theodore sends it by itself; it counts as sent today), ("failed", None) when it could not be sent,
     ("none", None) when no report goes (signed out, reports off for the account or not in its plan, the day's limit
-    reached). Never raises; never prints."""
+    reached). Never raises; never prints. `key`, `title`, `code`, `prefix` and `wait_s` serve the faults Theodore files
+    from the background (faults.py): the day's dedupe is by `key` (else the text), the wait for the answer is `wait_s`."""
     started = time.monotonic()
     text = scrub(summary)
-    fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]     # the error, not the command that met it
+    fingerprint = hashlib.sha256((key or text).encode("utf-8")).hexdigest()[:32]     # the error, not the command that met it
     try:
         cred = credentials.load()
         if not cred:
@@ -1012,9 +1014,9 @@ def _auto_report(summary: str, verb: str) -> tuple[str, str | None]:
         if not allowed:
             core.log(f"internal error not reported: automatic reports {why}")
             return "none", None
-        payload = _report_payload("bug", f"internal error in {verb}", f"THEODORE INTERNAL: {text}", verb, "INTERNAL", None, "automatic")
+        payload = _report_payload("bug", title or f"internal error in {verb}", f"{prefix}{text}", verb, code, None, "automatic")
         # the answer arrives (or the report is saved) before file_internal_report stops waiting
-        wait = max(0.5, AUTO_REPORT_WAIT_S - 0.75 - (time.monotonic() - started))
+        wait = wait_s if wait_s else max(0.5, AUTO_REPORT_WAIT_S - 0.75 - (time.monotonic() - started))
         try:
             _status, _headers, raw = api.call("reports", bearer=cred["installation_secret"], body=payload, timeout=wait,
                                               exact_timeout=True, learn_refusals=False)
@@ -1744,6 +1746,8 @@ def client_update_job(version_: str, sha256: str, runtime_id: str | None = None,
         return 0
     except Exception as exc:
         job.fail("INTERNAL", str(getattr(exc, "summary", exc)))
+        faults.job_failed("client-update", exc)
+        faults.wait_idle()
         return 1
 
 
@@ -1814,6 +1818,12 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
         if job:
             job.finish()
         return core.emit(_stale_status(stale))
+    except Exception as exc:        # an unexpected failure (not the network, the service or a refusal): filed, then raised as before
+        if job:
+            job.fail("INTERNAL", f"{exc.__class__.__name__}: {exc}")
+        faults.job_failed("packs", exc)
+        faults.wait_idle()
+        raise
     if job:
         job.finish()
     return core.emit(Status("OK", f"asset pack(s) installed: {', '.join(e['id'] for e in wanted)}.", "nothing to do.",
@@ -2199,6 +2209,7 @@ def _follow_claude_app() -> None:
             core.remove_tree(_host_record_path())
     except Exception as exc:
         core.log(f"hosts: the Claude app's moved folder was not followed ({exc.__class__.__name__}: {exc})")
+        faults.job_failed("hosts", exc)
 
 
 HOSTS_EVERY_S = 0.0             # the resident service sets 300: a process that runs many commands does this that often
@@ -2227,8 +2238,11 @@ def ensure_hosts() -> None:
         core.write_atomic(marker, str(int(core.now())), 0o600)
         for line in _register_hosts():
             core.log(f"hosts: {line}")
+            if "FAILED" in line:
+                faults.job_failed("hosts", line)
     except Exception as exc:  # a convenience: never the reason a guide or doctor fails
         core.log(f"hosts: not registered ({exc.__class__.__name__}: {exc})")
+        faults.job_failed("hosts", exc)
 
 
 def _host_registration(name: str, command: str) -> bool | None:
@@ -2893,6 +2907,7 @@ def resume_background() -> list[str]:
             started.append(name)
     except Exception as exc:  # a convenience: never the reason a guide or doctor fails
         core.log(f"resume: not started ({exc.__class__.__name__}: {exc})")
+        faults.job_failed("resume", exc)
     return started
 
 

@@ -427,6 +427,8 @@ def send_in_background(force: bool = False, reports: bool = False) -> bool:
     except Exception as exc:        # noqa: BLE001  usage counts never change what a command does
         with contextlib.suppress(Exception):
             core.log(f"usage: send not started ({exc.__class__.__name__})")
+            from . import faults
+            faults.job_failed("usage", exc)
         return False
 
 

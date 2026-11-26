@@ -272,6 +272,8 @@ def check_in_background() -> None:
         job.spawn([BACKGROUND_CHECK_JOB])     # detached; the refresh in it is bounded by its own 20 s timeout
     except Exception as exc:        # noqa: BLE001  never in the way of the engine command
         core.log(f"licence check: not started ({exc.__class__.__name__})")
+        from . import faults
+        faults.job_failed("licence-check", exc)
 
 
 def licence_check_job() -> int:

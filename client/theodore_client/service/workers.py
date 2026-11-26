@@ -35,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from .. import core, install
+from .. import core, faults, install
 from . import frames
 
 IS_WINDOWS = os.name == "nt"
@@ -1297,6 +1297,7 @@ class Pool:
                     self.service.log(f"worker {version} lost {argv[:2]} ({exc}); answered 78"
                                      f"{', part of it may be written' if committed else ''}")
                     call.out(lost_text(how, committed, getattr(worker, "lost_next", None)))
+                    faults.call_lost(argv[0] if argv else call.tool, how, time.monotonic() - started, call.stack_lines())
                     return 78, []
                 self._release(worker)
                 with contextlib.suppress(Exception):
@@ -1333,8 +1334,9 @@ class Pool:
             result = worker.run(call, argv, env, stdin, None, classify(argv))
         except WorkerFailed:
             self._release(worker)
-            call.out(lost_text(getattr(worker, "lost", None) or f"ended (exit {getattr(worker, 'exit_code', None)})",
-                               bool(getattr(worker, "_committed", False))))
+            how = getattr(worker, "lost", None) or f"ended (exit {getattr(worker, 'exit_code', None)})"
+            call.out(lost_text(how, bool(getattr(worker, "_committed", False))))
+            faults.call_lost(argv[0] if argv else call.tool, how, time.monotonic() - call.started, call.stack_lines())
             return 78, []
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
