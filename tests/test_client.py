@@ -1145,6 +1145,14 @@ class Packs(ClientCase):
         self.assertEqual(seen, ["backgrounds", "flags", "icons", "maps"])
         self.assertStatus(self.client("packs", "status"), "OK", 0)
 
+    def test_packs_with_no_action_or_list_gives_the_status_not_a_usage_error(self):
+        """Real run 26 Nov: an agent typed `theodore packs` and `theodore packs list` and got a usage error each time."""
+        self.ready()
+        for args in (("packs",), ("packs", "list"), ("packs", "status")):
+            done = self.client(*args)
+            self.assertStatus(done, "OK", 0)
+            self.assertIn("icons\tready", done.stdout)
+
     def test_a_pack_update_does_not_redownload_the_engine(self):
         self.ready()
         self.api.publish_pack("icons", "1.1.0", pack_zip("icons", "1.1.0"))
