@@ -3462,6 +3462,50 @@ class ProxiesAndSandboxes(ClientCase):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(_urlreq, "getproxies", lambda: {}):
             self.assertEqual(api._timeout("https://api.theodoreand.ai/v1/keys", 2.0), 2.0)
 
+    def test_a_proxy_set_or_removed_after_the_first_request_is_followed(self):
+        """urllib fixes an opener's proxies when it is built, and one built with none never asks again. The client kept
+        one opener for the life of the process: a service or tool server whose first request found no proxy went
+        straight to our hosts past one set later (the system's setting changes when a laptop changes network; in this
+        suite a test that named a proxy reached the real API that way), and one that began behind a proxy kept sending
+        to it after it was gone. The setting is read for each request, and an opener built again only when it changed."""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
+        from theodore_client import api
+        proxy, url, seen = _start_proxy()
+        self.addCleanup(proxy.shutdown)
+        keys = f"{self.api.base}/v1/keys"
+        unset = {name: "" for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
+                                       "NO_PROXY", "no_proxy")}
+        self.enterContext(mock.patch.object(api, "_OPENERS", {}))
+        no_proxy_anywhere = lambda: mock.patch.object(_urlreq, "getproxies", lambda: {})      # noqa: E731
+
+        with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+            self.assertEqual(api.request("GET", keys)[0], 200)      # the process's first request: no proxy
+        self.assertEqual(seen, [])
+        with mock.patch.dict(os.environ, {**unset, "HTTP_PROXY": url, "http_proxy": url}):
+            self.assertEqual(api.request("GET", keys)[0], 200)      # a proxy set since, in the environment: through it
+        self.assertEqual(seen, [f"GET {keys}"])
+        with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+            self.assertEqual(api.request("GET", keys)[0], 200)      # the proxy gone: straight again, not to where it was
+        self.assertEqual(seen, [f"GET {keys}"])
+        # The system's own setting (macOS, Windows), which no environment variable carries, and a request that follows
+        # no redirect (a download's opener): the same.
+        with mock.patch.dict(os.environ, unset), mock.patch.object(_urlreq, "getproxies", lambda: {"http": url}), \
+                mock.patch.object(_urlreq, "proxy_bypass", lambda host: False):
+            self.assertEqual(api.request("GET", keys, redirects=False)[0], 200)
+            self.assertEqual(seen, [f"GET {keys}"] * 2)
+            self.assertIs(api._opener(False), api._opener(False), "the same setting: the same opener, nothing built")
+        with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+            self.assertEqual(api.request("GET", keys, redirects=False)[0], 200)
+        self.assertEqual(seen, [f"GET {keys}"] * 2)
+        # The other way round, in a process whose first request went through a proxy: once it is gone, straight.
+        with mock.patch.object(api, "_OPENERS", {}):
+            with mock.patch.dict(os.environ, {**unset, "HTTP_PROXY": url, "http_proxy": url}):
+                self.assertEqual(api.request("GET", keys)[0], 200)
+            self.assertEqual(seen, [f"GET {keys}"] * 3)
+            with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+                self.assertEqual(api.request("GET", keys)[0], 200)
+            self.assertEqual(seen, [f"GET {keys}"] * 3, "a proxy that is gone is not used again")
+
     def test_a_sandbox_proxy_that_refuses_our_hosts_names_the_setting(self):
         """claude.ai's proxy answers CONNECT with 403 for a site off the allow list: in a cloud sandbox the status
         names the setting in Claude and says where ChatGPT has a network; elsewhere it stays the plain network text."""

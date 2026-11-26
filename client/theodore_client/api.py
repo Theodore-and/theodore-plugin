@@ -485,14 +485,27 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_AnyAddressHTTPS, req, context=self._context)
 
 
-_OPENERS: dict = {}
+_OPENERS: dict = {}     # redirects -> (the proxy setting it was built for, the opener)
 
 
 def _opener(redirects: bool = True):
-    if redirects not in _OPENERS:
-        _OPENERS[redirects] = urllib.request.build_opener(_HTTPSHandler(context=_ssl_context()),
-                                                          _Redirects() if redirects else _NoRedirects())
-    return _OPENERS[redirects]
+    """The opener for one request, with the proxy setting as it is now. urllib fixes an opener's proxies when it is
+    built, and one built with none never asks again: an opener kept for the life of the process went straight to our
+    hosts past a proxy set after its first request, and kept using one that was gone (a service or a tool server lives
+    through a laptop's change of network; the system's setting, on macOS and Windows, changes with it). So the setting
+    is read for each request, as _timeout and the kept connections read it (a look at the environment, then the
+    system's: no network), and an opener is built again only when it has changed."""
+    try:
+        setting = tuple(sorted(urllib.request.getproxies().items()))
+    except Exception:       # noqa: BLE001  a setting that cannot be read: urllib's own reading, and its own report
+        setting = None
+    kept = _OPENERS.get(redirects)
+    if kept is None or kept[0] != setting:
+        handlers = [_HTTPSHandler(context=_ssl_context()), _Redirects() if redirects else _NoRedirects()]
+        if setting is not None:
+            handlers.append(urllib.request.ProxyHandler(dict(setting)))
+        kept = _OPENERS[redirects] = (setting, urllib.request.build_opener(*handlers))
+    return kept[1]
 
 
 def _network_error(exc: Exception) -> NetworkError:
