@@ -764,6 +764,21 @@ class NoLibreOfficeInstalled(unittest.TestCase):
             self.assertFalse(welcome._downloading(), "the welcome says no download goes on for it")
 
 
+class ResumeGitDownload(unittest.TestCase):
+    def test_a_git_download_that_did_not_finish_is_started_again(self):
+        """0.3.5 to 0.5.1: the loop's rows were not wrapped in a tuple, so `resume: not started (too many values to
+        unpack)` ended every call and the PortableGit download was never resumed."""
+        from theodore_client import commands, install
+        with client_home(), mock.patch.object(commands, "needs_git_bash", return_value=True), \
+                mock.patch.object(install, "theodore_git_bash", return_value=None), \
+                mock.patch.object(install.Job, "spawn") as spawn, mock.patch.object(install.Job, "alive", return_value=False):
+            install.Job("git").update(pid=0, phase="downloading", percent=40, started=1)
+            self.assertEqual(commands.resume_background(), ["git"])
+            spawn.assert_called_once_with(["tools", "install", "git", "--if-needed", "--job"])
+            log = (core.home().logs / "client.log").read_text(encoding="utf-8") if (core.home().logs / "client.log").exists() else ""
+            self.assertNotIn("resume: not started", log)
+
+
 class ClaudeGitBash(unittest.TestCase):
     """Windows' Claude Code loads Theodore's skills through Git Bash; doctor says so when it would find none."""
 

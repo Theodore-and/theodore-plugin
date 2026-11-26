@@ -24,4 +24,7 @@ if code is None:
         site.main()
     from theodore_client.cli import main
     code = main()
+_faults = sys.modules.get("theodore_client.faults")
+if _faults is not None:         # a fault filed by this command goes before it ends (at most a few seconds, after its answer)
+    _faults.wait_idle(3.0)
 sys.exit(code)

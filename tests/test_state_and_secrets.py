@@ -716,6 +716,24 @@ class Round8Environment(unittest.TestCase):
                 self.assertEqual(result, "ok" if base == winner else "USAGE", (name, base, winner))
             self.assertEqual(len(outcomes), 8)
 
+    def test_a_record_refused_for_a_moment_to_a_reader_is_read_again_not_taken_for_empty(self):
+        """Windows refuses a read that meets another build's rename attempt onto the record (PermissionError): the one
+        lost build read "" and refused the folder it had just won (windows-x64, 26 Nov 2026)."""
+        with client_home() as home:
+            (home / "bin" / "launcher.json").unlink()
+            (home / "state").mkdir()
+            core._claim_environment("https://api.prod.example.test")
+            real, refusals = Path.read_text, [3]
+
+            def refused(path, *args, **kwargs):
+                if path.name == "environment" and refusals[0]:
+                    refusals[0] -= 1
+                    raise PermissionError(13, "Access is denied")
+                return real(path, *args, **kwargs)
+            with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(Path, "read_text", refused):
+                self.assertEqual(core.home_environment(), "https://api.prod.example.test")
+            self.assertEqual(refusals[0], 0)
+
     @unittest.skipIf(os.name == "nt", "Windows publishes by rename, which never replaces")
     def test_without_hard_links_the_record_is_still_claimed_once_and_never_seen_half_written(self):
         with mock.patch.object(os, "link", side_effect=PermissionError("no hard links here")):

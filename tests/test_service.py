@@ -303,6 +303,36 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
+    def test_a_part_apply_that_runs_on_is_stopped_at_the_part_ceiling_and_told_what_to_do(self):
+        # The real run of 26 Nov: a part's apply waited 15 minutes. A part's apply takes seconds: its own, tighter ceiling
+        # stops it and says why; the lead's apply (a whole deck) keeps the wide one.
+        self.env.update({"THEODORE_PART_CALL_CEILING_S": "2", "FAKE_APPLY_HANG_S": "4"})
+        self.service()
+        client, got = self.connect()
+        part = str(self.box.tmp / "ws" / "parts" / "s01")
+        started = time.monotonic()
+        frames_ = self.call(client, got, "stuck", ["apply", part])
+        self.assertLess(time.monotonic() - started, 3.9, "stopped at the part ceiling, not left to finish")
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        said = Collector.stdout(frames_)
+        self.assertIn("this part's apply ran for 2 s", said)
+        self.assertIn("deck.js very likely never finishes", said)
+        self.assertIn("NEXT: do not run the same command again", said)
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("did not finish within 2 s (a part's apply) during a call; stopping it", log)
+        lead = self.call(client, got, "lead", ["apply", str(self.box.tmp / "ws")])
+        self.assertEqual(Collector.done(lead)["exit"], 0, "a whole deck's apply keeps the wide ceiling")
+
+    def test_which_calls_are_a_part_apply(self):
+        from theodore_client.service.workers import is_part_apply
+
+        self.assertTrue(is_part_apply(["apply", "C:\\w\\parts\\s01"]))
+        self.assertTrue(is_part_apply(["apply", "/w/parts/s01", "/w/parts/s02", "--ahead"]))
+        self.assertFalse(is_part_apply(["apply", "/w"]))
+        self.assertFalse(is_part_apply(["apply", "/w/parts/s01", "/w"]))
+        self.assertFalse(is_part_apply(["check", "/w/parts/s01"]))
+        self.assertFalse(is_part_apply([]))
+
     def test_a_call_with_no_warm_idle_worker_takes_a_cold_idle_one_at_once(self):
         # Lane S2's S2-17 (the coordinator): waiting up to 1 s for a worker past its warm-up (C2 `warm`, lane B) made
         # every cold round's slowest 1.07-1.58 s against 0.13-0.21 s taking any idle worker. A worker still warming is
@@ -735,6 +765,42 @@ class PicturesRule(unittest.TestCase):
         self.assertEqual(tools.pictures_of(["apply", "/w"], full), ["/r/slide-2.jpg"], "the drawn ones, not the cached")
         unchanged = json.dumps({"ok": True, "render_summary": {"skipped": "deck.js unchanged since the last apply"}})
         self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
+
+
+class AssetPreviewsInline(unittest.TestCase):
+    """`assets show icons ... --render` answers with a path in the engine's cache; a desktop host may keep that folder
+    apart from the agent's file tools (run 2, 26 Nov: "File does not exist"). The pictures come back with the answer, as
+    render's do."""
+
+    def test_the_contact_sheet_or_each_preview_is_what_the_answer_is_about(self):
+        from theodore_client.service import tools
+        argv = ["assets", "show", "icons", "a", "b", "--render"]
+        self.assertTrue(tools.shows_pictures(argv))
+        self.assertFalse(tools.shows_pictures(["assets", "show", "icons", "a"]))
+        self.assertFalse(tools.shows_pictures(["assets", "search", "icons", "a", "--render"]))
+        sheet = json.dumps({"sheet": "/c/icon-sheet-1.png", "ok": True, "by_id": {
+            "a": {"ok": True, "icon": {"png_path": "/c/a.png"}}, "b": {"ok": True, "icon": {"png_path": "/c/b.png"}}}})
+        self.assertEqual(tools.pictures_of(argv, sheet), ["/c/icon-sheet-1.png"])
+        no_sheet = json.dumps({"ok": True, "by_id": {"a": {"ok": True, "icon": {"png_path": "/c/a.png"}},
+                                                     "z": {"ok": False, "error": "no"}}})
+        self.assertEqual(tools.pictures_of(argv, no_sheet), ["/c/a.png"])
+        one = json.dumps({"ok": True, "icon": {"id": "a", "png_path": "/c/a.png"}})
+        self.assertEqual(tools.pictures_of(["assets", "show", "icons", "a", "--render"], one), ["/c/a.png"])
+
+    def test_the_preview_is_attached_as_an_image_frame(self):
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import tools
+        folder = Path(tempfile.mkdtemp(prefix="theodore-previews-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        sheet = folder / "icon-sheet-1.png"
+        sheet.write_bytes(b"\x89PNG" + b"z" * 500)
+        sent = []
+        call = SimpleNamespace(args=["assets", "show", "icons", "a", "b", "--render"], cwd=str(folder), timing={},
+                               image=lambda mime, path, data: sent.append((mime, path)) or True)
+        tools.attach_pictures(call, json.dumps({"sheet": str(sheet), "ok": True, "by_id": {}}))
+        self.assertEqual(sent, [("image/png", str(sheet))])
 
 
 class PicturesOut(unittest.TestCase):
@@ -1751,7 +1817,10 @@ class GatheringUnit(unittest.TestCase):
         self.assertEqual(gatherer.on_way, {lead: 3})
         self.assertEqual(come(gatherer, lead, ("s05", "s06", "s07"), counted=True), [], "none ran alone")
         self.assertEqual(sorted(os.path.basename(name) for _t, names in sent for name in names), ["s05", "s06", "s07"])
-        self.assertEqual(len({round(t, 2) for t, _names in sent}), 1, f"one cut for the three: {sent}")
+        # One cut: every send of it within a few milliseconds (rounding the times to 0.01 s split one cut whose sends
+        # were 0.15 ms apart across a rounding edge, 133.01495 and 133.01510, on linux-arm64, 26 Nov).
+        times = [t for t, _names in sent]
+        self.assertLess(max(times) - min(times), 0.01, f"one cut for the three: {sent}")
         self.assertEqual(gatherer.on_way, {})
         # A deck whose parts do not come at once, or a count of none, is not counted.
         self.assertFalse(gatherer.expect(["apply", "/elsewhere/deck/parts/s01"], "/decks", 3))

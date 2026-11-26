@@ -806,8 +806,25 @@ def environment_path() -> Path:
     return home().state / "environment"
 
 
+def _read_record(path: Path) -> str:
+    """read_text, but on Windows a read that meets another build's rename attempt onto the same file (refused for a
+    moment with PermissionError, while the record is already there whole) is retried, never taken for an empty record:
+    eight builds racing on an empty folder had one read "" and refuse a folder it had just won."""
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except PermissionError:
+            if IS_WINDOWS and time.monotonic() < deadline:
+                time.sleep(0.02)
+                continue
+            return ""
+        except OSError:
+            return ""
+
+
 def home_environment() -> str:
-    lines = read_text(environment_path()).splitlines()
+    lines = _read_record(environment_path()).splitlines()
     recorded = lines[0].strip() if lines else ""
     if not recorded:            # a folder from before the record: its stable launcher.json says
         recorded = str(read_json(home().bin / "launcher.json").get("api_base") or "").strip()

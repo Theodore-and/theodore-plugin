@@ -191,6 +191,7 @@ while True:
     elif verb == "apply" and targets:
         for target in targets:
             note("apply", target)
+        time.sleep(float(os.environ.get("FAKE_APPLY_HANG_S") or 0))      # an apply that is stuck (deck.js without an end)
     if verb == "sleep":
         end = time.monotonic() + float(argv[1])
         while time.monotonic() < end:

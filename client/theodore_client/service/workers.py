@@ -35,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-from .. import core, install
+from .. import core, faults, install
 from . import frames
 
 IS_WINDOWS = os.name == "nt"
@@ -70,12 +70,31 @@ STATS_AFTER_S = 5.0
 CREATE_NO_WINDOW = 0x08000000
 # A call never waits for a worker that is gone or stuck (the coordinator, 25 Nov, after K's A3b hang on rig 1):
 CALL_CEILING_S = float(os.environ.get("THEODORE_CALL_CEILING_S") or 900.0)   # no engine command runs longer
+# A part's apply is a few slides built and drawn: measured 1-25 s whole, 53 s for a whole large deck. One that runs past this
+# is stuck (deck.js that never ends, an engine fault that left a wait): stopped and told so, in 5 minutes not 15.
+PART_CALL_CEILING_S = float(os.environ.get("THEODORE_PART_CALL_CEILING_S") or 300.0)
 HEARTBEAT_S = float(os.environ.get("THEODORE_WORKER_HEARTBEAT_S") or 60.0)   # silent this long during a call: stats
 HEARTBEAT_GRACE_S = float(os.environ.get("THEODORE_WORKER_HEARTBEAT_GRACE_S") or 30.0)   # no answer: it is stuck
 
 
-def lost_text(how: str, wrote: bool) -> str:
+def is_part_apply(argv: list[str]) -> bool:
+    """`pptx apply <part> ...`: every target a part folder (a `parts` folder's child), as `pptx prepare` made them."""
+    targets = [a for a in argv[1:] if not a.startswith("-")]
+    return bool(argv and argv[0] == "apply" and targets
+                and all(os.path.basename(os.path.dirname(a.replace("\\", "/").rstrip("/"))) == "parts" for a in targets))
+
+
+PART_STUCK = ("was stopped: this part's apply ran for {seconds} s and a part's apply takes seconds; deck.js very likely "
+              "never finishes (an endless loop, or an await on something that never settles)")
+PART_STUCK_NEXT = ("NEXT: do not run the same command again: undo your last edit of the part's deck.js (or look for a loop "
+                   "without an end, or an await that never settles in it), then apply again; if it happens again, run "
+                   "theodore doctor.\nTELL THE USER: nothing unless it happens again.\n")
+
+
+def lost_text(how: str, wrote: bool, next_step: str | None = None) -> str:
     """The answer to a call whose worker ended or stuck and that is not run again (exit 78)."""
+    if next_step:
+        return f"THEODORE INTERNAL: Theodore's engine {how} during this command; nothing of it was written.\n{next_step}"
     if wrote:
         return (f"THEODORE INTERNAL: Theodore's engine {how} while this command was writing; part of its result may be "
                 f"on disk.\nNEXT: run the same command again: it starts from what is on disk.\n"
@@ -299,6 +318,8 @@ class Worker:
         self._gone_done = False
         self.exit_code: int | None = None
         self.last_frame = time.monotonic()
+        self._part_call = False
+        self.lost_next: str | None = None            # what to do next, where the reason has its own (a stuck part)
         self.lost: str | None = None                # why a call it held was lost (ended, stuck, past the ceiling)
 
     @classmethod
@@ -480,6 +501,7 @@ class Worker:
             self._result, self._inputs, self._committed = None, None, False
             self._result_ready.clear()
             self._call = call
+        self._part_call = is_part_apply(argv)
         frame = {"t": "run", "id": self._run_id, "argv": argv, "cwd": call.cwd, "env": env, "key": key,
                  "priority": priority, "images": bool(call.images)}
         if stdin is not None:
@@ -513,8 +535,14 @@ class Worker:
         silent for HEARTBEAT_S is asked for its stats, and one that does not answer them within HEARTBEAT_GRACE_S
         is stopped. Either way the call is answered (Pool.run), and the next runs on a fresh worker."""
         started, asked = time.monotonic(), None
+        part = self._part_call
         while not self._result_ready.wait(1.0):
             now = time.monotonic()
+            if part and now - started > PART_CALL_CEILING_S:
+                self.lost_next = PART_STUCK_NEXT
+                self._stop(f"did not finish within {int(PART_CALL_CEILING_S)} s (a part's apply)",
+                           PART_STUCK.format(seconds=int(PART_CALL_CEILING_S)))
+                break
             if now - started > CALL_CEILING_S:
                 self._stop(f"did not finish within {int(CALL_CEILING_S)} s", "was stopped: it did not finish in time")
                 break
@@ -1268,7 +1296,8 @@ class Pool:
                     how = lost or f"ended (exit {getattr(worker, 'exit_code', None)})"
                     self.service.log(f"worker {version} lost {argv[:2]} ({exc}); answered 78"
                                      f"{', part of it may be written' if committed else ''}")
-                    call.out(lost_text(how, committed))
+                    call.out(lost_text(how, committed, getattr(worker, "lost_next", None)))
+                    faults.call_lost(argv[0] if argv else call.tool, how, time.monotonic() - started, call.stack_lines())
                     return 78, []
                 self._release(worker)
                 with contextlib.suppress(Exception):
@@ -1305,8 +1334,9 @@ class Pool:
             result = worker.run(call, argv, env, stdin, None, classify(argv))
         except WorkerFailed:
             self._release(worker)
-            call.out(lost_text(getattr(worker, "lost", None) or f"ended (exit {getattr(worker, 'exit_code', None)})",
-                               bool(getattr(worker, "_committed", False))))
+            how = getattr(worker, "lost", None) or f"ended (exit {getattr(worker, 'exit_code', None)})"
+            call.out(lost_text(how, bool(getattr(worker, "_committed", False))))
+            faults.call_lost(argv[0] if argv else call.tool, how, time.monotonic() - call.started, call.stack_lines())
             return 78, []
         self._release(worker)
         return int(result.get("exit", 78)), list(result.get("pending") or [])
