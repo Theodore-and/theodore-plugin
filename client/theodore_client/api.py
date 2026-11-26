@@ -10,6 +10,7 @@ import json
 import re
 import os
 import queue
+import select
 import socket
 import sys
 import threading
@@ -76,7 +77,8 @@ def _ssl_context() -> ssl.SSLContext:
 # crypt32 built none (CertFreeCertificateChain on NULL), so a failure of crypt32's own became a native fault, and the
 # address race counted it as a dead address. Now: a chain that was not built is not freed (the system's own error
 # shows); a check that fails in itself (not a certificate it refuses) is tried again, CERT_CHECK_WAITS apart; then the
-# address race tries OpenSSL against the same system store (Windows); and what still fails is a LocalFault.
+# address race tries OpenSSL against the same system store (Windows); and what still fails is a LocalFault. Each retry
+# and the OpenSSL try write one line through core.log, each with "certificate check failed".
 CERT_CHECK_WAITS = (0.25, 0.5, 1.0, 2.0)
 _GUARD_LOCK = threading.Lock()
 _GUARDED: list[bool] = []
@@ -103,6 +105,9 @@ def _guard_certificate_check(trust=None, windows=None) -> None:
             fault = None
             for wait in (0.0, *CERT_CHECK_WAITS):
                 if wait:
+                    # One line a retry (client.log, or the log a service process names): the rig counts them.
+                    core.log(f"network: the system's certificate check failed in itself ({fault.__class__.__name__}: "
+                             f"{fault}); tried again in {wait:g} s")
                     time.sleep(wait)
                 try:
                     return check(sock_or_sslobj, server_hostname)
@@ -238,7 +243,7 @@ def _domain(host: str) -> str:
 def _own_host(host: str) -> bool:
     """Theodore's site, API and download hosts and the other names of their domain (the staging forms): the domain of
     the bases this installation was set up for (launcher.json) or given (OWN_BASES). A third party's host
-    (LibreOffice's mirror) is reached as before."""
+    (PortableGit's release) is reached as before."""
     bases = list(OWN_BASES)
     try:
         cfg = core.config()
@@ -480,14 +485,31 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_AnyAddressHTTPS, req, context=self._context)
 
 
-_OPENERS: dict = {}
+_OPENERS: dict = {}     # (redirects, the proxy setting it was built for) -> the opener
+_OPENERS_KEPT = 8       # settings kept at once: a service's callers may each have their own
 
 
 def _opener(redirects: bool = True):
-    if redirects not in _OPENERS:
-        _OPENERS[redirects] = urllib.request.build_opener(_HTTPSHandler(context=_ssl_context()),
-                                                          _Redirects() if redirects else _NoRedirects())
-    return _OPENERS[redirects]
+    """The opener for one request, with the proxy setting as it is now. urllib fixes an opener's proxies when it is
+    built, and one built with none never asks again: an opener kept for the life of the process went straight to our
+    hosts past a proxy set after its first request, and kept using one that was gone (a service or a tool server lives
+    through a laptop's change of network; the system's setting, on macOS and Windows, changes with it). So the setting
+    is read for each request, as _timeout and the kept connections read it (a look at the environment, then the
+    system's: no network), and an opener is built only for a setting that has none yet. In the service the
+    environment a request reads is its call's (service/context.py: the calling client's proxy settings)."""
+    try:
+        setting = tuple(sorted(urllib.request.getproxies().items()))
+    except Exception:       # noqa: BLE001  a setting that cannot be read: urllib's own reading, and its own report
+        setting = None
+    opener = _OPENERS.get((redirects, setting))
+    if opener is None:
+        handlers = [_HTTPSHandler(context=_ssl_context()), _Redirects() if redirects else _NoRedirects()]
+        if setting is not None:
+            handlers.append(urllib.request.ProxyHandler(dict(setting)))
+        if len(_OPENERS) >= _OPENERS_KEPT:
+            _OPENERS.clear()
+        opener = _OPENERS[(redirects, setting)] = urllib.request.build_opener(*handlers)
+    return opener
 
 
 def _network_error(exc: Exception) -> NetworkError:
@@ -533,7 +555,7 @@ def sandbox_blocked(detail: str) -> bool:
 
 DEFAULT_LIMIT = 8 << 20          # an API answer (manifest, guide part, list) is far smaller
 ERROR_LIMIT = 64 << 10           # an error answer is a short JSON object
-DOWNLOAD_LIMIT = 2 << 30         # a download without a published size (none is larger than LibreOffice)
+DOWNLOAD_LIMIT = 2 << 30         # a download without a published size (none comes near it)
 
 
 def _read_bounded(response, limit: int) -> bytes:
@@ -670,8 +692,23 @@ KEPT_IDLE_MAX = 8               # connections kept open while idle; more may be 
 KEPT_WARM = 5                   # opened side by side when the tool server starts: a lead and four designers at once
 KEPT_IDLE_SECONDS = 240.0       # an idle connection older than this is closed rather than tried (proxies drop them)
 KEPT_PROXY_SECONDS = 60.0       # the system's proxy setting is read again after this
+_PROXY_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")  # hot.py's
 _REUSED_LOST = (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
                 ssl.SSLEOFError, ssl.SSLZeroReturnError)
+
+
+def _peer_closed(connection: http.client.HTTPConnection) -> bool:
+    """Whether the remote end has closed an idle kept connection: nothing is owed on it, so anything to read (the end
+    of the stream, a reset, a TLS close) means it is no longer usable. Asked without waiting, before a request is sent
+    on it, so no request is ever sent on a connection known closed."""
+    sock = connection.sock
+    if sock is None:
+        return True
+    try:
+        readable, _writable, _broken = select.select([sock], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    return bool(readable)
 
 
 class KeptAlive:
@@ -682,14 +719,19 @@ class KeptAlive:
         self.opened = 0                 # connections opened by this pool (tests; doctor)
         self._lock = threading.Lock()
         self._idle: list[tuple[tuple, http.client.HTTPConnection, float]] = []   # (route, connection, idle since)
-        self._proxies: dict[tuple[str, str], tuple[str | None, float]] = {}
+        self._proxies: dict[tuple, tuple[str | None, float]] = {}
 
     def _proxy(self, scheme: str, host: str) -> str | None:
         now = time.monotonic()
+        # What was read is kept for the environment it was read in: in the service each call reads its own caller's
+        # proxy variables (service/context.py), and one caller's answer is never another's.
+        key = (scheme, host, tuple(os.environ.get(name) for name in _PROXY_NAMES))
         with self._lock:
-            known = self._proxies.get((scheme, host))
+            known = self._proxies.get(key)
             if known and 0 <= now - known[1] < KEPT_PROXY_SECONDS:
                 return known[0]
+            if len(self._proxies) >= 64:
+                self._proxies.clear()
         try:
             proxy = urllib.request.getproxies().get(scheme) or None
             if proxy and urllib.request.proxy_bypass(host):
@@ -697,7 +739,7 @@ class KeptAlive:
         except Exception:       # noqa: BLE001  a malformed setting: request() reports it for the call
             proxy = "unreadable"
         with self._lock:
-            self._proxies[(scheme, host)] = (proxy, now)
+            self._proxies[key] = (proxy, now)
         return proxy
 
     def _route(self, url: str) -> tuple | None:
@@ -740,19 +782,31 @@ class KeptAlive:
             self.opened += 1
         return connection
 
-    def _take(self, route: tuple, timeout: float) -> tuple[http.client.HTTPConnection, bool]:
-        """An idle connection of this route (True), else a new one (False); connections gone stale, or of another
-        route (the API base changed), are closed."""
-        now, found, dropped = time.monotonic(), None, []
+    def _take(self, route: tuple, timeout: float, fresh: bool = False) -> tuple[http.client.HTTPConnection, bool, float]:
+        """(connection, reused, idle since): an idle connection of this route, the most recently used first, else a new
+        one (`fresh`: always a new one). Connections gone stale, of another route (the API base changed), or that the
+        remote end has closed while idle (an edge's idle timeout: seen before anything is sent on them) are closed."""
+        found, dropped = None, []
         with self._lock:
+            # The clock is read under the lock: a connection given back by another thread between a reading taken
+            # before the lock and the lock itself was dated after that reading, read as idle for less than nothing and
+            # closed as stale, and a new one opened in its place (release/0.5.0's linux-arm64 job: 9 opened where 6
+            # requests at once need 6).
+            now = time.monotonic()
+            since = now
             kept = []
             for item in self._idle:
                 if item[0] != route or not 0 <= now - item[2] <= KEPT_IDLE_SECONDS:
                     dropped.append(item[1])
                 else:
                     kept.append(item)
-            if kept:
-                found = kept.pop()[1]             # the most recently used: the least likely to be closed by now
+            while kept and not fresh:
+                _route, candidate, idle_since = kept.pop()
+                if _peer_closed(candidate):
+                    dropped.append(candidate)
+                    continue
+                found, since = candidate, idle_since
+                break
             self._idle = kept
         for connection in dropped:
             connection.close()
@@ -760,11 +814,20 @@ class KeptAlive:
             found.timeout = timeout
             if found.sock is not None:
                 found.sock.settimeout(timeout)
-            return found, True
+            return found, True, since
         try:
-            return self._open(route, timeout), False
+            return self._open(route, timeout), False, now
         except (OSError, http.client.HTTPException) as exc:
             raise _network_error(exc) from None
+
+    def _drop_idle(self, route: tuple, since: float) -> None:
+        """Close this route's idle connections idle since `since` or longer: one of them proved closed by the remote
+        end, so the idle timeout that closed it has most likely closed them too."""
+        with self._lock:
+            dropped = [item[1] for item in self._idle if item[0] == route and item[2] <= since]
+            self._idle = [item for item in self._idle if not (item[0] == route and item[2] <= since)]
+        for connection in dropped:
+            connection.close()
 
     def _give(self, route: tuple, connection: http.client.HTTPConnection, response: http.client.HTTPResponse) -> None:
         """Keep the connection for the next request when its answer was read to the end and it may stay open."""
@@ -833,15 +896,21 @@ class KeptAlive:
         parts = urllib.parse.urlsplit(url)
         target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         twice = method in ("GET", "HEAD") if again is None else again
+        fresh = False
         for attempt in (1, 2):
-            connection, reused = self._take(route, wait)
+            connection, reused, since = self._take(route, wait, fresh=fresh)
             try:
                 connection.request(method, target, body=data, headers=hdrs)
                 response = connection.getresponse()
             except _REUSED_LOST as exc:
                 connection.close()
                 if reused and twice and attempt == 1:
-                    continue                    # the server closed it while it was idle: once more, on a new one
+                    # The remote end closed it just as it was used (it was seen open before the request): once more,
+                    # on a new connection, never another idle one; those idle as long go too. Only a failure on the
+                    # new one is a network failure.
+                    self._drop_idle(route, since)
+                    fresh = True
+                    continue
                 raise _network_error(exc) from None
             except (OSError, http.client.HTTPException) as exc:
                 connection.close()

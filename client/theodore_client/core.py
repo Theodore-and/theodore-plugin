@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, hot
 from .contract import CLIENT_STATUSES, EXIT
 
 IS_WINDOWS = os.name == "nt"
@@ -122,12 +122,18 @@ def emit(status: Status) -> int:
         from . import specimens        # imported here: specimens imports this module
         specimens.sweep(everything=True)        # a device that is refused keeps no specimen sheet (never raises)
     if getattr(status, "refusal", False):
-        if _REFUSAL_EMITTED:
+        if (getattr(_SCOPE, "emitted", False) if _SCOPED else _REFUSAL_EMITTED):
             return status.code
-        _REFUSAL_EMITTED = True
+        if _SCOPED:                     # the service: once per call, each call learning afresh (begin_call)
+            _SCOPE.emitted = True
+        else:
+            _REFUSAL_EMITTED = True
     print(status.render(), flush=True)
     global _LAST_EMITTED
-    _LAST_EMITTED = status
+    if _SCOPED:
+        _SCOPE.last = status
+    else:
+        _LAST_EMITTED = status
     return status.code
 
 
@@ -135,8 +141,8 @@ _LAST_EMITTED: Status | None = None
 
 
 def last_emitted() -> Status | None:
-    """The last status this process printed (the usage counts record a non-OK one)."""
-    return _LAST_EMITTED
+    """The last status this process (with per-thread scope: this call) printed (the usage counts record a non-OK one)."""
+    return getattr(_SCOPE, "last", None) if _SCOPED else _LAST_EMITTED
 
 
 # --- refusals: learned by any authenticated call (api._signed_out), answered once, centrally ---------------------------
@@ -162,7 +168,7 @@ def begin_call() -> None:
     """A tool call starts: nothing refused yet in this thread (with per-thread scope), else in this process."""
     global _REFUSAL, _REFUSAL_EMITTED
     if _SCOPED:
-        _SCOPE.refusal, _SCOPE.status = None, None
+        _SCOPE.refusal, _SCOPE.status, _SCOPE.emitted, _SCOPE.last = None, None, False, None
     else:
         _REFUSAL, _REFUSAL_EMITTED = None, False
 
@@ -259,51 +265,14 @@ def windows_on_arm() -> bool:
         return False
 
 
-def _flag(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() not in ("", "0", "false", "no")
-
-
-def _claude_cloud() -> bool:
-    """A Claude cloud session: a claude.ai chat, Cowork or the desktop app's chat (each a fresh machine), or Claude
-    Code on the web."""
-    return _flag("CLAUDE_CODE_REMOTE") or os.environ.get("CLAUDE_CODE_SESSION_ORIGIN") == "claude_ai_chat" \
-        or (os.environ.get("CLAUDE_CODE_ENTRYPOINT") or "").startswith("remote")
-
-
-def _chatgpt_cloud() -> bool:
-    """ChatGPT's Work mode or a Codex cloud task: a Codex runtime on a Linux machine of OpenAI's, behind its proxy."""
-    return sys.platform.startswith("linux") and _flag("CODEX_NETWORK_PROXY_ACTIVE") \
-        and (bool(os.environ.get("CODEX_PROXY_CERT")) or Path("/opt/codex/runtimes").is_dir())
+# Which assistant and session: in hot.py, the short command's hot path, which reads them without loading this module.
+_flag, _claude_cloud, _chatgpt_cloud = hot.flag, hot.claude_cloud, hot.chatgpt_cloud
+host_name, session_id = hot.host_name, hot.session_id
 
 
 def codex_sandboxed() -> bool:
     """This command runs inside Codex's local sandbox (Codex sets CODEX_SANDBOX for the commands it sandboxes)."""
     return bool(os.environ.get("CODEX_SANDBOX")) and not _chatgpt_cloud()
-
-
-def host_name() -> str:
-    """The assistant that called us, as far as the environment says (sent as `host`).
-
-    claude-code: Claude Code on this computer, from its Bash tool, a skill's load command or the plugin's MCP server
-    (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_PLUGIN_ROOT). claude-web: a Claude cloud session. codex: Codex on this
-    computer (the variables Codex sets for the commands it runs). chatgpt: ChatGPT Work or a Codex cloud task."""
-    import re
-    explicit = re.sub(r"[^a-z0-9-]", "", (os.environ.get("THEODORE_HOST") or "").lower())[:32].lstrip("-")
-    if explicit:
-        return explicit
-    if _claude_cloud():
-        return "claude-web"
-    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
-        return "claude-code"
-    if _chatgpt_cloud():
-        return "chatgpt"
-    # Before CLAUDE_PLUGIN_ROOT: Codex sets it for the plugins it runs (a Codex desktop install was shown as Claude Code).
-    if any(os.environ.get(name) for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_HOME",
-                                             "CODEX_MANAGED_BY_NPM", "CODEX_VERSION")):
-        return "codex"
-    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
-        return "claude-code"
-    return "other"
 
 
 def host_executable(name: str) -> str | None:
@@ -352,15 +321,6 @@ def host_executable(name: str) -> str | None:
         except OSError:
             continue
     return None
-
-
-def session_id() -> str:
-    """The assistant session this command runs in, when the assistant says (Claude Code, Codex); else empty."""
-    for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value[:128]
-    return ""
 
 
 # Hosts that run Theodore on a machine of the assistant's own (a cloud sandbox), never on the user's computer.
@@ -523,6 +483,29 @@ def refresh_stable_launcher(sources: list[Path]) -> str | None:
 
 
 _HOME: Home | None = None
+# A process that serves a home that exists (the service) never brings it back once it is removed under it (an
+# uninstall, a user deleting the folder): set by keep_removed_home(), every folder made below the home goes through
+# make_parents(), which refuses while the home itself is gone. Without it a write that was already on its way (a
+# sign-in record, a lock, a log line) made the folder again, and the service kept serving a home that had gone.
+_KEEP_REMOVED = False
+
+
+def keep_removed_home() -> None:
+    global _KEEP_REMOVED
+    _KEEP_REMOVED = True
+
+
+def make_parents(folder: Path) -> None:
+    """folder.mkdir(parents=True, exist_ok=True), except below a removed home in a process that keeps it removed."""
+    if _KEEP_REMOVED:
+        root = home().root
+        try:
+            inside = os.path.commonpath([os.path.abspath(folder), os.path.abspath(root)]) == os.path.abspath(root)
+        except ValueError:                  # another drive
+            inside = False
+        if inside and not os.path.isdir(root):
+            raise FileNotFoundError(f"Theodore's folder {root} is gone; nothing is written in it")
+    folder.mkdir(parents=True, exist_ok=True)
 
 
 def home() -> Home:
@@ -612,7 +595,13 @@ def shim_texts() -> dict[str, str] | None:
     Since 0.4.34 each starts Theodore's client straight from its Python, with no other program (the launcher before it
     started about 20 in Git Bash: 1.14 s on the Windows test machine, 4.5 to 7 s on a laptop): the runtime and client
     are read from the folder's records (runtime/current.txt, client/current.txt) by the shell itself, so an update needs
-    no new short command. When anything is missing or not a plain name, it runs the full launcher, as before."""
+    no new short command. When anything is missing or not a plain name, it runs the full launcher, as before.
+
+    Since 0.5.1 it starts the client by its main file with -S: Python then loads neither site nor runpy (38 ms of
+    Python's start on a 4-core Windows test machine, 6 of them site's), and the client loads site itself when the
+    command needs more than the hot path (__main__.py). Only a client that has that hot path (theodore_client/hot.py)
+    is started so: the record may name a client from before 0.5.1 (one set back), which starts by its folder only, so
+    the launcher runs that one."""
     head = f"# {SHIM_MARK}, written by Theodore's set-up; `theodore hosts settings --remove` and its uninstall remove it.\n"
     # The records hold plain names; a carriage return (a record written on Windows) is dropped, anything else is refused.
     read = ('r= c= ok=1\n'
@@ -645,12 +634,12 @@ def shim_texts() -> dict[str, str] | None:
                  "if not defined THEODORE_SHIM_RT goto :launcher\r\n"
                  "if not defined THEODORE_SHIM_CV goto :launcher\r\n"
                  'if not exist "%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" goto :launcher\r\n'
-                 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" goto :launcher\r\n'
+                 'if not exist "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\theodore_client\\hot.py" goto :launcher\r\n'
                  'if not exist "%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" goto :launcher\r\n'
                  'set "THEODORE_HOME=%THEODORE_SHIM_HOME%"\r\n'
                  'set "THEODORE_LAUNCHER=%THEODORE_SHIM_HOME%\\bin\\theodore.cmd"\r\n'
                  # One line, then the batch ends: this file may be replaced while the client runs (an update rewrites it).
-                 '"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%" %*'
+                 '"%THEODORE_SHIM_HOME%\\runtime\\%THEODORE_SHIM_RT%\\python\\python.exe" -I -S "%THEODORE_SHIM_HOME%\\client\\%THEODORE_SHIM_CV%\\__main__.py" %*'
                  + RUN_LINE_TAIL + "\r\n"
                  ":launcher\r\n"
                  '"%THEODORE_SHIM_HOME%\\bin\\theodore.cmd" %*\r\n')
@@ -664,13 +653,13 @@ def shim_texts() -> dict[str, str] | None:
             hot = (f"w={_sh_quote(windows)} h={_sh_quote(msys)}\n"
                    f"if {claim}; then\n"
                    + "".join("  " + line + "\n" for line in read.splitlines()) +
-                   '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
+                   '  if [ -n "$ok" ] && [ -f "$h/runtime/$r/python/python.exe" ] && [ -f "$h/client/$c/theodore_client/hot.py" ] && [ -f "$h/bin/theodore.cmd" ]; then\n'
                    '    THEODORE_HOME=$w THEODORE_LAUNCHER="$w\\\\bin\\\\theodore.cmd"\n'
                    '    export THEODORE_HOME THEODORE_LAUNCHER\n'
                    # exec: no copy of this shell waits beside the client (in MSYS each one is a process started);
                    # execfail: a start the system refuses (a policy) returns here, and the launcher says so.
                    '    shopt -s execfail 2>/dev/null\n'
-                   '    exec "$h/runtime/$r/python/python.exe" -I "$w\\\\client\\\\$c" "$@"\n'
+                   '    exec "$h/runtime/$r/python/python.exe" -I -S "$w\\\\client\\\\$c\\\\__main__.py" "$@"\n'
                    '  fi\n'
                    'fi\n')
         return {
@@ -689,10 +678,10 @@ def shim_texts() -> dict[str, str] | None:
     lines = "#!/bin/sh\n" + head + f"h={_sh_quote(root)}\n"
     # A folder elsewhere is this short command's own (THEODORE_HOME set always); the default one yields to another.
     body = (read + 'p=$h/runtime/$r/python/bin/python3\n'
-            'if [ -n "$ok" ] && [ -f "$p" ] && [ -x "$p" ] && [ -f "$h/client/$c/__main__.py" ] && [ -f "$h/bin/theodore" ]; then\n'
+            'if [ -n "$ok" ] && [ -f "$p" ] && [ -x "$p" ] && [ -f "$h/client/$c/theodore_client/hot.py" ] && [ -f "$h/bin/theodore" ]; then\n'
             '  THEODORE_HOME=$h THEODORE_LAUNCHER=$h/bin/theodore\n'
             '  export THEODORE_HOME THEODORE_LAUNCHER\n'
-            '  exec "$p" -I "$h/client/$c" "$@"\n'
+            '  exec "$p" -I -S "$h/client/$c/__main__.py" "$@"\n'
             'fi\n')
     if default:
         lines += 'if [ "${THEODORE_HOME:-$h}" = "$h" ]; then\n' + "".join("  " + line + "\n" for line in body.splitlines()) + "fi\n"
@@ -701,6 +690,17 @@ def shim_texts() -> dict[str, str] | None:
     if not default:                 # the launchers set THEODORE_HOME always
         lines += "THEODORE_HOME=$h\nexport THEODORE_HOME\n"
     return {"theodore": lines + f'exec {_sh_quote(str(home().launcher()))} "$@"\n'}
+
+
+def shim_files() -> dict[str, bytes] | None:
+    """{file name: content} of the short command as it is written now: the native front once it is placed (front.py:
+    on Windows its own copy, theodore.exe; elsewhere a script that runs it), else the text shim_texts gives."""
+    from . import front
+    placed = front.shim_bytes()
+    if placed:
+        return placed
+    texts = shim_texts()
+    return None if texts is None else {name: text.encode("utf-8") for name, text in texts.items()}
 
 
 _SHIM_ACTIVE: list[bool] = []
@@ -713,21 +713,21 @@ def shim_active() -> bool:
     active = False
     with contextlib.suppress(OSError, ValueError):
         found = shutil.which(SHIM_NAME)
-        texts = shim_texts()
-        if found and texts:
+        files = shim_files()
+        if found and files:
             path = Path(found)
             # Windows names it as PATHEXT spells the extension (theodore.CMD): the file name is matched without case.
-            name = next((n for n in texts if n.lower() == path.name.lower()), None) if IS_WINDOWS else path.name
-            active = name in texts and shim_matches(path, texts[name])
+            name = next((n for n in files if n.lower() == path.name.lower()), None) if IS_WINDOWS else path.name
+            active = name in files and shim_matches(path, files[name])
     _SHIM_ACTIVE[:] = [active]
     return active
 
 
-def shim_matches(path: Path, text: str) -> bool:
-    """The file holds exactly this text, byte for byte (read as bytes: a text read turns the batch file's CRLF into LF,
-    and the Windows short command then never matched; WINDOWS's recount)."""
+def shim_matches(path: Path, text: str | bytes) -> bool:
+    """The file holds exactly this text (or these bytes), byte for byte (read as bytes: a text read turns the batch
+    file's CRLF into LF, and the Windows short command then never matched; WINDOWS's recount)."""
     try:
-        return path.read_bytes() == text.encode("utf-8")
+        return path.read_bytes() == (text if isinstance(text, bytes) else text.encode("utf-8"))
     except OSError:
         return False
 
@@ -986,7 +986,7 @@ def read_json(path: Path, default=None):
 
 
 def write_atomic(path: Path, data: str | bytes, mode: int | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    make_parents(path.parent)
     # Named by the thread too: the tool server's calls run side by side (0.4.34), and two of them writing one file
     # shared one name, so one moved the other's half-written copy into place or found it gone.
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -1055,7 +1055,7 @@ def link_dir(link: Path, target: Path, relative: str | None = None) -> None:
     checked once made: one that does not lead to a directory raises LinkError, naming both paths."""
     if link.is_symlink() or link.exists():
         remove_tree(link)
-    link.parent.mkdir(parents=True, exist_ok=True)
+    make_parents(link.parent)
     if IS_WINDOWS:
         # The junction stores the target's final real path, not the path as given: inside an MSIX-packaged app (the
         # Claude desktop app) Windows silently redirects this process's files under %LOCALAPPDATA% to
@@ -1123,7 +1123,7 @@ def lock(name: str, timeout: float = 600.0):
         finally:
             held[key] -= 1
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    make_parents(path.parent)
     handle = open(path, "a+")
     deadline = time.monotonic() + timeout
     try:
@@ -1324,8 +1324,31 @@ class Job:
     def read(self) -> dict:
         return read_json(self.path)
 
+    # On Windows a record another process holds (its replace, an antivirus scan of the new file) cannot be read for a
+    # moment, sometimes longer than read_json's 2 s on a loaded machine: read_json then gives {}, which read as "the
+    # job ended", and the setup's wait ended early and started a second job (release/0.5.0's Windows runtime target,
+    # 7 suites side by side, 25 Nov). A record that is there but held is read again; held this long, it is taken for
+    # a job still running (an ended job's record is readable).
+    UNREADABLE_WAIT_S = 30.0
+
+    def _state(self) -> dict | None:
+        """The record; {} when there is none or it is not a JSON object; None while it is there but held (Windows)."""
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except PermissionError:
+            return None if IS_WINDOWS else {}
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
     def alive(self) -> bool:
-        state = self.read()
+        deadline = time.monotonic() + self.UNREADABLE_WAIT_S
+        state = self._state()
+        while state is None:
+            if time.monotonic() >= deadline:
+                return True
+            time.sleep(0.1)
+            state = self._state()
         return bool(state) and not state.get("done") and not state.get("failed") and pid_alive(int(state.get("pid") or 0))
 
     def update(self, **fields) -> None:
@@ -1422,7 +1445,7 @@ def log(message: str) -> None:
         if _LOG_FILE is not None:
             target = _LOG_FILE
         else:
-            home().logs.mkdir(parents=True, exist_ok=True)
+            make_parents(home().logs)
             target = home().logs / "client.log"
         # On Windows a new log starts with a UTF-8 byte-order mark: Notepad and PowerShell 5.1 then read it as UTF-8
         # (without one they read the ANSI code page: C:\Users\Théo showed mangled, WINDOWS W-8).

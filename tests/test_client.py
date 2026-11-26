@@ -197,318 +197,6 @@ class SignIn(ClientCase):
 JPEG = b"\xff\xd8\xff\xe0" + b"specimen sheet " * 40 + b"\xff\xd9"
 
 
-class Specimen(ClientCase):
-    """`theodore specimen <file>...`: a deck-design sheet is fetched on demand into a private temporary folder, kept
-    for at most an hour, and never put in Theodore's folder or in the deck's."""
-
-    def setUp(self):
-        super().setUp()
-        self.sign_in()
-        self.api.specimens = {"cover-01.jpg": JPEG, "Grid_2.b.jpg": JPEG + b"2"}
-        self.temp = Path(self.box.env["TMPDIR"])
-        # Where sheets go: Theodore's own cache (the temporary folder only when the working folder contains the cache).
-        home, env = self.box.user_home, self.box.env
-        self.cache = (home / "Library" / "Caches" / "Theodore" / "specimens" if sys.platform == "darwin" else
-                      Path(env["LOCALAPPDATA"]) / "Theodore" / "Cache" / "specimens" if IS_WINDOWS else
-                      Path(env.get("XDG_CACHE_HOME") or home / ".cache") / "theodore" / "specimens")
-        self.deck = self.box.tmp / "deck"
-        (self.deck / ".pptx-state").mkdir(parents=True)
-        self.work = self.box.tmp / "work"           # a working folder that does not contain the temporary folder
-        self.work.mkdir()
-
-    def client(self, *args, **kwargs):
-        kwargs.setdefault("cwd", getattr(self, "work", None))
-        return super().client(*args, **kwargs)
-
-    def folders(self, root: Path | None = None) -> list[Path]:
-        root = root or self.cache
-        return sorted(p for p in root.iterdir() if p.name.startswith("theodore-specimens-")) if root.is_dir() else []
-
-    def specimen_requests(self) -> list[dict]:
-        return [r for r in self.api.requests if "/guide/specimens/" in r["path"]]
-
-    def refused(self, result, name: str, code: int):
-        first, nxt, tell = self.assertStatus(result, name, code)
-        self.assertEqual(self.folders(), [], "nothing is kept when a sheet is refused")
-        return first
-
-    def test_sheets_land_in_a_private_folder_outside_theodore_and_the_deck(self):
-        result = self.client("specimen", "cover-01.jpg", "Grid_2.b.jpg", cwd=self.deck)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 2, result.stdout)
-        one, two = Path(lines[0]), Path(lines[1])
-        self.assertTrue(one.is_absolute() and two.is_absolute())
-        self.assertEqual((one.name, two.name), ("cover-01.jpg", "Grid_2.b.jpg"))
-        self.assertEqual((one.read_bytes(), two.read_bytes()), (JPEG, JPEG + b"2"))
-        self.assertEqual(one.parent, two.parent, "one folder per run")
-        self.assertEqual(self.folders(), [one.parent])
-        self.assertEqual(self.folders(self.temp), [], "never the shared temporary folder when Theodore's cache can be used")
-        self.assertEqual(stat.S_IMODE(one.parent.stat().st_mode), 0o700)
-        self.assertEqual({stat.S_IMODE(p.stat().st_mode) for p in (one, two)}, {0o600})
-        for kept_out in (self.box.home, self.deck):
-            self.assertNotIn(kept_out.resolve(), one.resolve().parents)
-            self.assertEqual([p for p in kept_out.rglob("*") if p.is_file() and b"specimen sheet" in p.read_bytes()], [])
-            self.assertEqual([p for p in kept_out.rglob("*.jpg")], [])
-        asked = self.specimen_requests()
-        self.assertEqual([(r["method"], r["path"], r["auth"], r["query"]) for r in asked],
-                         [("GET", "/v1/guide/specimens/cover-01.jpg", True, {"skill": "deck-design"}),
-                          ("GET", "/v1/guide/specimens/Grid_2.b.jpg", True, {"skill": "deck-design"})])
-        again = self.client("specimen", "cover-01.jpg", cwd=self.deck)
-        self.assertEqual(Path(again.stdout.strip()), one, "a sheet held in a recent folder is reused after the check")
-        self.assertEqual(len(self.specimen_requests()), 3, "asked again, conditionally")
-        self.assertEqual(self.api.served["specimen", "cover-01.jpg", 304], 1)
-        self.assertEqual(self.folders(), [one.parent], "nothing new written")
-
-    def test_a_bare_code_names_its_close_up_and_shares_its_held_copy(self):
-        self.api.specimens["HC3.jpg"] = JPEG + b"HC3"
-        result = self.client("specimen", "HC3", "cover-01.jpg")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        code, cover = (Path(line) for line in result.stdout.splitlines())
-        self.assertEqual((code.name, code.read_bytes()), ("HC3.jpg", JPEG + b"HC3"))
-        again = self.client("specimen", "HC3.jpg")
-        self.assertEqual(Path(again.stdout.strip()), code, "the code and its file name are one held sheet")
-        self.assertEqual(self.api.served["specimen", "HC3.jpg", 200], 1)
-        self.assertEqual(self.api.served["specimen", "HC3.jpg", 304], 1)
-        self.assertEqual([r["path"] for r in self.specimen_requests()][:2], ["/v1/guide/specimens/HC3.jpg", "/v1/guide/specimens/cover-01.jpg"])
-        for wrong in ("hc3", "HC3456", "H3"):
-            self.assertStatus(self.client("specimen", wrong), "USAGE", 64)
-
-    def test_reuse_one_fetch_per_distinct_sheet_across_calls(self):
-        names = [f"s{i}.jpg" for i in range(10)]
-        self.api.specimens = {name: JPEG + name.encode() for name in names}
-        calls = [names[0:6], names[3:9], names[5:10] + names[0:2], names[1:7], names[::2], names[4:10]]
-        printed = {}
-        for asked in calls:          # six callers, each in a process of its own
-            result = self.client("specimen", *asked[:8])
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for name, line in zip(asked, result.stdout.splitlines()):
-                self.assertEqual(Path(line).read_bytes(), JPEG + name.encode())
-                printed.setdefault(name, set()).add(line)
-        for name in names:
-            self.assertEqual(self.api.served["specimen", name, 200], 1, name)
-            self.assertEqual(len(printed[name]), 1, "the same held copy each time")
-        self.assertEqual(sum(v for (route, _n, status), v in self.api.served.items() if route == "specimen" and status == 304),
-                         sum(len(set(c)) for c in calls) - len(names))
-
-    def test_no_reuse_of_a_changed_sheet_an_old_folder_or_an_older_service(self):
-        first = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
-        self.api.specimens["cover-01.jpg"] = JPEG + b"v2"            # a new version: the held copy no longer matches
-        second = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
-        self.assertNotEqual(second, first)
-        self.assertEqual(second.read_bytes(), JPEG + b"v2")
-        self.assertEqual(self.api.served["specimen", "cover-01.jpg", 200], 2)
-        later = self.client("specimen", "cover-01.jpg", env={"THEODORE_TEST_CLOCK_OFFSET": "2760"})    # 46 minutes on
-        self.assertNotIn(Path(later.stdout.strip()).parent, (first.parent, second.parent), "too little of the hour is left")
-        self.api.specimen_etag = False                              # an older service: no ETag, If-None-Match ignored
-        older = Path(self.client("specimen", "Grid_2.b.jpg").stdout.strip())
-        again = Path(self.client("specimen", "Grid_2.b.jpg").stdout.strip())
-        self.assertNotEqual(older, again)
-        self.assertEqual(again.read_bytes(), JPEG + b"2")
-
-    def test_a_refusal_removes_every_held_sheet(self):
-        held = Path(self.client("specimen", "cover-01.jpg", "Grid_2.b.jpg").stdout.splitlines()[0])
-        self.assertTrue(held.exists())
-        for inst in self.api.installations.values():
-            inst["revoked"] = True
-        self.assertStatus(self.client("specimen", "cover-01.jpg"), "SIGN_IN_REQUIRED", 65)
-        self.assertFalse(held.parent.exists(), "a revoked device keeps no sheet on disk")
-        self.assertEqual(self.folders(), [])
-
-    def test_any_command_that_learns_of_a_refusal_removes_every_held_sheet(self):
-        """Not only `specimen`: whatever command hears that the device is revoked, the account suspended, or that the
-        channel is switched off, no sheet stays on this computer."""
-        for refuse, command in (("revoked", ("guide", "deck-design")), ("suspended", ("guide", "deck-design")), ("kill", ("guide", "deck-design"))):
-            held = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
-            self.assertTrue(held.exists(), refuse)
-            if refuse == "revoked":
-                for inst in self.api.installations.values():
-                    inst["revoked"] = True
-            elif refuse == "suspended":
-                self.api.account_state = "suspended"
-            else:
-                self.api.guide_kill = True
-            self.client(*command)
-            self.assertFalse(held.parent.exists(), f"{refuse}: no sheet kept after `{' '.join(command)}`")
-            self.assertEqual(self.folders(), [], refuse)
-            for inst in self.api.installations.values():
-                inst["revoked"] = False
-            self.api.account_state, self.api.guide_kill = "active", False
-            self.sign_in()
-
-    def test_expired_folders_go_with_any_command(self):
-        held = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
-        self.client("version", env={"THEODORE_TEST_CLOCK_OFFSET": "3700"})
-        self.assertFalse(held.parent.exists(), "an hour on, any launcher command removes the folder")
-
-    def test_a_temporary_folder_inside_the_deck_or_inside_theodore_is_not_used(self):
-        for inside in (self.deck / "tmp", self.box.home / "tmp"):
-            inside.mkdir(parents=True)
-            result = self.client("specimen", "cover-01.jpg", cwd=self.deck, env={"TMPDIR": str(inside)})
-            if result.returncode == 0:      # another temporary folder of the system was used
-                path = Path(result.stdout.strip())
-                self.addCleanup(shutil.rmtree, path.parent, True)
-                self.assertEqual(path.read_bytes(), JPEG)
-                self.assertNotIn(self.deck.resolve(), path.resolve().parents)
-                self.assertNotIn(self.box.home.resolve(), path.resolve().parents)
-            else:
-                self.assertStatus(result, "BLOCKED_BY_POLICY", 73)
-            self.assertEqual(self.folders(inside), [])
-            self.assertEqual(list(self.deck.rglob("*.jpg")) + list(self.box.home.rglob("*.jpg")), [])
-
-    def test_a_sheet_whose_sha256_does_not_match_is_refused(self):
-        self.api.specimen_sha = "0" * 64
-        first = self.refused(self.client("specimen", "cover-01.jpg"), "RETRY", 75)
-        self.assertIn("sha256", first)
-        self.api.specimen_sha = None
-        self.api.specimens["second.jpg"] = JPEG
-        real = self.api._send
-
-        def no_header(h, status, body=None, headers=None, content_type="application/json"):
-            headers = {k: v for k, v in (headers or {}).items() if k != "X-Theodore-Sha256"}
-            return real(h, status, body, headers, content_type)
-        self.api._send = no_header
-        self.refused(self.client("specimen", "cover-01.jpg"), "RETRY", 75)
-        self.api._send = real
-        self.assertEqual(self.client("specimen", "cover-01.jpg", "second.jpg").returncode, 0)
-
-    def test_a_name_that_is_not_a_sheet_does_not_cost_the_good_one(self):
-        # until 0.4.30 one name the service has no sheet for failed the whole call (tests/test_specimen_names_not_found.py)
-        result = self.client("specimen", "cover-01.jpg", "absent.jpg")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        path, note = result.stdout.splitlines()
-        self.assertEqual(Path(path).read_bytes(), JPEG)
-        self.assertTrue(note.startswith("no such sheet: absent.jpg"), note)
-
-    def test_a_sheet_over_one_mebibyte_or_of_another_type_is_refused(self):
-        self.api.specimens["big.jpg"] = b"\xff\xd8" + b"x" * (1 << 20)
-        first = self.refused(self.client("specimen", "big.jpg"), "INTERNAL", 78)
-        self.assertIn("1 MiB", first)
-        self.api.specimens["edge.jpg"] = b"\xff\xd8" + b"x" * ((1 << 20) - 2)
-        self.assertEqual(self.client("specimen", "edge.jpg").returncode, 0)
-        self.api.specimen_type = "text/html"
-        for held in self.folders():         # the edge sheet's folder: what follows must add none
-            shutil.rmtree(held)
-        self.refused(self.client("specimen", "cover-01.jpg"), "INTERNAL", 78)
-
-    def fresh_temp(self) -> Path:
-        self.temp = self.box.tmp / "tmp2"
-        self.temp.mkdir(exist_ok=True)
-        return self.temp
-
-    def test_bad_names_and_counts_are_refused_before_any_request(self):
-        before = len(self.api.requests)
-        for names in (["../cover-01.jpg"], ["a/b.jpg"], ["a\\b.jpg"], ["cover-01.png"], ["cover-01.JPG"], ["cover 01.jpg"], [".jpg"],
-                      ["x" * 81 + ".jpg"], ["NUL.jpg"], ["com1.x.jpg"], ["cover-01.jpg", "bad name.jpg"], ["%2e%2e.jpg"], ["é.jpg"],
-                      [f"s{i}.jpg" for i in range(9)], []):
-            self.refused(self.client("specimen", *names), "USAGE", 64)
-        self.assertEqual(len(self.api.requests), before, "no request at all for a bad name")
-        self.api.specimens["x" * 80 + ".jpg"] = JPEG
-        self.assertEqual(self.client("specimen", "x" * 80 + ".jpg").returncode, 0)
-
-    def test_server_refusals_become_the_usual_statuses(self):
-        self.refused(self.client("specimen", "nosuch.jpg"), "USAGE", 64)                         # 404 not_found
-        self.api.fail_with = (429, "rate_limited")
-        _first, nxt, _tell = self.assertStatus(self.client("specimen", "cover-01.jpg"), "RETRY", 75)
-        self.assertIn("wait 7 seconds", nxt)
-        self.api.fail_with = None
-        self.api.features = ["pptx"]                                                              # 403: the plan lost deck-design
-        self.refused(self.client("specimen", "cover-01.jpg"), "NO_ENTITLEMENT", 70)
-        self.api.features = ["pptx", "deck-design"]
-        self.sign_in_again()
-        self.assertEqual(self.client("specimen", "cover-01.jpg").returncode, 0)
-        self.fresh_temp()
-        self.api.account_state = "suspended"
-        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.temp)}), "NO_ENTITLEMENT", 70)
-        self.api.account_state = "active"
-        for inst in self.api.installations.values():
-            inst["revoked"] = True
-        self.refused(self.client("specimen", "cover-01.jpg", env={"TMPDIR": str(self.temp)}), "SIGN_IN_REQUIRED", 65)    # 401
-
-    def sign_in_again(self):
-        self.client("logout")
-        self.assertStatus(self.client("login", "--code", self.api.issue_activation_code("EFGH-5678")), "OK", 0)
-
-    def test_not_signed_in_and_no_redirect(self):
-        self.api.specimen_redirect = f"{self.api.base}/dl/elsewhere.jpg"
-        self.api.files["elsewhere.jpg"] = JPEG
-        self.refused(self.client("specimen", "cover-01.jpg"), "OFFLINE", 71)
-        self.assertEqual([r for r in self.api.requests if "elsewhere" in r["path"]], [], "the redirect was not followed")
-        self.api.specimen_redirect = None
-        self.client("logout")
-        self.refused(self.client("specimen", "cover-01.jpg"), "SIGN_IN_REQUIRED", 65)
-
-    def test_every_call_removes_specimen_folders_older_than_an_hour(self):
-        now = time.time()
-        old, fresh, ahead = (self.temp / f"theodore-specimens-{n}" for n in ("old", "fresh", "ahead"))
-        for folder, age in ((old, 3601), (fresh, 3300), (ahead, -7200)):
-            folder.mkdir()
-            (folder / "cover-01.jpg").write_bytes(JPEG)
-            os.utime(folder, (now - age, now - age))
-        plain = self.temp / "theodore-specimens-file"
-        plain.write_bytes(b"not a folder")
-        elsewhere = self.box.tmp / "elsewhere"
-        elsewhere.mkdir()
-        (elsewhere / "keep.txt").write_text("keep")
-        os.symlink(elsewhere, self.temp / "theodore-specimens-link")
-        other = self.temp / "another-program"
-        other.mkdir()
-        for path in (plain, self.temp / "theodore-specimens-link", other):
-            os.utime(path, (now - 99999, now - 99999), follow_symlinks=False)
-        self.assertEqual(self.client("version").returncode, 0)
-        self.assertFalse(old.exists(), "older than 60 minutes: removed by the next call, whatever the command")
-        self.assertFalse(ahead.exists(), "dated ahead of the clock: not trusted to be recent")
-        self.assertTrue(fresh.exists())
-        self.assertTrue(plain.exists() and other.exists() and (elsewhere / "keep.txt").exists(), "only Theodore's own folders")
-
-    def test_uninstall_removes_every_specimen_folder(self):
-        path = Path(self.client("specimen", "cover-01.jpg").stdout.strip())
-        self.assertTrue(path.exists())
-        self.assertStatus(self.client("uninstall"), "OK", 0)
-        self.assertEqual(self.folders(), [])
-
-    def test_a_folder_uninstall_could_not_remove_keeps_its_record(self):
-        # The record of a folder that could not be removed survives the removal of state/, so a
-        # later uninstall finds it although TMPDIR changed.
-        # From the user's home, which contains Theodore's cache: the sheet goes to the temporary folder.
-        path = Path(self.client("specimen", "cover-01.jpg", cwd=self.box.user_home).stdout.strip())
-        self.assertEqual(self.temp, path.parent.parent)
-        self.temp.chmod(0o555)                     # the folder cannot be removed from its parent
-        self.addCleanup(lambda: self.temp.chmod(0o755))
-        other = self.box.tmp / "another-tmp"
-        other.mkdir()
-        first, _n, _t = self.assertStatus(self.client("uninstall", env={"TMPDIR": str(other)}), "RETRY", 75)
-        self.assertIn(str(path.parent), first)
-        record = self.box.home / "state" / "specimens.txt"
-        self.assertTrue(record.exists(), "the record of what is left survives")
-        self.assertIn(str(path.parent), record.read_text())
-        self.assertEqual(sorted(p.name for p in (self.box.home / "state").iterdir()), ["specimens.txt"])
-        self.temp.chmod(0o755)
-        self.assertStatus(self.box.run_launcher("uninstall", env={"TMPDIR": str(other)}), "OK", 0)
-        self.assertFalse(path.parent.exists(), "found again from the record and removed")
-        self.assertFalse(self.box.home.exists())
-
-    def test_the_guide_names_the_sheets_and_says_how_to_look_at_one(self):
-        text = "# Covers\n\n![Cover](specimens/cover-01.jpg) and [the grid](specimens/Grid_2.b.jpg)\n\n## Next\n\nMore.\n"
-        self.api.guides["deck-design"]["covers"] = text
-        result = self.client("guide", "deck-design", "covers")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        launcher = f'"{self.box.home / "bin" / "theodore"}"'
-        lines = result.stdout.splitlines()
-        self.assertIn("![Cover](cover-01.jpg) and [the grid](Grid_2.b.jpg)", lines)
-        self.assertNotIn("](specimens/", result.stdout)
-        direction = [line for line in lines if "specimen <file>" in line]
-        self.assertEqual(len(direction), 1, result.stdout)
-        self.assertIn(f"{launcher} specimen <file>", direction[0])
-        self.assertGreater(lines.index(direction[0]), lines.index("More."), "after the section")
-        body = "\n".join(lines[lines.index("--- covers ---") + 1:-1]) + "\n"
-        self.assertIn(f"({len(body)} chars, sha256 {hashlib.sha256(body.encode()).hexdigest()})", lines[-1], "the end line describes what was printed")
-        plain = self.client("guide", "deck-design")
-        self.assertNotIn("specimen <file>", plain.stdout, "a text without sheet links gets no direction")
-        self.assertEqual(self.folders(), [], "the guide fetches no sheet")
-        self.assertEqual(self.specimen_requests(), [])
-
-
 # An invented manual with one role block (the engine ships the pptx SKILL.md with role markers; the client composes it).
 ROLE_MANUAL = ("# Manual\n\nBuild the deck.\n\n<!-- theodore:if lead -->\n## Review\n\nSend the reviewer message.\n"
                "<!-- theodore:end -->\n\n```\n<!-- theodore:if lead -->\nA fenced example stays as it is.\n```\n\nFinish.\n")
@@ -1002,19 +690,20 @@ class Engine(ClientCase):
             self.assertEqual(lines[bindings + 5], "SERVED-POINTER: first instruction.", args)
             self.assertLess(out.index("DIRECTIONS."), out.index(manual), args)
 
-    def test_a_slow_service_is_retried_and_a_dead_one_is_never_silent(self):
-        """Lane STUDIO: the served pptx entry gets three attempts. One that answers in time on a later attempt is
-        delivered as usual; when none does, the first line after the document header says Theodore's online part
-        could not be reached and how to get it, in `guide pptx` and in the skill body, and `skill` still exits 0."""
+    def test_a_slow_service_is_waited_for_and_a_dead_one_is_never_silent(self):
+        """Lane STUDIO: the served pptx entry is waited for within the request's time (one request per call since
+        contract C6). One that answers in time is delivered as usual; when it does not, the first line after the
+        document header says Theodore's online part could not be reached and how to get it, in `guide pptx` and in the
+        skill body, and `skill` still exits 0."""
         self.ready()
         self.api.guides["pptx"][""] = "SERVED-POINTER: first instruction.\n"
-        env = {"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}
-        self.api.guide_delays["pptx"] = [1.2, 1.2]                # the first two attempts time out, the third answers
+        env = {"THEODORE_TEST_TEXTS_TIMEOUT": "1.0"}
+        self.api.guide_delays["pptx"] = [0.3]                     # slow, within the time
         out = self.client("guide", "pptx", env=env).stdout
         self.assertIn("SERVED-POINTER: first instruction.", out)
         self.assertNotIn("THEODORE OFFLINE", out)
         for args in (("guide", "pptx"), ("skill", "pptx")):
-            self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]       # none answers in time
+            self.api.guide_delays["pptx"] = [2.0]                 # past the time
             result = self.client(*args, env=env)
             self.assertEqual(result.returncode, 0, args)
             lines = result.stdout.splitlines()
@@ -1973,7 +1662,7 @@ class StatusDoctorUninstall(ClientCase):
         for folder in folders[:4]:
             self.assertIn(str(folder), first)
 
-    def test_uninstall_removes_the_engines_libreoffice_profile_and_lock_files_from_the_temporary_folder(self):
+    def test_uninstall_removes_the_engines_office_profile_and_lock_files_from_the_temporary_folder(self):
         # ACCEPT-LOCAL2 D-B: pptx-soffice-profile/, its .warm-seed/, its .lock, theodore-pptx-locks/*.lock stayed.
         self.ready()
         temp = Path(self.box.env["TMPDIR"])
@@ -1986,7 +1675,7 @@ class StatusDoctorUninstall(ClientCase):
             (temp / "theodore-pptx-locks" / f"{n}.lock").write_text("")
         (temp / "someone-elses").mkdir()
         first, _n, _t = self.assertStatus(self.client("uninstall"), "OK", 0)
-        self.assertIn("LibreOffice profile and lock files were removed", first)
+        self.assertIn("the engine's profile and lock files were removed", first)
         for name in ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed", "pptx-soffice-profile.lock", "theodore-pptx-locks"):
             self.assertFalse((temp / name).exists(), name)
         self.assertTrue((temp / "someone-elses").exists())
@@ -2776,8 +2465,8 @@ class HostsOffPath(ClientCase):
 
 class BackgroundResume(ClientCase):
     """A background download that stopped before it finished (the computer slept, the user signed out) is started
-    again by the next command: the runtime and engine by the setup job, LibreOffice and PortableGit by guide, skill and
-    doctor; doctor says what is still missing and what will fetch it."""
+    again by the next command: the runtime and engine by the setup job, PortableGit by guide, skill and doctor; doctor
+    says what is still missing and what will fetch it. Theodore fetches no LibreOffice (Carl's rule, 25 Nov 2026)."""
 
     DEAD_PID = 2 ** 22 + 12345          # no process has it
 
@@ -2796,32 +2485,14 @@ class BackgroundResume(ClientCase):
         self.assertStatus(self.client("status"), "OK", 0)
         self.assertTrue(json.loads(self.client("status", "--json").stdout)["engine"], "the engine came with it")
 
-    def test_libreoffice_that_stopped_is_started_again_and_doctor_says_so(self):
-        self.box.env["THEODORE_TEST_NO_SYSTEM_LIBREOFFICE"] = "1"
+    def test_a_libreoffice_download_an_earlier_version_left_is_not_started_again_or_named(self):
         self.ready()
-        missing = {"version": "0.0.9", "url": f"{self.api.base}/dl/upstream/LibreOffice_missing.dmg", "sha256": "1" * 64, "size": 10}
-        state_path = self.box.home / "state" / "update.json"
-        state = json.loads(state_path.read_text())
-        state["tools"] = {"libreoffice": {k: missing for k in ("darwin-arm64", "darwin-x64", "win32-x64", "linux-x64", "linux-arm64")}}
-        state_path.write_text(json.dumps(state))
-        record = self.dead_job("libreoffice")
-        out = self.client("doctor").stdout
-        self.assertIn("restarted: downloads that had stopped before they finished were started again: libreoffice", out)
-        self.assertIn("still missing:", out)
-        self.assertIn("LibreOffice (slide previews)", out)
-        self.box.wait_jobs()
-        after = json.loads(record.read_text())
-        self.assertNotEqual(after.get("pid"), self.DEAD_PID, "a new attempt ran")
-        # a failure that passes by itself is retried a minute later at the earliest; the attempt above failed just now
-        tried = len([r for r in self.api.requests if "LibreOffice_missing.dmg" in r["path"]])
-        self.assertGreater(tried, 0)
-        self.assertNotIn("restarted:", self.client("doctor").stdout, "not again within the minute")
-        # one that needs the user is not retried: doctor names it and the command that tries again
-        self.dead_job("libreoffice", failed={"cause": "PROXY_AUTH", "detail": "the proxy asks for a sign-in"})
+        self.dead_job("libreoffice")
         out = self.client("doctor").stdout
         self.assertNotIn("restarted:", out)
-        self.assertIn("its download failed (the proxy asks for a sign-in)", out)
-        self.assertIn("tools install libreoffice` tries again", out)
+        self.assertNotIn("LibreOffice", out)
+        self.assertIn("still missing: nothing", out)
+        self.assertFalse([r for r in self.api.requests if "LibreOffice" in r["path"]], "nothing fetched")
 
     def test_a_download_that_never_started_is_not_begun_by_guide_or_doctor(self):
         self.ready()
@@ -3014,37 +2685,19 @@ class AutoUpdate(ClientCase):
 
 
 @unittest.skipUnless(sys.platform == "darwin", "the disk-image route is macOS only")
-class LibreOffice(ClientCase):
-    def test_install_from_a_disk_image_with_a_pinned_checksum(self):
+class LibreOfficeNotInstalled(ClientCase):
+    """Carl's rule (25 November 2026): `tools install libreoffice` fetches nothing; from 0.5.1 it is an unknown tool like
+    any other (a usage error naming the one tool, git)."""
+
+    def test_tools_install_libreoffice_fetches_nothing(self):
         self.ready()
-        stage = self.box.tmp / "dmg-src" / "LibreOffice.app" / "Contents" / "MacOS"
-        stage.mkdir(parents=True)
-        (stage / "soffice").write_text("#!/bin/sh\necho fake soffice\n")
-        (stage / "soffice").chmod(0o755)
-        dmg = self.box.tmp / "LibreOffice_fake.dmg"
-        subprocess.run(["/usr/bin/hdiutil", "create", "-quiet", "-srcfolder", str(self.box.tmp / "dmg-src"), "-volname", "LibreOffice",
-                        "-format", "UDZO", str(dmg)], check=True, capture_output=True)
-        data = dmg.read_bytes()
-        # the mirror on the download host does not have it (404): the second source, the publisher's own URL, does
-        self.api.files["upstream/LibreOffice_fake.dmg"] = data
-        pin = {"version": "0.0.1", "url": f"{self.api.base}/dl/upstream/LibreOffice_fake.dmg", "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
-        state_path = self.box.home / "state" / "update.json"
-        state = json.loads(state_path.read_text())
-        state["tools"] = {"libreoffice": {"darwin-arm64": pin, "darwin-x64": pin}}
-        state_path.write_text(json.dumps(state))
-        result = self.client("tools", "install", "libreoffice", "--job")
-        self.assertStatus(result, "OK", 0)
-        tried = [r["path"] for r in self.api.requests if "LibreOffice_fake.dmg" in r["path"]]
-        self.assertEqual(tried, ["/dl/tools/LibreOffice_fake.dmg", "/dl/upstream/LibreOffice_fake.dmg"], "mirror first, publisher second")
-        binary = self.box.home / "tools" / "libreoffice" / "LibreOffice.app" / "Contents" / "MacOS" / "soffice"
-        self.assertTrue(os.access(binary, os.X_OK))
-        self.assertEqual(sorted(p.name for p in (self.box.home / "staging").iterdir()), [])
-        mounts = subprocess.run(["/sbin/mount"], capture_output=True, text=True).stdout
-        self.assertNotIn(str(self.box.home), mounts, "the disk image is detached")
-        state["tools"]["libreoffice"]["darwin-arm64"] = state["tools"]["libreoffice"]["darwin-x64"] = {**pin, "sha256": "0" * 64, "version": "0.0.2"}
-        state_path.write_text(json.dumps(state))
-        first, _n, _t = self.assertStatus(self.client("tools", "install", "libreoffice", "--job"), "SETUP_FAILED", 68)
-        self.assertIn("cause HASH_MISMATCH", first)
+        for args in (("tools", "install", "libreoffice"), ("tools", "install", "libreoffice", "--background", "--if-needed"),
+                     ("tools", "install", "libreoffice", "--job")):
+            first, _n, _tell = self.assertStatus(self.client(*args), "USAGE", 64)
+            self.assertIn("The tool is: git.", first, args)
+        self.assertFalse([r for r in self.api.requests if "LibreOffice" in r["path"] or "tools/" in r["path"]], "nothing fetched")
+        self.assertFalse((self.box.home / "tools" / "libreoffice").exists())
+        self.assertFalse((self.box.home / "state" / "jobs" / "libreoffice.json").exists())
         self.assertStatus(self.client("tools", "install", "word"), "USAGE", 64)
 
 
@@ -3233,11 +2886,14 @@ class HostTest(ClientCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn(" guide pptx pptxgenjs-charts)", result.stdout)
         self.assertEqual(result.stdout.splitlines()[4], "--- served-part ---")     # after the title and the three opening lines
-        before = len(self.api.requests)
+        before, batches = len(self.api.requests), len(self.api.batches)
         first, nxt, _tell = self.assertStatus(self.client("guide", "pptx", "not-served"), "USAGE", 64)
         self.assertIn("guide pptx has no section 'not-served'.", first)
         self.assertIn("guide pptx for the manual", nxt)
-        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/pptx/not-served", "/v1/guide/pptx"])
+        # contract C6: one request for the section (404), then one for the names offered instead (the index)
+        self.assertEqual([r["path"] for r in self.api.requests[before:] if "/guide/" in r["path"]], ["/v1/guide/batch", "/v1/guide/batch"])
+        self.assertEqual([[(item["type"], item["skill"], item.get("section")) for item in items] for items in self.api.batches[batches:]],
+                         [[("section", "pptx", "not-served")], [("index", "pptx", None)]])
         self.assertStatus(self.client("guide", "pptx", "--license"), "USAGE", 64)
 
     # --- 5: uninstall with an assistant that never had Theodore ------------------------------------------------------------------
@@ -3538,6 +3194,39 @@ class Internals(unittest.TestCase):
             self.assertFalse(ed25519.verify(pub_b, msg_b, sig_b[:-1] + bytes([sig_b[-1] ^ 1])))
         self.assertFalse(ed25519.verify(b"\x00" * 31, b"", b"\x00" * 64))
 
+    def test_a_job_record_held_unreadable_past_two_seconds_is_read_again_not_taken_for_an_ended_job(self):
+        # release/0.5.0's Windows runtime target (7 suites side by side, 25 Nov): the setup's record, held by another
+        # process past read_json's 2 s, read as {} and so as "the job ended"; the setup's wait ended early and a second
+        # job started. Read again instead, as long as it is held (Windows), and never taken for an ended job.
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from theodore_client import core
+        with tempfile.TemporaryDirectory() as tmp:
+            job = core.Job.__new__(core.Job)
+            job.name, job.path = "setup", Path(tmp) / "setup.json"
+            job.path.write_text(json.dumps({"pid": os.getpid(), "phase": "runtime", "percent": 40}))
+            real_read = Path.read_text
+            held_until = time.monotonic() + 2.5
+
+            def read_text(path, *args, **kwargs):
+                if path == job.path and time.monotonic() < held_until:
+                    raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+                return real_read(path, *args, **kwargs)
+            with mock.patch.object(core, "IS_WINDOWS", True), mock.patch.object(core, "pid_alive", return_value=True), \
+                    mock.patch.object(Path, "read_text", read_text):
+                began = time.monotonic()
+                self.assertTrue(job.alive(), "held, then read: the job is running")
+                self.assertGreaterEqual(time.monotonic() - began, 2.4, "it was read again until it could be")
+                held_until = time.monotonic() + 60
+                with mock.patch.object(core.Job, "UNREADABLE_WAIT_S", 0.5):
+                    self.assertTrue(job.alive(), "held past the wait: still not taken for an ended job")
+                held_until = 0
+                job.path.write_text(json.dumps({"pid": 0, "phase": "done", "done": True}))
+                self.assertFalse(job.alive(), "a readable record of an ended job: ended, at once")
+            job.path.unlink()
+            self.assertFalse(job.alive(), "no record: no job")
+
     def test_pack_detection_for_every_documented_helper(self):
         from theodore_client.install import PACK_HELPERS, packs_in_script
         self.assertEqual(sorted(PACK_HELPERS), ["backgrounds", "flags", "icons", "maps"])
@@ -3706,10 +3395,14 @@ class HostAndCloud(unittest.TestCase):
         self.core = core
 
     def host(self, env: dict, linux: bool = False, opt_codex: bool = False) -> str:
-        real_is_dir = Path.is_dir
+        real_is_dir, real_isdir = Path.is_dir, os.path.isdir
+        absent = ("/opt/codex/runtimes", "/mnt/skills", "/mnt/user-data", "/home/oai")
+        # The Codex runtime's folder is asked of os.path (hot.py, which loads no pathlib); the others of Path.
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "platform", "linux" if linux else "darwin"), \
+                mock.patch.object(os.path, "isdir", lambda p: (opt_codex and str(p) == "/opt/codex/runtimes") or
+                                  (str(p) not in absent and real_isdir(p))), \
                 mock.patch.object(Path, "is_dir", lambda p: (opt_codex and p.as_posix() == "/opt/codex/runtimes") or
-                                  (p.as_posix() not in ("/opt/codex/runtimes", "/mnt/skills", "/mnt/user-data", "/home/oai") and real_is_dir(p))):
+                                  (p.as_posix() not in absent and real_is_dir(p))):
             return self.core.host_name()
 
     def test_each_assistant_is_reported_as_itself(self):
@@ -3769,6 +3462,50 @@ class ProxiesAndSandboxes(ClientCase):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(_urlreq, "getproxies", lambda: {}):
             self.assertEqual(api._timeout("https://api.theodoreand.ai/v1/keys", 2.0), 2.0)
 
+    def test_a_proxy_set_or_removed_after_the_first_request_is_followed(self):
+        """urllib fixes an opener's proxies when it is built, and one built with none never asks again. The client kept
+        one opener for the life of the process: a service or tool server whose first request found no proxy went
+        straight to our hosts past one set later (the system's setting changes when a laptop changes network; in this
+        suite a test that named a proxy reached the real API that way), and one that began behind a proxy kept sending
+        to it after it was gone. The setting is read for each request, and an opener built again only when it changed."""
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
+        from theodore_client import api
+        proxy, url, seen = _start_proxy()
+        self.addCleanup(proxy.shutdown)
+        keys = f"{self.api.base}/v1/keys"
+        unset = {name: "" for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
+                                       "NO_PROXY", "no_proxy")}
+        self.enterContext(mock.patch.object(api, "_OPENERS", {}))
+        no_proxy_anywhere = lambda: mock.patch.object(_urlreq, "getproxies", lambda: {})      # noqa: E731
+
+        with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+            self.assertEqual(api.request("GET", keys)[0], 200)      # the process's first request: no proxy
+        self.assertEqual(seen, [])
+        with mock.patch.dict(os.environ, {**unset, "HTTP_PROXY": url, "http_proxy": url}):
+            self.assertEqual(api.request("GET", keys)[0], 200)      # a proxy set since, in the environment: through it
+        self.assertEqual(seen, [f"GET {keys}"])
+        with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+            self.assertEqual(api.request("GET", keys)[0], 200)      # the proxy gone: straight again, not to where it was
+        self.assertEqual(seen, [f"GET {keys}"])
+        # The system's own setting (macOS, Windows), which no environment variable carries, and a request that follows
+        # no redirect (a download's opener): the same.
+        with mock.patch.dict(os.environ, unset), mock.patch.object(_urlreq, "getproxies", lambda: {"http": url}), \
+                mock.patch.object(_urlreq, "proxy_bypass", lambda host: False):
+            self.assertEqual(api.request("GET", keys, redirects=False)[0], 200)
+            self.assertEqual(seen, [f"GET {keys}"] * 2)
+            self.assertIs(api._opener(False), api._opener(False), "the same setting: the same opener, nothing built")
+        with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+            self.assertEqual(api.request("GET", keys, redirects=False)[0], 200)
+        self.assertEqual(seen, [f"GET {keys}"] * 2)
+        # The other way round, in a process whose first request went through a proxy: once it is gone, straight.
+        with mock.patch.object(api, "_OPENERS", {}):
+            with mock.patch.dict(os.environ, {**unset, "HTTP_PROXY": url, "http_proxy": url}):
+                self.assertEqual(api.request("GET", keys)[0], 200)
+            self.assertEqual(seen, [f"GET {keys}"] * 3)
+            with mock.patch.dict(os.environ, unset), no_proxy_anywhere():
+                self.assertEqual(api.request("GET", keys)[0], 200)
+            self.assertEqual(seen, [f"GET {keys}"] * 3, "a proxy that is gone is not used again")
+
     def test_a_sandbox_proxy_that_refuses_our_hosts_names_the_setting(self):
         """claude.ai's proxy answers CONNECT with 403 for a site off the allow list: in a cloud sandbox the status
         names the setting in Claude and says where ChatGPT has a network; elsewhere it stays the plain network text."""
@@ -3813,25 +3550,6 @@ class ProxiesAndSandboxes(ClientCase):
         self.assertIn(url, tell)
         plain = self.client("login", "--start")
         self.assertIn("one-time sign-in", status_lines(plain.stdout)[2])
-
-
-class LibreOfficeAction(unittest.TestCase):
-    """doctor names the platform's real way to get LibreOffice: on Linux, where Theodore fetches none, the system's
-    package manager (lane accept-local: doctor said `tools install libreoffice`, which answers 'not supported')."""
-
-    def test_linux_names_the_package_manager_or_says_it_plainly(self):
-        from unittest import mock
-        from theodore_client import install
-        with mock.patch.object(install, "libreoffice_pin", lambda: None):
-            with mock.patch.object(install.shutil, "which", lambda tool: "/usr/bin/apt-get" if tool == "apt-get" else None):
-                self.assertEqual(install.libreoffice_install_action(),
-                                 "install LibreOffice with the system's package manager: `sudo apt-get install libreoffice-impress`")
-            with mock.patch.object(install.shutil, "which", lambda tool: "/sbin/apk" if tool == "apk" else None):
-                self.assertIn("`sudo apk add libreoffice`", install.libreoffice_install_action())
-            with mock.patch.object(install.shutil, "which", lambda tool: None):
-                action = install.libreoffice_install_action()
-                self.assertEqual(action, "install LibreOffice (its Impress part) with the system's package manager")
-                self.assertNotIn("tools install", action)
 
 
 class UpdateApplySays(ClientCase):

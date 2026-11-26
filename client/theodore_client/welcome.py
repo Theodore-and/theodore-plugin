@@ -163,10 +163,10 @@ def _host() -> str | None:
 
 def _new_session_needed(host: str | None, first_deck: bool = True) -> bool:
     """Codex loads plugins, tools and rules only when a session starts. So does Claude Code: a plugin's skills, agents
-    and tool, and the instructions line, load when a conversation starts, and the Claude app's Code tab keeps one
-    process for a conversation, so the conversation that installed Theodore has none of them. There the first deck
-    went to the app's own slide artifact instead of Theodore in one rehearsal (Opus, auto mode, the user's
-    configuration), and ran through Theodore's launcher without its agents in two (lane L3, 25 November 2026). The
+    and tool, its skills' allowed-tools, and the instructions line, load when a conversation starts, and the Claude
+    app's Code tab keeps one process for a conversation, so the conversation that installed Theodore has none of them.
+    There the first deck ran through Theodore's launcher with general-purpose agents instead of Studio's designers,
+    and in default mode every command asked (212 allow-once prompts for two slides; lane L3, 25 November 2026). The
     welcome (`first_deck`) sends the first deck to a new session in both; doctor, which also runs in conversations
     that have Theodore, says it only for Codex."""
     if host == "codex":
@@ -175,9 +175,9 @@ def _new_session_needed(host: str | None, first_deck: bool = True) -> bool:
 
 
 def _downloading() -> bool:
-    """A download of the runtime, the engine, LibreOffice or Git still going on (the packs have their own sentence)."""
+    """A download of the runtime, the engine or Git still going on (the packs have their own sentence)."""
     from .core import Job
-    return any(Job(name).alive() for name in ("setup", "libreoffice", "git"))
+    return any(Job(name).alive() for name in ("setup", "git"))
 
 
 CLOSING = ("This welcome is your whole closing message: say nothing about permissions, settings or uninstalling unless "

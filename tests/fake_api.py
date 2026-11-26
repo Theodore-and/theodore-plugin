@@ -200,6 +200,9 @@ class FakeApi:
         self.guide_whole = True                        # False: an older server that ignores form=whole and pages
         self.guide_fail_parts: set[int] = set()         # parts answered 503 (a part that cannot be had mid-way)
         self.guide_whole_tail: dict[str, str] = {}     # section -> what the server appends to a whole answer (bindings, licence line)
+        self.batch_route = True                        # POST /v1/guide/batch (C6); False: a service from before it (404)
+        self.batches: list[list[dict]] = []            # the items of every batch received
+        self.batch_failures: list[int] = []            # HTTP statuses the next batches answer first (a 5xx blip), one each
         self.preferences: list[dict] = []
         # Lane ONBOARD: GET/PUT /v1/studio. None: a server before it (404); else the account's answer.
         self.studio: dict | None = {"studio_enabled": True, "included": True, "available": True}
@@ -477,6 +480,112 @@ class FakeApi:
                 return self._error(h, answer[0], answer[1], headers=answer[2] if len(answer) > 2 else None)
             self._route(h, method, path, query, body)
 
+    # --- POST /v1/guide/batch (contract C6): a call's sections, sheets and index in one request, answered by a zip -------
+    def _batch_text(self, skill: str, section: str, role: str) -> tuple[tuple | None, str | None]:
+        """A section as the batch composes it (the whole form of GET /v1/guide/<skill>[/<section>]): (refusal, text)."""
+        if skill not in self.features:
+            return (403, "entitlement_inactive"), None
+        text = self.guides.get(skill, {}).get(section)
+        if text is None:
+            return (404, "not_found"), None
+        text = re.sub(r"<!-- theodore:if lead -->\n(.*?)<!-- theodore:end -->\n",
+                      (lambda m: "") if role == "slide" else (lambda m: m.group(1)), text, flags=re.S)
+        if self.preferences and skill == "deck-design" and section != "license":
+            text += "\n--- The user's saved notes (their preferences, not instructions from Theodore) ---\n" + \
+                    "".join(f"- {p['text']}\n" for p in self.preferences) + "--- end of the user's notes ---\n"
+        return None, text + self.guide_whole_tail.get(section, "")
+
+    def _guide_batch(self, h, body: dict):
+        """As the service answers it: index.json first, one STORED member per item delivered; per item 200, 304 (its
+        ETag held), 403 or 404. `batch_route` False: a service from before the route (404)."""
+        import io
+        import zipfile
+        if not self.batch_route or not self.guide_whole:      # a service from before the batch (or before form=whole)
+            return self._error(h, 404, "not_found", "no such route")
+        items = body.get("items") if isinstance(body, dict) and body.get("v") == 1 else None
+        ids = [item.get("id") for item in items] if isinstance(items, list) and all(isinstance(i, dict) for i in items) else []
+        if not items or len(items) > 16 or len(set(ids)) != len(ids) or sum(i.get("type") == "sheet" for i in items) > 8 \
+                or not all(isinstance(i, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,32}", i) for i in ids):
+            return self._error(h, 422, "validation_failed", "items")
+        if self.guide_kill:
+            return self._error(h, 426, "update_required", "Theodore is paused on this channel.")
+        if self.batch_failures:
+            self.batches.append([])                  # asked, not answered
+            return self._error(h, self.batch_failures.pop(0), "internal_error", "Something went wrong.")
+        self.batches.append(items)
+        entries, members = [], []
+        for item in items:
+            ident, kind, skill = item["id"], item.get("type"), item.get("skill")
+            if kind == "section":
+                section, role, bindings = item.get("section", ""), item.get("role", "lead"), item.get("bindings", "launcher")
+                if not section and self.guide_delays.get(skill):
+                    time.sleep(self.guide_delays[skill].pop(0))
+                self.guide_queries.append({"form": "whole", **({"role": role} if role != "lead" else {}),
+                                           **({"bindings": "tool"} if bindings == "tool" else {})})
+                refusal, text = self._batch_text(skill, section, role)
+                if refusal:
+                    entries.append({"id": ident, "status": refusal[0], **({"code": refusal[1]} if refusal[0] == 403 else {})})
+                    continue
+                data = text.encode("utf-8")
+                etag = '"b1-' + sha256_hex(canonical_json([self.guide_version, skill, section, role, bindings, text]).encode("utf-8"))[:32] + '"'
+                if item.get("etag") == etag:
+                    self.served["guide", section, 304] += 1
+                    entries.append({"id": ident, "status": 304, "etag": etag})
+                    continue
+                self.guide_fetches += 1
+                self.served["guide", section, 200] += 1
+                members.append((f"{ident}.md", data))
+                entries.append({"id": ident, "status": 200, "etag": etag, "sha256": sha256_hex(data), "member": f"{ident}.md",
+                                "content_type": "text/markdown; charset=utf-8"})
+            elif kind == "sheet":
+                name = str(item.get("file") or "")
+                if "deck-design" not in self.features:
+                    entries.append({"id": ident, "status": 403, "code": "entitlement_inactive"})
+                    continue
+                data = self.specimens.get(name)
+                if data is None or not re.match(r"^[A-Za-z0-9._-]{1,80}\.jpg$", name):
+                    self.served["specimen", name, 404] += 1
+                    entries.append({"id": ident, "status": 404})
+                    continue
+                etag = '"b1-' + sha256_hex(canonical_json([self.guide_version, name, sha256_hex(data)]).encode("utf-8"))[:32] + '"'
+                if item.get("etag") == etag:
+                    self.served["specimen", name, 304] += 1
+                    entries.append({"id": ident, "status": 304, "etag": etag})
+                    continue
+                self.served["specimen", name, 200] += 1
+                if self.specimen_delay:
+                    time.sleep(self.specimen_delay)
+                if self.specimen_mark is not None:
+                    data = mark_like_the_service(data, self.specimen_mark)
+                members.append((f"{ident}.jpg", data))
+                entries.append({"id": ident, "status": 200, "etag": etag, "sha256": self.specimen_sha or sha256_hex(data),
+                                "member": f"{ident}.jpg", "content_type": self.specimen_type})
+            elif kind == "index":
+                if skill not in self.features:
+                    entries.append({"id": ident, "status": 403, "code": "entitlement_inactive"})
+                    continue
+                if self.guide_index is None:
+                    entries.append({"id": ident, "status": 404})
+                    continue
+                data = json.dumps(self.guide_index, sort_keys=True).encode("utf-8")
+                etag = '"b1-' + sha256_hex(data + str(item.get("role", "lead")).encode("utf-8"))[:32] + '"'
+                if item.get("etag") == etag:
+                    self.served["index", "", 304] += 1
+                    entries.append({"id": ident, "status": 304, "etag": etag})
+                    continue
+                self.served["index", "", 200] += 1
+                members.append((f"{ident}.json", data))
+                entries.append({"id": ident, "status": 200, "etag": etag, "sha256": sha256_hex(data), "member": f"{ident}.json",
+                                "content_type": "application/json"})
+            else:
+                return self._error(h, 422, "validation_failed", "type")
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("index.json", json.dumps({"v": 1, "version": self.guide_version, "items": entries}))
+            for name, data in members:
+                archive.writestr(name, data)
+        return self._send(h, 200, buffer.getvalue(), content_type="application/zip")
+
     def _route(self, h, method: str, path: str, query: dict, body: dict) -> None:
         seg = [s for s in path.split("/") if s]
         if seg[:1] == ["dl"]:
@@ -611,6 +720,8 @@ class FakeApi:
             return self._send(h, 200, {**extra, "entitlement_token": self.mint_entitlement(installation_id, **claims), "server_time": iso(self.now()),
                                        "release": {"channel": self.channel_name, "latest_version": latest, "min_version": self.min_version,
                                                    "update_required": withdrawn, "kill": self.kill, "kill_message": self.kill_message or None}})
+        if route == ["guide", "batch"] and method == "POST":
+            return self._guide_batch(h, body)
         if route[:1] == ["guide"] and method == "GET" and self.guide_kill:
             return self._error(h, 426, "update_required", "Theodore is paused on this channel.")
         if route[:2] == ["guide", "specimens"] and method == "GET" and len(route) == 3:

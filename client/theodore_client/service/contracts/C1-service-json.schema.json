@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theodoreand.ai/contracts/C1-service-json.schema.json",
+  "title": "C1 <home>/state/run/service.json (mode 0600), written by the service after it listens",
+  "type": "object", "additionalProperties": false,
+  "required": ["v", "pid", "started", "protocol", "version", "endpoint", "secret", "home"],
+  "properties": {
+    "v": {"const": 1},
+    "pid": {"type": "integer", "minimum": 1},
+    "started": {"type": "string", "format": "date-time"},
+    "protocol": {"type": "integer", "minimum": 1},
+    "version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "endpoint": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "address"],
+      "properties": {
+        "kind": {"enum": ["pipe", "unix", "tcp"]},
+        "address": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      },
+      "allOf": [{"if": {"properties": {"kind": {"const": "tcp"}}}, "then": {"required": ["port"], "properties": {"address": {"const": "127.0.0.1"}}}}]
+    },
+    "secret": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "home": {"type": "string", "minLength": 1}
+  }
+}

@@ -1,5 +1,44 @@
 # Changes
 
+## 0.5.1
+
+Theodore keeps its engine running between commands, its short command starts in a few milliseconds on macOS and Linux,
+a deck in parts is built while it is being designed, and Theodore no longer uses LibreOffice.
+
+- Behind Theodore's tool and its short command, a service keeps Theodore's engine running (engine 2.0), so a command
+  no longer starts the engine and its libraries each time. Several commands at once run side by side: the service
+  grows to about one engine per core under load, shrinks back when idle, and stops a few minutes after the last
+  session ends. With an earlier engine, the service runs each command as before.
+- A command goes at once to an idle engine, preferring one that has finished warming up. When several parts are
+  designed at once, the service warms only the engines they need.
+- A deck in parts (engine 1.0.0-rc.37): as each part's slides are saved, the service builds them ahead on an idle
+  engine, and the lead's apply takes what was built ahead instead of building it again. A build ahead never takes the
+  last idle engine and never runs while a command waits. Several parts prepared at once are built together.
+- A deck's next commands go to the engine that already holds it, so they no longer read the deck afresh elsewhere.
+- A session opened in a folder prepares what the engine reads from that folder's decks and templates while the request
+  is being written, so the first `pptx start --from` usually finds it ready.
+- The tool's answer to an apply holds the pictures of the slides it changed, and to a render the pictures asked for,
+  so they reach the assistant without opening files.
+- In the Claude desktop app's chat, the engine builds and draws slides on several threads, as it does elsewhere.
+- The design guidance comes in one request per call, on a kept connection, and its texts are held only in memory,
+  never written to disk.
+- On macOS and Linux, `theodore` is now a small native program that hands each command to the service, with no shell
+  or Python to start first. Windows keeps its launcher until a signed program is available: on a modest 2-core Windows
+  PC a command answers in about 100 ms (about 285 ms through Git Bash, as Claude Code runs it).
+- A connection the server had already closed is no longer reported as offline: the request goes on a new connection.
+- A request the server answers with a passing error (500, 502, 503 or 504) is sent once more after a second, and
+  nothing already received is lost.
+- A command never waits forever. If the engine stops during a command, the service notices at once: a command that had
+  written nothing runs once more, and one that may have written says so instead of guessing. A command still running
+  at its time limit is stopped with the same answer.
+- Theodore no longer uses LibreOffice. On a Windows PC without PowerPoint that saves a 373 MB download (1.6 GB
+  installed), on a Mac about 300 MB (0.9 GB installed), and a copy an earlier version downloaded is removed on first
+  run.
+- Theodore's runtime is updated for engine 2.0: it no longer carries the two libraries 2.0 stopped using.
+- Theodore starts its second worker once a command has answered, never beside it.
+- When an engine is installed, Theodore starts it once, so the first command ever doesn't pay that start (the install
+  takes about 3 s longer).
+
 ## 0.4.34
 
 Every Theodore command starts faster, most of all on Windows, and the design guidance answers side by side. Setting

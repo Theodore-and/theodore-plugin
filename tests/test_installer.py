@@ -325,7 +325,9 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed\n" + result.stdout + result.stderr)
         self.api.activation_rate_limited = None
-        done = self.install("--code", "ABCD-1234")
+        # Signed in only now: the engine's one step is the installer's guide pptx, whose wait for the download (15 s)
+        # ran out on Windows with 7 suites side by side (25 Nov). Waited for as long as the load needs.
+        done = self.install("--code", "ABCD-1234", env={"THEODORE_TEST_UPDATE_WAIT": "120"})
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(len(self.api.activations), 1, "the same code works once the limit has passed")
         self.box.wait_jobs()
@@ -355,7 +357,8 @@ class Installer(unittest.TestCase):
         self.box.wait_jobs()
         self.assertTrue((self.box.home / "runtime" / RUNTIME_ID / ".ready").exists(), "everything else is installed\n" + result.stdout + result.stderr)
         self.api.computer_limit = None
-        done = self.install("--code", "ABCD-1234")
+        # As above: the engine's one step is the installer's guide pptx (its 15 s ran out under load, 25 Nov).
+        done = self.install("--code", "ABCD-1234", env={"THEODORE_TEST_UPDATE_WAIT": "120"})
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(len(self.api.activations), 1, "the same code works once a computer is removed")
         self.box.wait_jobs()
@@ -468,7 +471,7 @@ class Installer(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         tail = result.stdout.strip().splitlines()[-4:]
         # The first line says whether a download still goes on after the installer: on Windows the rest of the runtime
-        # (or LibreOffice) is often still downloading in the background when it ends; elsewhere here it is done.
+        # is often still downloading in the background when it ends; elsewhere here it is done.
         self.assertIn(tail[0], ("Theodore is set up and signed in on this computer.",
                                 "Theodore is installed on this computer and finishes a download by itself in the next few minutes."),
                       result.stdout)

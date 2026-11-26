@@ -60,10 +60,10 @@ rem --- pins: stamped by tools/sync_launchers.py from launcher.json; do not edit
 set "PIN_API_BASE=https://api.theodoreand.ai"
 set "PIN_DL_BASE=https://dl.theodoreand.ai"
 set "PIN_MANIFEST_KEYS=man-production-20261111-7792324a=LxgBIQ0n5McEVIMmiY-96H-YQErYK-OHpLBLLuscsbk"
-set "PIN_RUNTIME_ID=b77f7d4ca2d43955"
-set "PIN_CLIENT_VERSION=0.4.34"
-set "PIN_CLIENT=client/client-0.4.34.tar ab0d420d6119f1326fc1124bdc29391d5e1d40a93aec53a913851c1042c429c0"
-set "PIN_PYTHON_win32_x64=runtime/b77f7d4ca2d43955/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
+set "PIN_RUNTIME_ID=875c13a60af59e66"
+set "PIN_CLIENT_VERSION=0.5.1"
+set "PIN_CLIENT=client/client-0.5.1.tar 33e2485432eaed17b2cda92895b1fe1d37c364559d52087ece0c7747b63a7a8a"
+set "PIN_PYTHON_win32_x64=runtime/875c13a60af59e66/cpython-3.12.16+20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz 1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149"
 rem --- end of pins --------------------------------------------------------------------------------------------------
 
 set "API_BASE=%PIN_API_BASE%"
@@ -419,8 +419,6 @@ if errorlevel 1 goto :doctor
 call "%%T%%" guide pptx >nul 2>&1
 echo theodore-install: asset packs (icons, flags, maps, backgrounds; about 95 MB), when published for this channel, download in the background
 call "%%T%%" packs install --all --background >nul 2>&1
-rem Nothing to turn slides into images (no LibreOffice, no PowerPoint): fetch LibreOffice, as on macOS.
-call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1
 
 :doctor
 rem --- 7. the check the assistant reports: the last line says what failed, if anything did -------------------------

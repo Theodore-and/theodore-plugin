@@ -14,7 +14,7 @@ Never on a network error, a timeout, a 5xx, an answer whose body is not the serv
 licence (offline) or a clock the engine refuses: none of those reaches this module.
 
 What is removed: `engines/` and `packs/` inside Theodore's folder, and the engine and pack archives a download left in
-`staging/`. Never anything else: not the runtime (Python and Node are not Theodore's), not LibreOffice or Git, not the
+`staging/`. Never anything else: not the runtime (Python and Node are not Theodore's), not Git, not the
 state (the sign-in that a lifted suspension or a restored plan reuses), not the logs, the person's decks, workspaces or
 output folders. A top-level folder that is a link is left alone; inside, a link or a junction is removed as a link and
 never followed, so nothing outside Theodore's folder is ever reached.

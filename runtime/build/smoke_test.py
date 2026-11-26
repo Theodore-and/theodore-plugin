@@ -367,7 +367,9 @@ def check_engine(runtime: Path, payload: Path, home: Path, scratch: Path, label:
     probe = "import os, shutil, sys; print(os.path.realpath(shutil.which('node') or '')); print(sys.base_prefix)"
     proc, _ = timed([python, "-c", probe], env=strict, cwd=scratch)
     lines = proc.stdout.splitlines() + ["", ""]
-    expect(lines[0] == os.path.realpath(runtime_node(runtime)) and inside(lines[1], runtime),
+    # The same file, not the same name: on Windows the runtime's bin\node.exe is a hard link to node\node.exe.
+    node_is_ours = bool(lines[0]) and os.path.isfile(lines[0]) and os.path.samefile(lines[0], runtime_node(runtime))
+    expect(node_is_ours and inside(lines[1], runtime),
            f"{label} engine resolves the bundle's node and Python on a bare PATH", f"node={lines[0]} python={lines[1]}")
 
     # The engine's daemon is switched off for the smoke, as its own install recorder does.
@@ -406,6 +408,10 @@ def check_engine(runtime: Path, payload: Path, home: Path, scratch: Path, label:
     command_check(proc, seconds, f"{label} engine start --blank")
     proc, seconds = timed([python, cli, "apply", workspace], env=env, cwd=scratch)
     command_check(proc, seconds, f"{label} engine apply")
+    if not output.exists():
+        # Engine 2.0: apply builds without writing the deck; --deliver also writes it at the output path.
+        proc, seconds = timed([python, cli, "apply", "--deliver", workspace], env=env, cwd=scratch)
+        command_check(proc, seconds, f"{label} engine apply --deliver")
     valid = False
     if output.is_file() and zipfile.is_zipfile(output):
         with zipfile.ZipFile(output) as deck:
@@ -422,7 +428,7 @@ def main() -> int:
     parser.add_argument("--platform", required=True)
     parser.add_argument("--engine", type=Path, help="unpacked engine payload for a blank deck build (local only)")
     parser.add_argument("--extra-path", action="append", default=[], type=Path,
-                        help="directory added to PATH for the engine run (for example where soffice lives)")
+                        help="directory added to PATH for the engine run")
     parser.add_argument("--keep", action="store_true", help="keep the unpacked tree and print where it is")
     args = parser.parse_args()
 

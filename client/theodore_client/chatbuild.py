@@ -428,9 +428,10 @@ def font_dirs() -> list[Path]:
 def node_options(reads, writes) -> str:
     """NODE_OPTIONS for a chat's engine processes: the permission model with these folders, and the guard first."""
     guard = Path(__file__).resolve().parent / "node_guard.js"
-    # The two flags below print a security warning in every process, which the engine would report as a finding of
-    # the deck; the guard is what makes them safe here (addons from the runtime only; Node on the engine's own scripts).
-    options = ["--permission", "--allow-addons", "--allow-child-process", "--disable-warning=SecurityWarning"]
+    # The three flags below print a security warning in every process, which the engine would report as a finding of
+    # the deck; the guard is what makes them safe here (addons from the runtime only; Node, and worker threads, on the
+    # engine's own scripts only: its build and drawing pools; the coordinator, 25 Nov).
+    options = ["--permission", "--allow-addons", "--allow-child-process", "--allow-worker", "--disable-warning=SecurityWarning"]
     # The guard's own file is readable: Node started with inline code (`node -e`, as the engine resolves an icon named
     # by words) loads a --require file only when it may read it; with a script file as main it loads it either way.
     for path in dict.fromkeys(str(p) for p in [*reads, guard]):
@@ -610,7 +611,6 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
     _check_open(args)
     install.require_runtime()
     install.wait_for_packs(args)
-    install.wait_for_renderer(args)
     install.enforce_restrictions()
     version = install.engine_for(args)
     install.enforce_restrictions(version)
@@ -625,42 +625,17 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
         note.write_text(stdin_text, encoding="utf-8")
         args[args.index("--storyline") + 1] = str(note)
         stdin_text = None
-    command = [str(install.engine_python(directory)), str(directory / "skills" / "pptx" / "scripts" / "pptx.py"), *args]
     started = time.monotonic()
-    try:
-        proc = subprocess.Popen(command, cwd=str(folder), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
-    except OSError as exc:
-        drop_licence_copy()
-        raise core.internal(f"the engine could not be started: {exc}") from None
-    import threading
-    chunks: list[bytes] = []
-    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
-    reader.start()
-    with contextlib.suppress(BrokenPipeError, OSError):
-        if stdin_text:
-            proc.stdin.write(stdin_text.encode("utf-8"))
-        proc.stdin.close()
-    while True:
-        try:
-            code = proc.wait(timeout=PROGRESS_EVERY_S)
-            break
-        except subprocess.TimeoutExpired:
-            elapsed = time.monotonic() - started
-            progress = call_progress()
-            if progress:
-                with contextlib.suppress(Exception):
-                    progress(elapsed, f"pptx {args[0]} running ({int(elapsed)} s)")
-            if elapsed > RUN_TIMEOUT_S:
-                proc.kill()
-                code = proc.wait()
-                break
-    reader.join(timeout=10)
-    drop_licence_copy()
+    # In the service a warm engine worker confined to this chat's folder runs it (ENGINE_RUNNER, service/chat.py; the
+    # licence copy then lives as long as that worker); elsewhere, or for an engine without one, a process of its own.
+    warm = ENGINE_RUNNER(version, directory, args, folder, env, stdin_text) if ENGINE_RUNNER is not None else None
+    if warm is not None:
+        code, output = warm
+    else:
+        code, output = _engine_process(directory, args, folder, env, stdin_text, started)
     if note is not None:
         with contextlib.suppress(OSError):
             note.unlink()
-    output = b"".join(chunks).decode("utf-8", errors="replace")
     install._pin_workspaces(args, version)
     if code in (1, install.LICENCE_EXIT):        # a licence refusal is the engine's last JSON object: no second start to ask
         refusal = install.refusal_in_output(output, code)
@@ -707,6 +682,50 @@ def _run(args_in, stdin_text, folder_in, images_wanted=True) -> dict:
     if code == 0 and key in STARTS:                 # the whole answer, for a retried start
         STARTS[key] = (*STARTS[key][:2], result)
     return result
+
+
+# Set by the service (service/chat.py): runs one engine command for a chat on a warm worker confined as below, and
+# returns (exit code, output), or None when it cannot (an engine without a worker): then a process runs it here.
+ENGINE_RUNNER = None
+
+
+def _engine_process(directory: Path, args: list[str], folder: Path, env: dict, stdin_text, started: float) -> tuple[int, str]:
+    """One engine process for a chat's command, confined by `env`; the licence copy goes as soon as it ends."""
+    command = [str(install.engine_python(directory)), str(directory / "skills" / "pptx" / "scripts" / "pptx.py"), *args]
+    try:
+        proc = subprocess.Popen(command, cwd=str(folder), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+    except OSError as exc:
+        drop_licence_copy()
+        raise core.internal(f"the engine could not be started: {exc}") from None
+    import threading
+    chunks: list[bytes] = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
+    reader.start()
+    with contextlib.suppress(BrokenPipeError, OSError):
+        if stdin_text:
+            proc.stdin.write(stdin_text.encode("utf-8"))
+        proc.stdin.close()
+    while True:
+        try:
+            code = proc.wait(timeout=PROGRESS_EVERY_S)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            progress = call_progress()
+            if progress:
+                with contextlib.suppress(Exception):
+                    progress(elapsed, f"pptx {args[0]} running ({int(elapsed)} s)")
+            if elapsed > RUN_TIMEOUT_S:
+                proc.kill()
+                try:
+                    code = proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    code = -9  # held in exit (a crash the crash reporter has not taken yet): left, never waited for
+                break
+    reader.join(timeout=10)
+    drop_licence_copy()
+    return code, b"".join(chunks).decode("utf-8", errors="replace")
 
 
 # A start that succeeded, by its folder and deck name (and the conversation, when the host names it): a retried start of

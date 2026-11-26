@@ -175,6 +175,8 @@ t("node:https", () => require("node:https").get("https://example.com"));
 t("getBuiltinModule", () => process.getBuiltinModule("net").connect(80, "example.com"));
 t("fetch", () => fetch("https://example.com"));
 t("worker", () => new (require("worker_threads").Worker)("1", {{ eval: true }}));
+t("worker on a script it wrote", () => {{ require("fs").writeFileSync(__dirname + "/w.js", "1"); return new (require("worker_threads").Worker)(__dirname + "/w.js"); }});
+t("worker on a data URL", () => new (require("worker_threads").Worker)(new URL("data:text/javascript,1")));
 t("addon", () => process.dlopen({{ exports: {{}} }}, __dirname + "/x.node"));
 t("replace Module._load", () => {{ require("module")._load = () => "mine"; if (require("module")._load("net") === "mine") return "replaced"; throw new Error("no effect"); }});
 t("binding", () => process.binding("spawn_sync"));
@@ -188,6 +190,38 @@ t("binding", () => process.binding("spawn_sync"));
         self.assertEqual(results["node on the engine's script"], "ALLOWED helper ran false", "the child runs under the same restriction")
         self.assertEqual(results["spawnSync of a missing program"], "ALLOWED null", "fc-match fails as a missing program would")
         self.assertFalse((self.tmp / "x.txt").exists())
+
+    def test_the_engines_own_worker_threads_start_and_run_under_the_same_restriction(self):
+        """The 2.0 build worker's threads and the renderer's drawing pool start threads on the engine's own scripts
+        (lane F's finding: refused here, every chat build ran on one thread). Allowed for those scripts only, by their
+        resolved path; the thread runs under the same permission model and this guard (no network, no read outside,
+        no thread on code given as text)."""
+        secret = json.dumps(str(self.secret))
+        (self.engine / "pool.js").write_text(
+            "const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n"
+            "if (!isMainThread) {\n"
+            "  const out = [workerData];\n"
+            "  try { require('https').get('https://example.com'); out.push('network open'); } catch (e) { out.push(e.code); }\n"
+            f"  try {{ require('fs').readFileSync({secret}); out.push('read outside'); }} catch (e) {{ out.push(e.code); }}\n"
+            "  try { new Worker('1', { eval: true }); out.push('thread on text'); } catch (e) { out.push(e.code); }\n"
+            "  parentPort.postMessage(out);\n"
+            "}\n")
+        script = self.work / "deck.js"
+        script.write_text(
+            "const { Worker } = require('worker_threads');\n"
+            f"const w = new Worker({json.dumps(str(self.engine / 'pool.js'))}, {{ workerData: 'from the engine', execArgv: [] }});\n"
+            "const done = (m) => { require('fs').writeFileSync(__dirname + '/out.json', JSON.stringify(m)); process.exit(0); };\n"
+            "w.on('message', done); w.on('error', (e) => done(['error', e.code || e.message]));\n")
+        env = {**os.environ, "NODE_OPTIONS": chatbuild.node_options([self.work, self.engine], [self.work]),
+               "THEODORE_NODE_SCRIPT_ROOT": str(self.engine), "THEODORE_NODE_ADDON_ROOTS": str(self.engine)}
+        # Node (24) lets a worker thread read what lies under the process's working directory, whatever the grants, so the
+        # run is from the deck's folder as the product's is (chatbuild's Popen, cwd=folder), never from the runner's
+        # (a checkout whose TMPDIR lies inside it made the secret readable: the macOS shim jobs, 26 Nov).
+        ran = subprocess.run(["node", str(script)], env=env, capture_output=True, text=True, timeout=60, cwd=self.work)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertNotIn("SecurityWarning", ran.stderr)
+        self.assertEqual(json.loads((self.work / "out.json").read_text()),
+                         ["from the engine", "ERR_THEODORE_SANDBOX", "ERR_ACCESS_DENIED", "ERR_THEODORE_SANDBOX"])
 
     def test_node_started_with_inline_code_loads_the_guard(self):
         """The engine resolves an icon named by words with `node -e`. Under the options of a chat's engine processes
@@ -528,13 +562,13 @@ class PluginServerInTheApp(McpCase):
         without = self.start("Claude Desktop", False)
         self.assertEqual(names(without), ["theodore"], "no entry: the plugin's server is the chat's one tool")
         code = self.start("claude-code", True)
-        self.assertEqual(sorted(names(code)), ["guide", "list", "specimen"], "Claude Code keeps the plugin's tools")
+        self.assertEqual(sorted(names(code)), ["guide", "list", "pptx", "specimen", "theodore"], "Claude Code keeps the plugin's tools")
         agent = self.start("local-agent-mode-plugin:theodore:theodore", True)      # as the app names the plugin's server
         self.assertEqual(names(agent), [], "the app's agent mode is the app too: silent beside Theodore's entry")
         agent_alone = self.start("local-agent-mode-theodore", False)
         self.assertEqual(names(agent_alone), ["theodore"])
         codex = self.start("codex-mcp-client", True)
-        self.assertEqual(sorted(names(codex)), ["guide", "list", "specimen"], "Codex keeps the plugin's tools")
+        self.assertEqual(sorted(names(codex)), ["guide", "list", "pptx", "specimen", "theodore"], "Codex keeps the plugin's tools")
         for server in (with_entry, without, code, agent, agent_alone, codex):
             server.close()
         log = (self.box.home / "logs" / "client.log").read_text(encoding="utf-8")

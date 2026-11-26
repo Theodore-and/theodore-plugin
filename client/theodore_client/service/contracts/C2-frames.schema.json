@@ -1,0 +1,558 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theodoreand.ai/contracts/C2-frames.schema.json",
+  "title": "C2 frames: service <-> engine worker, protocol 1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/run"
+    },
+    {
+      "$ref": "#/$defs/cancel"
+    },
+    {
+      "$ref": "#/$defs/drop"
+    },
+    {
+      "$ref": "#/$defs/statsAsk"
+    },
+    {
+      "$ref": "#/$defs/exit"
+    },
+    {
+      "$ref": "#/$defs/ready"
+    },
+    {
+      "$ref": "#/$defs/fatal"
+    },
+    {
+      "$ref": "#/$defs/inputs"
+    },
+    {
+      "$ref": "#/$defs/committed"
+    },
+    {
+      "$ref": "#/$defs/done"
+    },
+    {
+      "$ref": "#/$defs/stats"
+    },
+    {
+      "$ref": "#/$defs/log"
+    },
+    {
+      "$ref": "#/$defs/warm"
+    },
+    {
+      "$ref": "C1-frames.schema.json#/$defs/progress"
+    },
+    {
+      "$ref": "C1-frames.schema.json#/$defs/out"
+    },
+    {
+      "$ref": "C1-frames.schema.json#/$defs/image"
+    }
+  ],
+  "$defs": {
+    "callId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+    },
+    "wsKey": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "statTuple": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer",
+          "minimum": -1
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "minItems": 5,
+      "maxItems": 5,
+      "description": "[path, size (-1 when absent), mtime_ns, ctime_ns, file_id]"
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "argv",
+        "cwd",
+        "priority",
+        "images"
+      ],
+      "properties": {
+        "t": {
+          "const": "run"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4096
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "stdin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "properties": {
+            "encoding": {
+              "enum": [
+                "utf-8",
+                "base64"
+              ]
+            },
+            "data": {
+              "type": "string"
+            }
+          }
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/wsKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "enum": [
+            "read",
+            "write",
+            "long"
+          ]
+        },
+        "images": {
+          "type": "boolean"
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 1000
+        }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id"
+      ],
+      "properties": {
+        "t": {
+          "const": "cancel"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        }
+      }
+    },
+    "drop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "key"
+      ],
+      "properties": {
+        "t": {
+          "const": "drop"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/wsKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "statsAsk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t"
+      ],
+      "properties": {
+        "t": {
+          "const": "stats"
+        }
+      }
+    },
+    "exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "grace_ms"
+      ],
+      "properties": {
+        "t": {
+          "const": "exit"
+        },
+        "grace_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offices": {
+          "const": "stop"
+        }
+      }
+    },
+    "ready": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "v",
+        "protocol",
+        "engine",
+        "pid",
+        "warm_ms",
+        "rss_mb",
+        "verbs"
+      ],
+      "properties": {
+        "t": {
+          "const": "ready"
+        },
+        "v": {
+          "const": 1
+        },
+        "protocol": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "engine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "build",
+            "semantics"
+          ],
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "build": {
+              "type": "string"
+            },
+            "semantics": {
+              "type": "string",
+              "pattern": "^b[0-9]+$"
+            }
+          }
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "warm_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rss_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "verbs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "apply-parts",
+              "apply-ahead",
+              "warm-after-ready"
+            ]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "fatal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "code",
+        "message",
+        "exit"
+      ],
+      "properties": {
+        "t": {
+          "const": "fatal"
+        },
+        "code": {
+          "enum": [
+            "LICENCE",
+            "IMPORT",
+            "NODE",
+            "INTEGRITY"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "exit": {
+          "enum": [
+            77,
+            78
+          ]
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "files"
+      ],
+      "properties": {
+        "t": {
+          "const": "inputs"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/statTuple"
+          }
+        }
+      }
+    },
+    "committed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "key"
+      ],
+      "properties": {
+        "t": {
+          "const": "committed"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "key": {
+          "$ref": "#/$defs/wsKey"
+        }
+      }
+    },
+    "done": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "id",
+        "exit",
+        "elapsed_ms"
+      ],
+      "properties": {
+        "t": {
+          "const": "done"
+        },
+        "id": {
+          "$ref": "#/$defs/callId"
+        },
+        "exit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "description": "0-63 the verb's own code; 75 RETRY; 77 licence refused (engine to service only: the service answers the caller with the client's status for it); 78 INTERNAL; 124 still running; 130 cancelled"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "$ref": "C1-frames.schema.json#/$defs/pending"
+          }
+        },
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/wsKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "touched": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/wsKey"
+          }
+        },
+        "counters": {
+          "$ref": "C1-frames.schema.json#/$defs/counters"
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "rss_mb",
+        "workspaces",
+        "requests",
+        "uptime_s"
+      ],
+      "properties": {
+        "t": {
+          "const": "stats"
+        },
+        "rss_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "workspaces": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key",
+              "mb"
+            ],
+            "properties": {
+              "key": {
+                "$ref": "#/$defs/wsKey"
+              },
+              "mb": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uptime_s": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "node": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "threads",
+            "rss_mb"
+          ],
+          "properties": {
+            "threads": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rss_mb": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t",
+        "level",
+        "message"
+      ],
+      "properties": {
+        "t": {
+          "const": "log"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 20000
+        }
+      }
+    },
+    "warm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t"
+      ],
+      "properties": {
+        "t": {
+          "const": "warm"
+        },
+        "ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "doneCounters": {
+      "$ref": "C1-frames.schema.json#/$defs/counters"
+    }
+  }
+}

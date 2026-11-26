@@ -36,7 +36,10 @@ def client_home(**config):
     saved = (core._HOME, core._CONFIG)
     core._HOME, core._CONFIG = core.Home(tmp), None
     try:
-        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(tmp), "THEODORE_CREDENTIAL_STORE": "file"}):
+        # THEODORE_SERVICE=0: a shell command run in this process (cli._main) runs here, where the test's mocks are,
+        # and starts no service in the scratch home (as in the Sandbox's environment).
+        with mock.patch.dict(os.environ, {"THEODORE_HOME": str(tmp), "THEODORE_CREDENTIAL_STORE": "file",
+                                          "THEODORE_SERVICE": "0"}):
             yield tmp
     finally:
         core._HOME, core._CONFIG = saved
@@ -402,8 +405,9 @@ class Round6(unittest.TestCase):
 
 
 class Specimens(unittest.TestCase):
-    """Deck-design specimen sheets: fetched on demand into a private temporary folder, never into Theodore's folder.
-    In process, so it also runs on Windows (the client suite against the fake server runs on macOS and Linux)."""
+    """Deck-design specimen sheets: online on every call (contract C6), as files only for a shell, in the session's own
+    private folder in Theodore's work folder (<home>/work/scratch/sheets/<session>/). In process, so it also runs on
+    Windows (the client suite against the fake server runs on macOS and Linux)."""
 
     JPEG = b"\xff\xd8\xff\xe0 sheet \xff\xd9"
 
@@ -422,37 +426,51 @@ class Specimens(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(work, ignore_errors=True)
 
-    def answer(self, body: bytes, sha: str | None = None, kind: str = "image/jpeg"):
-        import email.message
-        headers = email.message.Message()
-        headers["Content-Type"] = kind
-        headers["X-Theodore-Sha256"] = sha or hashlib.sha256(body).hexdigest()
-        return 200, headers, body
+    def batch(self, sheets: dict, sha: str | None = None, kind: str = "image/jpeg"):
+        """A Texts whose one request is answered by a batch zip of these sheets, as the service sends it."""
+        import io
+        import zipfile
+        from theodore_client.service import texts
+
+        def send(_self, method, url, what, **kwargs):
+            sent.append((method, url, kwargs.get("body")))
+            entries, buffer = [], io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+                members = []
+                for item in kwargs["body"]["items"]:
+                    data = sheets.get(item["file"])
+                    if data is None:
+                        entries.append({"id": item["id"], "status": 404})
+                        continue
+                    entries.append({"id": item["id"], "status": 200, "etag": '"b1-' + "a" * 32 + '"', "member": f"{item['id']}.jpg",
+                                    "sha256": sha or hashlib.sha256(data).hexdigest(), "content_type": kind})
+                    members.append((f"{item['id']}.jpg", data))
+                archive.writestr("index.json", json.dumps({"v": 1, "version": "g1", "items": entries}))
+                for name, data in members:
+                    archive.writestr(name, data)
+            return 200, {}, buffer.getvalue()
+        sent: list = []
+        store = texts.Texts(credential=lambda: "secret", require=lambda skill: {"plan": "beta"})
+        return store, sent, mock.patch.object(texts.Texts, "_send", send)
 
     def test_the_folder_and_the_files_are_the_current_users_alone(self):
         from theodore_client import commands, specimens
-        with client_home() as home, self.temp() as root:
+        from theodore_client.service import texts
+        with client_home() as home, self.temp():
             core.home().ensure()
-            calls = []
-
-            def fake(route, what, **kwargs):
-                calls.append((route, kwargs))
-                return self.answer(self.JPEG)
+            store, sent, patched = self.batch({"cover-01.jpg": self.JPEG, "b.jpg": self.JPEG + b"b"})
             out = []
-            with mock.patch.object(account, "require", return_value={"plan": "beta"}), mock.patch.object(commands, "_api", side_effect=fake), \
+            with patched, mock.patch.object(texts, "current", return_value=store), \
                     mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(a[0])):
                 self.assertEqual(commands.specimen(["cover-01.jpg", "cover-01.jpg", "b.jpg"]), 0)
-            self.assertEqual([c[0] for c in calls], ["guide_specimen", "guide_specimen"], "a name given twice is fetched once")
-            for _route, kwargs in calls:
-                self.assertEqual((kwargs["query"], kwargs["redirects"], kwargs["limit"]), ({"skill": "deck-design"}, False, 1 << 20))
+            self.assertEqual(len(sent), 1, "one request for the call")
+            self.assertEqual([item["file"] for item in sent[0][2]["items"]], ["cover-01.jpg", "b.jpg"], "a name given twice is asked once")
             self.assertEqual(len(out), 3)
             self.assertEqual(out[0], out[1])
             self.assertNotIn("\\", out[0], "forward slashes on every system")
             path = Path(out[0])
             self.assertTrue(path.is_absolute() and path.read_bytes() == self.JPEG)
-            self.assertEqual(path.parent.parent, root)
-            self.assertTrue(path.parent.name.startswith("theodore-specimens-"))
-            self.assertNotIn(home.resolve(), path.resolve().parents)
+            self.assertEqual(path.parent.parent, (home / "work" / "scratch" / "sheets").resolve())
             if sys.platform == "win32":
                 import subprocess
                 for target in (path.parent, path):
@@ -470,45 +488,55 @@ class Specimens(unittest.TestCase):
 
     def test_a_folder_that_cannot_be_made_private_is_not_used(self):
         from theodore_client import specimens
-        with client_home(), self.temp() as root:
+        with client_home(), self.temp():
             core.home().ensure()
-            with mock.patch.object(specimens, "_make_private", side_effect=OSError("icacls failed")):
+            store, _sent, patched = self.batch({"a.jpg": self.JPEG})
+            with patched, mock.patch.object(specimens, "_make_private", side_effect=OSError("icacls failed")):
                 with self.assertRaises(core.Status) as raised:
-                    specimens.make_folder()
+                    store.sheet_files(["a.jpg"])
             self.assertEqual(raised.exception.name, "INTERNAL")
-            self.assertEqual(list(root.iterdir()), [])
+            self.assertEqual(list(specimens.sheets_root().rglob("*")), [], "no folder, no file")
 
     def test_a_refused_sheet_leaves_nothing(self):
-        from theodore_client import commands
-        for answer, status in ((lambda: self.answer(self.JPEG, sha="1" * 64), "RETRY"), (lambda: self.answer(self.JPEG, kind="text/html"), "INTERNAL"),
-                               (lambda: (_ for _ in ()).throw(api.TooLarge(1 << 20)), "INTERNAL")):
-            with client_home(), self.temp() as root:
+        from theodore_client import specimens
+        for answer, status in ((dict(sha="1" * 64), "RETRY"), (dict(kind="text/html"), "INTERNAL")):
+            with client_home(), self.temp():
                 core.home().ensure()
-                with mock.patch.object(account, "require", return_value={}), mock.patch.object(commands, "_api", side_effect=lambda *a, **k: answer()):
+                store, _sent, patched = self.batch({"a.jpg": self.JPEG}, **answer)
+                with patched:
                     with self.assertRaises(core.Status) as raised:
-                        commands.specimen(["a.jpg"])
+                        store.sheet_files(["a.jpg"])
                 self.assertEqual(raised.exception.name, status)
-                self.assertEqual(list(root.iterdir()), [])
-
-    def test_a_folder_removed_while_the_sheets_arrive_is_a_retry(self):
-        """The folder of a run can go under it (an uninstall, a sign-out in another window): the next sheet then has
-        nowhere to go. That is said as a retry, not as an internal error that sends the assistant to doctor."""
-        from theodore_client import commands
-        with client_home(), self.temp() as root:
+                self.assertEqual(list(specimens.sheets_root().rglob("*.jpg")), [])
+        with client_home(), self.temp():
             core.home().ensure()
-            made = []
-
-            def fake(route, what, **kwargs):
-                if made:                # the second sheet: the folder has gone meanwhile
-                    core.remove_tree(made[0])
-                made.extend(root.glob("theodore-specimens-*"))
-                return self.answer(self.JPEG)
-            with mock.patch.object(account, "require", return_value={}), mock.patch.object(commands, "_api", side_effect=fake):
+            store, _sent, patched = self.batch({"big.jpg": b"\xff\xd8" + b"x" * (1 << 20)})
+            with patched:
                 with self.assertRaises(core.Status) as raised:
-                    commands.specimen(["a.jpg", "b.jpg"])
+                    store.sheet_files(["big.jpg"])
+            self.assertEqual(raised.exception.name, "INTERNAL")
+            self.assertIn("1 MiB", raised.exception.summary)
+
+    def test_a_folder_removed_while_the_sheets_are_written_is_a_retry(self):
+        """The session's folder can go under a call (an uninstall, a sign-out in another window): the next sheet then has
+        nowhere to go. That is said as a retry, not as an internal error that sends the assistant to doctor."""
+        from theodore_client.service import texts
+        with client_home(), self.temp():
+            core.home().ensure()
+            store, _sent, patched = self.batch({"a.jpg": self.JPEG, "b.jpg": self.JPEG + b"b"})
+            real = texts.Texts._write_sheet
+
+            def write(path, raw):
+                written = real(path, raw)
+                core.remove_tree(path.parent)       # the folder goes after the first sheet
+                return written
+            with patched, mock.patch.object(texts.Texts, "_write_sheet", staticmethod(write)), \
+                    mock.patch.object(texts.Texts, "_private_folder", lambda self, session: texts.specimens.sheets_root() / "shell"):
+                (texts.specimens.sheets_root() / "shell").mkdir(parents=True)
+                with self.assertRaises(core.Status) as raised:
+                    store.sheet_files(["a.jpg", "b.jpg"])
             self.assertEqual(raised.exception.name, "RETRY")
-            self.assertIn("specimen b.jpg", raised.exception.summary)
-            self.assertEqual(list(root.iterdir()), [])
+            self.assertIn("b.jpg", raised.exception.summary)
 
     def test_a_response_is_read_up_to_its_limit_and_no_further(self):
         import io
@@ -646,233 +674,94 @@ class HostTest(unittest.TestCase):
             self.assertNotIn("theodoreand.ai", core.no_release_keys().render().replace("@theodoreand.ai", ""))
 
 
-class WindowsRenderer(unittest.TestCase):
-    """Windows, where nothing fetches LibreOffice at install unless it is needed: the admin image's runtime, the wait
-    before a rendering call, and the installer's `--if-needed` call. In process, with Windows' answers stubbed."""
-
-    PIN = {"version": "26.2.7", "url": "https://download.example.test/LibreOffice_26.2.7_Win_x86-64.msi", "sha256": "0" * 64, "size": 350_000_000}
+class NoLibreOfficeInstalled(unittest.TestCase):
+    """Carl's rule (25 November 2026): Theodore installs no LibreOffice. Its own renderer draws the slides; a feature it
+    cannot draw is drawn by PowerPoint where installed (Windows), else pictured approximately and marked so. From 0.5.1
+    (engine 2.0 calls none) the client neither looks for one nor names one, and a copy an earlier Theodore fetched is
+    neither used nor kept (service/cleanup.py). In process."""
 
     @contextlib.contextmanager
-    def windows(self, *, office=None, powerpoint=False, pin=PIN):
+    def machine(self, *, powerpoint=False, windows=True):
         from theodore_client import install
-        with mock.patch.object(install, "IS_WINDOWS", True), mock.patch.object(install, "system_libreoffice", return_value=office), \
-                mock.patch.object(install, "powerpoint_registered", return_value=powerpoint), \
-                mock.patch.object(install, "libreoffice_pin", return_value=pin):
+        with mock.patch.object(install, "IS_WINDOWS", windows), \
+                mock.patch.object(install, "powerpoint_registered", return_value=powerpoint):
             yield install
 
-    def download(self, install):
-        return mock.patch.object(install.api, "download", side_effect=lambda url, path, **k: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).write_bytes(b"msi")))
-
-    def test_the_image_gets_its_x64_runtime_beside_the_program_and_drops_the_package_copy(self):
-        from theodore_client import install
-
-        def unpack(archive, target, job=None):          # what an unpack leaves: program, System64 (x64), System (x86)
-            for folder, name, data in (("program", "soffice.exe", b"exe"), ("System64", "msvcp140_1.dll", b"x64"),
-                                       ("System64", "vcruntime140.dll", b"x64"), ("System", "msvcp140_1.dll", b"x86")):
-                (target / folder).mkdir(parents=True, exist_ok=True)
-                (target / folder / name).write_bytes(data)
-            (target / Path(archive).name).write_bytes(b"package copy")
-            return 4
-
-        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), self.download(install), \
-                mock.patch.object(install, "msi_unpack", side_effect=unpack), \
-                mock.patch.object(install.subprocess, "run", side_effect=AssertionError("msiexec is only the second way")):
-            binary = install.install_libreoffice()
-            program = home / "tools" / "libreoffice" / "program"
-            self.assertEqual(binary, program / "soffice.exe")
-            self.assertEqual((program / "msvcp140_1.dll").read_bytes(), b"x64", "the 64-bit copy, never System's 32-bit one")
-            self.assertEqual((program / "vcruntime140.dll").read_bytes(), b"x64")
-            self.assertFalse((home / "tools" / "libreoffice" / "LibreOffice_26.2.7_Win_x86-64.msi").exists())
-
-    def test_msiexec_is_the_second_way_with_the_property_quoted_as_it_reads_it_and_bounded(self):
-        # WINDOWS W-6: from a list Python quoted the whole "TARGETDIR=C:\\Users\\Théo Tester\\...", msiexec showed its
-        # usage window where nobody saw it and waited 31 minutes at "100% unpacking".
-        from theodore_client import install
-        seen = []
-
-        def msiexec(command, **kwargs):
-            seen.append((command, kwargs))
-            target = Path(command.split('TARGETDIR="', 1)[1].rstrip('"'))
-            (target / "program").mkdir(parents=True)
-            (target / "program" / "soffice.exe").write_bytes(b"exe")
-            return mock.Mock(returncode=0)
-
-        with client_home() as home, self.windows(), mock.patch.object(install.sys, "platform", "win32"), self.download(install), \
-                mock.patch.object(install, "msi_unpack", side_effect=OSError("msi.dll OpenDatabase failed (110)")), \
-                mock.patch.object(install.subprocess, "run", side_effect=msiexec):
-            self.assertEqual(install.install_libreoffice(), home / "tools" / "libreoffice" / "program" / "soffice.exe")
-        command, kwargs = seen[0]
-        self.assertIsInstance(command, str, "one command string: msiexec parses its own command line")
-        self.assertRegex(command, r'^"[^"]*msiexec\.exe" /a "[^"]+\.msi" /qn TARGETDIR="[^"]+"$')
-        self.assertTrue(kwargs.get("timeout"), "never an endless wait")
-
-    def test_a_profile_with_a_space_an_accent_and_an_ampersand_is_one_path_for_msiexec(self):
-        from theodore_client import install
-        seen = []
-        target = Path("C:/Users/Théo & Tester/AppData/Local/Theodore/tools/libreoffice.partial")
-        with mock.patch.object(install.subprocess, "run", side_effect=lambda c, **k: seen.append(c) or mock.Mock(returncode=0)):
-            install.msiexec_admin(Path("C:/Users/Théo & Tester/AppData/Local/Theodore/staging/LO.msi"), target)
-        self.assertTrue(seen[0].endswith(f' /qn TARGETDIR="{target}"'), seen[0])
-        self.assertIn(f'/a "{Path("C:/Users/Théo & Tester/AppData/Local/Theodore/staging/LO.msi")}"', seen[0])
-
-    def test_a_hung_msiexec_ends_in_a_clear_failure(self):
-        from theodore_client import install
-
-        def hangs(command, **kwargs):
-            raise install.subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-        with client_home(), self.windows(), mock.patch.object(install.sys, "platform", "win32"), self.download(install), \
-                mock.patch.object(install, "msi_unpack", side_effect=install.subprocess.TimeoutExpired("expand.exe", 600)), \
-                mock.patch.object(install.subprocess, "run", side_effect=hangs):
-            with self.assertRaises(core.Status) as raised:
-                install.install_libreoffice()
-        self.assertEqual("SETUP_FAILED", raised.exception.name)
-        self.assertIn("did not finish within 600 s", raised.exception.summary)
-
-    def test_a_libreoffice_job_that_does_not_move_is_reported_as_stuck(self):
-        from theodore_client import install
-        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True), \
-                mock.patch.dict(os.environ, {"THEODORE_TEST_RENDERER_WAIT": "0"}), mock.patch.object(core, "is_loopback_api", return_value=True), \
-                mock.patch.object(install.Job, "alive", return_value=True):
-            job = install.Job("libreoffice")
-            job.update(pid=os.getpid(), phase="unpacking LibreOffice", percent=100)
-            with self.assertRaises(core.Status) as raised:
-                win.wait_for_renderer(["apply", "C:/deck/ws"])
-            self.assertEqual("SETUP_IN_PROGRESS", raised.exception.name)
-            self.assertIn("(unpacking LibreOffice, 100%", raised.exception.summary)
-            state = job.read()
-            state["updated"] = int(core.now()) - install.STALL_SECONDS - 60
-            core.write_json(job.path, state)
-            with self.assertRaises(core.Status) as raised:
-                win.wait_for_renderer(["apply", "C:/deck/ws"])
-            self.assertEqual("SETUP_FAILED", raised.exception.name)
-            self.assertIn("stuck, not still being installed", raised.exception.summary)
-
-    @staticmethod
-    def pe(machine: int) -> bytes:
-        head = bytearray(512)
-        head[:2], head[0x3C:0x40] = b"MZ", (0x80).to_bytes(4, "little")
-        head[0x80:0x84], head[0x84:0x86] = b"PE\0\0", machine.to_bytes(2, "little")
-        return bytes(head)
-
-    def test_only_x64_runtime_dlls_go_beside_the_program(self):
-        from theodore_client import install
-        with client_home() as home:
-            image = home / "image"
-            (image / "System64").mkdir(parents=True)
-            (image / "program").mkdir()
-            for name, machine in (("vcruntime140.dll", 0x8664), ("msvcp140.dll", 0xAA64), ("concrt140.dll", 0x14C)):
-                (image / "System64" / name).write_bytes(self.pe(machine))
-            self.assertEqual(install.pe_machine(image / "System64" / "msvcp140.dll"), 0xAA64)
-            self.assertIsNone(install.pe_machine(home / "bin" / "launcher.json"))
-            install.libreoffice_app_local_runtime(image)
-            self.assertEqual(sorted(p.name for p in (image / "program").iterdir()), ["vcruntime140.dll"])
-
-    def test_a_rendering_call_with_no_converter_fetches_libreoffice_and_says_so(self):
-        from theodore_client import install
-        with client_home(), self.windows() as win, mock.patch.object(install.Job, "spawn", autospec=True) as spawn, \
-                mock.patch.dict(os.environ, {"THEODORE_TEST_RENDERER_WAIT": "0"}), mock.patch.object(core, "is_loopback_api", return_value=True):
-            with self.assertRaises(core.Status) as raised:
-                win.wait_for_renderer(["apply", "C:/deck/ws"])
-            self.assertEqual(raised.exception.name, "SETUP_IN_PROGRESS")
-            self.assertIn("LibreOffice", raised.exception.summary)
-            self.assertEqual(spawn.call_args.args[1], ["tools", "install", "libreoffice", "--job"])
-            spawn.reset_mock()
-            for call in (["assets", "search", "icons", "cart"], ["start", "--blank"], ["version"]):
-                win.wait_for_renderer(call)                         # no rendering: nothing is fetched or waited for
-            spawn.assert_not_called()
-            install.Job("libreoffice").update(pid=0, failed={"cause": "SETUP_FAILED", "detail": "msiexec returned 1601"})
-            with self.assertRaises(core.Status) as raised:
-                win.wait_for_renderer(["render", "C:/deck/ws"])
-            self.assertEqual(raised.exception.name, "SETUP_FAILED", "a failed fetch is reported, not started again on every call")
-            self.assertIn("1601", raised.exception.summary)
-            self.assertIn("tools install libreoffice", raised.exception.next_step)
-            spawn.assert_not_called()
-
-    def test_a_converter_or_another_system_means_nothing_is_fetched(self):
-        from theodore_client import commands, install
-        cases = ({"office": r"C:\Program Files\LibreOffice\program\soffice.exe"}, {"powerpoint": True}, {"pin": None})
-        with client_home(), mock.patch.object(install.Job, "spawn", side_effect=AssertionError("nothing to fetch")), \
-                mock.patch("builtins.print"):
-            for case in cases:
-                with self.windows(**case) as win:
-                    win.wait_for_renderer(["apply", "C:/deck/ws"])
-                    self.assertFalse(win.needs_libreoffice(), case)
-                    self.assertEqual(commands.tools("libreoffice", True, False, if_needed=True), 0, case)
-            with mock.patch.object(install, "IS_WINDOWS", False):       # macOS fetches at install; Linux uses the system's
-                self.assertFalse(install.needs_libreoffice())
-                install.wait_for_renderer(["apply", "/deck/ws"])
-
-    def test_doctor_and_the_installer_answer_name_powerpoint_where_it_turns_decks_into_images(self):
-        # WINPPT: Windows 11 with PowerPoint and no LibreOffice built and checked every slide through PowerPoint, yet
-        # doctor (and so the installer's answer, which is doctor's) said previews needed LibreOffice and offered it.
-        from theodore_client import commands, install
-        offer = "tools install libreoffice"
-        office = r"C:\Program Files\LibreOffice\program\soffice.exe"
-
-        def answer(mac=False, **case):
+    def test_doctor_names_what_draws_what_theodore_cannot_and_never_warns(self):
+        from theodore_client import commands, install, welcome
+        def answer(**case):
             """doctor's renderer line, its still-missing parts and its last status, on this machine's answers."""
-            with self.windows(**case) as win:
-                with mock.patch.object(install, "IS_WINDOWS", False) if mac else contextlib.nullcontext():
-                    snap = {"engine": "1.0.0", "plan": "beta", "runtime_ready": True, "signed_in": True,
-                            "packs": {}, "renderer": {"libreoffice": win.system_libreoffice() or (str(win.libreoffice_binary()) if win.libreoffice_binary() else None),
-                                                      "powerpoint": win.powerpoint_registered(), "pdftoppm": None}}
-                    check = commands._renderer_check(snap)
-                    with mock.patch.object(install, "published_packs", return_value=[]):
-                        missing = commands._still_missing(snap)
-                    verdict = commands._doctor_verdict([check], snap, core.home())
-                    return check, missing, verdict
+            with self.machine(**case) as win:
+                snap = {"engine": "1.0.0", "plan": "beta", "runtime_ready": True, "signed_in": True, "packs": {},
+                        "renderer": {"powerpoint": win.powerpoint_registered(), "pdftoppm": None}}
+                check = commands._renderer_check(snap)
+                with mock.patch.object(install, "published_packs", return_value=[]):
+                    missing = commands._still_missing(snap)
+                return check, missing, commands._doctor_verdict([check], snap, core.home())
 
-        from theodore_client import welcome     # the ready line's Studio and pack sentences are test_welcome's subject
         with client_home(), mock.patch.object(commands, "needs_git_bash", return_value=False), \
                 mock.patch.object(welcome, "studio_state", return_value=None), \
                 mock.patch.object(welcome, "packs_sentence", return_value=None), \
                 mock.patch.object(welcome, "_new_session_needed", return_value=True):
-            check, missing, verdict = answer(powerpoint=True)
-            self.assertEqual(check, ("ok", "renderer", "Microsoft PowerPoint, installed on this computer, turns decks into slide images; LibreOffice is not needed"))
-            self.assertEqual(missing, [], "nothing missing: LibreOffice is not listed")
-            self.assertEqual(verdict.name, "OK")
-            self.assertEqual(verdict.tell_user, "Theodore is ready (engine 1.0.0). Start a new session and ask for a deck.")
-            rendered = verdict.render()
-            self.assertEqual(len(rendered.splitlines()), 3)
-            for text in (check[2], rendered):
-                self.assertNotIn(offer, text)
-            self.assertNotIn("LibreOffice", rendered)
+            powerpoint = ("ok", "renderer", "Theodore's own; Microsoft PowerPoint, installed on this computer, draws what Theodore's renderer cannot")
+            for case, expected in (({"powerpoint": True}, powerpoint),
+                                   ({}, ("ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so")),
+                                   ({"windows": False}, ("ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so"))):
+                check, missing, verdict = answer(**case)
+                self.assertEqual(check, expected, case)
+                self.assertEqual(missing, [], case)
+                self.assertEqual(verdict.name, "OK", case)
+                self.assertEqual(verdict.tell_user, "Theodore is ready (engine 1.0.0). Start a new session and ask for a deck.", case)
+                self.assertNotIn("tools install libreoffice", verdict.render(), case)
+                self.assertNotIn("LibreOffice", verdict.render(), case)
 
-            # every other case word for word as before
-            unchanged = "no LibreOffice found: slide previews are unavailable until it is installed; "
-            check, missing, verdict = answer(office=office, powerpoint=True)
-            self.assertEqual(check, ("ok", "renderer", f"LibreOffice at {office}"), "LibreOffice found wins")
-            self.assertNotIn("LibreOffice", verdict.tell_user)
-            check, missing, verdict = answer(office=office)
-            self.assertEqual(check, ("ok", "renderer", f"LibreOffice at {office}"))
-            check, missing, verdict = answer()                          # Windows with neither: the fetch
-            self.assertEqual(check[:2], ("warn", "renderer"))
-            self.assertEqual(check[2], unchanged + f"`{install.quoted_launcher()} tools install libreoffice` fetches it into Theodore's folder")
-            self.assertEqual(len(missing), 1)
-            self.assertTrue(missing[0].startswith("LibreOffice (slide previews): the next guide, doctor or rendering call starts its download again"), missing)
-            self.assertIn("Slide previews need LibreOffice, which is not installed.", verdict.tell_user)
-            check, missing, verdict = answer(pin=None, mac=True)        # macOS or Linux without one
-            self.assertEqual(check[:2], ("warn", "renderer"))
-            self.assertTrue(check[2].startswith(unchanged) and offer not in check[2], check)
-            self.assertEqual(missing, [])
-            self.assertIn("Slide previews need LibreOffice, which is not installed.", verdict.tell_user)
+    def test_tools_install_knows_only_git(self):
+        # `tools install libreoffice` is an unknown tool like any other: no job, no download, no answer naming it.
+        from theodore_client import commands, install
+        with client_home(), self.machine(), mock.patch.object(install.Job, "spawn", side_effect=AssertionError("nothing to fetch")), \
+                mock.patch.object(install.api, "download", side_effect=AssertionError("nothing to download")):
+            for name in ("libreoffice", "vlc"):
+                with self.assertRaises(core.Status) as raised:
+                    commands.tools(name, False, False)
+                self.assertIn("The tool is: git.", raised.exception.summary, name)
+            self.assertFalse((core.home().tools / "libreoffice").exists())
 
-    def test_the_tools_answer_names_powerpoint_when_libreoffice_is_not_needed_for_it(self):
-        from theodore_client import commands
-        with client_home(), mock.patch.object(commands.install.Job, "spawn", side_effect=AssertionError("nothing to fetch")):
-            for case, summary in (({"powerpoint": True}, "LibreOffice is not needed here: Microsoft PowerPoint, installed on this computer, turns decks into slide images."),
-                                  ({"pin": None}, "LibreOffice is not needed here: a converter is available or none is fetched on this system.")):
-                with self.windows(**case), mock.patch("builtins.print") as shown:
-                    self.assertEqual(commands.tools("libreoffice", True, False, if_needed=True), 0)
-                    text = "\n".join(str(c.args[0]) for c in shown.call_args_list)
-                    self.assertIn(summary, text, case)
-                    self.assertIn("TELL THE USER: Nothing to install.", text)
+    def test_the_engine_is_never_pointed_at_a_libreoffice(self):
+        # Before 0.5.1 a copy an earlier Theodore fetched into tools/libreoffice was handed to the engine (SOFFICE_BIN).
+        from theodore_client import install
+        with client_home():
+            program = core.home().tools / "libreoffice" / "program"
+            program.mkdir(parents=True)
+            (program / "soffice.exe").write_text("")
+            with mock.patch.dict(os.environ, {"SOFFICE_BIN": ""}):
+                os.environ.pop("SOFFICE_BIN")
+                self.assertNotIn("SOFFICE_BIN", install.engine_env(core.home().root))
+        for gone in ("libreoffice_binary", "system_libreoffice", "known_libreoffice", "RENDERER_FILE"):
+            self.assertFalse(hasattr(install, gone), gone)
+        for module in ("install.py", "commands.py", "verbs.py", "welcome.py", "chatbuild.py", "service/tools.py"):
+            text = (CLIENT_DIR / "theodore_client" / module).read_text(encoding="utf-8")
+            self.assertNotIn("LibreOffice", text, module)
+            self.assertNotIn("SOFFICE_BIN", text, module)
 
-    def test_the_installer_asks_for_libreoffice_only_through_if_needed(self):
-        text = (ROOT / "install" / "install.cmd").read_text(encoding="utf-8")
-        self.assertIn('call "%%T%%" tools install libreoffice --background --if-needed >nul 2>&1', text)
-        self.assertNotIn("tools install libreoffice --background >nul", text)
+    def test_no_installer_or_engine_call_fetches_or_waits_for_libreoffice(self):
+        from theodore_client import install
+        for name in ("install.sh", "install.cmd"):
+            text = (ROOT / "install" / name).read_text(encoding="utf-8")
+            self.assertNotIn("tools install libreoffice", text, name)
+            self.assertNotIn("300 MB", text, name)
+        for gone in ("install_libreoffice", "LIBREOFFICE_PINS", "libreoffice_pin", "needs_libreoffice", "wait_for_renderer",
+                     "libreoffice_install_action", "msi_unpack", "msiexec_admin"):
+            self.assertFalse(hasattr(install, gone), gone)
+        for module in ("verbs.py", "chatbuild.py", "service/tools.py"):
+            self.assertNotIn("wait_for_renderer", (CLIENT_DIR / "theodore_client" / module).read_text(encoding="utf-8"), module)
+
+    def test_a_libreoffice_download_left_by_an_earlier_version_is_neither_resumed_nor_mentioned(self):
+        from theodore_client import commands, install, welcome
+        with client_home(), self.machine(), mock.patch.object(install.Job, "spawn", side_effect=AssertionError("nothing to resume")):
+            install.Job("libreoffice").update(pid=0, phase="downloading LibreOffice", percent=40, started=1)
+            self.assertEqual(commands.resume_background(), [])
+            core.write_json(core.home().jobs / "libreoffice.json", {"pid": os.getpid(), "phase": "downloading", "started": 1})
+            self.assertFalse(welcome._downloading(), "the welcome says no download goes on for it")
 
 
 class ClaudeGitBash(unittest.TestCase):

@@ -534,8 +534,20 @@ class KeychainTombstone(unittest.TestCase):
 
 
 class SpecimenRegistry(unittest.TestCase):
-    """Every specimen folder is recorded in the Theodore home; the sweeps work from the record and from the
-    current roots; a folder is never put under the working folder, whatever it contains."""
+    """The specimen folders clients up to 0.4.33 made are recorded in the Theodore home: the sweeps still work from the
+    record and from the current roots, so every one of them goes within its hour after the update (since contract C6 a
+    shell's sheets are transient files in <home>/work/scratch/sheets/, tested in test_texts.py)."""
+
+    @staticmethod
+    def made(specimens, root=None) -> Path:
+        """A folder as an older client made one: under the cache root, private, recorded."""
+        import secrets
+        root = root or specimens.cache_root()
+        root.mkdir(parents=True, exist_ok=True)
+        folder = root / (specimens.PREFIX + secrets.token_hex(8))
+        folder.mkdir(mode=0o700)
+        specimens._write_registry(specimens._read_registry() + [(core.now(), folder)])
+        return folder
 
     @contextlib.contextmanager
     def world(self):
@@ -569,18 +581,12 @@ class SpecimenRegistry(unittest.TestCase):
         specimens._write_registry(lines)
         os.utime(folder, (time.time() - seconds, time.time() - seconds))
 
-    def test_every_folder_is_recorded_one_line_each(self):
+    def test_the_record_is_written_one_line_each_in_the_encoded_format(self):
         with self.world() as (specimens, home, dirs):
-            one, two = specimens.make_folder(), specimens.make_folder()
+            one, two = self.made(specimens), self.made(specimens)
             lines = (home / "state" / "specimens.txt").read_text().splitlines()
             self.assertEqual(lines.pop(0), "#v2", "the encoded format says so on its first line")
-            self.assertEqual(len(lines), 2)
-            for line, folder in zip(lines, (one, two)):
-                made, path = line.split(" ", 1)
-                self.assertTrue(made.isdigit())
-                self.assertEqual(Path(path), folder)
-                # Sheets live in a private folder under Theodore's own cache, never in the shared temporary folder.
-                self.assertEqual(folder.parent, dirs["cache"] / "specimens")
+            self.assertEqual([Path(line.split(" ", 1)[1]) for line in lines], [one, two])
 
     def test_a_folder_another_call_is_filling_is_not_swept(self):
         """TR-S9N9N8: every call sweeps first, with the time it read at its start. A folder another call makes, or puts a
@@ -588,7 +594,7 @@ class SpecimenRegistry(unittest.TestCase):
         call's next sheet had no folder (INTERNAL FileNotFoundError naming a sheet of the batch). A folder dated well
         ahead still goes."""
         with self.world() as (specimens, home, dirs):
-            filling, far = specimens.make_folder(), specimens.make_folder()
+            filling, far = self.made(specimens), self.made(specimens)
             started = time.time()
             self.age(specimens, filling, -3)        # made and written three seconds after the sweeping call read the time
             self.age(specimens, far, -7200)
@@ -608,7 +614,7 @@ class SpecimenRegistry(unittest.TestCase):
     def test_a_changed_temporary_folder_cannot_strand_a_folder(self):
         import tempfile
         with self.world() as (specimens, home, dirs):
-            old, fresh = specimens.make_folder(), specimens.make_folder()
+            old, fresh = self.made(specimens), self.made(specimens)
             self.age(specimens, old, 3601)
             with mock.patch.object(tempfile, "tempdir", str(dirs["tmp-b"])):
                 self.assertEqual(specimens.sweep(), [])
@@ -639,8 +645,7 @@ class SpecimenRegistry(unittest.TestCase):
         with self.world() as (specimens, home, dirs):
             odd = dirs["tmp-a"].parent / "cache\nwith a line feed %0A"
             odd.mkdir()
-            with mock.patch.object(specimens, "cache_root", return_value=odd):
-                folder = specimens.make_folder()
+            folder = self.made(specimens, odd)
             self.assertEqual(folder.parent, odd)
             self.assertEqual([path for _made, path in specimens._read_registry()], [folder])
             self.age(specimens, folder, 3601)
@@ -655,22 +660,6 @@ class SpecimenRegistry(unittest.TestCase):
             self.assertEqual(specimens._read_registry(), [(1700000000.0, folder)])
             self.assertEqual(specimens.sweep(), [])
             self.assertFalse(folder.exists())
-
-    def test_never_under_the_working_folder_even_when_it_holds_the_temporary_folder_or_the_home(self):
-        with self.world() as (specimens, home, dirs):
-            base = dirs["work"].parent
-            os.chdir(base)                      # the working folder holds the temporary folder and the user's home
-            folder = specimens.make_folder()
-            self.assertEqual(folder.parent, dirs["cache"] / "specimens", "the cache root is used instead")
-            self.assertTrue(os.path.lexists(folder))
-            os.chdir(os.path.commonpath([dirs["work"], dirs["cache"]]))     # ...and now the cache root too: refused, nothing made
-            before = (home / "state" / "specimens.txt").read_text()
-            with self.assertRaises(core.Status) as raised:
-                specimens.make_folder()
-            self.assertEqual(raised.exception.name, "BLOCKED_BY_POLICY")
-            self.assertIn("working folder", raised.exception.summary)
-            self.assertEqual((home / "state" / "specimens.txt").read_text(), before)
-            self.assertEqual([p.name for p in (dirs["cache"] / "specimens").iterdir()], [folder.name])
 
 
 class Round8Keychain(unittest.TestCase):

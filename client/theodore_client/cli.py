@@ -19,7 +19,8 @@ HELP = """Theodore client commands (run through the launcher):
   guide <pptx|deck-design> [section] [--part N] [--license] [--role lead|slide]   print the skill instructions
   specimen <file.jpg|CODE> [...] fetch deck-design specimen sheets (at most 8) and print where they are
   skill <pptx|deck-design>       the skill's instructions as a skill file's body (always exits 0)
-  mcp                            serve the guide and specimen tools to the assistant (MCP over standard input and output)
+  mcp                            the assistant's tools (pptx, guide, specimen, theodore, list) over MCP on standard input and output
+  stop                           stop Theodore's service (the next command starts it again)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --open | --finish --wait S | --code XXXX-XXXX]    logout    whoami
                                  (--open: also open the sign-in page in the browser; nothing else ever opens one)
@@ -29,7 +30,7 @@ HELP = """Theodore client commands (run through the launcher):
   report --kind bug|feedback --title T --details D|--details-file F [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
                                  (details of more than one line: put them in a UTF-8 file and pass --details-file; --details - reads standard input)
   prefs add "<text>" | list | remove <id>
-  packs install <pack>|--all [--background]    packs status     tools install libreoffice|git [--background]
+  packs install <pack>|--all [--background]    packs status     tools install git [--background]
   hosts register | unregister | settings [--apply | --remove]          activate --grant - | --grant-file F          uninstall
   usage [--show]                 where the usage counts stand; --show prints the next batch exactly as it would be sent
   studio [on|off]                whether Studio is on for the account; on or off changes it (only when the user asks)
@@ -271,7 +272,10 @@ def main(argv: list[str] | None = None) -> int:
     cut = cut_command_line(argv)
     if cut is not None:
         return core.emit(cut)
-    if argv[:1] == ["mcp"]:         # standard output carries only the protocol: statuses become tool answers
+    if argv[:1] == ["service"]:     # the resident service (service/server.py): its home first, before anything reads it
+        from .service import server
+        return server.main(argv[1:])
+    if argv[:1] == ["mcp"]:         # the relay (C1): standard output carries only the protocol
         from . import mcp
         blocked = None
         try:
@@ -281,11 +285,13 @@ def main(argv: list[str] | None = None) -> int:
             blocked = status
         with contextlib.suppress(Exception):
             account.register_disk_secrets()
-        specimens.sweep()
-        withdraw.resume()
         rest = argv[1:]
         for_host = rest[rest.index("--for") + 1] if "--for" in rest[:-1] else None
-        return mcp.serve(blocked=blocked, for_host=for_host)
+        plugin_root = rest[rest.index("--plugin-root") + 1] if "--plugin-root" in rest[:-1] else None
+        return mcp.serve(blocked=blocked, for_host=for_host, plugin_root=plugin_root)
+    if argv[:1] == ["stop"]:        # the service stops (it starts again at the next command)
+        from .service import control
+        return control.stop()
     if argv[:1] == ["session-start"]:   # the plugin's hook: reads Theodore's session note only; silent, exit 0, no network unless resumed
         from . import sessions
         return sessions.session_start()
@@ -310,6 +316,11 @@ def _main(argv: list[str]) -> int:
     except Status as status:
         return core.emit(status)
     _newest_launcher()
+    if argv[:1] and argv[0] in ("pptx", "guide", "specimen", "skill"):
+        from .service import shell                  # through the running service; None: run here, as before
+        code = shell.run(argv)
+        if code is not None:
+            return code
     try:
         account.register_disk_secrets()     # before any server diagnostic can be printed
     except Exception:       # noqa: BLE001  a scrubber that knows less is no reason not to run

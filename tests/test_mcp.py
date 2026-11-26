@@ -50,6 +50,30 @@ class Server:
     def call(self, name: str, **arguments) -> dict:
         return self.send("tools/call", {"name": name, "arguments": arguments})["result"]
 
+    def wait_notification(self, method: str, timeout: float = 20.0) -> dict | None:
+        """The next notification `method` (already received, or arriving within `timeout`)."""
+        import select
+        deadline = time.monotonic() + timeout
+        while True:
+            for note in self.notifications:
+                if note.get("method") == method:
+                    self.notifications.remove(note)
+                    return note
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([self.proc.stdout], [], [], left)[0]:
+                return None
+            self.notifications.append(json.loads(self.proc.stdout.readline()))
+
+    def tools_with_names(self) -> list[dict]:
+        """tools/list once the names are in: the relay answers at once, and when the service's names come later it
+        says tools/list_changed (contract C1, tools/list)."""
+        tools = self.send("tools/list")["result"]["tools"]
+        named = any("enum" in (((t.get("inputSchema") or {}).get("properties") or {}).get("section", {}).get("anyOf") or [{}])[0]
+                    for t in tools)
+        if named or self.wait_notification("notifications/tools/list_changed") is None:
+            return tools
+        return self.send("tools/list")["result"]["tools"]
+
     def close(self) -> bytes:
         self.proc.stdin.close()
         rest = self.proc.stdout.read()
@@ -79,10 +103,12 @@ class Handshake(McpCase):
         server.send("notifications/initialized", notify=True)
         self.assertEqual(server.send("ping")["result"], {})
         tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
-        self.assertEqual(sorted(tools), ["guide", "list", "specimen"])
+        self.assertEqual(sorted(tools), ["guide", "list", "pptx", "specimen", "theodore"])       # contracts/C1-mcp-tools.json
         self.assertEqual(init["result"]["capabilities"]["tools"], {"listChanged": True})
         self.assertNotIn("enum", tools["guide"]["inputSchema"]["properties"]["section"], "signed out: no index, any name")
-        self.assertEqual(tools["guide"]["_meta"], {"anthropic/maxResultSizeChars": 400000})
+        self.assertEqual(tools["guide"]["_meta"], {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": 400000})
+        self.assertEqual(tools["pptx"]["_meta"], {"anthropic/alwaysLoad": True, "anthropic/maxResultSizeChars": 500000})
+        self.assertEqual(tools["pptx"]["inputSchema"]["required"], ["args"])
         self.assertEqual(tools["guide"]["inputSchema"]["required"], ["skill"])
         for tool in tools.values():
             self.assertEqual(tool["description"].count("."), 1, "one neutral sentence")
@@ -101,7 +127,7 @@ class Listing(McpCase):
         self.sign_in()
         self.api.guide_index = INDEX
         server = self.server()
-        tools = {t["name"]: t for t in server.send("tools/list")["result"]["tools"]}
+        tools = {t["name"]: t for t in server.tools_with_names()}
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["section"]["anyOf"][0]["enum"], ["craft", "forms"])
         one, many = tools["specimen"]["inputSchema"]["properties"]["file"]["anyOf"]
         code = {"type": "string", "pattern": "^[A-Z]{2}[0-9]{1,3}$"}         # a close-up's bare code (P042b)
@@ -111,9 +137,9 @@ class Listing(McpCase):
                          ("array", ["cover-01.jpg", "rules-and-ledgers.jpg"], code, 1, 6))
         self.assertEqual(many["items"]["anyOf"][2], worked)
         self.assertEqual(tools["guide"]["inputSchema"]["properties"]["role"],
-                         {"type": "string", "enum": ["lead", "slide"], "description": '"slide" for an agent given one slide.'})
-        self.assertEqual([t["description"] for t in tools.values()],
-                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole.",
+                         {"type": "string", "enum": ["slide"], "description": '"slide" for an agent given one slide.'})
+        self.assertEqual([tools[n]["description"] for n in ("list", "guide", "specimen")],
+                         ["Lists the files of a Theodore skill.", "Returns one file of a Theodore skill, whole, or several files in one answer.",
                           "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name)."])
         listing = server.call("list", skill="deck-design")["content"][0]["text"]
         self.assertEqual(listing, "SKILL.md\nreferences/craft.md\nreferences/forms.md\nspecimens/cover-01.jpg\nspecimens/rules-and-ledgers.jpg\n")
@@ -122,7 +148,7 @@ class Listing(McpCase):
         self.sign_in()
         self.api.guide_index = dict(INDEX)
         server = self.server()
-        server.send("tools/list")
+        server.tools_with_names()
         server.call("guide", skill="deck-design")
         self.assertEqual(server.notifications, [])
         self.api.guide_version = "g2"
@@ -170,8 +196,9 @@ class Guide(McpCase):
         self.assertGreater(len(result["content"][0]["text"]), 60000)
         section = server.call("guide", skill="deck-design", section="references/craft.md")
         self.assertEqual(section["content"][0]["text"], "CRAFT " * 9000 + "\nLICENCE LINE.\n")
-        self.assertEqual([q.get("form") for q in self.api.guide_queries], ["whole", "whole"])
-        self.assertEqual({q.get("bindings") for q in self.api.guide_queries}, {"tool"})
+        texts = [q for q in self.api.guide_queries if q.get("form") != "index"]     # the service's index at session open aside
+        self.assertEqual([q.get("form") for q in texts], ["whole", "whole"])
+        self.assertEqual({q.get("bindings") for q in texts}, {"tool"})
         missing = server.call("guide", skill="deck-design", section="nosuch")
         self.assertTrue(missing["content"][0]["text"].startswith("THEODORE USAGE: "))
 
@@ -184,10 +211,10 @@ class Guide(McpCase):
         slide = server.call("guide", skill="deck-design", section="craft", role="slide")["content"][0]["text"]
         self.assertEqual(lead, "Intro.\nLEAD ONLY.\nShared.\n")
         self.assertEqual(slide, "Intro.\nShared.\n")
-        self.assertEqual([q.get("role") for q in self.api.guide_queries], [None, "slide"])
+        self.assertEqual([q.get("role") for q in self.api.guide_queries if q.get("form") != "index"], [None, "slide"])
         again = server.call("guide", skill="deck-design", section="craft", role="lead")["content"][0]["text"]
         self.assertEqual(again, lead)
-        self.assertNotIn("role", self.api.guide_queries[-1], "lead is the default: nothing is sent")
+        self.assertNotIn("role", [q for q in self.api.guide_queries if q.get("form") != "index"][-1], "lead is the default: nothing is sent")
         wrong = server.call("guide", skill="deck-design", section="craft", role="boss")
         self.assertTrue(wrong["content"][0]["text"].startswith("THEODORE USAGE: "), wrong)
 
@@ -198,7 +225,7 @@ class Guide(McpCase):
         server = self.server()
         text = server.call("guide", skill="deck-design", section="craft")["content"][0]["text"]
         self.assertEqual(text, ENTRY)
-        self.assertEqual([q.get("part") for q in self.api.guide_queries], [None, "2", "3"])
+        self.assertEqual([q.get("part") for q in self.api.guide_queries if q.get("form") != "index"], [None, "2", "3"])
 
     def test_revoked_device_gets_the_status_and_the_server_keeps_running(self):
         self.sign_in()
@@ -214,8 +241,8 @@ class Guide(McpCase):
         be reached after every attempt is named first, never dropped silently."""
         self.ready()
         self.api.guides["pptx"][""] = "SERVED-POINTER.\n"
-        self.api.guide_delays["pptx"] = [1.2, 1.2, 1.2]
-        text = self.server(env={"THEODORE_TEST_DIRECTIONS_TIMEOUTS": "0.5,0.5,0.5"}).call("guide", skill="pptx")["content"][0]["text"]
+        self.api.guide_delays["pptx"] = [2.0]
+        text = self.server(env={"THEODORE_TEST_TEXTS_TIMEOUT": "1.0"}).call("guide", skill="pptx")["content"][0]["text"]
         self.assertTrue(text.splitlines()[1].startswith("THEODORE OFFLINE: Theodore's online part for pptx could not be reached ("), text[:400])
         self.assertNotIn("SERVED-POINTER", text)
         self.assertIn(f"Fake manual for engine {self.ENGINE_VERSION}.", text)
@@ -248,7 +275,7 @@ class Guide(McpCase):
         server = self.server()
         text = server.call("guide", skill="pptx", section="served-part")["content"][0]["text"]
         self.assertEqual(text, "SERVED PPTX SECTION, see [charts](references/pptxgenjs-charts.md)\n")
-        self.assertEqual(self.api.guide_queries[-1], {"form": "whole", "bindings": "tool"})
+        self.assertEqual([q for q in self.api.guide_queries if q.get("form") != "index"][-1], {"form": "whole", "bindings": "tool"})
         missing = server.call("guide", skill="pptx", section="not-served")
         self.assertTrue(missing["isError"])
         first = missing["content"][0]["text"].splitlines()[0]
@@ -326,7 +353,7 @@ class ClaudeDesktop(McpCase):
                                                     "or call the `theodore_preference_add` tool.\n")
         self.api.specimens = {"cover-01.jpg": JPEG}
         server = self.server(args=("--for", "claude-desktop"))
-        tools = server.send("tools/list")["result"]["tools"]
+        tools = server.tools_with_names()
         self.assertEqual([t["name"] for t in tools], ["theodore"])
         tool = tools[0]
         self.assertTrue(tool["title"])
@@ -406,7 +433,8 @@ class ClaudeDesktop(McpCase):
 
     def test_without_the_flag_the_plugin_server_is_unchanged(self):
         server = self.server(args=("--for", "something-else"))
-        self.assertEqual(sorted(t["name"] for t in server.send("tools/list")["result"]["tools"]), ["guide", "list", "specimen"])
+        self.assertEqual(sorted(t["name"] for t in server.send("tools/list")["result"]["tools"]),
+                         ["guide", "list", "pptx", "specimen", "theodore"])
 
 
 class Specimen(McpCase):
@@ -450,15 +478,15 @@ class Specimen(McpCase):
         self.api.specimens = {name: JPEG + name.encode() for name in names}
         server = self.server()
         asked = [names[3], names[0], names[5], names[1], names[4], names[2]]
-        before = len([r for r in self.api.requests if r["path"].startswith("/v1/guide/specimens/")])
+        before = len(self.api.batches)
         content = server.call("specimen", file=asked)["content"]
         self.assertEqual(len(content), 12)
         for i, name in enumerate(asked):
             self.assertEqual(content[2 * i], {"type": "text", "text": name})
             self.assertEqual((content[2 * i + 1]["type"], content[2 * i + 1]["mimeType"]), ("image", "image/jpeg"))
             self.assertEqual(base64.b64decode(content[2 * i + 1]["data"]), JPEG + name.encode())
-        fetched = [r for r in self.api.requests if r["path"].startswith("/v1/guide/specimens/")][before:]
-        self.assertEqual(len(fetched), 6, "each sheet is one fetch")
+        sheets = [[item["file"] for item in items if item["type"] == "sheet"] for items in self.api.batches[before:]]
+        self.assertEqual([one for one in sheets if one], [asked], "the six sheets in one request (contract C6)")
         # one file, as before: the image alone
         self.assertEqual([b["type"] for b in server.call("specimen", file=names[0])["content"]], ["image"])
         # a list of one is the list form
@@ -669,47 +697,30 @@ class ReuseBounds(McpCase):
 
 
 class HeldBounds(unittest.TestCase):
-    """The two stores of `theodore mcp`, in-process: count and byte bounds, oldest evicted first, a version change drops
-    everything of the old version."""
+    """What the service's texts hold (service/texts.py, contract C6): bodies in memory only, bounded in bytes, least
+    recently used first; an item larger than the bound is not held; a refusal empties it (tests/test_texts.py)."""
 
     def setUp(self):
         sys.path.insert(0, str(CLIENT_DIR))
-        from theodore_client import mcp
-        self.mcp = mcp
-        mcp.SHEETS.clear()
-        mcp.GUIDES.clear()
-        self.addCleanup(mcp.SHEETS.clear)
-        self.addCleanup(mcp.GUIDES.clear)
+        from theodore_client.service import texts
+        self.texts_module = texts
 
-    def test_sheets_are_bounded_in_count_oldest_first(self):
-        for i in range(self.mcp.HELD_SHEETS_MAX + 5):
-            self.mcp._hold_sheet(f"s{i}.jpg", ("h", b"x", None))
-        self.assertEqual(len(self.mcp.SHEETS), self.mcp.HELD_SHEETS_MAX)
-        self.assertNotIn("s0.jpg", self.mcp.SHEETS)
-        self.assertIn(f"s{self.mcp.HELD_SHEETS_MAX + 4}.jpg", self.mcp.SHEETS)
-
-    def test_sheets_are_bounded_in_bytes(self):
-        big = b"x" * (self.mcp.HELD_SHEET_BYTES_MAX // 4 + 1)
+    def test_bodies_are_bounded_in_bytes_least_recently_used_first(self):
+        held = self.texts_module._Held(limit=1000)
         for i in range(5):
-            self.mcp._hold_sheet(f"b{i}.jpg", ("h", big, None))
-        self.assertLessEqual(sum(len(v[1]) for v in self.mcp.SHEETS.values()), self.mcp.HELD_SHEET_BYTES_MAX)
-        self.assertEqual(list(self.mcp.SHEETS), ["b2.jpg", "b3.jpg", "b4.jpg"])
+            held.put(("sheet", f"s{i}.jpg"), f'"e{i}"', b"x" * 300, "")
+        self.assertEqual(len(held), 3)
+        self.assertIsNone(held.get(("sheet", "s0.jpg")))
+        self.assertIsNotNone(held.get(("sheet", "s2.jpg")))          # used: the newest now
+        held.put(("sheet", "s5.jpg"), '"e5"', b"x" * 300, "")
+        self.assertIsNotNone(held.get(("sheet", "s2.jpg")), "the one used last stays")
+        self.assertIsNone(held.get(("sheet", "s3.jpg")), "the least recently used goes first")
 
-    def test_references_are_bounded_in_count_and_characters(self):
-        for i in range(self.mcp.HELD_GUIDES_MAX + 3):
-            self.mcp._hold_guide(("deck-design", f"r{i}"), ("e", "t"))
-        self.assertEqual(len(self.mcp.GUIDES), self.mcp.HELD_GUIDES_MAX)
-        huge = "t" * (self.mcp.HELD_GUIDE_CHARS_MAX + 1)
-        self.mcp._hold_guide(("deck-design", "huge"), ("e", huge))
-        self.assertNotIn(("deck-design", "huge"), self.mcp.GUIDES, "an item larger than the bound is not held")
-
-    def test_a_new_version_drops_everything_of_the_old_one(self):
-        self.mcp.INDEX = {"version": "g1", "sections": [], "specimens": ["a.jpg"], "etag": '"v1"'}
-        self.mcp._hold_sheet("a.jpg", ("h", b"x", '"v1"'))
-        self.mcp._hold_guide(("deck-design", "craft"), ("e", "t"))
-        self.mcp._adopt({"version": "g2", "sections": [], "specimens": ["a.jpg"], "etag": '"v2"'})
-        self.assertEqual((self.mcp.SHEETS, self.mcp.GUIDES), ({}, {}))
-        self.mcp.INDEX, self.mcp.NOTIFY[:] = None, []
+    def test_an_item_larger_than_the_bound_is_not_held(self):
+        held = self.texts_module._Held(limit=100)
+        held.put(("section", "deck-design", "huge", "lead", "tool"), '"e"', b"t" * 101, "")
+        self.assertEqual(len(held), 0)
+        self.assertEqual(self.texts_module.HELD_MAX_BYTES, 64 << 20)
 
 
 class SkillBody(ClientCase):
@@ -822,6 +833,23 @@ class WindowsLauncher(unittest.TestCase):
         self.box = Sandbox(self.api)
         self.addCleanup(self.box.close)
 
+    def _login_after_setup(self):
+        """Sign in once the setup job a launch started is done. That job is started detached (Start-Process) and takes
+        state\\bootstrap\\job.lock from its first lines, so it can take it after wait_jobs looked; the launcher then
+        answers SETUP_IN_PROGRESS (67), as it rightly would to a person whose setup is still running (the job writes
+        the ready marks before it lets the lock go, and `login` reads those first). The same command again once the
+        job has ended, within a bound."""
+        self.box.wait_jobs(600)
+        self.api.issue_activation_code("ABCD-1234")
+        deadline = time.monotonic() + 600
+        while True:
+            login = self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600)
+            if login.returncode != 67 or time.monotonic() > deadline:
+                break
+            self.box.wait_jobs(600)
+            time.sleep(1)
+        self.assertEqual(login.returncode, 0, login.stdout + login.stderr)
+
     def _mcp(self, env=None):
         command = cmd_command(str(self.box.launcher.with_suffix("")), "mcp")      # no extension, as the host spawns it
         return subprocess.Popen(command, env={**self.box.env, **(env or {})}, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -829,9 +857,7 @@ class WindowsLauncher(unittest.TestCase):
 
     def test_the_skill_body_with_characters_outside_the_code_page(self):
         self.box.run_launcher("version", timeout=600)
-        self.box.wait_jobs(600)
-        self.api.issue_activation_code("ABCD-1234")
-        self.assertEqual(self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600).returncode, 0)
+        self._login_after_setup()
         self.api.guides["deck-design"][""] = "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n"
         done = subprocess.run(cmd_command(str(self.box.launcher), "skill", "deck-design"), env=self.box.env, capture_output=True,
                               timeout=600, cwd=str(self.box.tmp))
@@ -843,9 +869,7 @@ class WindowsLauncher(unittest.TestCase):
         proc = self._mcp({"THEODORE_BOOTSTRAP_WAIT": "1"})
         out, err = proc.communicate(b"", timeout=600)
         self.assertNotIn(b"THEODORE ", out, "the protocol stream gets no status")
-        self.box.wait_jobs(600)
-        self.api.issue_activation_code("ABCD-1234")
-        self.assertEqual(self.box.run_launcher("login", "--code", "ABCD-1234", timeout=600).returncode, 0)
+        self._login_after_setup()
         proc = self._mcp()
         message = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
@@ -854,7 +878,7 @@ class WindowsLauncher(unittest.TestCase):
         answers = [json.loads(line) for line in out.decode().splitlines() if line.strip()]
         self.assertEqual([a["id"] for a in answers], [1, 2], out)
         self.assertEqual(answers[0]["result"]["serverInfo"]["name"], "theodore")
-        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "list", "specimen"])
+        self.assertEqual(sorted(t["name"] for t in answers[1]["result"]["tools"]), ["guide", "list", "pptx", "specimen", "theodore"])
 
 
 if __name__ == "__main__":

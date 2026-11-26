@@ -17,3 +17,13 @@ plugins/theodore/skills/pptx/scripts/launcher.json:generic-api-key:9
 72484731ed1d7551abdcd4836184247ee42aff0b:tests/fixtures/contract-v1.json:generic-api-key:136
 3260a2dff43a84d8d6e6c9d73a1fbc541842fef0:tests/fixtures/contract-v1.json:generic-api-key:136
 6798e6a8d0619a5a18ed87b69cd00c96b727f4ab:tests/fixtures/contract-v1.json:generic-api-key:139
+# False positive: tests/service_support.py line 143 in b368a9bc (lane A's stand-in C2 engine) is the workspace key of
+# its `committed` frame, sixteen hex digits made up for the test. Changed since to "written-workspace", which gitleaks
+# does not flag, so only the `gitleaks git` line for that commit is needed.
+b368a9bc8885d8bd3995530a41b01a918929ac6a:tests/service_support.py:generic-api-key:143
+
+# False positive: tests/service_support.py line 189 in 28751431 (lane A's stand-in C2 engine, "a new workspace's next
+# calls go to the worker that made it") is the workspace key the stand-in writes into the `.theodore.json` marker of
+# the workspace it makes, sixteen hex digits made up for the test, and the same value on the next line. A workspace
+# key is an identifier (C3 marker), not a credential; it is used in that file only.
+287514310ed20047f01a1d268702d2567cd14e22:tests/service_support.py:generic-api-key:189

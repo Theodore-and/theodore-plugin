@@ -44,14 +44,13 @@ with `THEODORE_HOME`, or uninstall the other first.
 | `runtime/<id>/` | Python 3.12, the engine's Python packages, Node 24 and its modules | about 358 to 466 MB (84 to 111 MB to download; table below) |
 | `engines/<version>/` | The PowerPoint engine (compiled for your platform when available); the current and previous versions and every version a deck used in the last 30 days are kept, others up to four versions in all | 43 to 58 MB each (15 to 21 MB to download) |
 | `packs/` | Icon, flag, map and background libraries | about 145 MB (about 95 MB to download) |
-| `tools/libreoffice/` | LibreOffice, only on a Mac or Windows PC that has none (it renders slide previews) | about 800 MB (about 300 MB to download) |
 | `plugin/` | A copy of this repository's plugin, which Codex adds as a local marketplace | under 100 KB |
 | `state/` | Sign-in state (see below), update state, locks, the session note (`sessions.json`, below) | a few KB |
 | `logs/`, `staging/` | Client log; downloads in progress | small |
 
 In all, about 100 to 130 MB is downloaded before the first deck (the runtime, 84 to 111 MB, and the engine, 15 to
 21 MB) and about 95 MB of asset packs follow in the background; a full install takes about 560 to 670 MB on disk
-(runtime, packs, one engine), plus LibreOffice where it is fetched. Engine sizes are those of the compiled
+(runtime, packs, one engine). Engine sizes are those of the compiled
 `1.0.0-rc.2` builds (download, then unpacked): macOS Apple silicon 14.6 / 42.7 MB, macOS Intel 16.5 / 45.9 MB,
 Windows x64 17.9 / 54.6 MB, Linux x64 21.2 / 58.5 MB, Linux arm64 18.5 / 48.9 MB. The runtime by platform (runtime `b77f7d4ca2d43955`, built by `ci/run.sh`):
 
@@ -124,13 +123,6 @@ Outside that folder:
   with the host settings, in Claude Code's settings, match it. Texts then name `theodore …` instead of the launcher's long path, which the assistant otherwise kept in a
   variable that no permission rule can match. `theodore hosts settings --remove` and the uninstall delete it.
 
-- **Two settings of LibreOffice on a Mac**, in LibreOffice's own preferences (`org.libreoffice.script`), written by
-  the engine before it starts LibreOffice: `ApplePersistenceIgnoreState` (after a crash of LibreOffice, macOS asks at
-  the next start whether to restore its windows, and a LibreOffice without a window waits for an answer for ever) and,
-  from engine 1.0.0-rc.27, `NSAppSleepDisabled` (macOS slows an app that shows no window after about 30 seconds, and
-  every conversion then took three times as long). Both also hold for a LibreOffice you open yourself: its windows
-  are not restored after a crash, and it is not slowed while it is hidden.
-
 - **The PowerPoint check on a Mac** (`pptx doctor --powerpoint`), only when your assistant or you run it: it opens a
   copy of the deck in your own PowerPoint to see whether PowerPoint would ask to repair it. The copy goes into
   PowerPoint's own temporary folder (`~/Library/Containers/com.microsoft.Powerpoint/Data/tmp`) and is deleted after
@@ -144,11 +136,10 @@ carry their own permissions, as above). It does not register the plugin in your 
 Desktop entry; `theodore hosts register` does. A line you delete is not written again. (Versions 0.4.18 to 0.4.20 left all of this to the installer; 0.4.21 does it again.)
 
 Nothing is installed system-wide. Nothing runs on its own: a Theodore command your assistant runs may start a
-download or an update in the background, which ends when it is done. Two helpers of the engine outlive the command
-that started them, so that the next command finds them ready, and stop by themselves: the engine's own helper process
-(it speeds up `render` and project sync), for up to 30 idle minutes; and the LibreOffice an engine command started,
-for up to 10 idle minutes (from engine 1.0.0-rc.27 on macOS and Linux, from 1.0.0-rc.28 on Windows too; 250 to 400 MB
-of memory in our runs, almost no CPU). Both also stop when Theodore is uninstalled or its cache is cleared. The plugin has one hook (`hooks/hooks.json`):
+download or an update in the background, which ends when it is done. One helper of the engine outlives the command
+that started it, so that the next command finds it ready, and stops by itself: the engine's own helper process (it
+speeds up `render` and project sync), for up to 30 idle minutes. It also stops when Theodore is uninstalled or its
+cache is cleared. The plugin has one hook (`hooks/hooks.json`):
 Claude Code runs it when it compacts a conversation or resumes one, and only then. It runs the launcher's
 `session-start`, which reads Theodore's own small record of the instructions it served to that session
 (`state/sessions.json`: the session id Claude Code gives, the skill, its version and when; never the conversation, which
@@ -203,14 +194,11 @@ when nothing else is in it). What is left afterwards:
 
 - Anything in the folder that Theodore did not put there.
 - `.pptx-state/theodore-engine.json` inside your deck workspaces (harmless; delete it if you like).
-- On a Mac, the two LibreOffice settings named above. They are LibreOffice's own preferences and harmless;
-  `defaults delete org.libreoffice.script ApplePersistenceIgnoreState` and
-  `defaults delete org.libreoffice.script NSAppSleepDisabled` remove them.
 - Claude Code's cached copy of the plugin under `~/.claude/plugins/cache/theodore/` (about 60 KB of text).
   Claude Code marks it as orphaned and deletes it itself after 14 days.
 - Nothing of the installer: the install commands above download it into a new private folder (Windows:
   `%LOCALAPPDATA%\Theodore-install`, never the temporary folder) that the installer deletes when it ends.
-- In the system's temporary folder (`$TMPDIR`, `%TEMP%`): the engine's LibreOffice profile (`pptx-soffice-profile/`,
+- In the system's temporary folder (`$TMPDIR`, `%TEMP%`): the profile an engine before 2.0 kept (`pptx-soffice-profile/`,
   `pptx-soffice-profile.warm-seed/`, `pptx-soffice-profile.lock`) and its empty lock files
   (`theodore-pptx-locks/*.lock`). The system clears that folder itself; they can be deleted at any time. Specimen
   folders (`theodore-specimens-*`) are not left: each is recorded in `state/specimens.txt` when it is made, is removed

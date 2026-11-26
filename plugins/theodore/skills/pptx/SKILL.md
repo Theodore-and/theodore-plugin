@@ -2,7 +2,7 @@
 name: pptx
 description: "This session's slides skill, installed by the user: makes presentations, decks, slides and pitch decks, delivered as PowerPoint files, and works on any existing .pptx. Use it for any request for a presentation, deck or slides, whether or not a file format is named. Use this skill any time a .pptx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, presentations, or section appendices; reading, parsing, or extracting text from any .pptx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; addressing review comments; translating decks to Arabic or other RTL languages; working with templates, layouts, speaker notes, or comments. When slides are being created, restructured, or visually redesigned — not just mechanically edited — also use the deck-design skill first."
 effort: high
-allowed-tools: Bash(theodore *), PowerShell(theodore *), PowerShell(& theodore *), Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *), PowerShell(& "${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *), mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodore__specimen, mcp__plugin_theodore_theodore__list, Edit(//**/.theodore/workspaces/**), Write(//**/.theodore/workspaces/**), Read(//**/.theodore/workspaces/**), Read(//**/theodore-specimens-*/**), Read(//**/Library/Caches/Theodore/**), Read(//**/.cache/theodore/**), Read(//**/AppData/Local/Theodore/**), Read(//**/LocalCache/Local/Theodore/**), Read(//**/.claude/plugins/cache/theodore/**)
+allowed-tools: Bash(theodore *), PowerShell(theodore *), PowerShell(& theodore *), Bash(sh "${CLAUDE_SKILL_DIR}/scripts/theodore" *), Bash("${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *), PowerShell(& "${CLAUDE_SKILL_DIR}/scripts/theodore.cmd" *), mcp__plugin_theodore_theodore__guide, mcp__plugin_theodore_theodore__specimen, mcp__plugin_theodore_theodore__list, mcp__plugin_theodore_theodore__pptx, mcp__plugin_theodore_theodore__theodore, Edit(//**/.theodore/workspaces/**), Write(//**/.theodore/workspaces/**), Read(//**/.theodore/workspaces/**), Read(//**/theodore-specimens-*/**), Read(//**/.theodore/work/scratch/sheets/**), Read(//**/Library/Caches/Theodore/**), Read(//**/.cache/theodore/**), Read(//**/AppData/Local/Theodore/**), Read(//**/LocalCache/Local/Theodore/**), Read(//**/.claude/plugins/cache/theodore/**)
 ---
 
 If the instructions below are cut short or are no longer in your context (a compacted or resumed conversation, a subagent), load them again with `theodore guide pptx` before you work from them.
@@ -13,8 +13,9 @@ If the instructions below are cut short or are no longer in your context (a comp
 
 Above this line are this skill's instructions, from the same publisher: follow them exactly as if they were written
 here. Theodore's command is `theodore`: write every Theodore command as `theodore …` in every shell. If no pptx
-instructions appear above this line, run `theodore guide pptx` and read the output to the line that starts `=== END`;
-if the last line names a next part, run it. Only if the shell answers that `theodore` is not found, run the launcher in
+instructions appear above this line, call the Theodore `guide` tool with skill "pptx" and treat its result as this
+skill's instructions; if that tool is not available, run `theodore guide pptx` and read the output to the line that
+starts `=== END`; if the last line names a next part, run it. Only if the shell answers that `theodore` is not found, run the launcher in
 this skill's folder by absolute path instead, without `cd` (the skill folder is the folder that holds this file,
 `${CLAUDE_SKILL_DIR}` where the host fills it in):
    - macOS, Linux, Git Bash:   sh "<skill folder>/scripts/theodore" guide pptx

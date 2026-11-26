@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -19,6 +20,119 @@ from theodore_client import api, core  # noqa: E402
 
 JPEG = b"\xff\xd8\xff\xe0" + b"sheet bytes " * 50 + b"\xff\xd9"
 NO_PROXY = {k: "" for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")}
+
+
+class IdleClosingServer:
+    """HTTP/1.1, kept alive, closing a connection after `idle` seconds without a request (an edge's idle timeout). It
+    counts the connections it accepted and the requests each one delivered."""
+
+    def __init__(self, idle: float = 0.2):
+        import http.server
+        owner = self
+        self.connections = 0
+        self.requests: list[tuple[int, str]] = []
+        self.lock = threading.Lock()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            timeout = idle
+
+            def setup(self):
+                super().setup()
+                with owner.lock:
+                    owner.connections += 1
+                    self.number = owner.connections
+
+            def answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                with owner.lock:
+                    owner.requests.append((self.number, self.command))
+                body = b'{"ok": true, "keys": []}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = answer
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class IdleTimeout(unittest.TestCase):
+    """Lane A's A4 on the rig (25 Nov): two warm `theodore guide` starts in 180 were told OFFLINE, \"Remote end closed
+    connection without response\". The service's kept connections had been closed by the remote end while idle; the one
+    retry took another idle one, closed too. Now a connection closed while idle is never used, and a connection lost as
+    it is used is tried once more on a new one; only a failure on that new one is a network failure."""
+
+    def setUp(self):
+        self.server = IdleClosingServer(idle=0.2)
+        self.addCleanup(self.server.stop)
+        self.enterContext(mock.patch.object(core, "_CONFIG", {"api_base": self.server.base}))
+        self.enterContext(mock.patch.dict(os.environ, NO_PROXY))
+        self.pool = api.KeptAlive()
+        self.addCleanup(self.pool.close)
+        self.url = self.server.base + "/v1/keys"
+
+    def fill(self, count: int) -> None:
+        start, done = threading.Barrier(count), []
+
+        def one():
+            start.wait()
+            done.append(self.pool.request("GET", self.url)[0])
+        threads = [threading.Thread(target=one) for _ in range(count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(done, [200] * count)
+
+    def test_every_method_after_the_idle_timeout_goes_on_a_new_connection(self):
+        self.fill(1)
+        time.sleep(0.6)                         # the server closed it
+        for method in ("POST", "GET"):
+            self.assertEqual(self.pool.request(method, self.url, body={} if method == "POST" else None)[0], 200)
+            time.sleep(0.6)
+        self.assertEqual([m for _n, m in self.server.requests], ["GET", "POST", "GET"], "each delivered once")
+        self.assertEqual(self.server.connections, 3)
+
+    def test_two_stale_idle_connections_give_one_fresh_connect_and_one_delivered_request(self):
+        self.fill(2)
+        self.assertEqual(len(self.pool._idle), 2)
+        time.sleep(0.6)                         # both closed by the server
+        before = self.server.connections
+        self.assertEqual(self.pool.request("POST", self.url, body={})[0], 200)
+        self.assertEqual(self.server.connections - before, 1, "one fresh connect")
+        self.assertEqual([m for _n, m in self.server.requests].count("POST"), 1, "exactly one delivered request")
+        self.assertEqual(len(self.pool._idle), 1, "the stale ones are gone; the fresh one is kept")
+
+    def test_lost_as_it_is_used_the_retry_takes_a_fresh_connection_never_another_idle_one(self):
+        self.fill(2)
+        time.sleep(0.6)
+        before = self.server.connections
+        with mock.patch.object(api, "_peer_closed", return_value=False):    # both looked open: the race at use
+            self.assertEqual(self.pool.request("GET", self.url)[0], 200)
+        self.assertEqual(self.server.connections - before, 1, "the retry opened one new connection")
+        self.assertEqual(len(self.pool._idle), 1, "the other stale one was dropped, not tried")
+
+    def test_a_failure_on_the_fresh_connection_is_a_network_failure(self):
+        self.fill(1)
+        time.sleep(0.6)
+        self.server.stop()
+        with self.assertRaises(api.NetworkError):
+            self.pool.request("GET", self.url, timeout=2.0)
 
 
 class KeptAliveCase(unittest.TestCase):
@@ -81,20 +195,61 @@ class KeptAliveCase(unittest.TestCase):
             self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
         self.assertEqual(self.pool.opened, opened)
 
+    def test_a_connection_given_back_just_before_the_lock_is_taken_is_reused_not_closed(self):
+        # Another thread gives a connection back after this request started but before it holds the pool's lock:
+        # the connection is reused, not read as idle for less than nothing and closed as stale (release/0.5.0's
+        # linux-arm64 job: 9 connections opened where 6 requests at once need 6).
+        self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
+        self.assertEqual(self.pool.opened, 1)
+        given = self.pool._idle.pop()
+        real = self.pool._lock
+        pool = self.pool
+
+        class GivenBackFirst:
+            """The pool's lock, except that when _take comes for it the first time, the connection is given back
+            first, as by another thread, dated now."""
+            done = False
+
+            def __enter__(lock):
+                if not lock.done and sys._getframe(1).f_code.co_name == "_take":
+                    lock.done = True
+                    with real:
+                        pool._idle.append((given[0], given[1], time.monotonic()))
+                return real.__enter__()
+
+            def __exit__(lock, *exc):
+                return real.__exit__(*exc)
+        self.pool._lock = GivenBackFirst()
+        self.addCleanup(setattr, self.pool, "_lock", real)
+        self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
+        self.assertTrue(self.pool._lock.done, "the connection was given back while the request waited for the lock")
+        self.assertEqual(self.pool.opened, 1, "the connection given back was reused")
+        self.assertEqual(len(self.accepted), 1)
+
     def test_a_connection_the_server_closed_is_opened_again_once(self):
         self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
         self.end_server_connections()
         self.assertEqual(self.pool.request("GET", self.keys)[0], 200)
         self.assertEqual(self.pool.opened, 2)
 
-    def test_a_post_goes_twice_only_when_the_caller_says_it_may(self):
+    def test_a_post_on_a_connection_closed_as_it_is_used_goes_twice_only_when_the_caller_says_it_may(self):
+        # Closed just as it is used: it looked open (so it was taken), and the request was lost on it. Whether a one-use
+        # action happened cannot be told, so a POST goes again only when its caller says it may (the backend's rule).
         self.assertEqual(self.pool.request("POST", self.keys, body={})[0], 200)
         self.end_server_connections()
-        with self.assertRaises(api.NetworkError):
+        with mock.patch.object(api, "_peer_closed", return_value=False), self.assertRaises(api.NetworkError):
             self.pool.request("POST", self.keys, body={})
         self.assertEqual(self.pool.request("POST", self.keys, body={})[0], 200)     # a new connection
         self.end_server_connections()
-        self.assertEqual(self.pool.request("POST", self.keys, body={}, again=True)[0], 200)
+        with mock.patch.object(api, "_peer_closed", return_value=False):
+            self.assertEqual(self.pool.request("POST", self.keys, body={}, again=True)[0], 200)
+
+    def test_a_connection_closed_while_idle_is_never_sent_a_request(self):
+        # An edge's idle timeout closed it: seen before anything is sent, so any method, a POST too, goes on a new one.
+        self.assertEqual(self.pool.request("POST", self.keys, body={})[0], 200)
+        self.end_server_connections()
+        self.assertEqual(self.pool.request("POST", self.keys, body={})[0], 200)
+        self.assertEqual(self.pool.opened, 2)
 
     def test_a_new_connection_that_fails_is_a_network_error_at_once(self):
         with socket.socket() as probe:

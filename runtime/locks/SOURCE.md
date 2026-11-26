@@ -7,10 +7,12 @@ the engine's source repository and copied again, and the runtime id (see `../bui
 | File | sha256 |
 | --- | --- |
 | `requirements.txt` | `95b65682e2560cc7a489c2b58fbc723456576cdfbeb1dfedc717f3b695905285` |
-| `package.json` | `40eb4b683906f538168719515c83cbbf67169c8d7ab940432c75cec1c07d4294` |
-| `package-lock.json` | `c99d471adf2bf4ecaee76b999f75135211f114ae8a06971ee42ceda4de9a64ec` |
+| `package.json` | `873417ccba2b5096170e053cdc64292a297bcc6c1653301dd0f440890791e1b8` |
+| `package-lock.json` | `3961acfd10795933d7b2f001e78532dcbd83f2c317a94386b4d25ae9fc461f4e` |
 
-Source commit: `dc668fd74b66b2c111ea79e28cfc85755fb18aff` (2026-11-09).
+Source commit: `d7da0a9f23891bbba8305e7363d2ff723b356255` (2026-11-25, engine 2.0: pptx-automizer and npm pptxgenjs are no
+longer dependencies; jszip and pako, what the engine's own pptxgenjs needs, are pinned). The commit that lands on the
+engine's main line may carry another id; the three files' bytes are what counts.
 
 `runtime-extra.txt` (packages the runtime adds: the PDF rasteriser and the system-certificate TLS helper) and
 `versions.json` (Python and Node pins, recipe version) are maintained in this repository.

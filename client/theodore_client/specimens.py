@@ -1,18 +1,13 @@
-r"""Deck-design specimen sheets. They are the publisher's images: fetched one at a time when the assistant asks,
-held in a private folder of this run in Theodore's cache, removed by the first Theodore run after an hour (there is no background
-process) and by the uninstall, and never put in Theodore's folder or in a deck's.
+r"""Deck-design specimen sheets: names, checks and the sweep of the folders older clients made.
 
-`theodore specimen <file>...` fetches into a new folder <root>/theodore-specimens-XXXXXXXX (the current user's
-alone), where <root> is the user's cache folder (~/Library/Caches/Theodore/specimens, $XDG_CACHE_HOME/theodore/specimens,
-%LOCALAPPDATA%\Theodore\Cache\specimens) or, only when that lies inside the working folder, the system's temporary folder.
-Every folder made is recorded in <home>/state/specimens.txt, one line "<created epoch> <path>", which the launchers and
-installers read too. Every client call first removes recorded folders, and folders in the current roots, older than an
-hour; `uninstall` removes them all. A changed TMPDIR therefore cannot strand a folder.
+Sheets are the publisher's images. Since contract C6 (24 November 2026) they come online on every call, through this
+process's Texts (service/texts.py): as image blocks from the MCP tools, or, in a shell, as transient files in
+<work>/scratch/sheets/<session>/, removed when the session ends or after 15 minutes. Nothing here fetches.
 
-A sheet already held in a recorded folder at most REUSE_SECONDS old is not fetched again: the client asks the service
-with If-None-Match (its SHA-256) and, on 304, prints that file's path. Nothing new is written and no bytes travel; the
-service still checks the device and the version on every call. A refusal that signs the device out or refuses the
-account removes every specimen folder at once.
+Clients up to 0.4.33 fetched each sheet into a folder <root>/theodore-specimens-XXXXXXXX (the user's cache folder, or
+the system's temporary folder) recorded in <home>/state/specimens.txt, which the launchers and installers read too.
+`sweep` still removes those folders (recorded, or found in the roots by their name) once they are older than an hour,
+and all of them at an uninstall or after a refusal of the device or the account.
 """
 
 from __future__ import annotations
@@ -34,7 +29,6 @@ tempfile = core.LazyModule("tempfile")
 
 PREFIX = "theodore-specimens-"
 KEEP_SECONDS = 3600
-REUSE_SECONDS = 2700            # a held sheet is reused while at least 15 minutes of its folder's hour remain
 AHEAD_SECONDS = 60              # dated further ahead of the clock than this: not trusted to be recent (the launchers allow the same)
 MAX_FILES = 8
 MAX_BYTES = 1 << 20
@@ -112,27 +106,6 @@ class NoSuchSheet(Exception):
     def __init__(self, name: str):
         super().__init__(name)
         self.name = name
-
-
-def index_sheets(headers, raw: bytes) -> list[str] | None:
-    """The sheet names of the published index (GET /v1/guide/deck-design?form=index: {..., specimens: [{file}]}), each
-    a valid name; None when the answer is not that index (an older service answers the text)."""
-    import json
-    if "json" not in str(headers.get("Content-Type") or "").lower():
-        return None
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    items = data.get("specimens") if isinstance(data, dict) else None
-    if not isinstance(items, list):
-        return None
-    names = []
-    for item in items:
-        name = item.get("file") if isinstance(item, dict) else item
-        if isinstance(name, str) and valid_name(name) and name not in names:
-            names.append(name)
-    return names or None
 
 
 FAMILY = re.compile(r"([A-Za-z]{1,4})([0-9]{1,3})")       # a code-like name: letters, then digits (AX9)
@@ -266,33 +239,6 @@ def _write_registry(entries: list[tuple[float, Path]]) -> None:
         core.remove_tree(registry())
 
 
-def _within(path: Path, parent: Path) -> bool:
-    return path == parent or parent in path.parents
-
-
-def _in_the_users_own_folder() -> bool:
-    """The assistant works in the user's own folder itself: where a terminal opens, not a project."""
-    with contextlib.suppress(OSError, RuntimeError):
-        return Path.cwd().resolve() == Path.home().resolve()
-    return False
-
-
-def _usable(root: Path, working_folder: bool = True) -> bool:
-    r"""Never inside the folder the assistant works in (whatever it holds, the user's home included), never inside a
-    deck (a folder holding .pptx-state), never inside Theodore's folder (the cache root that Windows keeps under
-    %LOCALAPPDATA%\Theodore\Cache is the one exception: it is made for this). `working_folder` False leaves the first
-    rule out: make_folder's one exception, below."""
-    with contextlib.suppress(OSError, RuntimeError):
-        if working_folder and _within(root, Path.cwd().resolve()):
-            return False
-        if root != cache_root().resolve() and _within(root, core.home().root.resolve()):
-            return False
-        if any((folder / ".pptx-state").is_dir() for folder in (root, *root.parents)):
-            return False
-        return True
-    return False
-
-
 def _make_private(folder: Path) -> None:
     """The current user alone. POSIX: mode 0700. Windows: the folder's access list is replaced by one entry, this
     user with full control, inherited by the files, and nothing is inherited from the parent (icacls /inheritance:r
@@ -333,78 +279,12 @@ def _make_private(folder: Path) -> None:
 
 
 def local_block(status: Status) -> Status:
-    """A BLOCKED_BY_POLICY that this computer decided about this one call (the working folder holds every place a sheet
-    may go; automatic reports are off): not a refusal of the device or the account, so it removes no specimen folder.
-    Until 0.4.30 it did (core.emit), and a designer refused in one folder emptied the folders of the designers working
-    beside it at that moment: a path printed a second before was gone when it was opened."""
+    """A BLOCKED_BY_POLICY that this computer decided about this one call (automatic reports are off): not a refusal of
+    the device or the account, so it removes no sheet. Until 0.4.30 it did (core.emit), and a designer refused in one
+    folder emptied the folders of the designers working beside it at that moment: a path printed a second before was
+    gone when it was opened."""
     status.keeps_sheets = True
     return status
-
-
-def make_folder() -> Path:
-    """A new folder for this run's sheets, recorded before anything is put in it. No private folder outside the
-    working folder, the deck and Theodore's folder: no sheet is fetched."""
-    problem = None
-    # Theodore's own cache first (the host settings' Read rule covers it; the system's temporary folder is shared,
-    # swept and indexed by other tools); the temporary folder only when the working folder contains the cache.
-    cache = cache_root().resolve()
-    usable = [root for root in roots() if _usable(root)]
-    # The one exception to "never inside the working folder" (0.4.24): the assistant works in the user's own folder
-    # itself and that folder contains every place a specimen folder may go. That is Windows, where a terminal opens
-    # in C:\Users\<name> and the temporary folder is %LOCALAPPDATA%\Temp: an assistant started there was refused every
-    # sheet and told to design without them. Theodore's own cache folder is used then, the very folder the sheets go
-    # to from a project folder, private to the user. A folder above the user's, or a project folder that holds every
-    # place, is still refused; on macOS and Linux the temporary folder lies outside the home and is used as before.
-    if not usable and _in_the_users_own_folder() and _usable(cache, working_folder=False):
-        usable = [cache]
-    for root in ([cache] if cache in usable else usable):
-        if root == cache_root().resolve():
-            with contextlib.suppress(OSError):
-                root.mkdir(parents=True, exist_ok=True)
-                if not core.IS_WINDOWS:
-                    os.chmod(root, 0o700)
-        folder = root / (PREFIX + secrets.token_hex(8))
-        try:        # a new folder: mkdir fails when the name exists, so it is never one somebody else prepared
-            if core.IS_WINDOWS:
-                os.mkdir(folder)
-            else:
-                os.mkdir(folder, 0o700)
-        except OSError as exc:
-            problem = f"{root}: {exc.__class__.__name__}"
-            continue
-        try:
-            _make_private(folder)
-        except (OSError, subprocess.SubprocessError) as exc:
-            core.remove_tree(folder)
-            problem = f"a folder in {root} could not be made private ({exc})"
-            continue
-        try:
-            with core.lock("specimens", timeout=10):
-                _write_registry(_read_registry() + [(core.now(), folder)])
-        except (OSError, Status) as exc:
-            core.remove_tree(folder)
-            raise Status("RETRY", f"the specimen folder could not be recorded ({getattr(exc, 'summary', exc)}); nothing was fetched.",
-                         "run the same command again once.", "A design specimen could not be opened just now; I am trying once more.") from None
-        return folder
-    if problem is None:
-        here = Path.cwd()
-        raise local_block(Status("BLOCKED_BY_POLICY", f"the specimen sheet was not fetched: the working folder ({here}) contains every place a "
-                                          f"specimen folder may go ({', '.join(str(r) for r in roots())}), and sheets are never put "
-                                          f"inside the working folder.",
-                     "continue without the sheet; do not fetch it another way. Sheets work when the assistant works in a project "
-                     "folder that does not contain the user's temporary or cache folder.",
-                     "I could not open a design specimen from this working folder; I am continuing without it."))
-    raise Status("INTERNAL", f"the specimen sheet was not fetched: {problem}.",
-                 "continue without the sheet; do not fetch it another way.",
-                 "I could not open a design specimen on this computer; I am continuing without it.")
-
-
-def write(folder: Path, name: str, data: bytes) -> Path:
-    path = folder / name
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    with os.fdopen(os.open(path, flags, 0o600), "wb") as handle:
-        handle.write(data)
-    return path
 
 
 def _ours(path: Path) -> float | None:
@@ -416,27 +296,6 @@ def _ours(path: Path) -> float | None:
         info = os.lstat(path)
         if stat.S_ISDIR(info.st_mode) and (core.IS_WINDOWS or info.st_uid == os.getuid()):
             return info.st_mtime
-    return None
-
-
-def held(name: str) -> Path | None:
-    """The newest recorded copy of sheet `name` that may be reused: in a folder of ours made at most REUSE_SECONDS ago,
-    a regular file (never a link) of at most MAX_BYTES. None when there is none."""
-    if not valid_name(name):
-        return None
-    now = core.now()
-    try:
-        entries = sorted(_read_registry(), key=lambda entry: entry[0], reverse=True)
-    except Exception:       # noqa: BLE001  no record: nothing to reuse
-        return None
-    for made, folder in entries:
-        if not 0 <= now - made <= REUSE_SECONDS or _ours(folder) is None or not _usable(folder.parent):
-            continue
-        path = folder / name
-        with contextlib.suppress(OSError):
-            info = os.lstat(path)
-            if stat.S_ISREG(info.st_mode) and 0 < info.st_size <= MAX_BYTES:
-                return path
     return None
 
 
@@ -522,7 +381,52 @@ def sweep(everything: bool = False, quick: bool = False) -> list[Path]:
             core.write_atomic(core.home().state / SCAN_STAMP, f"{int(now)}\n", 0o600)
     except Exception:       # noqa: BLE001  a cleanup must not stop the command it precedes
         pass
+    sweep_sheet_files(everything)
     return left
+
+
+# --- the shell route's sheet files (contract C6) ----------------------------------------------------------------------
+SHEET_FILES_KEEP_S = 15 * 60       # a sheet file lives 15 minutes after its last use, or until its session ends
+
+
+def sheets_root() -> Path:
+    """Where the shell route's sheet files are: <work>/scratch/sheets/<session>/ (<work> is THEODORE_WORK_DIR, else
+    <home>/work), Theodore's own folder, never the working folder or the system's temporary folder."""
+    work = os.environ.get("THEODORE_WORK_DIR")
+    return (Path(work) if work else core.home().root / "work") / "scratch" / "sheets"
+
+
+def sheet_file_recent(mtime: float, now: float) -> bool:
+    """Written or used within the last 15 minutes. A file just written can be dated a little ahead of the clock (on
+    Windows before Python 3.13 time.time() ticks every 15.6 ms while the file system dates finer): up to AHEAD_SECONDS
+    ahead counts as recent, as for the specimen folders; further ahead is not trusted."""
+    return -AHEAD_SECONDS <= now - mtime <= SHEET_FILES_KEEP_S
+
+
+def sweep_sheet_files(everything: bool = False) -> None:
+    """The sheet files older than 15 minutes go, and the session folders left empty; with `everything` (an uninstall,
+    a refusal of the device or the account), all of them. Never raises."""
+    try:
+        root = sheets_root()
+        if not root.is_dir() or root.is_symlink():
+            return
+        if everything:
+            core.remove_tree(root)
+            return
+        now = core.now()
+        for folder in list(root.iterdir()):
+            with contextlib.suppress(OSError):
+                if folder.is_symlink() or not folder.is_dir():
+                    folder.unlink()
+                    continue
+                for path in list(folder.iterdir()):
+                    with contextlib.suppress(OSError):
+                        if not sheet_file_recent(path.lstat().st_mtime, now):
+                            path.unlink()
+                if not any(folder.iterdir()) and not -AHEAD_SECONDS <= now - folder.lstat().st_mtime <= 60:
+                    folder.rmdir()
+    except Exception:       # noqa: BLE001  a cleanup must not stop the command it precedes
+        pass
 
 
 def guide_links(text: str, launcher: str) -> str:

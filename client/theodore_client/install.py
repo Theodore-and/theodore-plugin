@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -399,7 +401,7 @@ def setup_status() -> Status:
 
 def require_runtime(wait: float = 0.0) -> str:
     """The id of a complete runtime, or raise SETUP_IN_PROGRESS / SETUP_FAILED."""
-    rid = core.read_text(core.home().runtime / "current.txt")
+    rid = read_text_by_stat(core.home().runtime / "current.txt")
     if rid and runtime_ready(rid):
         return rid
     status = setup_status()
@@ -414,12 +416,59 @@ def require_runtime(wait: float = 0.0) -> str:
 
 # --- engines -------------------------------------------------------------------------------------------------------------
 
+# --- small state files read on every command (a resident service reads them per call) ----------------------------------
+
+# A file whose stat (size, mtime_ns, file id) is the one seen at its last read is not read again: the service answers 15
+# designers' commands at once, and each reads these files on its way (rig 1: admission 18-52 ms in a burst). A file is
+# kept only once it is older than RACY_S at its read, so a rewrite within the same clock tick that kept its size is never
+# mistaken for the same bytes (the store's racy rule), and a change made by another process is seen at the next call.
+RACY_S = 2.0
+_BY_STAT: dict[str, tuple[tuple, object]] = {}
+_BY_STAT_LOCK = threading.Lock()
+
+
+def _stamp(path: Path) -> tuple | None:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_size, info.st_mtime_ns, getattr(info, "st_ino", 0), getattr(info, "st_dev", 0))
+
+
+def _by_stat(path: Path, read):
+    """`read(path)` answered from memory while the file's stat is the one of a read past the racy window."""
+    key = str(path)
+    stamp = _stamp(path)
+    if stamp is not None:
+        with _BY_STAT_LOCK:
+            kept = _BY_STAT.get(key)
+        if kept is not None and kept[0] == stamp:
+            return copy.deepcopy(kept[1])
+    value = read(path)
+    if stamp is not None and time.time() - stamp[1] / 1e9 >= RACY_S and _stamp(path) == stamp:
+        with _BY_STAT_LOCK:
+            _BY_STAT[key] = (stamp, copy.deepcopy(value))
+    else:
+        with _BY_STAT_LOCK:
+            _BY_STAT.pop(key, None)
+    return value
+
+
+def read_json_by_stat(path: Path) -> dict:
+    """core.read_json for a state file read on every command; a copy, so a caller may change what it gets."""
+    return _by_stat(path, core.read_json)
+
+
+def read_text_by_stat(path: Path) -> str:
+    return _by_stat(path, core.read_text)
+
+
 def engines_state() -> dict:
-    return core.read_json(core.home().engines / "current.json")
+    return read_json_by_stat(core.home().engines / "current.json")
 
 
 def update_state() -> dict:
-    return core.read_json(core.home().state / "update.json")
+    return read_json_by_stat(core.home().state / "update.json")
 
 
 # One lock for everything that decides which engine is current: accepting a signed document (the replay times), the
@@ -441,7 +490,7 @@ def save_update_state(**fields) -> None:
 
 
 def pins() -> dict:
-    return core.read_json(core.home().state / "pins.json")
+    return read_json_by_stat(core.home().state / "pins.json")
 
 
 def engine_dirs() -> dict:
@@ -503,10 +552,6 @@ def engine_env(directory: Path) -> dict:
     # page, the engine's lines then differ in encoding from the client's around them, and a letter outside it fails.
     env["PYTHONIOENCODING"] = "utf-8"
     usage.engine_env(env)       # the usage ledger's path, only while the last licence refresh said usage_enabled: true
-    if not known_libreoffice():
-        local = libreoffice_binary()
-        if local:
-            env["SOFFICE_BIN"] = str(local)
     return env
 
 
@@ -571,6 +616,102 @@ def _self_test(directory: Path, runtime_id: str) -> None:
             raise EngineError("the runtime's Node did not start")
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise EngineError(f"the runtime's Node did not start: {exc}") from None
+
+
+# --- the first start, at install ---------------------------------------------------------------------------------------
+#
+# What only a first start pays is paid when an engine is installed, not by the first command ever. The runtime's Python
+# files come as source (the standard library as its publisher ships it, the packages installed without compiling), and
+# the interpreter compiles each on its first import and keeps the result beside it: on rig 9 (2 processors) the first
+# worker after an install was ready after 10.8 s, later ones after 2.9 to 5.5 s. So after an engine's self-test the
+# client starts it once exactly as the service starts its workers (`engine.py serve`, contract C2, the runtime's own
+# interpreter with -I, so no PYTHONDONTWRITEBYTECODE of the user's applies), with its input closed: the worker loads
+# what every worker loads before `ready`, finds no service and ends by itself, having started nothing else. The
+# compiled files are the interpreter's own, beside their sources in the runtime's folder (Theodore's home, the user's
+# own folder, the same real files for a process inside or outside an app's package), where every later worker reads
+# them. Nothing is listed here and nothing else is stored. At low priority: an engine update's first start yields to
+# the session it runs beside. It never fails an install: an engine that does not start as a worker still runs one-shot.
+FIRST_START_WAIT_S = 180.0
+_BELOW_NORMAL_PRIORITY = 0x00004000     # Windows BELOW_NORMAL_PRIORITY_CLASS
+_NO_WINDOW = 0x08000000                 # Windows CREATE_NO_WINDOW
+
+
+def _worker_frames(raw: bytes) -> list[dict]:
+    """The C2 frames in a worker's output: a 4-byte little-endian length, then that many bytes of JSON, each."""
+    frames, at = [], 0
+    while at + 4 <= len(raw):
+        size = int.from_bytes(raw[at:at + 4], "little")
+        body = raw[at + 4:at + 4 + size]
+        if len(body) < size:
+            break
+        at += 4 + size
+        with contextlib.suppress(ValueError):
+            frame = json.loads(body.decode("utf-8"))
+            if isinstance(frame, dict):
+                frames.append(frame)
+    return frames
+
+
+def first_start(directory: Path, runtime_id: str | None = None, label: str | None = None) -> dict:
+    """Start the engine in `directory` once as a worker and wait for it to end (see above). Returns what happened, for
+    the log and the tests: {"said": "ready" | "fatal" | "nothing" | "not started", "ms": the whole start, ...}."""
+    began = time.monotonic()
+    result: dict = {"said": "not started"}
+    name = label or directory.name
+    try:
+        script = directory / "skills" / "pptx" / "scripts" / "engine.py"
+        python = core.home().runtime_python(runtime_id)
+        if not script.is_file() or python is None or not python.is_file():
+            return result           # an engine with no worker, or no runtime of ours: nothing to start
+        env = engine_env(directory)
+        env["THEODORE_RESIDENT"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        flags = {"creationflags": _NO_WINDOW | _BELOW_NORMAL_PRIORITY} if IS_WINDOWS else {}
+        process = subprocess.Popen([str(python), "-I", str(script), "serve", "--protocol", "1"], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd=str(directory), **flags)
+        if not IS_WINDOWS:
+            with contextlib.suppress(OSError):
+                os.setpriority(os.PRIO_PROCESS, process.pid, 10)
+        try:
+            out, _ = process.communicate(timeout=FIRST_START_WAIT_S)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            out, _ = process.communicate()
+            result["stopped"] = True
+        frame = next((f for f in _worker_frames(out or b"") if f.get("t") in ("ready", "fatal")), {})
+        result.update(said=str(frame.get("t") or "nothing"), exit=process.returncode)
+        if frame.get("t") == "ready":
+            result["ready_ms"] = frame.get("warm_ms")
+        elif frame.get("t") == "fatal":
+            result["code"] = frame.get("code")
+    except Exception as exc:  # noqa: BLE001  a head start only: never an install's failure
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        result["ms"] = int((time.monotonic() - began) * 1000)
+        if result["said"] != "not started" or "error" in result:
+            detail = {"ready": f"ready (its own start {result.get('ready_ms')} ms)", "fatal": f"fatal {result.get('code')}",
+                      "nothing": "no answer"}.get(result["said"], "not started")
+            core.log(f"engine {name}: started once as a worker at its install, {result['ms']} ms: {detail}"
+                     f"{'; stopped after ' + str(int(FIRST_START_WAIT_S)) + ' s' if result.get('stopped') else ''}"
+                     f"{'; ' + result['error'] if result.get('error') else ''}")
+    return result
+
+
+def compile_client(folder: Path | None = None) -> int:
+    """This client's own Python files (or those under `folder`) compiled where one is not yet: the service's modules
+    are first loaded by the first command ever. Returns how many were compiled; never fails."""
+    done = 0
+    with contextlib.suppress(Exception):
+        import importlib.util
+        import py_compile
+        for source in sorted((folder or Path(__file__).resolve().parent).rglob("*.py")):
+            with contextlib.suppress(Exception):
+                compiled = importlib.util.cache_from_source(str(source))
+                if os.path.exists(compiled):
+                    continue
+                if py_compile.compile(str(source), cfile=compiled, doraise=False, quiet=2):
+                    done += 1
+    return done
 
 
 ENGINE_KINDS = ("engine-native", "engine-source")
@@ -649,6 +790,7 @@ def stage_engine(entry: dict, job: Job | None = None, lock_timeout: float = 600.
             _hoist(partial, "package.json")
             _prepare_engine(partial, runtime_id)
             _self_test(partial, runtime_id)
+            first_start(partial, runtime_id, label=version)
         except EngineError as exc:
             core.remove_tree(partial)
             core.remove_tree(archive)
@@ -682,6 +824,8 @@ def activate_engine(version: str) -> None:
             return
         core.write_json(core.home().engines / "current.json", {"version": version, "previous": old if old and engine_installed(old) else state.get("previous")})
     collect_garbage()
+    from . import front
+    front.refresh()             # launch.json names the engine now current
 
 
 def touch_used(version: str) -> None:
@@ -1280,6 +1424,8 @@ def update_client(version: str, sha256: str, runtime_id: str | None = None, issu
             return
         previous = core.read_text(home.client / "current.txt")
         core.write_atomic(home.client / "current.txt", version, 0o644)  # no newline: cmd reads it with set /p
+    from . import front
+    front.refresh()             # launch.json names the client now current (the service then hands over to it)
     if previous and previous != version:
         announce("client", version, update_state().get("client_notes"))
     for child in home.client.iterdir():
@@ -1459,7 +1605,15 @@ def _pin_key(workspace: Path) -> str:
     return core.sha256_hex(str(workspace).encode("utf-8"))[:16]     # a hash: no folder name is stored
 
 
+_PINS_LOCK = threading.Lock()      # the service's calls side by side: one rewrite of pins.json at a time, none lost
+
+
 def _pin_workspaces(args: list[str], version: str) -> None:
+    with _PINS_LOCK:
+        _pin_workspaces_locked(args, version)
+
+
+def _pin_workspaces_locked(args: list[str], version: str) -> None:
     record = pins()
     spaces = record.setdefault("workspaces", {})
     changed = False
@@ -1977,23 +2131,10 @@ def wait_for_packs(args: list[str], wait: float = 25.0) -> None:
                      f"Theodore is still downloading its {noun} library ({percent}%). I will continue as soon as it is here.")
 
 
-# --- LibreOffice (optional renderer) ---------------------------------------------------------------------------------------
+# --- Git Bash, and PowerPoint (Windows) ----------------------------------------------------------------------------------
 
-# LibreOffice, unmodified, as The Document Foundation publishes it. It is tried first from Theodore's download
-# host (<dl_base>/tools/<file name>, a mirror with the MPL notice) and then from The Document Foundation; one
-# sha256 covers both. A release manifest may carry newer pins under tools.libreoffice.<platform>-<arch>.
-LIBREOFFICE_PINS = {
-    "darwin-arm64": {"version": "26.2.7", "size": 297813809,
-                     "url": "https://download.documentfoundation.org/libreoffice/stable/26.2.7/mac/aarch64/LibreOffice_26.2.7_MacOS_aarch64.dmg",
-                     "sha256": "58601808ae2b919c82dc7c4d6a26389de0e167f344ca48e5b6c9189218eb95ae"},
-    "darwin-x64": {"version": "26.2.7", "size": 308070986,
-                   "url": "https://download.documentfoundation.org/libreoffice/stable/26.2.7/mac/x86_64/LibreOffice_26.2.7_MacOS_x86-64.dmg",
-                   "sha256": "26a830205c617cc624b2a83783ef46434a4d6c337c3a873f79c43012171f83de"},
-    "win32-x64": {"version": "26.2.7", "size": 373121024,
-                  "url": "https://download.documentfoundation.org/libreoffice/stable/26.2.7/win/x86_64/LibreOffice_26.2.7_Win_x86-64.msi",
-                  "sha256": "480fecf759fc6393bd614fbf43753eb95a8198fc1a065d41b727e3b664cd1e59"},
-}
-
+# Theodore's own renderer draws the slides. A feature it cannot draw is drawn by PowerPoint where it is installed
+# (Windows), else pictured by Theodore and marked approximate; the engine decides.
 
 # Git for Windows' PortableGit, unmodified, as its project publishes it: the Git Bash Claude Code needs on Windows to run
 # a skill's injected command (without it Claude Code uses PowerShell, and Theodore's skills cannot load). Tried first
@@ -2070,95 +2211,9 @@ def install_git(job: Job | None = None) -> Path:
     return target / "bin" / "bash.exe"
 
 
-def libreoffice_pin() -> dict | None:
-    key = "-".join(core.platform_arch())
-    override = (update_state().get("tools") or {}).get("libreoffice", {}).get(key)
-    return override or LIBREOFFICE_PINS.get(key)
-
-
-# Where Theodore fetches no LibreOffice (Linux), the system's package manager installs it: the command, when known.
-_PACKAGE_COMMANDS = (("apt-get", "sudo apt-get install libreoffice-impress"), ("dnf", "sudo dnf install libreoffice-impress"),
-                     ("yum", "sudo yum install libreoffice-impress"), ("zypper", "sudo zypper install libreoffice-impress"),
-                     ("apk", "sudo apk add libreoffice"), ("pacman", "sudo pacman -S libreoffice-fresh"))
-
-
-def libreoffice_install_action() -> str:
-    """What installs LibreOffice here, in words a user can act on."""
-    if libreoffice_pin():
-        return f"`{quoted_launcher()} tools install libreoffice` fetches it into Theodore's folder"
-    for tool, command in _PACKAGE_COMMANDS:
-        if shutil.which(tool):
-            return f"install LibreOffice with the system's package manager: `{command}`"
-    return "install LibreOffice (its Impress part) with the system's package manager"
-
-
-def libreoffice_binary() -> Path | None:
-    base = core.home().tools / "libreoffice"
-    for candidate in (base / "LibreOffice.app" / "Contents" / "MacOS" / "soffice", base / "program" / "soffice.exe",
-                      base / "LibreOffice" / "program" / "soffice.exe"):
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _given_libreoffice() -> tuple[bool, str | None]:
-    """(decided, what): what the environment itself says, before any lookup."""
-    if os.environ.get("THEODORE_TEST_NO_SYSTEM_LIBREOFFICE") and core.is_loopback_api():     # test seam: a computer without one
-        return True, None
-    if os.environ.get("SOFFICE_BIN") and Path(os.environ["SOFFICE_BIN"]).exists():
-        return True, os.environ["SOFFICE_BIN"]
-    return False, None
-
-
-def system_libreoffice() -> str | None:
-    decided, given = _given_libreoffice()
-    if decided:
-        return given
-    found = shutil.which("soffice")
-    if not found:
-        for candidate in ("/Applications/LibreOffice.app/Contents/MacOS/soffice", r"C:\Program Files\LibreOffice\program\soffice.exe"):
-            if Path(candidate).exists():
-                found = candidate
-                break
-    _remember_libreoffice(found)
-    return found
-
-
-# Where the last lookup found the system's LibreOffice, for the commands' own path (state/renderer.json): a lookup walks
-# every PATH folder with every PATHEXT extension (about 400 file tests, 10 to 40 ms on Windows) and ran up to twice per
-# verb. A command reuses it while PATH is the same, for an hour, and while the program found is still there; doctor
-# and `tools install` look again (system_libreoffice), so a LibreOffice installed meanwhile is seen within the hour.
-RENDERER_FILE = "renderer.json"
-RENDERER_RECHECK_S = 3600
-
-
-def _path_key() -> str:
-    raw = "\0".join((os.environ.get("PATH") or "", os.environ.get("PATHEXT") or ""))
-    return core.sha256_hex(raw.encode("utf-8", "surrogateescape"))[:16]
-
-
-def _remember_libreoffice(found: str | None) -> None:
-    with contextlib.suppress(Exception):
-        record = {"soffice": found, "key": _path_key(), "at": int(core.now())}
-        if core.read_json(core.home().state / RENDERER_FILE) != record and core.home().state.is_dir():
-            core.write_json(core.home().state / RENDERER_FILE, record, 0o600)
-
-
-def known_libreoffice() -> str | None:
-    """system_libreoffice for a command's path: the last lookup's answer while it holds (see above), else a lookup."""
-    decided, given = _given_libreoffice()
-    if decided:
-        return given
-    record = core.read_json(core.home().state / RENDERER_FILE)
-    if isinstance(record, dict) and record.get("key") == _path_key() and 0 <= core.now() - float(record.get("at") or 0) < RENDERER_RECHECK_S:
-        found = record.get("soffice")
-        if found is None or (isinstance(found, str) and Path(found).exists()):
-            return found
-    return system_libreoffice()
-
-
 def powerpoint_registered() -> bool:
-    """True on Windows when PowerPoint's COM class is registered (the engine then converts with PowerPoint). Read only."""
+    """True on Windows when PowerPoint's COM class is registered (the engine then draws with PowerPoint what its own
+    renderer cannot). Read only."""
     if not IS_WINDOWS:
         return False
     try:
@@ -2167,13 +2222,6 @@ def powerpoint_registered() -> bool:
             return True
     except OSError:
         return False
-
-
-def needs_libreoffice() -> bool:
-    """On Windows, nothing can turn a deck into slide images: no LibreOffice anywhere and no PowerPoint, and Theodore
-    has a LibreOffice to fetch. (macOS fetches it at install; Linux uses the system's.)"""
-    return IS_WINDOWS and not known_libreoffice() and not libreoffice_binary() and not powerpoint_registered() \
-        and libreoffice_pin() is not None
 
 
 # A background fetch that failed for a reason that passes by itself (the network dropped: the computer slept, the user
@@ -2188,307 +2236,3 @@ def resumable_failure(state: dict) -> bool:
     return failed.get("cause") in RESUMABLE_CAUSES and \
         core.now() - int(state.get("updated") or state.get("started") or 0) >= RESUME_AFTER_FAILURE_S
 
-
-def _libreoffice_failed(failed: dict) -> Status:
-    return Status("SETUP_FAILED", f"LibreOffice, which turns the slides into images, could not be installed "
-                  f"({failed.get('detail') or failed.get('cause') or 'unknown error'}).",
-                  f"run {quoted_launcher()} tools install libreoffice to try again; if it fails again, tell the user what it says.",
-                  "Theodore could not install LibreOffice, which it needs to render the slides.")
-
-
-# The engine calls that turn the deck into images: without a converter they cannot finish.
-RENDERING_CALLS = (("apply",), ("render",), ("slide", "add"))
-
-
-def wait_for_renderer(args: list[str], wait: float = 25.0) -> None:
-    """A rendering call on a Windows computer with no converter: fetch LibreOffice (in the background, as on macOS at
-    install) and wait for it a while; past `wait` seconds say so (67). A fetch that failed is reported, and started again
-    when its failure passes by itself (resumable_failure)."""
-    if not any(tuple(args[:len(call)]) == call for call in RENDERING_CALLS) or not needs_libreoffice():
-        return
-    if core.is_loopback_api() and os.environ.get("THEODORE_TEST_RENDERER_WAIT"):
-        wait = float(os.environ["THEODORE_TEST_RENDERER_WAIT"])
-    job = Job("libreoffice")
-    failed = job.read().get("failed") if not job.alive() else None
-    if failed and not resumable_failure(job.read()):
-        raise _libreoffice_failed(failed)
-    if not job.alive():
-        job.spawn(["tools", "install", "libreoffice", "--job"])
-    deadline = time.monotonic() + wait
-    while time.monotonic() < deadline and job.alive() and not libreoffice_binary():
-        time.sleep(0.5)
-    if libreoffice_binary():
-        return
-    state = job.read()
-    if state.get("failed"):
-        failed = state["failed"]
-        raise _libreoffice_failed(failed)
-    phase = str(state.get("phase") or "starting")
-    still = core.now() - float(state.get("updated") or state.get("started") or core.now())
-    if job.alive() and still > STALL_SECONDS:      # every step is bounded: a record that does not move is not progress
-        raise Status("SETUP_FAILED", f"LibreOffice's installation has not moved for {int(still // 60)} minutes ({phase}, "
-                     f"{int(state.get('percent') or 0)}%); it is stuck, not still being installed.",
-                     "do not retry this call now; tell the user what this says: the slides cannot be previewed until "
-                     "LibreOffice is installed.",
-                     "Theodore's installation of LibreOffice, which renders the slides, is stuck, so I cannot preview the slides yet.")
-    megabytes = int((libreoffice_pin() or {}).get("size", 0) / 1e6) or 300
-    raise Status("SETUP_IN_PROGRESS", f"LibreOffice, which turns the slides into images for this call, is still being installed "
-                 f"({phase}, {int(state.get('percent') or 0)}%, about {megabytes} MB in all).",
-                 "run the same command again in a minute.",
-                 f"Theodore is downloading LibreOffice (about {megabytes} MB) to render the slides. I will continue as soon as it is here.")
-
-
-def libreoffice_app_local_runtime(image: Path) -> None:
-    """Put the Visual C++ runtime that LibreOffice's package carries beside its program.
-
-    A full install puts those DLLs into System32; an administrative install leaves them in the image's `System64`
-    folder (the x64 copies; `System` holds the 32-bit ones), where the loader never looks. On a computer without
-    Microsoft's redistributable, soffice then fails to start (STATUS_DLL_NOT_FOUND). Copies beside the program are
-    found first by the loader and touch nothing outside Theodore's folder.
-    """
-    source = image / "System64"
-    program = next((p for p in (image / "program", image / "LibreOffice" / "program") if p.is_dir()), None)
-    if not source.is_dir() or program is None:
-        return
-    for dll in sorted(source.glob("*.dll")):
-        if pe_machine(dll) in (None, 0x8664):          # only x64 copies (an unpack without the service may mix others in)
-            shutil.copy2(dll, program / dll.name)
-
-
-def pe_machine(path: Path) -> int | None:
-    """The machine field of a Windows executable's PE header (0x8664 x64, 0x14c x86, 0xaa64 ARM64), None if unreadable."""
-    try:
-        with open(path, "rb") as handle:
-            head = handle.read(4096)
-        offset = int.from_bytes(head[0x3C:0x40], "little")
-        if head[:2] != b"MZ" or head[offset:offset + 4] != b"PE\0\0":
-            return None
-        return int.from_bytes(head[offset + 4:offset + 6], "little")
-    except (OSError, ValueError):
-        return None
-
-
-# Hard limits on the programs the client runs to unpack a tool: a program that hangs (msiexec showing its usage window
-# where nobody sees it, WINDOWS W-6) ends the step with a clear failure or the other way, never an endless wait.
-UNPACK_TIMEOUT_S = 600
-COPY_TIMEOUT_S = 600
-MOUNT_TIMEOUT_S = 300
-# A LibreOffice job whose record has not moved for this long is reported as stalled, not as "still being installed".
-STALL_SECONDS = 1200
-
-
-def msi_unpack(archive: Path, target: Path, job: Job | None = None) -> int:
-    """Unpack an MSI package into `target` without the Windows Installer service: its tables and its embedded cabinet
-    are read with msi.dll's database functions (in this process), the cabinet is expanded with Windows' expand.exe,
-    and each file is moved to the folder the Directory table gives it (source names, as an administrative install
-    lays them out). Components meant only for ARM64 computers are left out, and where two files still land on one
-    path the x64 one is kept. Returns the number of files placed."""
-    import ctypes
-    from ctypes import wintypes
-    msi = ctypes.WinDLL("msi")
-    handle = ctypes.c_ulong
-
-    def check(code: int, what: str) -> None:
-        if code != 0:
-            raise OSError(f"msi.dll {what} failed ({code})")
-
-    def query(database, sql: str, fields: int, stream_to: Path | None = None) -> list[list[str]]:
-        view, rows = handle(), []
-        check(msi.MsiDatabaseOpenViewW(database, ctypes.c_wchar_p(sql), ctypes.byref(view)), "OpenView")
-        try:
-            check(msi.MsiViewExecute(view, handle(0)), "Execute")
-            while True:
-                record = handle()
-                code = msi.MsiViewFetch(view, ctypes.byref(record))
-                if code == 259:                     # ERROR_NO_MORE_ITEMS
-                    break
-                check(code, "Fetch")
-                try:
-                    if stream_to is not None:
-                        with open(stream_to, "wb") as out:
-                            buffer = ctypes.create_string_buffer(1 << 20)
-                            while True:
-                                size = wintypes.DWORD(len(buffer))
-                                check(msi.MsiRecordReadStream(record, 1, buffer, ctypes.byref(size)), "ReadStream")
-                                if not size.value:
-                                    break
-                                out.write(buffer.raw[:size.value])
-                        continue
-                    row = []
-                    for field in range(1, fields + 1):
-                        size = wintypes.DWORD(0)
-                        msi.MsiRecordGetStringW(record, field, ctypes.c_wchar_p(""), ctypes.byref(size))
-                        size.value += 1
-                        text = ctypes.create_unicode_buffer(size.value)
-                        check(msi.MsiRecordGetStringW(record, field, text, ctypes.byref(size)), "GetString")
-                        row.append(text.value)
-                    rows.append(row)
-                finally:
-                    msi.MsiCloseHandle(record)
-        finally:
-            msi.MsiCloseHandle(view)
-        return rows
-
-    database = handle()
-    check(msi.MsiOpenDatabaseW(ctypes.c_wchar_p(str(archive)), ctypes.c_wchar_p(0), ctypes.byref(database)), "OpenDatabase")
-    work = target.parent / (target.name + ".cab")
-    core.remove_tree(work)
-    work.mkdir(parents=True)
-    try:
-        directories = {d: (parent, default) for d, parent, default in query(database, "SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`", 3)}
-        rows = query(database, "SELECT `Component`, `Directory_`, `Condition` FROM `Component`", 3)
-        components = {c: d for c, d, _cond in rows}
-        # Components installed only on ARM64 computers (their runtime DLLs share names and folders with the x64 ones,
-        # and ARM64X builds even carry the x64 machine field): this unpack is for x64.
-        arm64_only = {c for c, _d, cond in rows if re.search(r'=\s*"ARM64"', cond or "")}
-        files = query(database, "SELECT `File`, `Component_`, `FileName` FROM `File`", 3)
-        cabinets = [c[1:] for _d, c in query(database, "SELECT `DiskId`, `Cabinet` FROM `Media`", 2) if c.startswith("#")]
-        if not cabinets:
-            raise OSError("the package carries no embedded cabinet")
-        expanded = work / "files"
-        expanded.mkdir()
-        for name in cabinets:
-            if not re.match(r"^[A-Za-z0-9._-]{1,72}$", name):
-                raise OSError(f"unexpected cabinet name {name!r}")
-            cab = work / name
-            query(database, f"SELECT `Data` FROM `_Streams` WHERE `Name`='{name}'", 1, stream_to=cab)
-            system = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
-            subprocess.run([str(system / "expand.exe"), str(cab), "-F:*", str(expanded)], check=True, capture_output=True,
-                           stdin=subprocess.DEVNULL, creationflags=0x08000000, timeout=UNPACK_TIMEOUT_S)
-            cab.unlink()
-    finally:
-        msi.MsiCloseHandle(database)
-
-    paths: dict[str, Path] = {}
-
-    def folder(directory: str) -> Path:
-        if directory not in paths:
-            parent, default = directories[directory]
-            source = default.split(":")[-1].split("|")[-1]
-            if not parent or parent == directory:
-                paths[directory] = target
-            else:
-                base = folder(parent)
-                paths[directory] = base if source in (".", "") else base / source
-        return paths[directory]
-
-    placed = 0
-    for index, (key, component, name) in enumerate(files):
-        if job and index % 500 == 0:
-            job.progress("unpacking LibreOffice", 100 * index / max(1, len(files)))
-        found = expanded / key
-        if not found.is_file():
-            continue
-        if component in arm64_only:
-            found.unlink()
-            continue
-        destination = folder(components[component]) / name.split("|")[-1]
-        if target.resolve() not in destination.resolve().parents:
-            raise OSError(f"{key}: a path outside the target")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists() and pe_machine(destination) == 0x8664 and pe_machine(found) != 0x8664:
-            found.unlink()
-            continue
-        os.replace(found, destination)
-        placed += 1
-    core.remove_tree(work)
-    if not placed:
-        raise OSError("no file of the package could be placed")
-    return placed
-
-
-def msiexec_admin(archive: Path, target: Path, timeout: float = UNPACK_TIMEOUT_S) -> None:
-    """`msiexec /a` into `target`, quiet, bounded. One command string, the property as msiexec reads it
-    (TARGETDIR="C:\\Users\\Théo Tester\\..."): from a list, Python quotes the whole "TARGETDIR=..." when the path
-    has a space, msiexec rejects that form, shows its usage window where nobody sees it and waits (WINDOWS W-6)."""
-    system = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
-    command = f'"{system / "msiexec.exe"}" /a "{archive}" /qn TARGETDIR="{target}"'
-    try:
-        subprocess.run(command, check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout,
-                       creationflags=0x08000000 if IS_WINDOWS else 0)
-    except subprocess.TimeoutExpired:
-        raise OSError(f"msiexec /a did not finish within {int(timeout)} s") from None
-    except subprocess.CalledProcessError as exc:
-        raise OSError(f"msiexec /a returned {exc.returncode}") from None
-
-
-def install_libreoffice(job: Job | None = None) -> Path:
-    pin = libreoffice_pin()
-    if not pin:
-        raise Status("UNSUPPORTED_PLATFORM", "Theodore does not fetch LibreOffice on this platform.",
-                     f"ask the user to {libreoffice_install_action()}; renders work once `soffice` is on PATH.",
-                     "To preview slides, please install LibreOffice with your system's package manager.")
-    home = core.home()
-    existing = libreoffice_binary()
-    if existing and core.read_text(home.tools / "libreoffice" / ".version") == pin["version"]:
-        return existing
-    name = Path(urlparse(pin["url"]).path).name
-    archive = home.staging / name
-    sources = [f"{core.config()['dl_base'].rstrip('/')}/tools/{name}", pin["url"]]
-    failure: Status | None = None
-    for source in dict.fromkeys(sources):
-        try:
-            api.download(source, archive, sha256=pin["sha256"], size=int(pin.get("size") or 0) or None,
-                         progress=(lambda pct: job.progress("downloading LibreOffice", pct)) if job else None, timeout=120)
-            failure = None
-            break
-        except api.NetworkError as error:
-            failure = api.setup_failed(error.cause, f"LibreOffice could not be downloaded ({error.detail})")
-        except api.ApiError as error:
-            failure = api.setup_failed("NETWORK", f"LibreOffice could not be downloaded (HTTP {error.http_status})")
-        except Status as status:      # a checksum mismatch at one source: the other may still be right
-            failure = status
-    if failure is not None:
-        raise failure
-    target = home.tools / "libreoffice"
-    partial = home.tools / "libreoffice.partial"
-    core.remove_tree(partial)
-    partial.mkdir(parents=True)
-    if job:
-        job.progress("unpacking LibreOffice", 0)
-    try:
-        if sys.platform == "darwin":
-            mount = home.staging / "libreoffice-mount"
-            core.remove_tree(mount)
-            mount.mkdir(parents=True)
-            subprocess.run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", str(mount), str(archive)],
-                           check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=MOUNT_TIMEOUT_S)
-            try:
-                apps = [a for a in mount.iterdir() if a.suffix == ".app"]
-                if not apps:
-                    raise OSError("the disk image holds no application")
-                subprocess.run(["/bin/cp", "-R", str(apps[0]), str(partial / "LibreOffice.app")], check=True, capture_output=True,
-                               stdin=subprocess.DEVNULL, timeout=COPY_TIMEOUT_S)
-            finally:
-                with contextlib.suppress(subprocess.SubprocessError, OSError):
-                    subprocess.run(["/usr/bin/hdiutil", "detach", str(mount), "-force"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
-                core.remove_tree(mount)
-        elif IS_WINDOWS:
-            # Theodore's own unpack first (msi.dll's tables read in this process, the cabinet expanded by expand.exe):
-            # no Windows Installer service, which refuses network and batch logons (1601), no command line to quote, a
-            # bounded time and progress per file. An administrative install (`msiexec /a`, it only copies files) is the
-            # second way, also bounded.
-            try:
-                msi_unpack(archive, partial, job)
-            except (OSError, subprocess.SubprocessError) as exc:
-                core.log(f"libreoffice: the unpack without Windows Installer failed ({exc}); trying an administrative install")
-                core.remove_tree(partial)
-                partial.mkdir(parents=True)
-                if job:
-                    job.progress("unpacking LibreOffice with Windows Installer", 0)
-                msiexec_admin(archive, partial)
-            libreoffice_app_local_runtime(partial)
-            (partial / archive.name).unlink(missing_ok=True)     # the image keeps a copy of the package (about 350 MB)
-        else:
-            raise OSError("no unpack method for this platform")
-    except (OSError, subprocess.SubprocessError) as exc:
-        core.remove_tree(partial)
-        raise api.setup_failed("DISK", f"LibreOffice could not be unpacked: {exc}") from None
-    core.write_atomic(partial / ".version", pin["version"] + "\n", 0o644)
-    core.remove_tree(target)
-    os.rename(partial, target)
-    core.remove_tree(archive)
-    binary = libreoffice_binary()
-    if not binary:
-        raise api.setup_failed("DISK", "LibreOffice was unpacked but its program was not found")
-    return binary

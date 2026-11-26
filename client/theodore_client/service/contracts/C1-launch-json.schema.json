@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://theodoreand.ai/contracts/C1-launch-json.schema.json",
+  "title": "C1 <home>/bin/launch.json: what the front and relay need to start the service and the one-shot engine; rewritten by the client at every install and update",
+  "type": "object", "additionalProperties": false,
+  "required": ["v", "home", "runtime_python", "client_dir", "client_version", "engine_dir", "engine_version"],
+  "properties": {
+    "v": {"const": 1},
+    "home": {"type": "string", "minLength": 1},
+    "runtime_python": {"type": "string", "minLength": 1, "description": "the runtime's base python executable (never the venv redirector)"},
+    "client_dir": {"type": "string", "minLength": 1},
+    "client_version": {"type": "string", "minLength": 1},
+    "engine_dir": {"type": "string", "minLength": 1, "description": "the current engine; pinned workspaces resolve their own through engines/pins.json"},
+    "engine_version": {"type": "string", "minLength": 1},
+    "oneshot": {"type": "boolean", "description": "true when the service must not be started (a policy refused it, or doctor chose the one-shot mode)"}
+  }
+}

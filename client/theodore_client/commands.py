@@ -16,8 +16,8 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, account, api, core, credentials, desktop, install, outbox, routing, sessions, specimens
-from .contract import (DELETE_CREDENTIAL_ON, DELETE_TOKEN_ON, GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
+from . import __version__, account, api, core, credentials, desktop, front, install, outbox, routing, sessions, specimens
+from .contract import (GUIDE_PART_CHARS, HEADER_GUIDE_PARTS, HEADER_GUIDE_VERSION, PACK_ORDER, PLUGIN_LATEST_SCHEMA, PREFERENCE_MAX_CHARS,
                        REPORT_MAX_BYTES, REPORT_MESSAGE_MAX, REPORT_TITLE_MAX, SKILLS)
 from .core import Job, Status, quoted_launcher
 
@@ -131,9 +131,9 @@ def _end_line(skill: str, name: str, body: str, part: int, total: int, next_comm
     return f"=== END theodore {skill} {label} ({len(body)} chars, sha256 {digest}){tail} ==="
 
 
-def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
-                    header_lines: list[str], command: str, section: str | None, opening: bool = True,
-                    notices: bool = True, role: str | None = None) -> None:
+def _document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
+              header_lines: list[str], command: str, section: str | None, opening: bool = True,
+              notices: bool = True, role: str | None = None) -> str:
     """One document: the whole text (total 1) or one part of it. `command` prints this text (without --part);
     `section` is how the guide tool names it; `opening` is False when the text is a tool's result; `role` is the
     reader's role when it is not the default (lead)."""
@@ -146,9 +146,16 @@ def _print_document(skill: str, version: str, plan: str, name: str, body: str, p
         out += [line for line in (install.take_announcement(), install.plugin_notice(daily=True)) if line]
     out += header_lines
     out.append(f"--- {name} ---")
-    sys.stdout.write("\n".join(out) + "\n")
-    sys.stdout.write(body if body.endswith("\n") else body + "\n")
-    sys.stdout.write(_end_line(skill, name, body, part, total, f"{command} --part {part + 1}") + "\n")
+    return ("\n".join(out) + "\n" + (body if body.endswith("\n") else body + "\n")
+            + _end_line(skill, name, body, part, total, f"{command} --part {part + 1}") + "\n")
+
+
+def _print_document(skill: str, version: str, plan: str, name: str, body: str, part: int, total: int,
+                    header_lines: list[str], command: str, section: str | None, opening: bool = True,
+                    notices: bool = True, role: str | None = None) -> None:
+    """_document, printed; a command's own output (opening lines) is noted for this session."""
+    sys.stdout.write(_document(skill, version, plan, name, body, part, total, header_lines, command, section, opening,
+                               notices, role))
     sys.stdout.flush()
     if opening and section != "license":    # a command's output (the tool server's answers have no opening): noted for this session
         sessions.record_loaded(skill, version if skill != "pptx" or section is None else None)
@@ -269,8 +276,19 @@ def _pptx_disk_names() -> list[str]:
     return names
 
 
-def _pptx_pointers(text: str, role: str | None = None) -> str:
-    """In a served pptx text, every pointer to a file of the manual becomes the command that prints that section."""
+def _pptx_pointers(text: str, role: str | None = None, bindings: str = "launcher") -> str:
+    """In a served pptx text, every pointer to a file of the manual becomes the command that prints that section; for
+    a reader with the plugin's tools (`bindings` "tool"), the guide tool's call in the header's own words, so no link
+    sends such a reader to a shell (lane J's J2 wording): a link's target and a code span's whole text, with
+    ` and role "slide"` for a designer."""
+    if bindings == "tool":
+        reader = ' and role "slide"' if role == "slide" else ""
+
+        def words(match: re.Match) -> str:
+            name = match.group(1) or match.group(2)
+            return f'the Theodore tool guide with skill "pptx" and section "{MANUAL_SECTION if name == "SKILL" else name}"{reader}'
+        text = _PPTX_LINK.sub(lambda m: f"]({words(m)})", text)
+        return _PPTX_SPAN.sub(words, text)
     launcher = quoted_launcher()
 
     def command(match: re.Match) -> str:
@@ -280,28 +298,99 @@ def _pptx_pointers(text: str, role: str | None = None) -> str:
     return _PPTX_SPAN.sub(lambda m: f"`{command(m)}`", text)
 
 
-def _pptx_manual_text(directory: Path, version: str, role: str | None, pointers: bool = True) -> tuple[str, bool]:
-    """(the manual's main text composed for the role, whether the engine brought it as a file). Its pointers to the
-    manual's other texts are the commands that print them, for an engine's own file as for a served text; `pointers`
-    False leaves an engine's own file as it is (a chat, which has no launcher and reads those files with its own tool)."""
-    path = directory / "skills" / "pptx" / "SKILL.md"
-    try:
-        text = compose_manual(path.read_text(encoding="utf-8"), role)
-        return (_pptx_pointers(text, role) if pointers else text), True
-    except FileNotFoundError:
-        pass
-    except OSError:
-        raise core.internal(f"engine {version} has a skills/pptx/SKILL.md that cannot be read.") from None
-    what = "guide pptx"
-    try:
-        _status, headers, raw = _api("guide_section", what, passing=("not_found",), skill="pptx", section=MANUAL_SECTION,
-                                     query=_role_query({"form": "whole"}, role))
-    except api.ApiError:
-        raise core.internal(f"engine {version} has no manual, and the service serves none for it.") from None
-    total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
-    if total > 1:
-        raw = _remaining_parts("pptx", MANUAL_SECTION, what, raw, total, role)
-    return _pptx_pointers(raw.decode("utf-8", errors="replace"), role), False
+class PptxManual:
+    """The pptx manual as `guide pptx` prints it: the selected engine's manual (the file an engine up to rc.28 brought,
+    else the section `manual` the service serves) with the account's directions (the pptx entry: reporting and saved
+    preferences, and for an account with Studio the method's first instruction). What is served comes in ONE request
+    (contract C6: online on every call, held in this process's memory only)."""
+
+    def __init__(self, role: str | None, plan: str, version: str, directory: Path, on_disk: str | None):
+        self.role, self.plan, self.version, self.directory, self.on_disk = role, plan, version, directory, on_disk
+
+    @classmethod
+    def prepare(cls, role: str | None, check: bool = False,
+                downloading: str = "run the same command again in 20 seconds. Do not use another slide tool meanwhile.") -> "PptxManual":
+        """The selected engine and its own manual, if it brought one. `check`: the one-shot command's update check
+        (forced while no engine is installed); the service's timers do it otherwise. `downloading`: what to do while
+        the first engine is still downloading."""
+        claims = account.require("pptx")
+        install.require_runtime()
+        first = install.current_engine() is None
+        if check or first:
+            wait = 15.0
+            if core.is_loopback_api() and os.environ.get("THEODORE_TEST_UPDATE_WAIT"):
+                wait = float(os.environ["THEODORE_TEST_UPDATE_WAIT"])
+            install.check_updates(force=first, wait=wait, timeout=20.0 if first else 3.0)
+        version = install.selected_engine()          # the global pin's instructions when pinned: they belong to that engine
+        if not version:
+            raise _engine_downloading(downloading)
+        directory = install.engine_dir(version)
+        try:
+            on_disk = (directory / "skills" / "pptx" / "SKILL.md").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            on_disk = None
+        except OSError:
+            raise core.internal(f"engine {version} has a skills/pptx/SKILL.md that cannot be read.") from None
+        return cls(role, str(claims.get("plan", "unknown")), version, directory, on_disk)
+
+    def items(self) -> list:
+        """What is read online: the directions, and the manual when the engine brought none."""
+        from .service.texts import Item
+        reader = self.role or "lead"
+        wanted = [Item("section", "pptx", "", reader, "launcher")]
+        if self.on_disk is None:
+            wanted.append(Item("section", "pptx", MANUAL_SECTION, reader, "launcher"))
+        return wanted
+
+    def fetch(self, texts) -> dict | None:
+        """The items, in one request. None when the service cannot be reached and the engine brought its manual: the
+        manual is printed with the line that says the directions are missing (as before)."""
+        try:
+            return dict(zip(self.items(), texts.fetch(self.items(), "guide pptx")))
+        except Status as status:
+            if status.name == "OFFLINE" and self.on_disk is not None:
+                self.offline = status.summary.removeprefix("guide pptx: ").rstrip(".")
+                return None
+            raise
+
+    def texts(self, got: dict | None, pointers: bool = True, bindings: str = "launcher") -> tuple[str, bool, str]:
+        """(the manual composed for the role, whether the engine brought it, the directions or a THEODORE OFFLINE line).
+        Its pointers to the manual's other texts are the commands that print them; `pointers` False leaves an engine's
+        own file as it is (a chat, which has no launcher and reads those files with its own tool)."""
+        install.touch_used(self.version)
+        items = self.items()
+        if got is None:
+            detail = getattr(self, "offline", "")
+            directions = (f"THEODORE OFFLINE: Theodore's online part for pptx could not be reached ({detail}); "
+                          f"run {quoted_launcher()} guide pptx{_role_option(self.role)} again before building.")
+        else:
+            answer = got[items[0]]
+            directions = answer.text() if answer.status == 200 else ""      # no entry for this account: nothing to add
+        if self.on_disk is not None:
+            text = compose_manual(self.on_disk, self.role)
+            return (_pptx_pointers(text, self.role, bindings) if pointers else text), True, directions
+        answer = got[items[1]]
+        if answer.status != 200:
+            raise core.internal(f"engine {self.version} has no manual, and the service serves none for it.")
+        return _pptx_pointers(answer.text(), self.role, bindings), False, directions
+
+    def document(self, got: dict | None, *, part: int = 1, whole: bool = True, opening: bool = True, notices: bool = True,
+                 pointers: bool = True, bindings: str = "launcher") -> str:
+        """The manual as `guide pptx` prints it: part `part` of it, or `whole`; `bindings` as _pptx_header takes it."""
+        text, on_disk, directions = self.texts(got, pointers, bindings)
+        parts = [text] if whole else split_parts(text)
+        if part > len(parts):
+            raise core.usage(f"guide pptx has {len(parts)} part(s); there is no part {part}.")
+        launcher = quoted_launcher()
+        header = []
+        if part == 1:
+            header = _pptx_header(self.directory, on_disk, self.role, bindings)
+            if directions.startswith("THEODORE OFFLINE: "):
+                header.insert(0, directions)         # first thing read: the agent fetches it again before building
+            elif directions:
+                header += directions.rstrip("\n").split("\n")
+        return _document("pptx", self.version, self.plan, "SKILL.md", parts[part - 1], part, len(parts), header,
+                         f"{launcher} guide pptx{_role_option(self.role)}", None, opening, notices, self.role)
 
 
 def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str, role: str | None = None) -> str:
@@ -321,6 +410,40 @@ def _pptx_files_binding(directory: Path, on_disk: bool, launcher: str, role: str
     if on_disk:
         return f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}\n{texts}"
     return texts
+
+
+def reader_bindings(bindings: str | None = None) -> str | None:
+    """The bindings a composition uses: the ones given, else "tool" when the service says this call's reader has the
+    plugin's tools (THEODORE_TOOLS=1: every MCP call, and a shell command from a session whose relay said hello), else
+    None (each composition decides as before)."""
+    if bindings is not None:
+        return bindings
+    return "tool" if os.environ.get("THEODORE_TOOLS") == "1" else None
+
+
+def _pptx_header(directory: Path, on_disk: bool, role: str | None = None, bindings: str = "launcher") -> list[str]:
+    """The Bindings lines that open the pptx manual. The engine's texts say `pptx <verb>` and rely on them (DESIGN
+    2.1). `bindings` "tool" (the reader has the plugin's tools: a guide tool call, or a skill or guide command from a
+    session whose relay said hello) maps the verbs, Theodore's other commands and the manual's other texts to the
+    Theodore tools, the launcher kept as the fallback where a tool is missing (lane J's J2 wording); "launcher", the
+    form every shell reader gets, is unchanged."""
+    launcher = quoted_launcher()
+    if bindings != "tool":
+        return [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
+                f"          python3 ...  ->  {launcher} python ...",
+                f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
+                _pptx_files_binding(directory, on_disk, launcher, role)]
+    reader = ' and role "slide"' if role == "slide" else ""
+    lines = [f"Bindings: pptx <verb> …  ->  the Theodore tool pptx, args [<verb>, …]; only where that tool is missing: "
+             f"{launcher} pptx <verb> … in a shell",
+             f"          python3 ...  ->  {launcher} python ...",
+             f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  the Theodore tools guide, specimen "
+             f"and theodore; only where they are missing: {launcher} <command>"]
+    if on_disk:
+        lines.append(f"          <pptx-skill-dir> = {directory / 'skills' / 'pptx'}")
+    lines.append(f'          a text this manual names  ->  the Theodore tool guide with skill "pptx" and section "<name>"{reader}'
+                 f"   (a name that is not one lists them)")
+    return lines
 
 
 def guide(skill: str, section: str | None, part: int | None, license_text: bool, role: str | None = None) -> int:
@@ -352,39 +475,18 @@ def guide(skill: str, section: str | None, part: int | None, license_text: bool,
 
 
 def _guide_pptx(part: int, whole: bool = False, opening: bool = True, notices: bool = True, role: str | None = None,
-                pointers: bool = True) -> int:
-    """The engine's manual: whole, or part `part` of it. The guide tool asks for it whole with no opening lines."""
-    claims = account.require("pptx")
-    install.require_runtime()
-    first = install.current_engine() is None
-    wait = 15.0
-    if core.is_loopback_api() and os.environ.get("THEODORE_TEST_UPDATE_WAIT"):
-        wait = float(os.environ["THEODORE_TEST_UPDATE_WAIT"])
-    install.check_updates(force=first, wait=wait, timeout=20.0 if first else 3.0)
-    version = install.selected_engine()          # the global pin's instructions when pinned: they belong to that engine
-    if not version:
-        raise _engine_downloading("run the same command again in 20 seconds. Do not use another slide tool meanwhile.")
-    directory = install.engine_dir(version)
-    text, on_disk = _pptx_manual_text(directory, version, role, pointers)
-    install.touch_used(version)
-    _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
-    parts = [text] if whole else split_parts(text)
-    if part > len(parts):
-        raise core.usage(f"guide pptx has {len(parts)} part(s); there is no part {part}.")
-    launcher = quoted_launcher()
-    header = []
-    if part == 1:
-        header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
-                  f"          python3 ...  ->  {launcher} python ...",
-                  f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
-                  _pptx_files_binding(directory, on_disk, launcher, role)]
-        directions = _directions("pptx", role)
-        if directions.startswith("THEODORE OFFLINE: "):
-            header.insert(0, directions)         # first thing read: the agent fetches it again before building
-        elif directions:
-            header += directions.rstrip("\n").split("\n")
-    _print_document("pptx", version, str(claims.get("plan", "unknown")), "SKILL.md", parts[part - 1], part, len(parts), header,
-                    f"{launcher} guide pptx{_role_option(role)}", None, opening, notices, role)
+                pointers: bool = True, bindings: str | None = None) -> int:
+    """The engine's manual: whole, or part `part` of it, printed. Its served texts come in one request. `bindings`
+    "tool": the reader has the plugin's tools (the service passes it for a session whose relay said hello)."""
+    from .service import texts
+    manual = PptxManual.prepare(role, check=True)
+    got = manual.fetch(texts.current())
+    _heartbeat(manual.version)      # at most hourly; the request above already refused a revoked device
+    sys.stdout.write(manual.document(got, part=part, whole=whole, opening=opening, notices=notices, pointers=pointers,
+                                     bindings=reader_bindings(bindings) or "launcher"))
+    sys.stdout.flush()
+    if opening:
+        sessions.record_loaded("pptx", manual.version)
     return 0
 
 
@@ -407,52 +509,12 @@ def _engine_downloading(next_step: str) -> Status:
                   "Theodore is downloading its PowerPoint engine. I will continue as soon as it is ready.")
 
 
-# The served entry of a skill (directions, saved preferences, and for an account with Studio the first instruction of
-# the method) is fetched with a few attempts, never dropped silently: a slow corporate proxy needs 7 to 10 seconds per
-# connection (P33), so the first attempt gets 10 seconds and two more share the rest of a 20-second budget.
-DIRECTIONS_TIMEOUTS = (10.0, 5.0, 5.0)
-DIRECTIONS_PAUSE = 0.5
-
-
 def _role_option(role: str | None) -> str:
     return f" --role {role}" if role else ""
 
 
 def _role_query(query: dict | None, role: str | None) -> dict | None:
     return {**(query or {}), "role": role} if role else query
-
-
-def _directions(skill: str, role: str | None = None) -> str:
-    """Server-composed entry for this account. Empty when the service has none for it; when the service cannot be
-    reached after every attempt, one status line that says so and how to get it, so the agent fetches it again
-    before building instead of going on without it."""
-    cred = credentials.load()
-    if not cred:
-        return ""
-    failure = ""
-    timeouts = DIRECTIONS_TIMEOUTS
-    raw_test = os.environ.get("THEODORE_TEST_DIRECTIONS_TIMEOUTS")   # test seam, honoured only against a loopback API
-    if raw_test and core.is_loopback_api():
-        timeouts = tuple(float(value) for value in raw_test.split(","))
-    for attempt, timeout in enumerate(timeouts):
-        if attempt:
-            time.sleep(DIRECTIONS_PAUSE)
-        try:
-            _status, _headers, raw = api.call("guide", bearer=cred["installation_secret"], skill=skill, timeout=timeout,
-                                              query=_role_query(None, role))
-            return raw.decode("utf-8", errors="replace")
-        except api.ApiError as error:
-            if error.code in DELETE_CREDENTIAL_ON:      # the device was revoked: no instructions, and the sign-in is already cleared
-                raise account.login_start("this device was signed out; it needs to sign in again.") from None
-            if error.code in DELETE_TOKEN_ON:           # the account no longer has the skill
-                raise api.status_from(error, f"guide {skill}") from None
-            if error.http_status < 500 and error.http_status != 429:
-                return ""                               # the service answered: nothing for this account
-            failure = f"HTTP {error.http_status}"
-        except api.NetworkError as error:
-            failure = error.detail
-    return (f"THEODORE OFFLINE: Theodore's online part for {skill} could not be reached ({failure}); "
-            f"run {quoted_launcher()} guide {skill}{_role_option(role)} again before building.")
 
 
 REFERENCE_LINK = re.compile(r"\]\(references/([A-Za-z0-9_-]{1,64})\.md\)")
@@ -468,24 +530,27 @@ def _section_name(given: str) -> str:
     return name[:-3] if name.endswith(".md") else name
 
 
-def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
+def _no_such_section(skill: str, given: str, role: str | None = None, texts=None) -> Status:
     """Which sections there are: the ones the skill's main text links, fetched now (the text is never stored). For pptx
     the ones the service serves to this account and the texts the selected engine brought as files.
 
     Both lists are the reader's own (0.4.32): the entry is fetched with the reader's role, so a designer is shown the
     sections a designer's entry links, and the pptx index is asked with that role too. Until then a designer who named
     no section was shown the lead's list, lead-only names among them, which the service then refused to that reader.
-    The sheet index the specimen commands read is not a list of sections and is asked as before."""
+    The sheet index the specimen commands read is not a list of sections and is asked as before. The names come in one
+    request on `texts` (the process's Texts unless given)."""
+    from .service import texts as texts_module
+    texts = texts or texts_module.current()
     launcher = quoted_launcher()
     shown = "".join(ch for ch in given if ch.isprintable())[:80]
     if skill == "pptx":
         served: list[str] = []
         try:
-            _status, _headers, raw = _api("guide", "guide pptx", skill="pptx", query=_role_query({"form": "index"}, role))
-            index = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+            answer = texts.fetch([texts_module.Item("index", "pptx", role=role or "lead")], "guide pptx")[0]
+            index = json.loads((answer.body or b"{}").decode("utf-8", errors="replace") or "{}") if answer.status == 200 else {}
             served = [str(s.get("name")) for s in index.get("sections") or []
                       if isinstance(s, dict) and s.get("name") and s.get("name") != MANUAL_SECTION]
-        except (Status, ValueError):
+        except (Status, ValueError, AttributeError):
             served = []
         served += [name for name in _pptx_disk_names() if name not in served]
         if served:
@@ -495,8 +560,8 @@ def _no_such_section(skill: str, given: str, role: str | None = None) -> Status:
         return core.usage(f"guide pptx has no section '{shown}'.", f"run {launcher} guide pptx{_role_option(role)} for the manual.")
     names: list[str] = []
     try:
-        _status, _headers, raw = _api("guide", f"guide {skill}", skill=skill, query=_role_query(None, role))
-        for name in REFERENCE_LINK.findall(raw.decode("utf-8", errors="replace")):
+        answer = texts.fetch([texts_module.Item("section", skill, "", role or "lead", "launcher")], f"guide {skill}")[0]
+        for name in REFERENCE_LINK.findall(answer.text() if answer.status == 200 else ""):
             if name not in names:
                 names.append(name)
     except Status as status:
@@ -515,41 +580,43 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     claims = account.require(skill)
     # A section of pptx is fetched whole and paged here, at its own headings (split_parts), whatever the service's paging.
     paged_here = skill == "pptx" and bool(section) and section != "license"
-    query = _role_query({"form": "whole"} if whole or paged_here else ({"part": part} if part > 1 else None), role)
     what = f"guide {skill}"
     if section and section != "license":
         given, section = section, _section_name(section)
         if not SECTION_NAME.fullmatch(section):
             raise _no_such_section(skill, _section_name(given), role)
+    if whole or paged_here:
+        # The whole text, in one request on this process's kept-alive connection (Texts: online on every call, held in
+        # memory only). A text of pptx the service does not serve is the selected engine's own file, also offline.
+        from .service import texts
         try:
-            _status, headers, raw = _api("guide_section", what, passing=("not_found",), skill=skill, section=section, query=query)
-        except api.ApiError:
-            if part > 1 and not paged_here:
-                raise core.usage(f"{what} {section} has no part {part}.") from None
-            on_disk = _pptx_disk_section(section) if paged_here else None
-            if on_disk is None:
-                raise _no_such_section(skill, section, role) from None
-            headers, raw = _pptx_from_disk(on_disk)
+            headers, raw = _whole_text(texts.current(), skill, section, role)
         except Status as status:
-            # no connection: a text the engine brought as a file is still there to read, as the engine still builds
             on_disk = _pptx_disk_section(section) if paged_here and status.name == "OFFLINE" else None
             if on_disk is None:
                 raise
             headers, raw = _pptx_from_disk(on_disk)
-    elif section:
-        _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query)
     else:
-        _status, headers, raw = _api("guide", what, skill=skill, query=query)
+        query = _role_query({"part": part} if part > 1 else None, role)
+        if section and section != "license":
+            try:
+                _status, headers, raw = _api("guide_section", what, passing=("not_found",), skill=skill, section=section,
+                                             query=query, pool=api.KEPT)
+            except api.ApiError:
+                if part > 1:
+                    raise core.usage(f"{what} {section} has no part {part}.") from None
+                raise _no_such_section(skill, section, role) from None
+        elif section:
+            _status, headers, raw = _api("guide_section", what, skill=skill, section=section, query=query, pool=api.KEPT)
+        else:
+            _status, headers, raw = _api("guide", what, skill=skill, query=query, pool=api.KEPT)
     total = max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1))
     label = headers.get(HEADER_GUIDE_VERSION) or "current"
-    if (whole or paged_here) and total > 1:
-        raw = _remaining_parts(skill, section, what, raw, total, role)
-        total = 1
     body = raw.decode("utf-8", errors="replace")
     if not section:                           # before any paging here: the line on links opens the text (0.4.30)
         body = _links_first(body)
     if paged_here:                            # before its paging: a command must not be cut in two
-        body = _pptx_pointers(body, role)
+        body = _pptx_pointers(body, role, reader_bindings(None) or "launcher")
     if whole:
         pass                                          # the host keeps it whole: never cut here
     elif total == 1 and len(body) > GUIDE_PART_CHARS:  # the server did not page: page here so no output is truncated
@@ -573,33 +640,28 @@ def _guide_remote(skill: str, section: str | None, part: int, whole: bool = Fals
     return 0
 
 
+def _whole_text(texts, skill: str, section: str | None, role: str | None) -> tuple[dict, bytes]:
+    """A served text whole, in one request: (the headers a guide answer gives, its bytes). A text of pptx the service
+    does not serve is the selected engine's own file."""
+    from .service.texts import Item
+    name = section or ""
+    answer = texts.fetch([Item("section", skill, name, role or "lead", "launcher")], f"guide {skill}")[0]
+    if answer.status == 404:
+        if name == "license":
+            raise api.status_from(api.ApiError(404, "not_found", "this skill has no licence text."), f"guide {skill}")
+        on_disk = _pptx_disk_section(name) if skill == "pptx" and name else None
+        if on_disk is None:
+            raise _no_such_section(skill, name, role, texts)
+        return _pptx_from_disk(on_disk)
+    return {HEADER_GUIDE_VERSION: answer.version or "current"}, answer.body or b""
+
+
 def _pptx_from_disk(found: tuple[str, str]) -> tuple[dict, bytes]:
     """The headers and body of a text of the manual read from the selected engine, as a served section gives them."""
     text, version = found
     install.touch_used(version)
     _heartbeat(version)             # before anything is printed: a revoked device gets no part of the manual
     return {HEADER_GUIDE_VERSION: version}, text.encode("utf-8")
-
-
-def _remaining_parts(skill: str, section: str | None, what: str, first: bytes, total: int, role: str | None = None) -> bytes:
-    """Parts 2 to `total` after `first`, fetched one after the other and joined in order. A part that cannot be had
-    fails the whole command: nothing of the text is printed, and the status says which part is missing."""
-    chunks = [first]
-    for number in range(2, total + 1):
-        try:
-            if section:
-                _s, _h, more = _api("guide_section", what, skill=skill, section=section, query=_role_query({"part": number}, role))
-            else:
-                _s, _h, more = _api("guide", what, skill=skill, query=_role_query({"part": number}, role))
-        except Status as status:
-            missing = f"part {number} of {total}" + (f" (and the {total - number} after it)" if number < total else "")
-            failed = Status(status.name, f"{what}{' ' + section if section else ''}: {missing} could not be fetched "
-                         f"({status.summary}). Nothing of the text was printed: it is one text and was not read whole.",
-                         status.next_step, status.tell_user)
-            failed.cause = status.cause
-            raise failed from None
-        chunks.append(more)
-    return b"".join(chunks)
 
 
 # --- skill: the instructions as a skill file's body -------------------------------------------------------------------------
@@ -652,71 +714,74 @@ def _links_first(text: str) -> str:
     return text
 
 
-def _deck_design_body() -> tuple[str, str]:
+def skill_text(name: str, texts, host: str | None = None, check: bool = False, bindings: str | None = None) -> tuple[str, str]:
+    """(a skill's instructions as a skill file's body, the version they came from), from ONE request on `texts` (the
+    process's Texts). `host` names the assistant (the service passes the session's; else this process's). `check`: the
+    one-shot command's update check and heartbeat, which the service runs on its timers instead. `bindings`: "tool"
+    when the reader is known to have the plugin's tools (the service: a session whose relay said hello, on any system,
+    given here or as THEODORE_TOOLS=1), "launcher" when known not to; None decides by the host as before."""
+    bindings = reader_bindings(bindings)
+    if name == "deck-design":
+        return _deck_design_body(texts, host or core.host_name(), bindings)
+    return _pptx_body(texts, check, bindings or "launcher")
+
+
+def _deck_design_body(texts, host: str, bindings: str | None = None) -> tuple[str, str]:
+    from .service.texts import Item
     account.require("deck-design")
-    # Claude Code has the plugin's guide tool (its wording for the links), except on Windows, where the plugin cannot
-    # register its server (sh is not on the path Claude Code spawns from): there the launcher's wording.
-    tool = core.host_name() == "claude-code" and not core.IS_WINDOWS
-    query = {"form": "whole", **({"bindings": "tool"} if tool else {})}
-    _s, headers, raw = _api("guide", "guide deck-design", skill="deck-design", query=query)
-    chunks = [raw]
-    for part in range(2, max(1, int(headers.get(HEADER_GUIDE_PARTS) or 1)) + 1):     # an older service that still pages
-        _s, _h, more = _api("guide", "guide deck-design", skill="deck-design", query={**query, "part": part})
-        chunks.append(more)
+    # Claude Code has the plugin's guide tool (its wording for the links), except on Windows, where the plugin's own
+    # server could not start until the relay (sh is not on the path Claude Code spawns from): there the launcher's
+    # wording. A session the service knows has its relay says so itself, on any system.
+    tool = bindings == "tool" if bindings is not None else host == "claude-code" and not core.IS_WINDOWS
+    answer = texts.fetch([Item("section", "deck-design", "", "lead", "tool" if tool else "launcher")], "guide deck-design")[0]
+    if answer.status != 200:
+        raise api.status_from(api.ApiError(404, "not_found", "no deck-design guidance for this account's channel."), "guide deck-design")
     if core.refused():
         raise api.sign_in_required()
     rest = 'call the Theodore guide tool with skill "deck-design"' if tool else f"run {quoted_launcher()} guide deck-design"
-    body = _links_first(_without_frontmatter(b"".join(chunks).decode("utf-8", errors="replace")))
+    body = _links_first(_without_frontmatter(answer.text()))
     # The host ran this command, not the agent: "the launcher you used" (or the service's "where it is" wording for
     # tool delivery) becomes this launcher's own path, which is true however the text arrived.
     for line in _LAUNCHER_LINES:
         body = body.replace(line, f"Run {quoted_launcher()} with:")
-    return _bounded(body, rest), str(headers.get(HEADER_GUIDE_VERSION) or "")
+    return _bounded(body, rest), answer.version
 
 
 _LAUNCHER_LINES = ("Run the Theodore launcher you used to get these instructions with:",
                    "Run the Theodore launcher (scripts/theodore in the folder of either Theodore skill; scripts\\theodore.cmd on Windows) with:")
 
 
-def _pptx_body() -> tuple[str, str]:
-    claims = account.require("pptx")
-    del claims
-    install.require_runtime()
-    first = install.current_engine() is None
-    install.check_updates(force=first, wait=15.0, timeout=20.0 if first else 3.0)
-    version = install.selected_engine()
-    if not version:
-        raise _engine_downloading(f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. Do not use another slide tool meanwhile.")
-    directory = install.engine_dir(version)
-    text, on_disk = _pptx_manual_text(directory, version, None)
-    install.touch_used(version)
-    _heartbeat(version)
+def _pptx_body(texts, check: bool = False, bindings: str = "launcher") -> tuple[str, str]:
+    manual = PptxManual.prepare(None, check=check, downloading=f"run {quoted_launcher()} guide pptx in 20 seconds and follow it. "
+                                                                 f"Do not use another slide tool meanwhile.")
+    got = manual.fetch(texts)
+    if check:
+        _heartbeat(manual.version)
+    text, on_disk, directions = manual.texts(got, bindings=bindings)
     if core.refused():
         raise api.sign_in_required()
     launcher = quoted_launcher()
-    header = [f"Bindings: pptx <verb>  ->  {launcher} pptx <verb>",
-              f"          python3 ...  ->  {launcher} python ...",
-              f"          Theodore's other commands (guide, specimen, status, report, ...)  ->  {launcher} <command>",
-              _pptx_files_binding(directory, on_disk, launcher)]
-    directions = _directions("pptx")
+    header = _pptx_header(manual.directory, on_disk, None, bindings)
     if directions.startswith("THEODORE OFFLINE: "):
         header.insert(0, directions)             # first thing read: the agent fetches it again before building
     elif directions:
         header += directions.rstrip("\n").split("\n")
     body = "\n".join(header) + "\n\n" + _without_frontmatter(text)
-    return _bounded(body, f"run {launcher} guide pptx"), version
+    rest = 'call the Theodore guide tool with skill "pptx"' if bindings == "tool" else f"run {launcher} guide pptx"
+    return _bounded(body, rest), manual.version
 
 
 def skill(name: str) -> int:
     """`theodore skill <name>`: the skill's instructions as a clean document (no framing), or a three-line status.
     Always exit 0: a host that injects this output aborts the whole skill on any other code."""
+    from .service import texts
     ensure_hosts()
     ensure_instructions()
     resume_background()
     try:
         if name not in SKILLS:
             raise core.usage(f"unknown skill '{name}'. The skills are: {', '.join(SKILLS)}.")
-        body, version_ = _deck_design_body() if name == "deck-design" else _pptx_body()
+        body, version_ = skill_text(name, texts.current(), check=True)
     except Status as status:
         core.emit(status)               # a revoked or suspended device gets that refusal instead, once
         return 0
@@ -730,35 +795,41 @@ def skill(name: str) -> int:
 
 
 def specimen(files: list[str]) -> int:
-    """Fetch deck-design specimen sheets into a private temporary folder of this run and print one path per line.
-    A sheet this computer already holds in a recent specimen folder is checked with the service (If-None-Match) and,
-    when unchanged, its path is printed instead. A name the service has no sheet for (0.4.30) is said on a line of its
-    own after the paths, with the nearest real names, and the other sheets are still delivered; only when no sheet at
-    all is delivered is the call a USAGE status, naming the nearest names. Any other refusal fails the whole call: no
-    path is printed. A refusal that signs the device out or refuses the account removes every specimen folder."""
+    """Deck-design specimen sheets as files, one path per line: each sheet comes online in this call's one request
+    (contract C6) and is written new, private to the user, into this session's folder for sheets
+    (<work>/scratch/sheets/<session>/), which goes when the session ends or after 15 minutes. A name the service has
+    no sheet for (0.4.30) is said on a line of its own after the paths, with the nearest real names, and the other
+    sheets are still delivered; only when no sheet at all is delivered is the call a USAGE status, naming the nearest
+    names. Any other refusal fails the whole call: no path is printed. A refusal that signs the device out or refuses
+    the account removes every sheet on this computer."""
+    from .service import texts
     if not 1 <= len(files) <= specimens.MAX_FILES:
         raise core.usage(f"specimen takes 1 to {specimens.MAX_FILES} file names, as the deck-design text gives them.")
     files = [specimens.file_name(name) for name in files]       # a bare code (HC3) is its close-up's file (HC3.jpg)
-    texts = [name for name in files if isinstance(name, str) and name.lower().endswith(".md")]
-    if texts:       # a text of the guidance asked for as a sheet (three designers in six did, 2026-11-22): say what reads it
-        section = _section_name(texts[0])
-        shown = "".join(ch for ch in texts[0] if ch.isprintable())[:80]
+    named = [name for name in files if isinstance(name, str) and name.lower().endswith(".md")]
+    if named:       # a text of the guidance asked for as a sheet (three designers in six did, 2026-11-22): say what reads it
+        section = _section_name(named[0])
+        shown = "".join(ch for ch in named[0] if ch.isprintable())[:80]
         if SECTION_NAME.fullmatch(section):
             raise core.usage(f"'{shown}' is a text of the guidance, not a specimen sheet: specimen opens images, and their names end in .jpg.",
                              f"read that text with {quoted_launcher()} guide deck-design {section} (with the same --role as your other "
                              f"guide commands, if they carry one); then run specimen with the .jpg names the text gives.")
     if not all(specimens.valid_name(name) for name in files):
         raise core.usage("a specimen is named as the deck-design text names it: letters, digits, dot, dash and underscore, ending in .jpg.")
+    store = texts.current()
+    store.sweep()
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or None
     try:
-        paths, missing = _specimen_paths(files)
-        notes = [specimens.missing_note(name, _sheet_names()) for name in missing] if missing else []
-        if missing and core.refused():
+        results = store.sheet_files(files, session=session)
+        paths = {name: path for name, path, _note in results if path is not None}
+        notes = list(dict.fromkeys(note for _name, path, note in results if path is None and note))
+        if notes and core.refused():
             raise api.sign_in_required()
         if not paths:
             raise specimens.none_delivered(notes, f"run {quoted_launcher()} specimen")
     except Status as status:
         if core.refused() or status.name in ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT"):
-            specimens.sweep(everything=True)
+            store.forget(refused=True)
         raise
     for name in files:
         if name in paths:
@@ -766,83 +837,6 @@ def specimen(files: list[str]) -> int:
     for note in notes:          # on the paths' own stream, right after them: a reader of the last lines sees both
         print(note, flush=True)
     return 0
-
-
-_SHEET_NAMES: list | None = None
-
-
-def _sheet_names() -> list[str] | None:
-    """The account's sheet names, from the published index the tool server lists them from (asked once a process, only
-    when a name was not found). None when it cannot be had: the notes then name no nearest sheet."""
-    global _SHEET_NAMES
-    if _SHEET_NAMES is None:
-        _SHEET_NAMES = []
-        try:
-            _s, headers, raw = _api("guide", "specimen", skill="deck-design", query={"form": "index"})
-            _SHEET_NAMES = specimens.index_sheets(headers, raw) or []
-        except (Status, api.TooLarge):
-            pass
-    return _SHEET_NAMES or None
-
-
-def _specimen_paths(files: list[str]) -> tuple[dict[str, Path], list[str]]:
-    """The path of each sheet delivered, and the names the service has no sheet for, in the order asked."""
-    account.require("deck-design")
-    copies = {name: specimens.held(name) for name in dict.fromkeys(files)}
-    # A sheet not held needs a folder: made before anything is fetched, so a working folder that leaves no private
-    # place for sheets stops the call before any sheet is downloaded (as before 0.3.4).
-    folder = specimens.make_folder() if any(copy is None for copy in copies.values()) else None
-    paths: dict[str, Path] = {}
-    missing: list[str] = []
-    try:
-        for name, copy in copies.items():
-            what = f"specimen {name}"
-            asked = {"Accept": "image/jpeg, application/json;q=0.9"}
-            if copy is not None:
-                try:
-                    asked["If-None-Match"] = '"' + specimens.content_sha256(copy.read_bytes()) + '"'
-                except OSError:
-                    copy = None
-            try:
-                status, headers, raw = _api("guide_specimen", what, passing=("not_found",), file=name, query={"skill": "deck-design"},
-                                            headers=asked, redirects=False, limit=specimens.MAX_BYTES)
-            except api.TooLarge:
-                raise core.internal(f"{what}: the answer is larger than 1 MiB; it was refused and nothing was kept.") from None
-            except api.ApiError as error:       # passed through only for not_found: no such sheet; the others still come
-                if error.code != "not_found":
-                    raise api.status_from(error, what) from None
-                missing.append(name)
-                continue
-            if core.refused():
-                raise api.sign_in_required()
-            if status == 304 and copy is not None:
-                paths[name] = copy
-                continue
-            if not str(headers.get("Content-Type") or "").lower().startswith("image/jpeg"):
-                raise core.internal(f"{what}: the answer is not a JPEG image; it was refused and nothing was kept.")
-            if str(headers.get("X-Theodore-Sha256") or "").strip().lower() != hashlib.sha256(raw).hexdigest() \
-                    or not specimens.content_matches(raw, headers.get("ETag")):
-                raise Status("RETRY", f"{what}: the sheet did not arrive as the service sent it (sha256 differs or is missing); nothing was kept.",
-                             "run the same command again once. If it fails again, continue without the sheet.",
-                             "A design specimen arrived damaged. I am trying once more.")
-            if folder is None:          # a held copy went missing or was answered 200: this sheet needs a folder after all
-                folder = specimens.make_folder()
-            try:
-                paths[name] = specimens.write(folder, name, raw)
-            except FileNotFoundError:   # the folder went while the sheets arrived (an uninstall, a sign-out elsewhere)
-                raise Status("RETRY", f"{what}: the folder for this run's sheets was removed while they arrived; nothing was kept.",
-                             "run the same command again once. If it fails again, continue without the sheet.",
-                             "A design specimen could not be opened just now; I am trying once more.") from None
-    except BaseException:
-        # A sheet already written here may be printed by another Theodore call at this moment: from the record, it
-        # reuses held sheets (held()). The folder goes only when nothing was written in it; one that holds sheets stays,
-        # recorded and private, until the sweep after its hour (or at once after a refusal of the device or account).
-        if folder is not None and not any(path.parent == folder for path in paths.values()):
-            core.remove_tree(folder)
-        raise
-    if folder is not None and not any(path.parent == folder for path in paths.values()):
-        core.remove_tree(folder)        # every sheet was held after all, or none was found: the empty folder goes
-    return paths, missing
 
 
 def _heartbeat(engine_version: str) -> None:
@@ -1124,6 +1118,7 @@ def setup_job() -> int:
     job.begin("runtime")
     try:
         install.install_runtime(job)
+        install.compile_client()        # the service's modules too, before the first command ever loads them
         account.import_pending_activation()
         if credentials.load():
             try:
@@ -1189,8 +1184,7 @@ def _snapshot() -> dict:
         "offline_until": int(claims.get("exp") or 0),
         "packs": {p: {"status": packs_state.get(p, {}).get("status", "missing"), "version": packs_state.get(p, {}).get("version"),
                       "percent": packs_state.get(p, {}).get("percent", 0)} for p in PACK_ORDER},
-        "renderer": {"libreoffice": install.system_libreoffice() or (str(install.libreoffice_binary()) if install.libreoffice_binary() else None),
-                     "powerpoint": install.powerpoint_registered(),
+        "renderer": {"powerpoint": install.powerpoint_registered(),
                      "pdftoppm": shutil.which("pdftoppm")},
     }
 
@@ -1429,19 +1423,17 @@ def doctor(as_json: bool) -> int:
     return core.emit(final)
 
 
-# On Windows the engine turns decks into slide images with an installed PowerPoint when no LibreOffice is found
-# (install.powerpoint_registered); LibreOffice is then not needed, so nothing offers it or says it is missing.
-POWERPOINT_RENDERER = "Microsoft PowerPoint, installed on this computer, turns decks into slide images"
+# Theodore's own renderer draws the slides. A feature it cannot draw is drawn by PowerPoint where it is installed
+# (Windows), else pictured by Theodore and marked approximate (the engine's order). Nothing is missing either way: this
+# line never warns, and nothing offers to install anything.
+POWERPOINT_RENDERER = "Microsoft PowerPoint, installed on this computer, draws what Theodore's renderer cannot"
 
 
 def _renderer_check(snap: dict) -> tuple[str, str, str]:
-    """doctor's renderer line: LibreOffice when found, else PowerPoint on Windows when registered, else what installs one."""
-    office = snap["renderer"]["libreoffice"]
-    if office:
-        return "ok", "renderer", f"LibreOffice at {office}"
+    """doctor's renderer line: Theodore's own renderer, and what draws the features it cannot. Never a warning."""
     if snap["renderer"].get("powerpoint"):
-        return "ok", "renderer", f"{POWERPOINT_RENDERER}; LibreOffice is not needed"
-    return "warn", "renderer", f"no LibreOffice found: slide previews are unavailable until it is installed; {install.libreoffice_install_action()}"
+        return "ok", "renderer", f"Theodore's own; {POWERPOINT_RENDERER}"
+    return "ok", "renderer", "Theodore's own; a feature it cannot draw is pictured approximately and marked so"
 
 
 def _still_missing(snap: dict) -> list[str]:
@@ -1465,18 +1457,6 @@ def _still_missing(snap: dict) -> list[str]:
     if waiting and snap["runtime_ready"]:
         missing.append(f"the asset packs {', '.join(waiting)}: " + ("downloading in the background now" if Job("packs").alive()
                        else "the next guide or catalogue call starts their download again"))
-    lo = Job("libreoffice")
-    lo_state = lo.read()
-    if not snap["renderer"].get("powerpoint") and (install.needs_libreoffice() or (
-            lo_state and not lo_state.get("done") and not (install.system_libreoffice() or install.libreoffice_binary()))):
-        if lo.alive():
-            missing.append("LibreOffice (slide previews): downloading in the background now")
-        elif lo_state.get("failed") and not install.resumable_failure(lo_state):
-            missing.append(f"LibreOffice (slide previews): its download failed ({lo_state['failed'].get('detail') or lo_state['failed'].get('cause')}); "
-                           f"`{launcher} tools install libreoffice` tries again once that is fixed")
-        else:
-            missing.append(f"LibreOffice (slide previews): the next guide, doctor or rendering call starts its download again, "
-                           f"or `{launcher} tools install libreoffice` now")
     if needs_git_bash():
         fetching = _git_fetching()
         missing.append("Git Bash for Claude Code: " + (f"PortableGit is downloading in the background now ({fetching}); nothing to install"
@@ -1534,9 +1514,6 @@ def _doctor_verdict(checks: list, snap: dict, home) -> Status:
     from . import welcome
     notes = [line for line in (welcome.studio_sentence(welcome.studio_state(timeout=DOCTOR_STUDIO_READ_S)),
                                welcome.packs_sentence()) if line]
-    if "renderer" in warned:
-        notes.append("Slide previews need LibreOffice, which is still downloading or not installed." if Job("libreoffice").alive()
-                     else "Slide previews need LibreOffice, which is not installed.")
     if "claude git bash" in warned:
         notes.append("Theodore is fetching Git Bash for Claude Code in the background; nothing for you to install. Start a new "
                      "session once it is there." if _git_fetching() else
@@ -1844,51 +1821,9 @@ def packs(action: str, name: str | None, everything: bool, background: bool, as_
 
 
 def tools(name: str, background: bool, as_job: bool, if_needed: bool = False) -> int:
-    if name == "git":
-        return _tools_git(if_needed, as_job)
-    if name != "libreoffice":
-        raise core.usage(f"unknown tool '{name}'. The tools are: libreoffice, git.")
-    if if_needed and not install.needs_libreoffice():      # the Windows installer's call: only when nothing can render
-        return core.emit(Status("OK", f"LibreOffice is not needed here: {POWERPOINT_RENDERER}." if install.powerpoint_registered()
-                                and not (install.system_libreoffice() or install.libreoffice_binary()) else
-                                "LibreOffice is not needed here: a converter is available or none is fetched on this system.",
-                                "nothing to do.", "Nothing to install."))
-    existing = install.system_libreoffice() or install.libreoffice_binary()
-    if existing and not as_job:
-        return core.emit(Status("OK", f"LibreOffice is already available at {existing}.", "nothing to do.", "LibreOffice is already installed."))
-    pin = install.libreoffice_pin() or {}
-    megabytes = int(pin.get("size", 0) / 1e6) or 300
-    if background:
-        if not Job("libreoffice").alive():
-            Job("libreoffice").spawn(["tools", "install", "libreoffice", "--job"])
-        return core.emit(Status("OK", f"LibreOffice {pin.get('version', '')} is downloading in the background (about {megabytes} MB, from The Document Foundation) into {core.home().tools}.",
-                                "continue; slide previews work once it has arrived.",
-                                f"Theodore is downloading LibreOffice (about {megabytes} MB) in the background so it can preview slides. Nothing is installed system-wide."))
-    running = Job("libreoffice")
-    if running.alive() and int(running.read().get("pid") or 0) != os.getpid():
-        # W-15: one install at a time. A second one (the installer's background job plus `tools install libreoffice`)
-        # raced the first over the same .part file and ended INTERNAL; it now reports the first one's progress.
-        if as_job:
-            return 0
-        state = running.read()
-        percent = state.get("percent")
-        how = f"{state.get('phase') or 'downloading'}" + (f", {int(percent)}%" if isinstance(percent, (int, float)) and percent > 0 else "")
-        return core.emit(Status("OK", f"LibreOffice is already being installed in the background ({how}) into {core.home().tools}.",
-                                "nothing to do; slide previews work once it has arrived. Do not start it again.",
-                                "Theodore is already downloading LibreOffice for its slide previews."))
-    job = Job("libreoffice") if as_job else None
-    if job:
-        job.begin("libreoffice")
-    try:
-        with core.lock("libreoffice", timeout=3600.0):      # and one at a time also when both start in the same instant
-            binary = install.install_libreoffice(job)
-    except Status as status_:
-        if job:
-            job.fail(_failure_cause(status_), status_.summary)
-        raise
-    if job:
-        job.finish()
-    return core.emit(Status("OK", f"LibreOffice is installed at {binary}.", "nothing to do.", "LibreOffice is installed for Theodore's slide previews."))
+    if name != "git":
+        raise core.usage(f"unknown tool '{name}'. The tool is: git.")
+    return _tools_git(if_needed, as_job)
 
 
 def _failure_cause(status_: Status) -> str:
@@ -2242,9 +2177,20 @@ def _follow_claude_app() -> None:
         core.log(f"hosts: the Claude app's moved folder was not followed ({exc.__class__.__name__}: {exc})")
 
 
+HOSTS_EVERY_S = 0.0             # the resident service sets 300: a process that runs many commands does this that often
+_hosts_checked: list[float] = []
+
+
 def ensure_hosts() -> None:
     """Finish the registration an installer left undone (see above), then the settings (ensure_settings). Never fails
-    or prints in the command it runs in."""
+    or prints in the command it runs in. A one-shot command does it once; the resident service, whose every guide,
+    skill and doctor comes here, at most every HOSTS_EVERY_S (a burst of designers' first guides did it fifteen times
+    at once, each reading and checking the hosts' settings files)."""
+    now = time.monotonic()
+    if HOSTS_EVERY_S and _hosts_checked and now - _hosts_checked[-1] < HOSTS_EVERY_S:
+        return
+    _hosts_checked[:] = [now]
+    front.refresh()             # the native front and launch.json in step with what is installed (front.py)
     ensure_settings()
     _follow_claude_app()
     marker = _hosts_pending_path()
@@ -2686,16 +2632,24 @@ def _shim_paths(record: dict) -> list[Path]:
     return [Path(p) for p in ((record.get("shim") or {}).get("files") or [])]
 
 
+_PROGRAM_HEADS = (b"MZ", b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")     # Windows, Linux, macOS, macOS universal
+
+
 def _shim_ours(path: Path) -> bool:
+    """Theodore wrote this file: its mark is in the first lines of a script, or anywhere in the native front."""
     try:
-        return core.SHIM_MARK in path.read_text(encoding="utf-8", errors="replace")[:400]
+        with open(path, "rb") as handle:
+            head = handle.read(400)
+            if head.startswith(_PROGRAM_HEADS):
+                return core.SHIM_MARK.encode("utf-8") in head + handle.read()
+        return core.SHIM_MARK in head.decode("utf-8", errors="replace")
     except OSError:
         return False
 
 
 def _shim_apply(only_new: bool = False) -> str:
     record = _host_record()
-    texts = core.shim_texts()
+    texts = core.shim_files()
     folder = core.shim_dir()
     if record.get("shim_gone") and only_new:
         return "short command: left out (it was removed after Theodore wrote it)"
@@ -2720,8 +2674,15 @@ def _shim_apply(only_new: bool = False) -> str:
             return f"short command: not written ({path} exists and is not Theodore's)"
     try:
         folder.mkdir(parents=True, exist_ok=True)
+        # The other form goes (the scripts once the front is placed, or the front once it is not): in Git Bash an
+        # extensionless `theodore` script would come before theodore.exe.
+        for name in {"theodore", "theodore.cmd", "theodore.exe"} - set(texts):
+            if (folder / name).exists() and _shim_ours(folder / name):
+                front.discard(folder / name)
         for path in targets:
             if not core.shim_matches(path, texts[path.name]):
+                if path.suffix == ".exe" and path.exists():
+                    front.discard(path)         # a running copy is moved aside, not overwritten
                 core.write_atomic(path, texts[path.name], 0o755)
     except OSError as exc:
         return f"short command: not written ({exc.__class__.__name__}: {exc})"
@@ -2745,7 +2706,7 @@ def _shim_take_back(left: list[str], notes: list[str]) -> None:
             notes.append(f"{path} was replaced after Theodore wrote it, so it was left as it is")
             continue
         try:
-            path.unlink()
+            front.discard(path)
         except OSError as exc:
             left.append(f"the short command {path} ({exc.__class__.__name__})")
             kept.append(str(path))
@@ -2766,7 +2727,7 @@ def _short_rules() -> set[str]:
 def _shim_written() -> bool:
     """The short command Theodore wrote is in place, as written now (its rules exist only then). Told from the files, not
     from this process's PATH: a Theodore command started by a host with another PATH must not take its rules away."""
-    texts = core.shim_texts()
+    texts = core.shim_files()
     paths = _shim_paths(_host_record())
     if not texts or not paths:
         return False
@@ -2882,8 +2843,8 @@ def _take_back_instructions(left: list[str]) -> None:
 
 
 # Downloads in the background that stopped before they finished (the computer slept, the user signed out, the process
-# was killed) are started again by the next guide, skill or doctor, as the asset packs are (0.3.3): LibreOffice and
-# PortableGit here; the runtime and the first engine by the setup job, which every command restarts when it is not
+# was killed) are started again by the next guide, skill or doctor, as the asset packs are (0.3.3): PortableGit
+# here; the runtime and the first engine by the setup job, which every command restarts when it is not
 # running. Only a fetch that was started and did not finish: one that never started is not begun here. A failure that
 # needs the user (a proxy sign-in, TLS inspection, a full disk, a refusal) is not retried; doctor names it.
 def resume_background() -> list[str]:
@@ -2891,8 +2852,6 @@ def resume_background() -> list[str]:
     started: list[str] = []
     try:
         for name, argv, present in (
-                ("libreoffice", ["tools", "install", "libreoffice", "--job"],
-                 lambda: install.system_libreoffice() or install.libreoffice_binary()),
                 ("git", ["tools", "install", "git", "--if-needed", "--job"],
                  lambda: install.theodore_git_bash() or not needs_git_bash())):
             job = Job(name)
@@ -3201,7 +3160,11 @@ def _unregister_hosts(claude: str | None, codex: str | None, left: list[str], ed
 
 # --- the installer's plugin step ----------------------------------------------------------------------------------------
 
-CODEX_MCP_WINDOWS_COMMAND = "./skills/pptx/scripts/theodore.cmd"
+# Codex's server entry on Windows, by the published `sh` form it replaces: the plugin's command (scripts/, which runs
+# the native front when the plugin carries it, else the launcher), or the launcher itself in a plugin before it.
+CODEX_MCP_WINDOWS_COMMANDS = {"./scripts/theodore": "./scripts/theodore.cmd",
+                              "./skills/pptx/scripts/theodore": "./skills/pptx/scripts/theodore.cmd"}
+CODEX_MCP_WINDOWS_COMMAND = CODEX_MCP_WINDOWS_COMMANDS["./scripts/theodore"]
 
 
 def _codex_mcp_for_windows(path: Path) -> None:
@@ -3218,9 +3181,9 @@ def _codex_mcp_for_windows(path: Path) -> None:
     if not isinstance(entry, dict) or entry.get("command") != "sh":
         return
     args = entry.get("args")
-    if not isinstance(args, list) or not args or args[0] != "./skills/pptx/scripts/theodore":
+    if not isinstance(args, list) or not args or args[0] not in CODEX_MCP_WINDOWS_COMMANDS:
         return
-    entry["command"] = CODEX_MCP_WINDOWS_COMMAND
+    entry["command"] = CODEX_MCP_WINDOWS_COMMANDS[args[0]]
     entry["args"] = args[1:]
     core.write_atomic(path, json.dumps(data, indent=2) + "\n", 0o644)
 
@@ -3286,10 +3249,12 @@ def install_plugin(dl_base: str, keys_text: str) -> int:
     if core.IS_WINDOWS:
         _codex_mcp_for_windows(home.plugin / "plugins" / "theodore" / "mcp.json")
     else:
-        for name in ("pptx", "deck-design"):
-            launcher = home.plugin / "plugins" / "theodore" / "skills" / name / "scripts" / "theodore"
-            if launcher.exists():
-                launcher.chmod(0o755)
+        plugin = home.plugin / "plugins" / "theodore"
+        for program in [plugin / "skills" / name / "scripts" / "theodore" for name in ("pptx", "deck-design")] + \
+                [plugin / "scripts" / name for name in ("theodore", "theodore-darwin", "theodore-linux-x64", "theodore-linux-arm64")]:
+            if program.exists():
+                program.chmod(0o755)
+    front.refresh()                     # the native front this plugin carries, and launch.json (front.py)
     print(f"theodore-install: plugin {version} is in {home.plugin} (signed by {envelope.get('kid')})", flush=True)
     return 0
 
@@ -3375,7 +3340,7 @@ def _remove_old_engine_caches(left: list[str]) -> list[str]:
     return removed
 
 
-# What the engine keeps in the temporary folder (Python's tempfile.gettempdir(), the engine's own rule): LibreOffice's
+# What engines before 2.0 kept in the temporary folder (Python's tempfile.gettempdir(), the engine's own rule): an office
 # profile and its warm copy, the profile's lock file, and the folder of empty lock files. ACCEPT-LOCAL2 D-B.
 _TEMP_PROFILE = ("pptx-soffice-profile", "pptx-soffice-profile.warm-seed")
 _TEMP_PROFILE_LOCK = "pptx-soffice-profile.lock"
@@ -3397,7 +3362,7 @@ def _remove_engine_temp(left: list[str]) -> list[str]:
         folder = base / name
         if folder.is_dir() and mine(folder):
             core.remove_tree(folder)
-            (left.append(f"the LibreOffice profile Theodore's engine used in {folder}") if folder.exists() else removed.append(str(folder)))
+            (left.append(f"the profile Theodore's engine used in {folder}") if folder.exists() else removed.append(str(folder)))
     lock = base / _TEMP_PROFILE_LOCK
     if lock.is_file() and mine(lock):
         with contextlib.suppress(OSError):
@@ -3462,7 +3427,7 @@ def _inside(text: str, root: Path) -> bool:
 def _recorded_is_ours(pid: int, record: Path, root: Path, job_word: str | None = None) -> tuple[bool, str]:
     """Whether the process holding `pid` now is the one Theodore wrote `record` for, with the reason when it is not.
     Both must hold (0.4.32):
-    - it runs from inside Theodore's folder: on Windows its program file (Theodore's Python, Node or LibreOffice), on
+    - it runs from inside Theodore's folder: on Windows its program file (Theodore's Python or Node), on
       the other systems its command line (Theodore's Python and client; for the launcher's job, `job_word`, which its
       command line carries whichever copy of the launcher started it);
     - it started no later than the record's last write. The process a record was written for, or a parent for it
@@ -3505,6 +3470,9 @@ def _theodore_pids() -> dict[int, float | None]:
     for path in (servers.iterdir() if servers.is_dir() else []):
         with contextlib.suppress(ValueError):
             records.append((int(path.name), path, None))
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        service_record = home.state / "run" / "service.json"         # the resident service (service/server.py)
+        records.append((int(json.loads(service_record.read_text(encoding="utf-8")).get("pid") or 0), service_record, None))
     mine = core.ancestors()
     found: dict[int, float | None] = {}
     for pid, record, job_word in records:
@@ -3519,8 +3487,8 @@ def _theodore_pids() -> dict[int, float | None]:
 
 
 def _processes_in_folder(root: Path) -> list[int]:
-    """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, LibreOffice, Git
-    Bash), whatever started them; never this process or any process above it. Read with WMI. Empty elsewhere."""
+    """Windows: the processes whose program file is inside Theodore's folder (its Python, its Node, Git Bash, anything
+    it fetched), whatever started them; never this process or any process above it. Read with WMI. Empty elsewhere."""
     if not core.IS_WINDOWS or not root.exists():
         return []
     ps = os.path.join(os.environ.get("SystemRoot") or "C:" + os.sep + "Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
@@ -3752,6 +3720,9 @@ def _uninstall(keep_hosts: bool) -> int:
         notes = _unregister_hosts(core.host_executable("claude"), core.host_executable("codex"), left, edits)
     else:
         _take_back_instructions(left)           # its record goes with state/: the block cannot be left without it
+    from .service import control            # the service and its workers first: they hold the runtime and engines
+    with contextlib.suppress(Exception):
+        core.log(f"uninstall: Theodore's service: {control.stop_service()}")
     stopped = _stop_theodore_processes()
     if stopped:
         core.log(f"uninstall: stopped Theodore's own processes {stopped}")
@@ -3770,7 +3741,7 @@ def _uninstall(keep_hosts: bool) -> int:
         edits.append(f"the engine's former caches were removed ({', '.join(old_caches)})")
     temp = _remove_engine_temp(left)
     if temp:
-        edits.append(f"the engine's LibreOffice profile and lock files were removed from the temporary folder ({', '.join(temp)})")
+        edits.append(f"the engine's profile and lock files were removed from the temporary folder ({', '.join(temp)})")
     specimens_left = specimens.sweep(everything=True)
     for folder in specimens_left:
         left.append(f"the specimen folder {folder} (its record is kept in {specimens.registry()}; running uninstall again retries it)")

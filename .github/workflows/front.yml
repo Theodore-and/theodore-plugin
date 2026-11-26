@@ -1,0 +1,192 @@
+# MANUAL MIRROR ONLY, like shim.yml: nothing starts it on a push or a pull request; it is started by hand at a release.
+# Builds the native front (front/, DESIGN §2.2, PLAN lane C) on each system's own runner, tests it there, signs it with
+# the company's identities, and builds the plugin archives with it (tools/build_plugin_archives.py --front).
+#
+#   macOS    universal (arm64 + x64), signed with the Developer ID Application certificate and the hardened runtime,
+#            notarized by notarytool (a bare program cannot be stapled: Gatekeeper asks Apple online the first time)
+#   Linux    x64 and arm64, static (musl), linked by rust-lld; Linux needs no signature
+#   Windows  x64, MSVC with its C runtime inside, Authenticode-signed through Azure Trusted Signing (the company's
+#            validated identity) with an RFC 3161 timestamp; checked with signtool before it is kept
+#
+# Secrets (the owner's, lanes/C.md "What needs an owner's certificate"): APPLE_DEVELOPER_ID_P12 (base64 of the .p12),
+# APPLE_DEVELOPER_ID_P12_PASSWORD, APPLE_TEAM_ID, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER_ID, APPLE_NOTARY_KEY_P8
+# (base64 of the App Store Connect API key); AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET (an app with the
+# "Trusted Signing Certificate Profile Signer" role), AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
+# AZURE_SIGNING_PROFILE. Without them the jobs build and test, and the signing steps are skipped (an unsigned
+# theodore.exe is then left out of the archives: Windows keeps the launcher, scripts/theodore.cmd).
+name: front
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Build the plugin archives as a release (refuses an unsigned theodore.exe and the placeholder manifest key)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: front (macOS universal)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      # A step's `if` cannot read secrets: whether each is there, as text.
+      HAS_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' front/rust-toolchain.toml)"
+      - name: Unit tests
+        run: cd front && cargo test --locked
+      - name: Build
+        run: sh ci/front-build.sh "$RUNNER_TEMP/front" darwin
+      - name: End-to-end tests against the stand-in service
+        env:
+          THEODORE_FRONT_BIN: ${{ runner.temp }}/front/theodore-darwin
+        run: python -m unittest -v tests.test_front tests.test_front_client
+      - name: Sign with the Developer ID (hardened runtime, timestamp)
+        if: env.HAS_DEVELOPER_ID == 'true'
+        env:
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          kc="$RUNNER_TEMP/sign.keychain-db"
+          pw=$(openssl rand -hex 16)
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 900 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/id.p12"
+          security import "$RUNNER_TEMP/id.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/id.p12"
+          identity=$(security find-identity -v -p codesigning "$kc" | sed -n "s/.*\"\(Developer ID Application: .*($TEAM_ID)\)\".*/\1/p" | head -n 1)
+          test -n "$identity"
+          codesign --force --options runtime --timestamp --identifier ai.theodoreand.theodore --sign "$identity" "$RUNNER_TEMP/front/theodore-darwin"
+          codesign --verify --strict --verbose=2 "$RUNNER_TEMP/front/theodore-darwin"
+      - name: Notarize
+        if: env.HAS_DEVELOPER_ID == 'true' && env.HAS_NOTARY_KEY == 'true'
+        env:
+          KEY: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          echo "$KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          (cd "$RUNNER_TEMP/front" && zip -q "$RUNNER_TEMP/notarize.zip" theodore-darwin)
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER" --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/notarize.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: front-macos
+          path: ${{ runner.temp }}/front/theodore-darwin
+          if-no-files-found: error
+
+  linux:
+    name: front (Linux x64 and arm64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: cd front && cargo test --locked
+      - name: Build
+        run: sh ci/front-build.sh "$RUNNER_TEMP/front" linux
+      - name: End-to-end tests against the stand-in service
+        env:
+          THEODORE_FRONT_BIN: ${{ runner.temp }}/front/theodore-linux-x64
+        run: python -m unittest -v tests.test_front tests.test_front_client
+      - uses: actions/upload-artifact@v7
+        with:
+          name: front-linux
+          path: |
+            ${{ runner.temp }}/front/theodore-linux-x64
+            ${{ runner.temp }}/front/theodore-linux-arm64
+          if-no-files-found: error
+
+  windows:
+    name: front (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      HAS_TRUSTED_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: cd front && cargo test --locked
+      - name: Build (MSVC, static C runtime)
+        run: sh ci/front-build.sh "$RUNNER_TEMP/front" windows
+      - name: End-to-end tests against the stand-in service (named pipe)
+        env:
+          THEODORE_FRONT_BIN: ${{ runner.temp }}\front\theodore.exe
+        run: python -m unittest -v tests.test_front tests.test_front_client
+      - name: Sign through Azure Trusted Signing
+        if: env.HAS_TRUSTED_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ runner.temp }}\front
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Keep it only when its signature verifies
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'front\theodore.exe'
+          $sig = Get-AuthenticodeSignature $exe
+          Write-Host "signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { Remove-Item $exe; Write-Host 'unsigned: theodore.exe is left out of the archives' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: front-windows
+          path: ${{ runner.temp }}/front/theodore.exe
+          if-no-files-found: ignore
+
+  archives:
+    name: plugin archives with the front
+    runs-on: ubuntu-22.04
+    needs: [macos, linux, windows]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: front-*
+          path: ${{ runner.temp }}/front
+          merge-multiple: true
+      - name: Build
+        env:
+          RELEASE: ${{ inputs.release && '--release' || '' }}
+        run: |
+          ls -la "$RUNNER_TEMP/front"
+          python tools/build_plugin_archives.py --out dist/plugin --front "$RUNNER_TEMP/front" $RELEASE
+          sha256sum dist/plugin/* "$RUNNER_TEMP"/front/* | tee dist/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-archives-with-front
+          path: dist/
+          if-no-files-found: error

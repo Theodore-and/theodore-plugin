@@ -30,9 +30,8 @@ your session. High effort uses more of your AI plan than the default.
   by the assistant, speaking over standard input and output only. It gives the assistant the same instructions and
   specimen images as the launcher does, where a tool result is shown whole and a command's output is not. It opens no
   network port.
-- No service and no scheduled task. Three things outlive the command that started them, and each ends by itself:
-  downloads started during set-up; the engine's own helper process, which stays ready for up to 30 idle minutes; and
-  the LibreOffice the engine started, which stays ready for up to 10 idle minutes.
+- No service and no scheduled task. Two things outlive the command that started them, and each ends by itself:
+  downloads started during set-up, and the engine's own helper process, which stays ready for up to 30 idle minutes.
 - On a Mac, and only when your assistant or you ask for it (`pptx doctor --powerpoint`): your own PowerPoint, to open
   a copy of a deck and see whether PowerPoint would ask to repair it. The copy is deleted afterwards and a repair
   prompt is answered with Cancel.
@@ -43,7 +42,6 @@ your session. High effort uses more of your AI plan than the default.
 | --- | --- | --- |
 | `dl.theodoreand.ai` | Theodore's Python (an unmodified python-build-standalone archive) and its client; then the rest of the runtime, the engine, the asset packs, and later versions of all of these and of this plugin. About 100 to 130 MB before the first deck, about 560 to 670 MB on disk with the asset packs | the first two against SHA-256 values pinned in `launcher.json`; everything else against manifests signed with Ed25519 keys pinned in the same file |
 | `api.theodoreand.ai` | the design instructions, each time they are loaded (never stored on disk); a text of the engine's manual the assistant reads by its name, when the service holds it for your account (otherwise the installed engine's own file is read); and the specimen images the assistant asks to look at (on disk for an hour at most) | sent only to a signed-in computer of an account with access |
-| `download.documentfoundation.org` | LibreOffice, unmodified, only when the computer has none: it renders the slides Theodore checks | pinned SHA-256 |
 | `dl.theodoreand.ai`, otherwise `github.com` | Git for Windows' PortableGit, unmodified, only on Windows when Claude Code finds no Git Bash and Theodore's set-up or you ask for it (`theodore tools install git`) | pinned SHA-256 |
 
 Nothing that was downloaded runs before it has been checked.
@@ -79,9 +77,6 @@ In Theodore's own places:
 - one small file in each deck's working folder, naming the engine version that started it;
 - its own copy of this plugin in Claude Code and Codex, through their own plugin commands, when a newer version is
   published;
-- on a Mac, two of LibreOffice's own preferences (`ApplePersistenceIgnoreState` and `NSAppSleepDisabled` in
-  `org.libreoffice.script`), which a LibreOffice without a window needs. They also hold for a LibreOffice you open
-  yourself, and they stay after an uninstall.
 
 At its first use it also **sets Theodore up in your assistant**, so that it works without further steps:
 
