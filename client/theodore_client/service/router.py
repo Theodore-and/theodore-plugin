@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import frames as framing
+from . import context, frames as framing
 
 REMEMBER_S = 600.0
 REPLAY_BYTES = 1 << 20
@@ -64,6 +64,9 @@ class Call:
         self.params = dict(frame.get("params") or {})
         self.cwd = frame.get("cwd")
         self.env = dict(frame.get("env") or {})
+        # The caller's proxy settings are for this call's own requests: taken out here, so no engine, no gathering key
+        # and nothing else that reads the call's env ever holds them.
+        self.proxy = self.env.pop(context.CALLER_PROXY, None)
         self.stdin = frame.get("stdin")
         self.images = frame.get("images", True) is not False
         self.deadline_ms = frame.get("deadline_ms")

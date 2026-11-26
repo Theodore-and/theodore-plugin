@@ -35,7 +35,7 @@ def enabled() -> bool:
     return resident() and (os.environ.get("THEODORE_SERVICE") or "").strip() != "0"
 
 
-from ..hot import stdio_flags  # noqa: E402  (one rule for both fronts: the hot path's)
+from ..hot import CALLER_PROXY, proxy_settings, stdio_flags  # noqa: E402  (one rule for both fronts: the hot path's)
 
 
 def _stdin(args: list[str]) -> dict | None:
@@ -95,6 +95,7 @@ def run(argv: list[str]) -> int | None:
     env = {k: v for k, v in os.environ.items() if context.ALLOWED.match(k) and k not in context.FIXED}
     env.setdefault("THEODORE_HOST", core.host_name())
     env["THEODORE_STDIO"] = stdio_flags()       # what the engine would see of its streams in this process (C1, B-2)
+    env[CALLER_PROXY] = proxy_settings()        # this client's proxy settings: the service's requests for this call
     tool = "pptx" if argv[0] == "pptx" else "theodore"
     args = argv[1:] if tool == "pptx" else argv
     frame = {"t": "call", "id": f"f{os.getpid()}-{secrets.token_hex(4)}", "tool": tool, "args": args, "cwd": os.getcwd(),

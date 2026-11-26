@@ -485,7 +485,8 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(_AnyAddressHTTPS, req, context=self._context)
 
 
-_OPENERS: dict = {}     # redirects -> (the proxy setting it was built for, the opener)
+_OPENERS: dict = {}     # (redirects, the proxy setting it was built for) -> the opener
+_OPENERS_KEPT = 8       # settings kept at once: a service's callers may each have their own
 
 
 def _opener(redirects: bool = True):
@@ -494,18 +495,21 @@ def _opener(redirects: bool = True):
     hosts past a proxy set after its first request, and kept using one that was gone (a service or a tool server lives
     through a laptop's change of network; the system's setting, on macOS and Windows, changes with it). So the setting
     is read for each request, as _timeout and the kept connections read it (a look at the environment, then the
-    system's: no network), and an opener is built again only when it has changed."""
+    system's: no network), and an opener is built only for a setting that has none yet. In the service the
+    environment a request reads is its call's (service/context.py: the calling client's proxy settings)."""
     try:
         setting = tuple(sorted(urllib.request.getproxies().items()))
     except Exception:       # noqa: BLE001  a setting that cannot be read: urllib's own reading, and its own report
         setting = None
-    kept = _OPENERS.get(redirects)
-    if kept is None or kept[0] != setting:
+    opener = _OPENERS.get((redirects, setting))
+    if opener is None:
         handlers = [_HTTPSHandler(context=_ssl_context()), _Redirects() if redirects else _NoRedirects()]
         if setting is not None:
             handlers.append(urllib.request.ProxyHandler(dict(setting)))
-        kept = _OPENERS[redirects] = (setting, urllib.request.build_opener(*handlers))
-    return kept[1]
+        if len(_OPENERS) >= _OPENERS_KEPT:
+            _OPENERS.clear()
+        opener = _OPENERS[(redirects, setting)] = urllib.request.build_opener(*handlers)
+    return opener
 
 
 def _network_error(exc: Exception) -> NetworkError:
@@ -688,6 +692,7 @@ KEPT_IDLE_MAX = 8               # connections kept open while idle; more may be 
 KEPT_WARM = 5                   # opened side by side when the tool server starts: a lead and four designers at once
 KEPT_IDLE_SECONDS = 240.0       # an idle connection older than this is closed rather than tried (proxies drop them)
 KEPT_PROXY_SECONDS = 60.0       # the system's proxy setting is read again after this
+_PROXY_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")  # hot.py's
 _REUSED_LOST = (http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
                 ssl.SSLEOFError, ssl.SSLZeroReturnError)
 
@@ -714,14 +719,19 @@ class KeptAlive:
         self.opened = 0                 # connections opened by this pool (tests; doctor)
         self._lock = threading.Lock()
         self._idle: list[tuple[tuple, http.client.HTTPConnection, float]] = []   # (route, connection, idle since)
-        self._proxies: dict[tuple[str, str], tuple[str | None, float]] = {}
+        self._proxies: dict[tuple, tuple[str | None, float]] = {}
 
     def _proxy(self, scheme: str, host: str) -> str | None:
         now = time.monotonic()
+        # What was read is kept for the environment it was read in: in the service each call reads its own caller's
+        # proxy variables (service/context.py), and one caller's answer is never another's.
+        key = (scheme, host, tuple(os.environ.get(name) for name in _PROXY_NAMES))
         with self._lock:
-            known = self._proxies.get((scheme, host))
+            known = self._proxies.get(key)
             if known and 0 <= now - known[1] < KEPT_PROXY_SECONDS:
                 return known[0]
+            if len(self._proxies) >= 64:
+                self._proxies.clear()
         try:
             proxy = urllib.request.getproxies().get(scheme) or None
             if proxy and urllib.request.proxy_bypass(host):
@@ -729,7 +739,7 @@ class KeptAlive:
         except Exception:       # noqa: BLE001  a malformed setting: request() reports it for the call
             proxy = "unreadable"
         with self._lock:
-            self._proxies[(scheme, host)] = (proxy, now)
+            self._proxies[key] = (proxy, now)
         return proxy
 
     def _route(self, url: str) -> tuple | None:

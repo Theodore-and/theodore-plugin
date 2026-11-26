@@ -32,6 +32,9 @@ PASSED = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_PLUGIN_R
 FIXED = ("THEODORE_HOME", "THEODORE_API_BASE", "THEODORE_CREDENTIAL_STORE", "THEODORE_WORK_DIR", "THEODORE_RESIDENT")
 CONNECT_S = 2.0
 _UPPER = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+# The variables that name a proxy for this process (urllib's, curl's), and the one that carries them with a call.
+PROXY_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")
+CALLER_PROXY = "THEODORE_CALLER_PROXY"
 
 
 # --- which assistant and which session a command runs in, from the environment alone (core re-exports these) -----------
@@ -88,6 +91,16 @@ def session_id() -> str:
 
 
 # --- the call --------------------------------------------------------------------------------------------------------
+
+def proxy_settings() -> str:
+    """The calling client's proxy settings, for a call's env as THEODORE_CALLER_PROXY (a name C1's allow-list takes
+    as it stands; the service keeps it to itself and gives it to no engine): a JSON object of the proxy variables this
+    process has, {} when it has none. The service does the call's network work with these and never with its own: it
+    was started by whichever command came first and kept that one's environment, whose proxy may be gone (Claude
+    Code's sandbox gives each session its own) or may never have been this caller's. Always sent: a variable that is
+    not in it is one the caller has not, and hides the service's."""
+    return dumps({name: os.environ[name] for name in PROXY_NAMES if os.environ.get(name)})
+
 
 def passed(name: str) -> bool:
     """service/context.py's ALLOWED and FIXED, without the regular-expression module."""
@@ -428,6 +441,7 @@ def _call(stream: _Stream, record: dict, argv: list[str]) -> int | None:
     env = {k: v for k, v in os.environ.items() if passed(k)}
     env.setdefault("THEODORE_HOST", host_name())
     env["THEODORE_STDIO"] = stdio_flags()
+    env[CALLER_PROXY] = proxy_settings()
     tool = "pptx" if argv[0] == "pptx" else "theodore"
     call_id = f"f{os.getpid()}-{os.urandom(4).hex()}"
     deadline = int(os.environ.get("THEODORE_DEADLINE_MS") or 0) or \
