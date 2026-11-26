@@ -767,6 +767,42 @@ class PicturesRule(unittest.TestCase):
         self.assertEqual(tools.pictures_of(["apply", "/w"], unchanged), [])
 
 
+class AssetPreviewsInline(unittest.TestCase):
+    """`assets show icons ... --render` answers with a path in the engine's cache; a desktop host may keep that folder
+    apart from the agent's file tools (run 2, 26 Nov: "File does not exist"). The pictures come back with the answer, as
+    render's do."""
+
+    def test_the_contact_sheet_or_each_preview_is_what_the_answer_is_about(self):
+        from theodore_client.service import tools
+        argv = ["assets", "show", "icons", "a", "b", "--render"]
+        self.assertTrue(tools.shows_pictures(argv))
+        self.assertFalse(tools.shows_pictures(["assets", "show", "icons", "a"]))
+        self.assertFalse(tools.shows_pictures(["assets", "search", "icons", "a", "--render"]))
+        sheet = json.dumps({"sheet": "/c/icon-sheet-1.png", "ok": True, "by_id": {
+            "a": {"ok": True, "icon": {"png_path": "/c/a.png"}}, "b": {"ok": True, "icon": {"png_path": "/c/b.png"}}}})
+        self.assertEqual(tools.pictures_of(argv, sheet), ["/c/icon-sheet-1.png"])
+        no_sheet = json.dumps({"ok": True, "by_id": {"a": {"ok": True, "icon": {"png_path": "/c/a.png"}},
+                                                     "z": {"ok": False, "error": "no"}}})
+        self.assertEqual(tools.pictures_of(argv, no_sheet), ["/c/a.png"])
+        one = json.dumps({"ok": True, "icon": {"id": "a", "png_path": "/c/a.png"}})
+        self.assertEqual(tools.pictures_of(["assets", "show", "icons", "a", "--render"], one), ["/c/a.png"])
+
+    def test_the_preview_is_attached_as_an_image_frame(self):
+        import tempfile
+        from types import SimpleNamespace
+
+        from theodore_client.service import tools
+        folder = Path(tempfile.mkdtemp(prefix="theodore-previews-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        sheet = folder / "icon-sheet-1.png"
+        sheet.write_bytes(b"\x89PNG" + b"z" * 500)
+        sent = []
+        call = SimpleNamespace(args=["assets", "show", "icons", "a", "b", "--render"], cwd=str(folder), timing={},
+                               image=lambda mime, path, data: sent.append((mime, path)) or True)
+        tools.attach_pictures(call, json.dumps({"sheet": str(sheet), "ok": True, "by_id": {}}))
+        self.assertEqual(sent, [("image/png", str(sheet))])
+
+
 class PicturesOut(unittest.TestCase):
     """A burst's answers each carry a picture of about 100 KB (lane S2b's S2-22, rig 10 round 1 on a fresh store: 90 to
     304 ms, one designer after another, between a part's answer and its done frame, where the same build's next run had
