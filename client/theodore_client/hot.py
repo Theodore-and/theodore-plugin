@@ -26,11 +26,46 @@ except ImportError:             # an interpreter without it: the package
 
 from . import __version__
 
-FRONT_COMMANDS = ("pptx", "guide", "specimen", "skill")          # service/shell.py's
+FRONT_COMMANDS = ("pptx", "guide", "specimen", "skill", "wait")   # service/shell.py's
 LAUNCHER_TAIL = "& if not errorlevel 0 (echo THEODORE BLOCKED_BY_POLICY"   # cli.py's: a command line cmd cut short
 PASSED = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_PLUGIN_ROOT", "CODEX_THREAD_ID")  # context.ALLOWED
 FIXED = ("THEODORE_HOME", "THEODORE_API_BASE", "THEODORE_CREDENTIAL_STORE", "THEODORE_WORK_DIR", "THEODORE_RESIDENT")
 CONNECT_S = 2.0
+
+# --- text for a Windows shell -----------------------------------------------------------------------------------------
+# The engine and the client write UTF-8. A Windows shell reads a command's output in its own code page (PowerShell 5
+# decodes a pipe as cp1252 or the OEM page), so a symbol outside ASCII reached the assistant as mojibake ("\u00e2\u0161\u00a0\u00ef\u00b8\u008f" for the
+# warning sign, 26 Nov, a colleague's machine). The symbols and punctuation the guidance and the engine's messages use
+# are written as ASCII words and marks there; letters stay UTF-8 (a deck's own text is never changed).
+_MARKS = {"\u26a0": "WARNING", "\u2713": "OK", "\u2714": "OK", "\u2705": "OK", "\u2717": "x", "\u2718": "x", "\u274c": "ERROR",
+          "\u2192": "->", "\u2190": "<-", "\u2194": "<->", "\u21d2": "=>", "\u2026": "...", "\u2013": "-", "\u2014": "-",
+          "\u2212": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2022": "*", "\u00b7": "-",
+          "\u00a0": " ", "\u2009": " ", "\u202f": " ", "\u00d7": "x", "\u2264": "<=", "\u2265": ">=", "\u2260": "!=",
+          "\u2248": "~", "\u25b6": ">", "\u2139": "i", "\u2753": "?", "\u2757": "!"}
+_DROPPED = ((0x200b, 0x200f), (0x2060, 0x2064), (0xfe00, 0xfe0f), (0x2600, 0x27bf), (0x2b00, 0x2bff), (0x1f000, 0x1faff))
+
+
+def fold(text: str) -> str:
+    """`text` with its symbols and typographic punctuation as ASCII (the map above); pictographs with no word of their
+    own are left out; letters, digits and everything else are kept."""
+    if text.isascii():
+        return text
+    out = []
+    for char in text:
+        if char < "\x80":
+            out.append(char)
+            continue
+        mark = _MARKS.get(char)
+        if mark is None:
+            code = ord(char)
+            mark = "" if any(low <= code <= high for low, high in _DROPPED) else char
+        out.append(mark)
+    return "".join(out)
+
+
+def console_text(text: str) -> bytes:
+    """What a front writes of an answer's text: UTF-8, with symbols folded to ASCII on Windows (see fold)."""
+    return (fold(text) if os.name == "nt" else text).encode("utf-8")
 _UPPER = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 # The variables that name a proxy for this process (urllib's, curl's), and the one that carries them with a call.
 PROXY_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")
@@ -471,7 +506,7 @@ def _call(stream: _Stream, record: dict, argv: list[str]) -> int | None:
             if kind == "out":
                 target = err if got.get("stream") == "stderr" and not skill else out
                 if target is not None:
-                    target.write(str(got.get("data") or "").encode("utf-8"))
+                    target.write(console_text(str(got.get("data") or "")))
                     target.flush()
                     wrote = True
             elif kind == "done":
@@ -552,7 +587,7 @@ def _resume(frame: dict, out, err, skill: bool) -> int:
         if got.get("t") == "out":
             target = err if got.get("stream") == "stderr" and not skill else out
             if target is not None:
-                target.write(str(got.get("data") or "").encode("utf-8"))
+                target.write(console_text(str(got.get("data") or "")))
                 target.flush()
         elif got.get("t") in ("done", "error"):
             result.update(got)

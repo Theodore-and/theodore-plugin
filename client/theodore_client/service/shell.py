@@ -17,7 +17,7 @@ from .. import core
 # Nothing else at import: with THEODORE_SERVICE=0 or THEODORE_RESIDENT=0 an engine command takes the lean one-shot path
 # (verbs.py), which loads no network, hashing or archive module (0.4.34); run() imports what reaching the service needs.
 
-FRONT_COMMANDS = ("pptx", "guide", "specimen", "skill")
+FRONT_COMMANDS = ("pptx", "guide", "specimen", "skill", "wait")
 # The Bash tool's limit minus 30 s (Claude Code: BASH_MAX_TIMEOUT_MS, 10 minutes), as the native front reckons it.
 DEADLINE_MS = int(os.environ.get("THEODORE_DEADLINE_MS") or 0) or \
     max(30_000, int(os.environ.get("BASH_MAX_TIMEOUT_MS") or 600_000) - 30_000)
@@ -35,7 +35,7 @@ def enabled() -> bool:
     return resident() and (os.environ.get("THEODORE_SERVICE") or "").strip() != "0"
 
 
-from ..hot import CALLER_PROXY, proxy_settings, stdio_flags  # noqa: E402  (one rule for both fronts: the hot path's)
+from ..hot import CALLER_PROXY, console_text, proxy_settings, stdio_flags  # noqa: E402  (one rule for both fronts: the hot path's)
 
 
 def _stdin(args: list[str]) -> dict | None:
@@ -72,7 +72,7 @@ def run(argv: list[str]) -> int | None:
     def on_frame(frame: dict) -> None:
         kind = frame.get("t")
         if kind == "out":
-            data = str(frame.get("data") or "").encode("utf-8")
+            data = console_text(str(frame.get("data") or ""))
             stream = err if frame.get("stream") == "stderr" and not skill else out
             if stream is not None:
                 stream.write(data)

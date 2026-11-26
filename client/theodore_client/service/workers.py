@@ -41,6 +41,8 @@ from . import frames
 IS_WINDOWS = os.name == "nt"
 READY_WAIT_S = 90.0
 IDLE_SHRINK_S = 300.0
+SETTLE_QUIET_S = float(os.environ.get("THEODORE_SETTLE_QUIET_S") or 3.0)   # a service a hand-over started: the current engine unchanged this long
+SETTLE_MAX_S = float(os.environ.get("THEODORE_SETTLE_MAX_S") or 90.0)     # and it waits no longer than this for an update to land
 # A Studio deck's workers, warmed at its `prepare` (one a part, within the pool's size), are kept this long against the
 # idle shrink: its designers write for minutes before their saves, and the burst starts no worker of its own (lane S2b).
 BURST_KEEP_S = 30 * 60.0
@@ -801,6 +803,7 @@ class Pool:
         self.features: dict[str, set] = {}          # per engine version: what a ready worker of it said it can do
         self.keys = _KeyLock()
         self.closed = False
+        self.settled = False                        # settle(): a hand-over's successor has waited for the update to land
         self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
         self._engine_run = None
         self.starts: dict[str, collections.deque] = {}  # per version: its recent workers' seconds from start to ready
@@ -874,10 +877,30 @@ class Pool:
                 worker.kill()
             self.cond.notify_all()
 
+    def settle(self) -> None:
+        """A service started by a hand-over (an update: its client is new, its engine may still be arriving) starts no
+        worker until the engine update is done and the current engine has stayed the same for SETTLE_QUIET_S, at most
+        SETTLE_MAX_S: on 26 Nov the successor warmed rc.37 and then rc.38 within seconds, and the stacked warm-ups ran
+        24 to 92 s. Any other service returns at once."""
+        if not getattr(self.service, "handed_over", False) or self.settled:
+            return
+        end = time.monotonic() + SETTLE_MAX_S
+        last, since = None, time.monotonic()
+        while not self.closed and not self.settled and time.monotonic() < end:
+            engine, pending = install.selected_engine(), install.engine_update_pending()
+            now = time.monotonic()
+            if pending or engine != last:
+                last, since = engine, now
+            elif now - since >= SETTLE_QUIET_S:
+                break
+            time.sleep(0.25)
+        self.settled = True
+
     def warm_current(self) -> None:
         """At session open: a worker of the current engine, started in the background, so the first command finds it."""
         def warm() -> None:
             with contextlib.suppress(Exception):
+                self.settle()
                 version = install.selected_engine()
                 if not version:
                     return
@@ -1352,6 +1375,7 @@ class Pool:
         try:
             if not os.path.isdir(folder):
                 return True
+            self.settle()
             version = install.selected_engine()
             spec = Spec(version) if version else None
             if spec is None or not spec.resident() or self._oneshot(version):
