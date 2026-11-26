@@ -171,10 +171,14 @@ def _pptx(service, call, args: list[str], begun: float, coming: str | None) -> t
         service.ahead.before_apply(args, call.cwd, on_wait=not_coming)
         call.ahead_wait_ms = int((time.perf_counter() - waiting) * 1000)
     wanted = service.parts.wants(version, args, call)
-    not_coming()                            # here now
     if wanted is not None:                  # a Studio part arriving with the others: one build for several (parts.py)
-        code, pending = service.parts.run(call, version, args, env, wanted)
+        still_coming = coming if coming is not None and not here else None
+        if still_coming is not None:        # counted off by the gathering itself, in the step that takes it in
+            here.append(True)
+            call.arrived = True
+        code, pending = service.parts.run(call, version, args, env, wanted, still_coming)
     else:
+        not_coming()                        # not for the gathering: no longer on its way to it
         code, pending = service.pool.run(call, version, args, env, call.stdin)
     call.ran_until = time.perf_counter()    # the timing line's "after": its answer read, its pictures attached
     if args[0] == "prepare" and code == 0:

@@ -1676,7 +1676,7 @@ class GatheringUnit(unittest.TestCase):
         gatherer._run_batch = run_batch                                  # noqa: SLF001
         return gatherer, os.path.realpath(lead), sent
 
-    def burst(self, gatherer, lead: str) -> list:
+    def burst(self, gatherer, lead: str, gap_s: float = 0.01) -> list:
         from types import SimpleNamespace
         members = []
         gatherer.on_way[lead] = 3                     # three designers' applies admitted (tools: parts.coming)
@@ -1684,17 +1684,37 @@ class GatheringUnit(unittest.TestCase):
         for name in ("s01", "s02", "s03"):
             call = SimpleNamespace(cwd="/decks", cancelled=threading.Event(), timing={}, env={}, stdin=None,
                                    out=lambda *_a, **_k: None, count=lambda *_a, **_k: None)
-            gatherer.arrived(lead)
             shape = ("9.9", lead, ("apply", "--json"), ())
+            # on its way until the gathering takes it in (tools passes the lead it was counted under)
             thread = threading.Thread(target=gatherer.run, args=(call, "9.9", ["apply", f"{lead}/parts/{name}"], {},
-                                                                (shape, f"{lead}/parts/{name}")))
+                                                                (shape, f"{lead}/parts/{name}"), lead))
             thread.start()
             threads.append(thread)
             members.append(call)
-            time.sleep(0.01)
+            time.sleep(gap_s)
         for thread in threads:
             thread.join(10)
         return members
+
+    def test_a_part_still_on_its_way_when_the_window_closes_is_waited_for(self):
+        # Windows, 26 Nov (plugin 017e9b0): a burst of three went out as two parts, then one a second later. A part
+        # was counted off its way (tools) before the gathering had it, and its thread was held between the two for
+        # longer than the 15 ms window, which then closed on the two already waiting as though none were coming. The
+        # gathering now counts a part off its way in the step that takes it in. Here each part comes four windows
+        # after the one before: the window re-arms while parts are on their way, and all three go out together.
+        from theodore_client.service import parts
+        logged: list = []
+        gatherer, lead, sent = self.gatherer(logged)
+        self.burst(gatherer, lead, gap_s=4 * parts.GATHER_S)
+        self.assertEqual(sorted(name for _t, names in sent for name in names),
+                         [f"{lead}/parts/{name}" for name in ("s01", "s02", "s03")])
+        self.assertEqual(len({round(t, 2) for t, _names in sent}), 1, f"one cut, when the third came: {sent}")
+        self.assertTrue(any(line.startswith("parts: 3 of a deck") for _t, line in logged), logged)
+        self.assertEqual(gatherer.on_way, {}, "none is counted on its way once all are in")
+        # A part that never reaches the gathering (refused on its way) is counted off by `arrived`, as before.
+        gatherer.on_way[lead] = 1
+        gatherer.arrived(lead)
+        self.assertEqual(gatherer.on_way, {})
 
     def test_a_burst_whose_every_part_is_in_goes_at_once(self):
         from unittest import mock
