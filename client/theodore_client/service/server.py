@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import traceback
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -71,6 +72,14 @@ class Service:
             self.home_id = (st.st_dev, st.st_ino) if st.st_ino else None
         except OSError:
             self.home_id = None
+        # A freed inode is handed out again (Linux filesystems do it at once for a folder removed and made again), so
+        # the identity alone cannot tell a new folder from this one. An open handle on the folder keeps its inode from
+        # being reused for as long as the service runs (POSIX; Windows file ids are not reused this way).
+        self._home_fd = None
+        if self.home_id is not None and os.name == "posix":
+            with contextlib.suppress(OSError):
+                self._home_fd = os.open(self.home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                weakref.finalize(self, os.close, self._home_fd)
         self.secret = secrets.token_hex(32)
         self.started = utc_now()
         self.started_mono = time.monotonic()

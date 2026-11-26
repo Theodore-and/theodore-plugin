@@ -1336,8 +1336,8 @@ class Timings(ServiceCase):
         self.call(client, got, "prep", ["prepare", str(self.box.tmp / "deck"), "--parts", "2"])
         self.call(client, got, "p1", ["apply", str(self.box.tmp / "deck" / "parts" / "s01")])
         log = self.log_with("timing: pptx apply s01")
-        self.assertRegex(log, r"timing: pptx apply s01: \d+ ms = admission \d+ \+ gathering \d+ \(1 part\(s\) in its "
-                              r"build\) \+ queue")
+        self.assertRegex(log, r"timing: pptx apply s01: \d+ ms = admission \d+ \+ (?:own ahead \d+ \+ )?gathering \d+ "
+                              r"\(1 part\(s\) in its build\) \+ queue")
 
 
 class StudioParts(ServiceCase):

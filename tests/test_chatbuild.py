@@ -214,7 +214,10 @@ t("binding", () => process.binding("spawn_sync"));
             "w.on('message', done); w.on('error', (e) => done(['error', e.code || e.message]));\n")
         env = {**os.environ, "NODE_OPTIONS": chatbuild.node_options([self.work, self.engine], [self.work]),
                "THEODORE_NODE_SCRIPT_ROOT": str(self.engine), "THEODORE_NODE_ADDON_ROOTS": str(self.engine)}
-        ran = subprocess.run(["node", str(script)], env=env, capture_output=True, text=True, timeout=60)
+        # Node (24) lets a worker thread read what lies under the process's working directory, whatever the grants, so the
+        # run is from the deck's folder as the product's is (chatbuild's Popen, cwd=folder), never from the runner's
+        # (a checkout whose TMPDIR lies inside it made the secret readable: the macOS shim jobs, 26 Nov).
+        ran = subprocess.run(["node", str(script)], env=env, capture_output=True, text=True, timeout=60, cwd=self.work)
         self.assertEqual(ran.returncode, 0, ran.stderr)
         self.assertNotIn("SecurityWarning", ran.stderr)
         self.assertEqual(json.loads((self.work / "out.json").read_text()),
