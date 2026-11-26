@@ -91,8 +91,23 @@ PART_STUCK_NEXT = ("NEXT: do not run the same command again: undo your last edit
                    "theodore doctor.\nTELL THE USER: nothing unless it happens again.\n")
 
 
+def busy_text(verb: str, seconds: int) -> str:
+    """The answer to a command that found another on its deck running far too long (exit 75): it did not wait."""
+    return (f"THEODORE INTERNAL: Theodore's engine is busy: a `{verb}` command on this deck has been running for "
+            f"{seconds} s and has not finished, so this command did not wait behind it; nothing of it ran.\n"
+            f"NEXT: wait a moment and run it again (the other command is stopped by the engine at its limit); if this "
+            f"keeps happening, run theodore doctor.\n"
+            f"TELL THE USER: only if it keeps happening: the engine is stuck on one step.\n")
+
+
 def lost_text(how: str, wrote: bool, next_step: str | None = None) -> str:
     """The answer to a call whose worker ended or stuck and that is not run again (exit 78)."""
+    if "did not finish" in how and not next_step and not wrote:
+        return (f"THEODORE INTERNAL: Theodore's engine {how} during this command, so the engine was stopped and "
+                f"restarted; nothing of this command was written. Theodore filed a report of it automatically.\n"
+                f"NEXT: run the command once more (the engine is fresh); if it stops again, run theodore doctor.\n"
+                f"TELL THE USER: one step stopped and was reported to Theodore; tell them again only if it stops "
+                f"a second time.\n")
     if next_step:
         return f"THEODORE INTERNAL: Theodore's engine {how} during this command; nothing of it was written.\n{next_step}"
     if wrote:
@@ -544,7 +559,8 @@ class Worker:
                            PART_STUCK.format(seconds=int(PART_CALL_CEILING_S)))
                 break
             if now - started > CALL_CEILING_S:
-                self._stop(f"did not finish within {int(CALL_CEILING_S)} s", "was stopped: it did not finish in time")
+                self._stop(f"did not finish within {int(CALL_CEILING_S)} s",
+                           f"was stopped: this command did not finish in {int(CALL_CEILING_S)} s")
                 break
             if asked is None and now - max(self.last_frame, started) > HEARTBEAT_S:     # silent during this call
                 asked = now
@@ -722,37 +738,66 @@ class _QuietCall:
         pass
 
 
+class KeyBusy(Exception):
+    """The command ahead on this workspace key has run past KEY_STUCK_S: this one does not wait behind it."""
+
+    def __init__(self, verb: str, seconds: int):
+        super().__init__(f"{verb} has held this deck for {seconds} s")
+        self.verb, self.seconds = verb, seconds
+
+
+# Writes on one workspace key run one at a time, in arrival order; a command that finds the one ahead of it has run past
+# this long does not wait behind it, it is answered at once that the engine is busy (TR-FGXBAS, 26 Nov: a `render --wait`
+# that hung held the lead's own `render` of the same part for 12 minutes, until the worker's ceiling ended both).
+KEY_STUCK_S = float(os.environ.get("THEODORE_KEY_STUCK_S") or 60.0)
+
+
 class _KeyLock:
     """Writes on one workspace key run one at a time, in arrival order."""
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._held: dict[str, list[threading.Event]] = {}
+        self._since: dict[threading.Event, tuple[float, str]] = {}   # the command at the head: when it began, its verb
 
     @contextlib.contextmanager
-    def held(self, key: str | None):
+    def held(self, key: str | None, verb: str = "a command"):
         if not key:
             yield
             return
         mine = threading.Event()
-        with self._lock:
+        with self._cond:
             queue = self._held.setdefault(key, [])
             queue.append(mine)
-            before = queue[-2] if len(queue) > 1 else None
-        if before is not None:
-            while not before.wait(0.5):
-                with self._lock:
-                    if before not in self._held.get(key, []):
-                        break
+            if queue[0] is mine:
+                self._since[mine] = (time.monotonic(), verb)
+            while queue[0] is not mine:
+                head = queue[0]
+                began, head_verb = self._since.get(head, (time.monotonic(), "a command"))
+                ran = time.monotonic() - began
+                if ran > KEY_STUCK_S:
+                    queue.remove(mine)         # not set: the commands behind this one find their own turn
+                    if not queue:
+                        self._held.pop(key, None)
+                    raise KeyBusy(head_verb, int(ran))
+                self._cond.wait(min(0.5, max(0.05, KEY_STUCK_S - ran + 0.01)))
+                queue = self._held.setdefault(key, [])
+                if queue[0] is mine:
+                    self._since[mine] = (time.monotonic(), verb)
         try:
             yield
         finally:
-            with self._lock:
+            with self._cond:
                 queue = self._held.get(key, [])
                 if mine in queue:
                     queue.remove(mine)
-                if not queue:
+                if queue:
+                    self._since.setdefault(queue[0], (time.monotonic(), "a command"))
+                else:
                     self._held.pop(key, None)
+                self._since.pop(mine, None)
+                self._cond.notify_all()
             mine.set()
 
     def busy(self, key: str | None) -> bool:
@@ -772,16 +817,21 @@ class _KeyLock:
             if self._held.get(key):
                 return None
             self._held[key] = [mine]
+            self._since[mine] = (time.monotonic(), "a build ahead")
         return mine
 
     def give(self, key: str | None, mine: threading.Event) -> None:
         if key:
-            with self._lock:
+            with self._cond:
                 queue = self._held.get(key, [])
                 if mine in queue:
                     queue.remove(mine)
-                if not queue:
+                if queue:
+                    self._since.setdefault(queue[0], (time.monotonic(), "a command"))
+                else:
                     self._held.pop(key, None)
+                self._since.pop(mine, None)
+                self._cond.notify_all()
         mine.set()
 
 
@@ -1260,8 +1310,15 @@ class Pool:
         held = sorted(set(keys)) if keys is not None else [key if priority != "read" else None]
         entered = time.perf_counter()
         with contextlib.ExitStack() as stack:
-            for one in held:
-                stack.enter_context(self.keys.held(one))
+            try:
+                for one in held:
+                    stack.enter_context(self.keys.held(one, argv[0] if argv else "a command"))
+            except KeyBusy as busy:
+                if acquired is not None:
+                    acquired()
+                self.service.log(f"{argv[:2]} not run: {busy}; answered 75")
+                call.out(busy_text(busy.verb, busy.seconds))
+                return 75, []
             for attempt in (1, 2):
                 try:
                     worker = self._acquire(spec, key, priority, call, rank=order, prefer=prefer)

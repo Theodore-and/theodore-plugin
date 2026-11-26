@@ -299,7 +299,11 @@ class Pool(ServiceCase):
         client, got = self.connect()
         frames_ = self.call(client, got, "slow", ["sleep", "20"])        # it answers, it progresses, it never ends
         self.assertEqual(Collector.done(frames_)["exit"], 78)
-        self.assertIn("was stopped: it did not finish in time", Collector.stdout(frames_))
+        said = Collector.stdout(frames_)
+        self.assertIn("did not finish in 2 s", said)
+        # TR-FGXBAS: what happened, that the engine restarted, and that the report was filed: not "tell the user nothing"
+        self.assertIn("filed a report", said)
+        self.assertNotIn("TELL THE USER: nothing", said)
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
@@ -556,6 +560,85 @@ class FolderWatch(ServiceCase):
         watches.open("s2", str(self.box.home))
         self.assertEqual(logged, [], "its workspaces and outputs are Theodore's own")
         watches.stop()
+
+
+class KeyLock(unittest.TestCase):
+    """A command does not wait behind a stuck one on its deck (TR-FGXBAS: the lead's `render` waited 12 minutes on the
+    designer's hung `render --wait`)."""
+
+    def setUp(self):
+        from theodore_client.service import workers
+        self.workers = workers
+        old = workers.KEY_STUCK_S
+        workers.KEY_STUCK_S = 0.6
+        self.addCleanup(setattr, workers, "KEY_STUCK_S", old)
+
+    def test_a_command_behind_one_that_runs_past_the_limit_is_told_the_engine_is_busy_at_once(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        inside, free = threading.Event(), threading.Event()
+
+        def hang():
+            with keys.held("k", "render"):
+                inside.set()
+                free.wait(30)
+
+        threading.Thread(target=hang, daemon=True).start()
+        self.assertTrue(inside.wait(5))
+        try:
+            started = time.monotonic()
+            with self.assertRaises(self.workers.KeyBusy) as raised:
+                with keys.held("k", "render"):
+                    self.fail("it ran behind a stuck command")
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(raised.exception.verb, "render")
+            self.assertIn("busy", self.workers.busy_text("render", 61))
+            self.assertTrue(keys.busy("k"), "the stuck command still holds the key")
+        finally:
+            free.set()
+
+    def test_commands_queue_in_order_behind_one_that_is_still_within_the_limit(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        order = []
+
+        def run(name, hold):
+            with keys.held("k", "apply"):
+                order.append(name)
+                time.sleep(hold)
+
+        first = threading.Thread(target=run, args=("a", 0.3))
+        first.start()
+        time.sleep(0.05)
+        rest = [threading.Thread(target=run, args=(n, 0.05)) for n in "bc"]
+        for t in rest:
+            t.start()
+            time.sleep(0.02)
+        for t in [first, *rest]:
+            t.join(10)
+        self.assertEqual(order, ["a", "b", "c"])
+        self.assertFalse(keys.busy("k"))
+
+    def test_the_key_is_free_again_once_the_stuck_command_ends_and_a_busted_one_left_nothing_behind(self):
+        keys = self.workers._KeyLock()                                              # noqa: SLF001
+        inside, free, ran = threading.Event(), threading.Event(), []
+
+        def hang():
+            with keys.held("k", "render"):
+                inside.set()
+                free.wait(30)
+
+        threading.Thread(target=hang, daemon=True).start()
+        self.assertTrue(inside.wait(5))
+        time.sleep(self.workers.KEY_STUCK_S + 0.1)
+        with self.assertRaises(self.workers.KeyBusy):
+            with keys.held("k", "render"):
+                ran.append("x")
+        free.set()
+        until = time.monotonic() + 5
+        while keys.busy("k") and time.monotonic() < until:
+            time.sleep(0.01)
+        with keys.held("k", "render"):          # the stuck command ended: the key is free again for a later one
+            ran.append("after")
+        self.assertEqual(ran, ["after"])
 
 
 class RemovedHome(unittest.TestCase):
