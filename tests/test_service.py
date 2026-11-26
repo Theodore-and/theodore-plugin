@@ -1757,9 +1757,20 @@ class AheadUnit(unittest.TestCase):
 
         from theodore_client.service import ahead
         full10, full7, small = (4, 4), (3, 3), (1, 1)
-        self.assertEqual(ahead.shares(15, [full10, small, small, small], 32), [6, 3, 3, 3], "8 processors, one worker idle")
-        self.assertEqual(ahead.shares(8, [full7, small], 32), [6, 2], "4 processors, one worker idle")
+        self.assertEqual(ahead.shares(15, [full10, small, small, small], 32, 8), [6, 3, 3, 3], "8 processors, one worker idle")
+        self.assertEqual(ahead.shares(15, [full10, small, small, small], 32), [6, 3, 3, 3], "the same when not said")
+        self.assertEqual(ahead.shares(8, [full7, small], 32, 8), [6, 2], "by the last picture, were there the processors")
         self.assertEqual(ahead.shares(8, [full7, small, small], 32), [4, 2, 2], "were three workers taken")
+        # Four processors or fewer (lane S2's S2-28 on rig 7, 2 cores, one boot: 6 and 2 gave round 1 at 0.304 to
+        # 0.387 s on a fresh store, 4 and 4 at 0.188 to 0.275 s): equal shares whatever the threads, since a worker's
+        # threads share the few cores with the other worker's.
+        self.assertEqual(ahead.shares(8, [full7, small], 32, 4), [4, 4], "4 processors: equal halves")
+        self.assertEqual(ahead.shares(7, [full7, small], 32, 4), [4, 3], "the odd part to the worker taken first")
+        self.assertEqual(ahead.shares(15, [(1, 1), small], 32, 2), [8, 7], "2 processors")
+        self.assertEqual(ahead.shares(3, [full7, small], 32, 4), [2, 1])
+        self.assertEqual(ahead.shares(80, [full7, small], 32, 4), [32, 32], "the cap holds there too")
+        self.assertEqual(ahead.shares(8, [full7, small], 32, 5), [6, 2], "above four processors: by the last picture")
+        self.assertEqual(ahead.EQUAL_SHARES_PROCESSORS, 4)
         self.assertEqual(ahead.shares(15, [small] * 4, 32), [4, 4, 4, 3], "equal workers: equal shares")
         self.assertEqual(ahead.shares(3, [(10, 10), small, small], 32), [1, 1, 1], "each worker taken gets a part")
         self.assertEqual(ahead.shares(2, [full10, small, small], 32), [1, 1, 0], "fewer parts than workers")
