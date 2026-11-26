@@ -207,11 +207,27 @@ class Gatherer:
         rest = tuple(arg for i, arg in enumerate(argv) if i != index)
         return (version, lead, rest, tuple(sorted((call.env or {}).items()))), part
 
-    def run(self, call, version: str, argv: list[str], env: dict, wanted: tuple) -> tuple[int, list]:
+    def run(self, call, version: str, argv: list[str], env: dict, wanted: tuple,
+            coming: str | None = None) -> tuple[int, list]:
+        """`coming`: the lead `arriving` counted this part under, when it is still counted on its way. It stops being
+        on its way in the very step that puts it in the gathering, so no moment has it in neither: counted off first
+        (tools, before this call), a thread held between the two for the 15 ms window let the window close on the
+        parts already waiting, as though none were coming, and the burst went out without it (seen on Windows,
+        26 Nov: three parts gathered as two, then one a second later)."""
         shape, part = wanted
-        member = _Member(call, part, workers.workspace_key(["apply", part], call.cwd))
+        try:
+            member = _Member(call, part, workers.workspace_key(["apply", part], call.cwd))
+        except BaseException:
+            self.arrived(coming)
+            raise
         alone = every_part_in = False
         with self.lock:
+            if coming is not None:              # as `arrived`, under the same lock as what follows
+                left = self.on_way.get(coming, 0) - 1
+                if left > 0:
+                    self.on_way[coming] = left
+                else:
+                    self.on_way.pop(coming, None)
             lead = self.leads.setdefault(shape, _Lead())
             if any(other.part == part for other in lead.pending):
                 twice = True                    # the same part already waits: a run names each part once (lane G)
