@@ -179,6 +179,20 @@ class Gatherer:
             self.on_way[found[0]] = self.on_way.get(found[0], 0) + 1
         return found[0]
 
+    def expect(self, argv: list[str], cwd: str | None, count: int) -> bool:
+        """`count` part applies of this part's deck are on their way again: they waited for the build-ahead that
+        holds them (counted off their way meanwhile, so the ready parts did not wait for them) and all come now that
+        it has ended (ahead.py). Counted, the first of them to reach the gathering does not run alone, and they go
+        out as their ahead's group, to its worker. False when the deck's parts do not come at once."""
+        found = _lead_and_part(argv, cwd)
+        if found is None or count <= 0:
+            return False
+        with self.lock:
+            if found[0] not in self.bursts:
+                return False
+            self.on_way[found[0]] = self.on_way.get(found[0], 0) + count
+        return True
+
     def arrived(self, lead: str | None) -> None:
         if lead is None:
             return

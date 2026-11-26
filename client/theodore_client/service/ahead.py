@@ -60,6 +60,8 @@ class _Call:
         self.stats = {part.path: part.seen for part in members}     # the deck.js each part is built from
         first = members[0]
         self.id = f"ahead-{os.path.basename(first.path)}-{len(members)}-{int(time.monotonic() * 1000)}"
+        self.waiters = 0                    # designers' applies waiting for it (before_apply)
+        self.recounted = False              # those were counted on their way to the gathering again when it ended
         self.cwd = first.cwd
         self.images = False
         self.deadline_ms = None
@@ -189,14 +191,20 @@ class Ahead:
                 part.ready_since = time.monotonic()
         self._dispatch()
 
-    def before_apply(self, argv: list[str], cwd: str | None, on_wait=None) -> None:
+    def before_apply(self, argv: list[str], cwd: str | None, on_wait=None) -> bool:
         """The designer's own apply of a part: the part leaves the next ahead; an ahead running with it on the
         deck.js the apply will read is waited for (the apply then reuses it), one on an older deck.js is not (and,
         when the part is its only one, is cancelled). `on_wait` is called before it waits: the gathering then stops
-        counting this part as on its way, so the parts that are ready go out without it (lane S2's rig 7)."""
+        counting this part as on its way, so the parts that are ready go out without it (lane S2's rig 7).
+
+        True when it waited and the ahead, as it ended, counted its waiting applies on their way to the gathering
+        again (`_run`): the caller hands that count to the gathering with the apply, so the applies that waited for
+        one ahead reach it as a group and go to that ahead's worker together. S2-31 on rig 7 (2 cores): four applies
+        waited 56 to 83 ms for their ahead; the first to wake found nobody coming and ran alone on that worker, the
+        other three found it busy and went to another, which drew their pictures again (500 ms)."""
         part = self._part_of(argv, cwd)
         if part is None:
-            return
+            return False
         now = _stat(part.deck)
         with self.lock:
             if part.ready_since is not None:
@@ -206,19 +214,24 @@ class Ahead:
             part.burst.until = time.monotonic() + WATCH_FOR_S
             call = part.ahead
             if call is None:
-                return
+                return False
             same = call.stats.get(part.path) == now
             alone = len(call.members) == 1
+            if same:
+                call.waiters += 1
         if not same:
             if alone:
                 self._cancel(call, "the designer's apply reads a newer deck.js")
-            return
+            return False
         self._count("ahead_waited")
         if on_wait is not None:
             with contextlib.suppress(Exception):
                 on_wait()
-        if not call.done.wait(WAIT_OWN_S) and alone:
-            self._cancel(call, f"the designer's apply waited {int(WAIT_OWN_S)} s for it")
+        if not call.done.wait(WAIT_OWN_S):
+            if alone:
+                self._cancel(call, f"the designer's apply waited {int(WAIT_OWN_S)} s for it")
+            return False
+        return call.recounted
 
     def applied(self, argv: list[str], cwd: str | None, answer: dict) -> None:
         """The designer's apply of a part answered: when it reused its ahead (lane G: `part.built_ahead`), counted."""
@@ -383,6 +396,13 @@ class Ahead:
                             part.ready_since = None     # saved again meanwhile: ready again at its next still poll
                 with contextlib.suppress(ValueError):
                     self.running.remove(call)
+                waiters = call.waiters
+            if waiters and not call.cancelled.is_set():
+                # Its waiting applies come to the gathering now, all at once: counted on their way before they wake.
+                gatherer = getattr(self.service, "parts", None)
+                with contextlib.suppress(Exception):
+                    call.recounted = bool(gatherer is not None and
+                                          gatherer.expect(["apply", first.path], first.cwd, waiters))
             call.done.set()
             self._dispatch()
 
