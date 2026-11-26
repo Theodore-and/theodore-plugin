@@ -1,5 +1,20 @@
 # Changes
 
+## 0.5.2
+
+Fixes from the first real jobs on 0.5.1.
+
+- A fault in the engine, a command the service had to stop, an engine lost during a command, and an error in one of
+  Theodore's background jobs now file a bug report themselves, once a day per fault and without slowing the command;
+  the account's switch for automatic reports still turns them off.
+- A slide's apply in a deck in parts that never ends is stopped after 5 minutes (the lead's apply keeps 15), and the
+  answer says to undo the last edit of the slide's code rather than run the same command again.
+- `assets show --render` answers with its previews as pictures, as `render` does, so the assistant sees them in the
+  Claude desktop app too.
+- An interrupted download of Git for Windows is started again; every command had stopped resuming it.
+- Registering Theodore with Codex says what Codex rejected, and tries the other form Codex documents.
+- `theodore packs` and `theodore packs list` show the packs' status.
+
 ## 0.5.1
 
 Theodore keeps its engine running between commands, its short command starts in a few milliseconds on macOS and Linux,
