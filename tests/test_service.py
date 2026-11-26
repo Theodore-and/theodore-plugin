@@ -303,6 +303,36 @@ class Pool(ServiceCase):
         after = self.call(client, got, "after", ["echo"])
         self.assertEqual(Collector.done(after)["exit"], 0, "the next call runs on a fresh worker")
 
+    def test_a_part_apply_that_runs_on_is_stopped_at_the_part_ceiling_and_told_what_to_do(self):
+        # The real run of 26 Nov: a part's apply waited 15 minutes. A part's apply takes seconds: its own, tighter ceiling
+        # stops it and says why; the lead's apply (a whole deck) keeps the wide one.
+        self.env.update({"THEODORE_PART_CALL_CEILING_S": "2", "FAKE_APPLY_HANG_S": "4"})
+        self.service()
+        client, got = self.connect()
+        part = str(self.box.tmp / "ws" / "parts" / "s01")
+        started = time.monotonic()
+        frames_ = self.call(client, got, "stuck", ["apply", part])
+        self.assertLess(time.monotonic() - started, 3.9, "stopped at the part ceiling, not left to finish")
+        self.assertEqual(Collector.done(frames_)["exit"], 78)
+        said = Collector.stdout(frames_)
+        self.assertIn("this part's apply ran for 2 s", said)
+        self.assertIn("deck.js very likely never finishes", said)
+        self.assertIn("NEXT: do not run the same command again", said)
+        log = (self.box.home / "logs" / "service.log").read_text()
+        self.assertIn("did not finish within 2 s (a part's apply) during a call; stopping it", log)
+        lead = self.call(client, got, "lead", ["apply", str(self.box.tmp / "ws")])
+        self.assertEqual(Collector.done(lead)["exit"], 0, "a whole deck's apply keeps the wide ceiling")
+
+    def test_which_calls_are_a_part_apply(self):
+        from theodore_client.service.workers import is_part_apply
+
+        self.assertTrue(is_part_apply(["apply", "C:\\w\\parts\\s01"]))
+        self.assertTrue(is_part_apply(["apply", "/w/parts/s01", "/w/parts/s02", "--ahead"]))
+        self.assertFalse(is_part_apply(["apply", "/w"]))
+        self.assertFalse(is_part_apply(["apply", "/w/parts/s01", "/w"]))
+        self.assertFalse(is_part_apply(["check", "/w/parts/s01"]))
+        self.assertFalse(is_part_apply([]))
+
     def test_a_call_with_no_warm_idle_worker_takes_a_cold_idle_one_at_once(self):
         # Lane S2's S2-17 (the coordinator): waiting up to 1 s for a worker past its warm-up (C2 `warm`, lane B) made
         # every cold round's slowest 1.07-1.58 s against 0.13-0.21 s taking any idle worker. A worker still warming is
