@@ -20,6 +20,7 @@ import traceback
 from pathlib import Path
 
 from . import context, frames as framing
+from .. import faults
 
 REMEMBER_S = 600.0
 REPLAY_BYTES = 1 << 20
@@ -97,6 +98,14 @@ class Call:
         self.stdout_kept_size = 0
         self.engine_timings: list[str] = []   # the engine's `theodore-timings` lines (THEODORE_TIMINGS=1), for the log
 
+    def stack_lines(self) -> str | None:
+        """The last lines of where this call's thread is, as the service logs a slow call (the last one logged, else now)."""
+        with contextlib.suppress(Exception):
+            frame = sys._current_frames().get(getattr(self, "thread", None))        # noqa: SLF001
+            if frame is not None:
+                return " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(traceback.extract_stack(frame)[-8:]))
+        return getattr(self, "last_stack", None)
+
     def _fingerprint(self) -> str:
         """What makes two shell commands "the same command on the same inputs" (C1 "Deadline")."""
         stdin = self.stdin or {}
@@ -125,6 +134,8 @@ class Call:
             return
         if stream == "stderr" and any(mark in text for mark in TIMING_LINES) and len(self.engine_timings) < 64:
             self.engine_timings.extend(line for line in text.splitlines() if line.startswith(TIMING_LINES))
+        if "engine_fault" in text:
+            faults.engine_fault(self.args[0] if self.args else self.tool, text)      # queued on a thread of its own
         if stream == "stdout" and self.stdout_kept_size < KEEP_STDOUT:
             self.stdout_kept.append(text)
             self.stdout_kept_size += len(text)
@@ -371,6 +382,8 @@ class Router:
             frame = sys._current_frames().get(getattr(call, "thread", None))        # noqa: SLF001
             where = " <- ".join(f"{Path(f.filename).name}:{f.lineno} {f.name}"
                                 for f in reversed(traceback.extract_stack(frame)[-8:])) if frame else "not started"
+            if frame:
+                call.last_stack = where
             self.service.log(f"slow call {call.tool} {' '.join(call.args[:2])} ({call.id}): {int(age)} s, at {where}")
 
     def _past_ceiling(self, call: Call, age: float) -> None:
@@ -384,6 +397,8 @@ class Router:
             # Not known whether it wrote (a one-shot engine reports no `committed`): the answer says it may have.
             call.out(lost_text(f"did not finish this command within {int(ROUTER_CEILING_S // 60)} minutes", True))
             call.finish(EXIT_INTERNAL)
+        faults.call_lost(call.args[0] if call.args else call.tool, f"did not finish this command within {int(ROUTER_CEILING_S // 60)} minutes",
+                         age, getattr(call, "last_stack", None))
 
     def abandon_session(self, session_id: str) -> None:
         """A relay's session ended with calls of it running: nobody waits for them (K's A3b: fifteen hung calls kept
