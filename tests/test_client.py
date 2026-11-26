@@ -1729,6 +1729,31 @@ class Hosts(ClientCase):
         self.assertIn(f"codex plugin marketplace add {plugin}", calls)
         self.assertIn("codex plugin add theodore@theodore", calls)
 
+    def test_codex_usage_error_names_the_rejected_argument_and_the_other_documented_form_is_tried(self):
+        """0.5.1 logged only "For more information, try '--help'." when this Codex refused the call."""
+        log = self._fake_tools()
+        codex = self.box.tmp / "fakebin" / "codex"
+        codex.write_text(f'#!/bin/sh\necho "codex $*" >> "{log}"\n'
+                         'case "$*" in "plugin add theodore@theodore") echo "error: unexpected argument \'theodore@theodore\' found" >&2; '
+                         'echo >&2; echo "Usage: codex plugin add [OPTIONS]" >&2; echo >&2; '
+                         'echo "For more information, try \'--help\'." >&2; exit 2;; esac\n'
+                         'case "$*" in "plugin list --json") echo "[]";; esac\nexit 0\n')
+        plugin = self.box.home / "plugin"
+        (plugin / ".agents" / "plugins").mkdir(parents=True)
+        (plugin / ".agents" / "plugins" / "marketplace.json").write_text("{}")
+        self.assertStatus(self.client("hosts", "register"), "OK", 0)
+        calls = log.read_text().splitlines()
+        self.assertIn("codex plugin add theodore --marketplace theodore", calls)
+        first = self.client("hosts", "register")
+        self.assertNotIn("FAILED", first.stdout + first.stderr)
+        # both forms refused: the failure names the argument, not the closing line
+        codex.write_text('#!/bin/sh\ncase "$*" in "plugin add"*) echo "error: unexpected argument \'--marketplace\' found" >&2; '
+                         'echo "For more information, try \'--help\'." >&2; exit 2;; esac\nexit 0\n')
+        again = self.client("hosts", "register")
+        text = again.stdout + again.stderr
+        self.assertIn("codex: not added (error: unexpected argument", text)
+        self.assertIn("[codex plugin add theodore@theodore]", text)
+
     @unittest.skipIf(IS_WINDOWS, "symbolic links: ChatGPT's Work mode is Linux")
     def test_codex_with_read_only_settings_gets_the_skills_linked_and_uninstall_takes_them_back(self):
         """Lane CHATGPT: in ChatGPT's Work mode ~/.codex is read-only, so `codex plugin add` fails; Theodore's two skills
