@@ -1,6 +1,6 @@
 {
   "launcher_generation": 16,
-  "shim_version": "0.5.1",
+  "shim_version": "0.5.2",
   "api_base": "https://api.theodoreand.ai",
   "dl_base": "https://dl.theodoreand.ai",
   "marketplace_url": "https://theodoreand.ai/marketplace.json",
