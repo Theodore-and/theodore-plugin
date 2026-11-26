@@ -168,10 +168,23 @@ class FirstStartUnit(unittest.TestCase):
         self.assertEqual(len(self.record.read_text().splitlines()), 2)
 
     def test_a_worker_that_never_ends_is_stopped_and_the_install_goes_on(self):
-        with mock.patch.dict(os.environ, {"FIRST_START_SAYS": "hang"}), mock.patch.object(install, "FIRST_START_WAIT_S", 1.5):
-            began = time.monotonic()
+        real_popen = subprocess.Popen
+        running_at: list[float] = []
+
+        def popen_once_it_has_started(*args, **kwargs):
+            # The window under test is the hang's, and it opens when the worker is running: on a loaded machine the
+            # interpreter's own start takes seconds, and a worker killed before it wrote its record proves nothing.
+            process = real_popen(*args, **kwargs)
+            deadline = time.monotonic() + 30
+            while not self.record.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            running_at.append(time.monotonic())
+            return process
+
+        with mock.patch.dict(os.environ, {"FIRST_START_SAYS": "hang"}), mock.patch.object(install, "FIRST_START_WAIT_S", 1.5), \
+                mock.patch.object(subprocess, "Popen", popen_once_it_has_started):
             result = install.first_start(self.engine, "rt-test", label="9.9.9")
-        self.assertLess(time.monotonic() - began, 20)
+        self.assertLess(time.monotonic() - running_at[0], 20)  # stopped by its window, not left to its sleep
         self.assertTrue(result.get("stopped"), result)
         self.assertEqual(result["said"], "nothing")
         pid = json.loads(self.record.read_text().splitlines()[0])["pid"]
