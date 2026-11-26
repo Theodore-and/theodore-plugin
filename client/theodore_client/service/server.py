@@ -34,6 +34,7 @@ API_WARM_WAIT_S = 1.5             # a session's first request waits this long at
 API_FRESH_S = 60.0                # a session opening later than this after them tops the kept connections up again
 HANDOVER_CAP_S = 900.0             # a hand-over waits for calls in flight at most this long (a stuck call)
 LOG_MAX = 1 << 20
+HANDOVER_ENV = "THEODORE_HANDOVER_FROM"      # set in the successor a hand-over starts: the old service's pid
 
 
 def utc_now() -> str:
@@ -86,6 +87,7 @@ class Service:
         self.version = __version__
         self.pid = os.getpid()
         self.draining = False
+        self.handed_over = bool(os.environ.pop(HANDOVER_ENV, None))     # started by a hand-over: an update is under way
         self.stopping = threading.Event()
         self.exit_code = 0
         self.clients: set[Client] = set()
@@ -494,7 +496,7 @@ class Service:
         endpoint.remove_service_json(self.home, self.pid)
         if self.sessions.relays():
             try:
-                endpoint.ensure(self.home, start=True)[1].close()
+                endpoint.ensure(self.home, start=True, env={**os.environ, HANDOVER_ENV: str(self.pid)})[1].close()
             except Exception as exc:  # noqa: BLE001  the clients start one themselves when they reconnect
                 self.log(f"hand-over: successor not started ({exc})")
         self.broadcast({"t": "notify", "method": "theodore/reconnect", "params": {"reason": "update"}})

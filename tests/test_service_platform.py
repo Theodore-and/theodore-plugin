@@ -193,6 +193,35 @@ class Platform(PlatformCase):
         self.assertEqual(after["argv"], ["echo", "new"])
         self.assertTrue(self.gone(record["pid"], 15), "the old service left")
 
+    def test_a_session_that_ends_during_a_hand_over_does_not_cancel_its_call(self):
+        client, got = self.client()
+        record = endpoint.read_service_json(self.home)
+        self.call(client, got, "long", ["sleep", "3"], wait=False)
+        time.sleep(0.4)
+        new = self.home / "client" / "9.9.8"
+        shutil.copytree(CLIENT_DIR, new, ignore=shutil.ignore_patterns("__pycache__"))
+        init = new / "theodore_client" / "__init__.py"
+        import theodore_client
+        init.write_text(init.read_text().replace(f'"{theodore_client.__version__}"', '"9.9.8"'))
+        (self.home / "bin").mkdir(exist_ok=True)
+        (self.home / "bin" / "launch.json").write_text(json.dumps({
+            "v": 1, "home": str(self.home), "runtime_python": sys.executable, "client_dir": str(new), "client_version": "9.9.8",
+            "engine_dir": str(self.home / "engines" / ENGINE), "engine_version": ENGINE}))
+        (self.home / "client" / "current.txt").write_text("9.9.8")
+        log = self.home / "logs" / "service.log"
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and "hand-over:" not in (log.read_text(errors="replace") if log.exists() else ""):
+            time.sleep(0.1)
+        client.close()                  # the relay's session ends while the old service still runs its call
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and "they finish" not in log.read_text(errors="replace"):
+            time.sleep(0.1)
+        text = log.read_text(errors="replace")
+        self.assertIn("session ended during a hand-over with 1 call(s) running: they finish", text)
+        self.assertNotIn("running: cancelled", text)
+        self.assertTrue(self.gone(record["pid"], 30), "the old service left once its call had ended")
+        self.assertNotIn("still running after its session ended", log.read_text(errors="replace"))
+
     def test_the_relay_and_the_lifecycle(self):
         proc = subprocess.Popen([sys.executable, "-I", str(CLIENT_DIR), "mcp"], env=self.env, stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(self.work))

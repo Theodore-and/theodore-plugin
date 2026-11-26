@@ -447,6 +447,38 @@ class Pool(ServiceCase):
         self.assertEqual(Collector.done(again)["exit"], 0)
         self.assertEqual(json.loads(Collector.stdout(again))["slept"], "2.5")
 
+    def test_still_running_names_the_command_that_waits_and_wait_returns_the_answer(self):
+        self.service()
+        front, got = self.connect(role="front", session="sh")
+        front.send_call({"t": "call", "id": "w1", "tool": "pptx", "cwd": "/", "args": ["sleep", "3"], "deadline_ms": 1000}, start=False)
+        first = got.wait("w1", 30)
+        self.assertEqual(Collector.done(first)["exit"], 124)
+        said = json.loads(Collector.stdout(first))
+        self.assertEqual(said["code"], "STILL_RUNNING")
+        self.assertEqual(said["call"], "w1")
+        self.assertTrue(said["next"].endswith(" wait w1"), said["next"])
+        # a bounded wait that ends first says STILL_RUNNING again, with the same command
+        front.send_call({"t": "call", "id": "w2", "tool": "theodore", "cwd": "/", "args": ["wait", "w1", "--timeout", "1"]}, start=False)
+        short = got.wait("w2", 30)
+        self.assertEqual(Collector.done(short)["exit"], 124)
+        self.assertEqual(json.loads(Collector.stdout(short))["next"], said["next"])
+        # a wait that outlasts the call returns the call's own output and exit code, from a connection of another session
+        other, got2 = self.connect(role="front", session="sh2")
+        other.send_call({"t": "call", "id": "w3", "tool": "theodore", "cwd": "/", "args": ["wait", "w1", "--timeout", "30"]}, start=False)
+        answer = got2.wait("w3", 60)
+        self.assertEqual(Collector.done(answer)["exit"], 0)
+        self.assertEqual(json.loads(Collector.stdout(answer))["slept"], "3")
+        # the finished call is replayed to a later wait
+        other.send_call({"t": "call", "id": "w4", "tool": "theodore", "cwd": "/", "args": ["wait", "w1"]}, start=False)
+        again = got2.wait("w4", 30)
+        self.assertEqual(json.loads(Collector.stdout(again))["slept"], "3")
+        self.assertEqual(Collector.done(again)["exit"], 0)
+        # an id nobody knows is a usage answer that says what to do, not a hang
+        other.send_call({"t": "call", "id": "w5", "tool": "theodore", "cwd": "/", "args": ["wait", "nope"]}, start=False)
+        unknown = got2.wait("w5", 30)
+        self.assertEqual(Collector.done(unknown)["exit"], 64)
+        self.assertIn("THEODORE USAGE: no call 'nope'", Collector.stdout(unknown))
+
     def test_pictures_oneshot_engines_and_a_licence_refusal(self):
         self.service()
         client, got = self.connect()

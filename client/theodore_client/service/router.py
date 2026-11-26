@@ -20,7 +20,7 @@ import traceback
 from pathlib import Path
 
 from . import context, frames as framing
-from .. import faults
+from .. import core, faults
 
 REMEMBER_S = 600.0
 REPLAY_BYTES = 1 << 20
@@ -31,6 +31,8 @@ PROGRESS_EVERY_S = 2.0
 EXIT_RETRY = 75
 EXIT_INTERNAL = 78
 EXIT_STILL_RUNNING = 124
+WAIT_DEFAULT_S = 300.0            # `theodore wait <call-id>` without --timeout (or the caller's deadline) waits this long
+WAIT_MAX_S = 570.0                # the most it waits: under the Bash tool's 10 minutes
 EXIT_CANCELLED = 130
 TOOLS = ("pptx", "theodore", "guide", "specimen", "list", "chat")
 COUNTERS = ("spawned", "deck_hashes", "deckjs_full_parses", "packages_written", "files_written", "user_files_written",
@@ -250,6 +252,9 @@ class Router:
         if not isinstance(frame.get("cwd"), str) or not frame.get("cwd"):
             client.send({"t": "error", "id": call_id, "code": "BAD_CALL", "message": "a call needs cwd, an absolute folder"})
             return
+        if frame.get("tool") == "theodore" and (frame.get("args") or [None])[0] == "wait":
+            self._wait(client, frame)
+            return
         key = (client.session_id, call_id)
         with self.lock:
             known = self.calls.get(key)
@@ -300,10 +305,59 @@ class Router:
         with call.lock:
             subscriber, call.subscriber = call.subscriber, None
         if subscriber is not None:
-            subscriber.send({"t": "out", "id": call.id, "stream": "stdout",
-                             "data": json.dumps({"code": "STILL_RUNNING", "call": call.id}) + "\n"})
+            subscriber.send({"t": "out", "id": call.id, "stream": "stdout", "data": still_running_text(call.id)})
             subscriber.send({"t": "done", "id": call.id, "exit": EXIT_STILL_RUNNING,
                              "elapsed_ms": int((time.perf_counter() - call.started_perf) * 1000)})
+
+    def _wait(self, client, frame: dict) -> None:
+        """`theodore wait <call-id> [--timeout S]`: the answer of a call that went on past its deadline (STILL_RUNNING),
+        waited for here, bounded: its output so far and the rest as it comes, then its exit code; or STILL_RUNNING again
+        when the bound passes first. The call is found by its id alone (a shell command's id is its own); a finished call
+        is replayed for REMEMBER_S after it ended."""
+        wait_id = frame["id"]
+        args = list(frame.get("args") or [])[1:]
+        timeout, target_id = None, None
+        i = 0
+        while i < len(args):
+            if args[i] == "--timeout" and i + 1 < len(args):
+                with contextlib.suppress(ValueError):
+                    timeout = float(args[i + 1])
+                i += 2
+            else:
+                target_id = target_id or args[i]
+                i += 1
+        if timeout is None:
+            ms = frame.get("deadline_ms")
+            timeout = (ms / 1000.0 - 5.0) if isinstance(ms, (int, float)) and ms > 6000 else WAIT_DEFAULT_S
+        timeout = max(1.0, min(timeout, WAIT_MAX_S))
+        with self.lock:
+            target = next((c for c in self.calls.values() if c.id == target_id and c.tool != "wait"), None) if target_id else None
+        if target is None:
+            client.send({"t": "out", "id": wait_id, "stream": "stdout",
+                         "data": f"THEODORE USAGE: no call {target_id or '(none given)'!r} is known to the Theodore service (a call is kept "
+                                 f"{int(REMEMBER_S // 60)} minutes after it ends, and not across a service restart).\n"
+                                 "NEXT: read the files the command writes to see whether it finished, or run the same command again.\n"
+                                 "TELL THE USER: nothing; do not mention this to the user.\n"})
+            client.send({"t": "done", "id": wait_id, "exit": 64, "elapsed_ms": 0})
+            return
+        target.detached_by_deadline = False
+        target.attach(client, replayed=target.finished.is_set(), as_id=wait_id)
+        if target.finished.is_set():
+            return
+
+        def bound() -> None:
+            if target.finished.is_set():
+                return
+            with target.lock:
+                if target.subscriber is not client:
+                    return
+                target.subscriber = None
+            target.detached_by_deadline = True
+            client.send({"t": "out", "id": wait_id, "stream": "stdout", "data": still_running_text(target.id)})
+            client.send({"t": "done", "id": wait_id, "exit": EXIT_STILL_RUNNING, "elapsed_ms": int(timeout * 1000)})
+        timer = threading.Timer(timeout, bound)
+        timer.daemon = True
+        timer.start()
 
     def _run(self, call: Call) -> None:
         from . import tools
@@ -409,6 +463,12 @@ class Router:
                      if c.session == session_id and c.client_role == "relay" and not c.finished.is_set()]
         if not calls:
             return
+        if self.service.draining:
+            # A hand-over: the session's relay reconnects to the successor (or has gone with the host's own restart for
+            # the update), and a call it started here is never cancelled for that. Each finishes; its files are
+            # written, and the service exits when the last has ended (hand_over waits, at most HANDOVER_CAP_S).
+            self.service.log(f"session ended during a hand-over with {len(calls)} call(s) running: they finish")
+            return
         for call in calls:
             call.cancelled.set()
             worker = call.worker
@@ -437,6 +497,18 @@ class Router:
     def running_calls(self) -> list[Call]:
         with self.lock:
             return [c for c in self.calls.values() if not c.finished.is_set()]
+
+
+def still_running_text(call_id: str) -> str:
+    """The answer of a call that goes on past its deadline: its id, and the exact command that waits for it."""
+    try:
+        launcher = core.quoted_launcher()
+    except Exception:  # noqa: BLE001  a message only
+        launcher = "theodore"
+    command = f"{launcher} wait {call_id}"
+    return json.dumps({"code": "STILL_RUNNING", "call": call_id, "next": command,
+                       "summary": "the command is still running on the Theodore service and carries on; nothing was lost.",
+                       "tell_user": "nothing; do not mention this to the user."}) + "\n"
 
 
 def check_call(frame: dict) -> str | None:

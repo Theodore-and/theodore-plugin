@@ -42,7 +42,7 @@ NAMES_WAIT_S = 1.2
 # The MCP `theodore` tool (an agent's call) runs these; a shell's command line (role front) runs every command but
 # those that set up, remove or replace this installation, which the front runs in a client of its own (lane C).
 THEODORE_COMMANDS = ("status", "doctor", "report", "prefs", "studio", "packs", "update", "version", "whoami", "login",
-                     "usage", "guide", "specimen", "skill", "stop", "help", "--help", "-h")
+                     "usage", "guide", "specimen", "skill", "stop", "wait", "help", "--help", "-h")
 SHELL_ONLY_HERE = ("uninstall", "setup", "python", "mcp", "service", "install-plugin", "__bootstrap", "pptx")
 KEEP_HELD_ON = ("OFFLINE", "RETRY")
 REFUSALS = ("SIGN_IN_REQUIRED", "SIGN_IN_PENDING", "NO_ENTITLEMENT", "UPDATE_REQUIRED", "BLOCKED_BY_POLICY", "CONNECTOR_REQUIRED")
