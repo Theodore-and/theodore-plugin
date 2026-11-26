@@ -1686,8 +1686,8 @@ def plugin_update_job() -> int:
     if codex and record.get("codex_registered") is not False and _listed([codex, "plugin", "list"], "theodore@theodore"):
         if not _listed([codex, "plugin", "marketplace", "list"], str(core.home().plugin)):
             _run([codex, "plugin", "marketplace", "upgrade", "theodore"], timeout=300)
-        code, out = _run([codex, "plugin", "add", "theodore@theodore"], timeout=300)
-        results["codex"] = "updated" if code == 0 else f"codex plugin add failed: {(out.splitlines() or ['no output'])[-1]}"[:200]
+        code, out = _codex_plugin_add(codex)
+        results["codex"] = "updated" if code == 0 else f"codex plugin add failed: {out}"[:300]
     refreshed = refresh_stable_launcher()
     if refreshed:
         results["launcher"] = refreshed
@@ -2069,6 +2069,30 @@ def _codex_config() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
 
 
+def _why_failed(command: list[str], out: str) -> str:
+    """What a failed host command said, with the command's own words: a usage error ends in a line that names nothing
+    ("For more information, try '--help'."), so the line that says what was rejected (error: / Error:) comes first,
+    then the subcommand that was run (0.5.2: a Windows Codex failed with only that last line in the log)."""
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    said = next((ln for ln in lines if re.match(r"(?i)(error|fatal)\b", ln)), None) or (lines[-1] if lines else "no output")
+    named = " ".join(["codex" if "codex" in Path(command[0]).name.lower() else Path(command[0]).stem, *command[1:]])
+    return f"{said} [{named}]"[:300]
+
+
+def _codex_plugin_add(codex: str, timeout: float = 300.0) -> tuple[int, str]:
+    """`codex plugin add theodore@theodore`; when this Codex rejects that form as a usage error, the other form its
+    help documents (`theodore --marketplace theodore`) is tried, and the failure names the argument Codex rejected."""
+    command = [codex, "plugin", "add", "theodore@theodore"]
+    code, out = _run(command, timeout=timeout)
+    if code != 0 and re.search(r"(?i)unexpected argument|unrecognized|invalid value|required arguments|^usage:", out, re.M):
+        again = [codex, "plugin", "add", "theodore", "--marketplace", "theodore"]
+        code2, out2 = _run(again, timeout=timeout)
+        if code2 == 0:
+            return 0, out2
+        return code2, f"{_why_failed(command, out)}; then {_why_failed(again, out2)}"
+    return code, (out if code == 0 else _why_failed(command, out))
+
+
 def _listed(command: list[str], name: str = "theodore") -> bool:
     code, out = _run(command, timeout=60)
     return code == 0 and re.search(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", out) is not None
@@ -2331,11 +2355,12 @@ def _register_hosts() -> list[str]:
             if _listed([codex, "plugin", "list"], "theodore@theodore"):
                 record.setdefault("codex_registered", False)       # there before Theodore's own: not ours to remove
                 record.setdefault("codex_added_marketplace", False)
-            _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
-            code, out = _run([codex, "plugin", "add", "theodore@theodore"])
+            m_code, m_out = _run([codex, "plugin", "marketplace", "add", str(plugin_dir)])
+            if m_code != 0:
+                core.log(f"hosts: codex marketplace add: {_why_failed([codex, 'plugin', 'marketplace', 'add', str(plugin_dir)], m_out)}")
+            code, out = _codex_plugin_add(codex)
             linked = None if code == 0 else _agents_skills_link(record, plugin_dir)
-            lines.append("codex: registered" if code == 0 else linked if linked else
-                         f"codex: FAILED ({out.splitlines()[-1] if out else 'no output'})")
+            lines.append("codex: registered" if code == 0 else linked if linked else f"codex: FAILED ({out})")
             if code == 0:
                 record.setdefault("codex_registered", True)        # "not ours" (False) is never overwritten
                 record.setdefault("codex_added_marketplace", not market_before)
@@ -2853,7 +2878,7 @@ def resume_background() -> list[str]:
     try:
         for name, argv, present in (
                 ("git", ["tools", "install", "git", "--if-needed", "--job"],
-                 lambda: install.theodore_git_bash() or not needs_git_bash())):
+                 lambda: install.theodore_git_bash() or not needs_git_bash()),):     # the comma: a tuple of rows
             job = Job(name)
             state = job.read()
             if not state or state.get("done") or job.alive():
