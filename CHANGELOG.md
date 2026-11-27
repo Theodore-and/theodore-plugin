@@ -1,5 +1,13 @@
 # Changes
 
+## 0.5.4
+
+- When a new version of Theodore is published, a computer starts its update within seconds of its next quiet moment,
+  instead of at its next six-hourly check, so it never runs an older engine with newer guidance for hours.
+- If the guidance an assistant loaded is newer than the engine on the computer, Theodore says the engine update is on
+  its way and the work can go on, instead of asking to load the guidance again.
+- A guidance sheet whose contents changed with a new version is replaced, instead of stopping on "holds other bytes".
+
 ## 0.5.3
 
 Fixes from real work on 0.5.2: updates that cancelled running commands, one stuck command holding others, and a way
