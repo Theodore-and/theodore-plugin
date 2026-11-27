@@ -3329,12 +3329,15 @@ class Internals(unittest.TestCase):
         wrapper = sys.stdout = io.TextIOWrapper(raw, encoding="cp1252", newline="")       # what a Windows pipe gets
         try:
             cli._utf8_streams()
-            sys.stdout.write("a \u2192 b \u2014 c\n")
+            sys.stdout.write("a \u2192 b \u2014 c \u0645\u0631\u062d\u0628\u0627\n")
             sys.stdout.flush()
             written = raw.getvalue()
         finally:
             sys.stdout = saved
-        self.assertEqual(written.decode("utf-8"), "a \u2192 b \u2014 c\n")
+        # UTF-8 whatever the code page: letters (here Arabic) arrive whole. On Windows the symbols and typographic punctuation
+        # are written as ASCII on purpose (hot.fold, 0.5.3: a Windows shell decoded them as mojibake); elsewhere they are kept.
+        symbols = "a -> b - c" if os.name == "nt" else "a \u2192 b \u2014 c"
+        self.assertEqual(written.decode("utf-8"), symbols + " \u0645\u0631\u062d\u0628\u0627\n")
         self.assertEqual(wrapper.encoding, "utf-8")
 
     def test_exit_codes_are_the_frozen_ones(self):
