@@ -244,7 +244,7 @@ def refresh(timeout: float = 20.0, *, nudge_updates: bool = True) -> dict:
     if nudge_updates and (release.get("update_required") or release.get("kill") or (release.get("latest_version") and release["latest_version"] != engine)):
         # the channel moved: let the next guide check the manifest now instead of waiting out the six hours
         from . import install          # imported here: install imports this module
-        install.save_update_state(last_check=0, last_attempt=0)
+        install.nudge_update(release.get("latest_version") or None)
     return answer
 
 
