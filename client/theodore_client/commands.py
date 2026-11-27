@@ -998,13 +998,19 @@ def _auto_report(summary: str, verb: str, *, key: str | None = None, title: str 
                 record = {"day": day, "count": 0, "sent": {}}
             if fingerprint in record["sent"]:
                 reference = str(record["sent"][fingerprint])
+                if reference.startswith(_SENDING):      # another thread or process is sending this very fault now
+                    if core.now() - _sending_age(reference) < _SENDING_STALE_S:
+                        return "already", "being sent"
+                    reference = ""      # a send that died: this call takes it over
                 if reference.startswith(_QUEUED):       # saved for later today: waiting still, or sent by Theodore since
                     waiting = outbox.folder() / f"{reference.removeprefix(_QUEUED)}.json"
                     return ("queued", None) if waiting.exists() else ("already", "sent later")
-                return "already", reference
+                if reference:
+                    return "already", reference
             if int(record.get("count") or 0) >= AUTO_REPORTS_PER_DAY:
                 return "none", None
             record["count"] = int(record.get("count") or 0) + 1      # an attempt counts, sent or not
+            record["sent"][fingerprint] = f"{_SENDING}{core.now():.0f}"     # reserved under the lock: a second caller sees it
             core.write_json(path, record, 0o600)
         allowed, why = account.automatic_reports()
         if why == "unknown":        # learn the account's switch first, as `report` does; never guess "on"
@@ -1013,6 +1019,7 @@ def _auto_report(summary: str, verb: str, *, key: str | None = None, title: str 
             allowed, why = account.automatic_reports()
         if not allowed:
             core.log(f"internal error not reported: automatic reports {why}")
+            _release_auto_report(path, day, fingerprint)
             return "none", None
         payload = _report_payload("bug", title or f"internal error in {verb}", f"{prefix}{text}", verb, code, None, "automatic")
         # the answer arrives (or the report is saved) before file_internal_report stops waiting
@@ -1023,11 +1030,13 @@ def _auto_report(summary: str, verb: str, *, key: str | None = None, title: str 
         except (api.ApiError, api.NetworkError) as error:
             if isinstance(error, api.ApiError) and error.code == "auto_reports_disabled":
                 account.remember_automatic_reports_off()
+                _release_auto_report(path, day, fingerprint)
                 return "none", None
             if outbox.later(error) and outbox.save(payload, error):
                 _remember_auto_report(path, day, fingerprint, _QUEUED + payload["client_report_id"])
                 core.log("internal error saved for an automatic report; Theodore sends it by itself")
                 return "queued", None
+            _release_auto_report(path, day, fingerprint)
             raise
         answer = json.loads(raw.decode("utf-8") or "{}")
         reference = str(answer.get("ref") or answer.get("id") or "received")[:64]
@@ -1036,10 +1045,33 @@ def _auto_report(summary: str, verb: str, *, key: str | None = None, title: str 
         return "sent", reference
     except Exception as exc:  # noqa: BLE001  a report never makes the error worse
         core.log(f"internal error not reported: {exc.__class__.__name__}: {exc}")
+        with contextlib.suppress(Exception):
+            _release_auto_report(path, day, fingerprint)
         return "failed", None
 
 
 _QUEUED = "queued:"        # in auto-reports.json "sent", before the report's id: saved in the outbox; counts as sent today
+
+
+_SENDING = "sending:"      # in auto-reports.json "sent": reserved by the caller that is sending it now (then its timestamp)
+_SENDING_STALE_S = 120.0
+
+
+def _sending_age(reference: str) -> float:
+    try:
+        return float(reference.removeprefix(_SENDING))
+    except ValueError:
+        return 0.0
+
+
+def _release_auto_report(path: Path, day: str, fingerprint: str) -> None:
+    """A reservation whose send did not happen is given back (a later call may try again); a recorded one stays."""
+    with core.lock("auto-reports", timeout=2.0):
+        record = core.read_json(path)
+        sent = record.get("sent")
+        if record.get("day") == day and isinstance(sent, dict) and str(sent.get(fingerprint, "")).startswith(_SENDING):
+            del sent[fingerprint]
+            core.write_json(path, record, 0o600)
 
 
 def _remember_auto_report(path: Path, day: str, fingerprint: str, reference: str) -> None:
