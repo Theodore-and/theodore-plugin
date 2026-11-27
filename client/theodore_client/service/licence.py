@@ -55,7 +55,7 @@ class Licence:
     def _refresh(self) -> None:
         from .. import api
         try:
-            account.refresh(timeout=20.0, nudge_updates=False)
+            account.refresh(timeout=20.0)       # a channel that moved starts the update now (service/timers._nudged)
         except api.ApiError as error:
             if self.service is not None:
                 self.service.log(f"licence check: refused ({error.code})")

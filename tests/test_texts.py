@@ -423,3 +423,53 @@ class PptxManualFromTexts(TextsCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SheetFileReplacedOnVersionChange(TextsCase):
+    def test_other_bytes_under_the_same_file_name_replace_the_file(self):
+        folder = self.texts._private_folder("session-1")
+        path = folder / ("a" * 32 + "-a.jpg")
+        self.texts._write_sheet(path, JPEG)
+        got = self.texts._write_sheet(path, JPEG + b"v2")           # used to raise "holds other bytes"
+        self.assertEqual(got, path)
+        self.assertEqual(path.read_bytes(), JPEG + b"v2")
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), [path.name], "no temporary file is left")
+        self.assertEqual(self.texts._write_sheet(path, JPEG + b"v2"), path)
+
+
+class ChannelMovedStartsTheUpdate(TextsCase):
+    def test_a_guide_newer_than_the_engine_marks_the_update_once_per_version(self):
+        with mock.patch.object(install, "current_engine", return_value="1.0.0-rc.38"):
+            texts_module.Texts._guide_ahead_of_engine("1.0.0-rc.40+text.1")
+            self.assertTrue(install.update_state().get("nudge_pending"))
+            install.save_update_state(nudge_pending=False, last_check=99)
+            texts_module.Texts._guide_ahead_of_engine("1.0.0-rc.40")       # same version: not again
+            self.assertFalse(install.update_state().get("nudge_pending"))
+            self.assertEqual(install.update_state().get("last_check"), 99)
+            texts_module.Texts._guide_ahead_of_engine("1.0.0-rc.41")       # a newer one: again
+            self.assertTrue(install.update_state().get("nudge_pending"))
+            self.assertEqual(install.update_state().get("last_check"), 0)
+
+    def test_a_guide_not_newer_than_the_engine_marks_nothing(self):
+        with mock.patch.object(install, "current_engine", return_value="1.0.0-rc.40"):
+            texts_module.Texts._guide_ahead_of_engine("1.0.0-rc.40")
+            texts_module.Texts._guide_ahead_of_engine("1.0.0-rc.38")
+        self.assertFalse(install.update_state().get("nudge_pending"))
+
+    def test_the_timer_checks_at_once_when_idle_and_waits_while_a_call_runs(self):
+        from theodore_client.service import timers
+        service = mock.Mock()
+        service.draining = False
+        service.router.running = 1
+        clock = timers.Timers(service)
+        install.nudge_update("1.0.0-rc.40")
+        with mock.patch.object(install, "check_updates") as check:
+            clock._nudged()
+            check.assert_not_called()
+            self.assertTrue(install.update_state().get("nudge_pending"), "kept for when the call is done")
+            service.router.running = 0
+            clock._nudged()
+            check.assert_called_once()
+            self.assertTrue(check.call_args.kwargs["force"])
+            clock._nudged()
+            check.assert_called_once()

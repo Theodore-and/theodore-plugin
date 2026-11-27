@@ -124,6 +124,24 @@ class NoticeWithoutTheLock(HomeCase):
         taken, lines = self.burst()
         self.assertEqual((taken, lines), (0, []))
 
+    def test_guidance_newer_than_the_engine_never_asks_for_a_reload(self):
+        self.note("1.0.0-rc.40")
+        self.write(core.home().state / "update.json", {"guides": {"deck-design": "1.0.0-rc.38"}})
+        _taken, lines = self.burst(3)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertNotIn("load them again", lines[0])
+        self.assertIn("on its way", lines[0])
+        state = json.loads((core.home().state / "update.json").read_text())
+        self.assertTrue(state["nudge_pending"], "the update is started")
+        self.assertEqual(state["nudged"], "1.0.0-rc.40")
+
+    def test_guidance_older_than_the_engine_still_asks_for_a_reload(self):
+        self.note("1.0.0-rc.38")
+        self.write(core.home().state / "update.json", {"guides": {"deck-design": "1.0.0-rc.40"}})
+        _taken, lines = self.burst(3)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("load them again", lines[0])
+
     def test_a_line_owed_is_said_once_among_designers_at_once(self):
         self.note("g1")
         _taken, lines = self.burst()
