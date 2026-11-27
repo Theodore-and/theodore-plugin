@@ -1545,6 +1545,16 @@ def repin(target: str) -> Status:
                   f"This deck now uses Theodore {version}, so its next build redraws every slide once.")
 
 
+def engine_update_pending() -> bool:
+    """An engine update is on its way: one recorded as pending, or its job running. The current engine is about to
+    change; nothing is warmed on the one that is current now (service/workers.py, Pool.settle)."""
+    with contextlib.suppress(Exception):
+        if update_state().get("pending"):
+            return True
+        return Job("engine-update").alive()
+    return False
+
+
 def selected_engine() -> str | None:
     """The engine a call without a workspace uses: the global pin (update --pin) when installed, else current."""
     forced = pins().get("engine")

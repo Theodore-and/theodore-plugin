@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import account, core, specimens, usage, withdraw
+from . import account, core, hot, specimens, usage, withdraw
 from .core import Status
 
 # An engine command (`pptx`, `python`) goes to verbs.py: the command table, the argument parser and the network stack
@@ -20,11 +20,12 @@ HELP = """Theodore client commands (run through the launcher):
   specimen <file.jpg|CODE> [...] fetch deck-design specimen sheets (at most 8) and print where they are
   skill <pptx|deck-design>       the skill's instructions as a skill file's body (always exits 0)
   mcp                            the assistant's tools (pptx, guide, specimen, theodore, list) over MCP on standard input and output
+  wait <call-id> [--timeout S]   the answer of a command that said STILL_RUNNING: waits for it (at most S seconds, default 5 minutes)
   stop                           stop Theodore's service (the next command starts it again)
   pptx <verb...>                 run the engine          python <args...>   run the engine's Python
   login [--start | --open | --finish --wait S | --code XXXX-XXXX]    logout    whoami
                                  (--open: also open the sign-in page in the browser; nothing else ever opens one)
-  status [--json] [--wait S]     doctor [--json]         version
+  status [--json] [--wait S]     doctor [--json]         version (also --version, -V)
   update [--check | --apply | --rollback | --channel C | --pin V | --unpin | --reset-state]
   repin <workspace>              move a deck and all its slide parts to the current engine (its next build redraws every slide)
   report --kind bug|feedback --title T --details D|--details-file F [--verb V --code C --workspace DIR] [--origin user_requested] [--dry-run]
@@ -72,6 +73,9 @@ def _parser():
     dr = sub.add_parser("doctor", add_help=False)
     dr.add_argument("--json", action="store_true")
     sub.add_parser("version", add_help=False)
+    wt = sub.add_parser("wait", add_help=False)
+    wt.add_argument("call")
+    wt.add_argument("--timeout", type=float, default=None)
     sub.add_parser("help", add_help=False)
     up = sub.add_parser("update", add_help=False)
     mode = up.add_mutually_exclusive_group()
@@ -175,6 +179,9 @@ def _dispatch(argv: list[str]) -> int:
         return commands.doctor(args.json)
     if cmd == "version":
         return commands.version()
+    if cmd == "wait":      # with a service this was answered by it (shell.run); here none runs, so nothing is running
+        return core.emit(core.usage(f"no Theodore service is running, so no call {args.call!r} is running.",
+                                    "read the files the command writes to see whether it finished, or run the same command again."))
     if cmd == "update":
         if args.engine_job:
             return commands.engine_update_job()
@@ -256,6 +263,19 @@ def cut_command_line(argv: list[str]) -> Status | None:
                       "one line, then run the command again.")
 
 
+class _Folding:
+    """Standard output and error on Windows: text written through it has its symbols folded to ASCII (hot.fold)."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        return self._stream.write(hot.fold(text) if isinstance(text, str) else text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def _utf8_streams() -> None:
     """Text goes out as UTF-8 whatever the system's code page: on Windows a pipe or a file otherwise gets the ANSI code
     page (cp1252), and a guidance character outside it would end the command with UnicodeEncodeError."""
@@ -264,11 +284,18 @@ def _utf8_streams() -> None:
         if encoding != "utf8" and hasattr(stream, "reconfigure"):
             with contextlib.suppress(Exception):
                 stream.reconfigure(encoding="utf-8", errors="replace")
+    if os.name == "nt":
+        for name in ("stdout", "stderr"):
+            stream = getattr(sys, name)
+            if stream is not None and not isinstance(stream, _Folding):
+                setattr(sys, name, _Folding(stream))
 
 
 def main(argv: list[str] | None = None) -> int:
     _utf8_streams()
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] in (["--version"], ["-V"]):
+        argv = ["version"]
     cut = cut_command_line(argv)
     if cut is not None:
         return core.emit(cut)
@@ -316,7 +343,7 @@ def _main(argv: list[str]) -> int:
     except Status as status:
         return core.emit(status)
     _newest_launcher()
-    if argv[:1] and argv[0] in ("pptx", "guide", "specimen", "skill"):
+    if argv[:1] and argv[0] in ("pptx", "guide", "specimen", "skill", "wait"):
         from .service import shell                  # through the running service; None: run here, as before
         code = shell.run(argv)
         if code is not None:

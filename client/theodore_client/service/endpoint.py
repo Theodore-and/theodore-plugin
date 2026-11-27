@@ -465,7 +465,7 @@ def _start_failed_recently(home: Path) -> bool:
         return False
 
 
-def ensure(home: Path, *, start: bool = True, wait: float | None = None) -> tuple[dict, object]:
+def ensure(home: Path, *, start: bool = True, wait: float | None = None, env: dict | None = None) -> tuple[dict, object]:
     """(service.json, a connected stream): the running service, or one started under the start lock (C1 "Start").
     Raises Unreachable when none answers and none could be started within the wait."""
     home = Path(home)
@@ -487,7 +487,7 @@ def ensure(home: Path, *, start: bool = True, wait: float | None = None) -> tupl
             except Unreachable:
                 pass
         stale = record
-        spawn_detached(service_command(home)[0], home)
+        spawn_detached(service_command(home)[0], home, env)
         deadline = time.monotonic() + (START_WAIT_S if wait is None else wait)
         while time.monotonic() < deadline:
             record = read_service_json(home)

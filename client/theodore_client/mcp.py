@@ -42,7 +42,7 @@ DESCRIPTIONS = {
     "specimen": "Returns specimen sheets as images: one file, or a list of up to 6 (each image after its file name).",
     "pptx": "Theodore's engine on this computer: runs one pptx command (the same arguments as `theodore pptx` in a shell) "
             "and returns its answer; pictures come back as images.",
-    "theodore": "Theodore's own commands on this computer: status, doctor, report, prefs, studio, packs, update, version "
+    "theodore": "Theodore's own commands on this computer: status, doctor, report, prefs, studio, packs, update, version, wait <call-id> "
                 "(the same arguments as `theodore <command>` in a shell).",
 }
 

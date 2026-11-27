@@ -41,6 +41,8 @@ from . import frames
 IS_WINDOWS = os.name == "nt"
 READY_WAIT_S = 90.0
 IDLE_SHRINK_S = 300.0
+SETTLE_QUIET_S = float(os.environ.get("THEODORE_SETTLE_QUIET_S") or 3.0)   # a service a hand-over started: the current engine unchanged this long
+SETTLE_MAX_S = float(os.environ.get("THEODORE_SETTLE_MAX_S") or 90.0)     # and it waits no longer than this for an update to land
 # A Studio deck's workers, warmed at its `prepare` (one a part, within the pool's size), are kept this long against the
 # idle shrink: its designers write for minutes before their saves, and the burst starts no worker of its own (lane S2b).
 BURST_KEEP_S = 30 * 60.0
@@ -91,8 +93,35 @@ PART_STUCK_NEXT = ("NEXT: do not run the same command again: undo your last edit
                    "theodore doctor.\nTELL THE USER: nothing unless it happens again.\n")
 
 
+ENGINE_STACK_PREFIX = "engine stack ("      # serve.STACK_PREFIX, as the engine's watchdog logs it
+
+
+def stack_note(stack: str | None, limit: int = 1500) -> str:
+    """The engine's latest stack for a call, as one line of an answer: file names, lines and functions only."""
+    if not stack:
+        return ""
+    text = stack.split("): ", 1)[1] if "): " in stack else stack
+    return f"Last engine stack: {text[:limit]}\n"
+
+
+def busy_text(verb: str, seconds: int, bound: int = 0) -> str:
+    """The answer to a command that found another on its deck running far too long (exit 75): it did not wait."""
+    return (f"THEODORE INTERNAL: Theodore's engine is busy: a `{verb}` command on this deck has been running for "
+            f"{seconds} s{f', past the {bound} s it is expected to take,' if bound else ''} and has not finished, so this "
+            f"command did not wait behind it; nothing of it ran.\n"
+            f"NEXT: wait a moment and run it again (the other command is stopped by the engine at its limit); if this "
+            f"keeps happening, run theodore doctor.\n"
+            f"TELL THE USER: only if it keeps happening: the engine is stuck on one step.\n")
+
+
 def lost_text(how: str, wrote: bool, next_step: str | None = None) -> str:
     """The answer to a call whose worker ended or stuck and that is not run again (exit 78)."""
+    if "did not finish" in how and not next_step and not wrote:
+        return (f"THEODORE INTERNAL: Theodore's engine {how} during this command, so the engine was stopped and "
+                f"restarted; nothing of this command was written. Theodore filed a report of it automatically.\n"
+                f"NEXT: run the command once more (the engine is fresh); if it stops again, run theodore doctor.\n"
+                f"TELL THE USER: one step stopped and was reported to Theodore; tell them again only if it stops "
+                f"a second time.\n")
     if next_step:
         return f"THEODORE INTERNAL: Theodore's engine {how} during this command; nothing of it was written.\n{next_step}"
     if wrote:
@@ -320,6 +349,7 @@ class Worker:
         self.last_frame = time.monotonic()
         self._part_call = False
         self.lost_next: str | None = None            # what to do next, where the reason has its own (a stuck part)
+        self.engine_stack: str | None = None        # the engine's latest stack line for a call that ran long (serve's watchdog)
         self.lost: str | None = None                # why a call it held was lost (ended, stuck, past the ceiling)
 
     @classmethod
@@ -463,6 +493,9 @@ class Worker:
             self.rss_mb = float(frame.get("rss_mb") or self.rss_mb)
             return
         if kind == "log":
+            message = str(frame.get("message") or "")
+            if message.startswith(ENGINE_STACK_PREFIX):     # the engine's watchdog: where a long call is, kept for its answer
+                self.engine_stack = message
             self.pool.service.log(f"[worker {self.spec.version} {frame.get('level')}] {frame.get('message')}")
             return
         call = self._call
@@ -544,7 +577,8 @@ class Worker:
                            PART_STUCK.format(seconds=int(PART_CALL_CEILING_S)))
                 break
             if now - started > CALL_CEILING_S:
-                self._stop(f"did not finish within {int(CALL_CEILING_S)} s", "was stopped: it did not finish in time")
+                self._stop(f"did not finish within {int(CALL_CEILING_S)} s",
+                           f"was stopped: this command did not finish in {int(CALL_CEILING_S)} s")
                 break
             if asked is None and now - max(self.last_frame, started) > HEARTBEAT_S:     # silent during this call
                 asked = now
@@ -722,37 +756,87 @@ class _QuietCall:
         pass
 
 
+class KeyBusy(Exception):
+    """The command ahead on this workspace key has run past its expected bound: this one does not wait behind it."""
+
+    def __init__(self, verb: str, seconds: int, bound: int = 0):
+        super().__init__(f"{verb} has held this deck for {seconds} s (expected at most {bound} s)")
+        self.verb, self.seconds, self.bound = verb, seconds, bound
+
+
+# Writes on one workspace key run one at a time, in arrival order. A command waits behind the one ahead of it until that
+# one is past what its own kind of command is expected to take (expected_bound: a part build 120 s, a part's apply 300 s,
+# a render's wait bound, the whole-deck ceiling for the rest) plus KEY_GRACE_S; only then is it answered at once that the
+# engine is busy (TR-FGXBAS, 26 Nov: a `render --wait` that hung held the lead's own `render` of the same part for 12
+# minutes, until the worker's ceiling ended both). A long whole-deck apply is never reason to refuse the call behind it.
+KEY_GRACE_S = float(os.environ.get("THEODORE_KEY_GRACE_S") or 15.0)
+AHEAD_BOUND_S = 120.0       # a part built ahead of its apply
+RENDER_BOUND_S = 240.0      # the engine's cap on a render's wait for pictures (pictures.WAIT_BOUND_MAX_S)
+
+
+def expected_bound(argv: list[str], cwd: str | None = None) -> float:
+    """Seconds a command of this kind may run before it counts as stuck."""
+    verb = argv[0] if argv else ""
+    if "--ahead" in argv:
+        return AHEAD_BOUND_S
+    if is_part_apply(argv):
+        return PART_CALL_CEILING_S
+    if verb == "render":
+        return RENDER_BOUND_S
+    return CALL_CEILING_S
+
+
 class _KeyLock:
     """Writes on one workspace key run one at a time, in arrival order."""
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._held: dict[str, list[threading.Event]] = {}
+        self._since: dict[threading.Event, tuple[float, str, float]] = {}   # the head: when it began, its verb, its bound
 
     @contextlib.contextmanager
-    def held(self, key: str | None):
+    def held(self, key: str | None, verb: str = "a command", bound: float = CALL_CEILING_S):
+        """Yields what this command waited for: {"behind": the verb ahead of it or None, "waited": seconds}."""
+        info: dict = {"behind": None, "waited": 0.0}
         if not key:
-            yield
+            yield info
             return
         mine = threading.Event()
-        with self._lock:
+        asked = time.monotonic()
+        with self._cond:
             queue = self._held.setdefault(key, [])
             queue.append(mine)
-            before = queue[-2] if len(queue) > 1 else None
-        if before is not None:
-            while not before.wait(0.5):
-                with self._lock:
-                    if before not in self._held.get(key, []):
-                        break
+            if queue[0] is mine:
+                self._since[mine] = (time.monotonic(), verb, bound)
+            while queue[0] is not mine:
+                began, head_verb, head_bound = self._since.get(queue[0], (time.monotonic(), "a command", CALL_CEILING_S))
+                info["behind"] = head_verb
+                ran = time.monotonic() - began
+                limit = head_bound + KEY_GRACE_S
+                if ran > limit:
+                    queue.remove(mine)         # not set: the commands behind this one find their own turn
+                    if not queue:
+                        self._held.pop(key, None)
+                    raise KeyBusy(head_verb, int(ran), int(head_bound))
+                self._cond.wait(min(0.5, max(0.05, limit - ran + 0.01)))
+                queue = self._held.setdefault(key, [])
+                if queue[0] is mine:
+                    self._since[mine] = (time.monotonic(), verb, bound)
+            info["waited"] = time.monotonic() - asked
         try:
-            yield
+            yield info
         finally:
-            with self._lock:
+            with self._cond:
                 queue = self._held.get(key, [])
                 if mine in queue:
                     queue.remove(mine)
-                if not queue:
+                if queue:
+                    self._since.setdefault(queue[0], (time.monotonic(), "a command", CALL_CEILING_S))
+                else:
                     self._held.pop(key, None)
+                self._since.pop(mine, None)
+                self._cond.notify_all()
             mine.set()
 
     def busy(self, key: str | None) -> bool:
@@ -772,16 +856,21 @@ class _KeyLock:
             if self._held.get(key):
                 return None
             self._held[key] = [mine]
+            self._since[mine] = (time.monotonic(), "a build ahead", AHEAD_BOUND_S)
         return mine
 
     def give(self, key: str | None, mine: threading.Event) -> None:
         if key:
-            with self._lock:
+            with self._cond:
                 queue = self._held.get(key, [])
                 if mine in queue:
                     queue.remove(mine)
-                if not queue:
+                if queue:
+                    self._since.setdefault(queue[0], (time.monotonic(), "a command", CALL_CEILING_S))
+                else:
                     self._held.pop(key, None)
+                self._since.pop(mine, None)
+                self._cond.notify_all()
         mine.set()
 
 
@@ -801,6 +890,7 @@ class Pool:
         self.features: dict[str, set] = {}          # per engine version: what a ready worker of it said it can do
         self.keys = _KeyLock()
         self.closed = False
+        self.settled = False                        # settle(): a hand-over's successor has waited for the update to land
         self.oneshot_until: dict[str, float] = {}    # versions whose workers failed to start: one-shot until then
         self._engine_run = None
         self.starts: dict[str, collections.deque] = {}  # per version: its recent workers' seconds from start to ready
@@ -874,10 +964,30 @@ class Pool:
                 worker.kill()
             self.cond.notify_all()
 
+    def settle(self) -> None:
+        """A service started by a hand-over (an update: its client is new, its engine may still be arriving) starts no
+        worker until the engine update is done and the current engine has stayed the same for SETTLE_QUIET_S, at most
+        SETTLE_MAX_S: on 26 Nov the successor warmed rc.37 and then rc.38 within seconds, and the stacked warm-ups ran
+        24 to 92 s. Any other service returns at once."""
+        if not getattr(self.service, "handed_over", False) or self.settled:
+            return
+        end = time.monotonic() + SETTLE_MAX_S
+        last, since = None, time.monotonic()
+        while not self.closed and not self.settled and time.monotonic() < end:
+            engine, pending = install.selected_engine(), install.engine_update_pending()
+            now = time.monotonic()
+            if pending or engine != last:
+                last, since = engine, now
+            elif now - since >= SETTLE_QUIET_S:
+                break
+            time.sleep(0.25)
+        self.settled = True
+
     def warm_current(self) -> None:
         """At session open: a worker of the current engine, started in the background, so the first command finds it."""
         def warm() -> None:
             with contextlib.suppress(Exception):
+                self.settle()
                 version = install.selected_engine()
                 if not version:
                     return
@@ -1260,8 +1370,22 @@ class Pool:
         held = sorted(set(keys)) if keys is not None else [key if priority != "read" else None]
         entered = time.perf_counter()
         with contextlib.ExitStack() as stack:
-            for one in held:
-                stack.enter_context(self.keys.held(one))
+            behind: tuple[str, float] | None = None
+            try:
+                for one in held:
+                    info = stack.enter_context(self.keys.held(one, argv[0] if argv else "a command",
+                                                              expected_bound(argv, call.cwd)))
+                    if info["behind"] and info["waited"] >= 2.0 and (behind is None or info["waited"] > behind[1]):
+                        behind = (info["behind"], info["waited"])
+            except KeyBusy as busy:
+                if acquired is not None:
+                    acquired()
+                self.service.log(f"{argv[:2]} not run: {busy}; answered 75")
+                call.out(busy_text(busy.verb, busy.seconds, busy.bound))
+                return 75, []
+            if behind is not None:
+                call.out(f"THEODORE: this command waited {int(behind[1])} s behind a `{behind[0]}` command on the same deck "
+                         f"before it ran.\n", "stderr")
             for attempt in (1, 2):
                 try:
                     worker = self._acquire(spec, key, priority, call, rank=order, prefer=prefer)
@@ -1296,8 +1420,10 @@ class Pool:
                     how = lost or f"ended (exit {getattr(worker, 'exit_code', None)})"
                     self.service.log(f"worker {version} lost {argv[:2]} ({exc}); answered 78"
                                      f"{', part of it may be written' if committed else ''}")
-                    call.out(lost_text(how, committed, getattr(worker, "lost_next", None)))
-                    faults.call_lost(argv[0] if argv else call.tool, how, time.monotonic() - started, call.stack_lines())
+                    engine_stack = getattr(worker, "engine_stack", None)
+                    call.out(lost_text(how, committed, getattr(worker, "lost_next", None)) + stack_note(engine_stack))
+                    faults.call_lost(argv[0] if argv else call.tool, how, time.monotonic() - started, call.stack_lines(),
+                                     stack_note(engine_stack, 3000).removeprefix("Last engine stack: ").strip() or None)
                     return 78, []
                 self._release(worker)
                 with contextlib.suppress(Exception):
@@ -1352,6 +1478,7 @@ class Pool:
         try:
             if not os.path.isdir(folder):
                 return True
+            self.settle()
             version = install.selected_engine()
             spec = Spec(version) if version else None
             if spec is None or not spec.resident() or self._oneshot(version):

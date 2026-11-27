@@ -862,12 +862,14 @@ class WindowsLauncher(unittest.TestCase):
     def test_the_skill_body_with_characters_outside_the_code_page(self):
         self.box.run_launcher("version", timeout=600)
         self._login_after_setup()
-        self.api.guides["deck-design"][""] = "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n"
+        self.api.guides["deck-design"][""] = "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d \u0645\u0631\u062d\u0628\u0627\n"
         done = subprocess.run(cmd_command(str(self.box.launcher), "skill", "deck-design"), env=self.box.env, capture_output=True,
                               timeout=600, cwd=str(self.box.tmp))
         self.assertEqual(done.returncode, 0, done.stdout)
-        self.assertEqual(done.stdout.decode("utf-8"), "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n".replace("\n", "\r\n")
-                         if b"\r\n" in done.stdout else "# Deck design\n\nA \u2192 B \u2014 \u201cquoted\u201d\n")
+        # a Windows shell reads this in its own code page: the symbols and typographic marks arrive as ASCII (hot.fold, on
+        # purpose since 0.5.3), the letters (Arabic here) arrive whole as UTF-8
+        expected = "# Deck design\n\nA -> B - \"quoted\" \u0645\u0631\u062d\u0628\u0627\n"
+        self.assertEqual(done.stdout.decode("utf-8"), expected.replace("\n", "\r\n") if b"\r\n" in done.stdout else expected)
 
     def test_before_setup_standard_output_stays_clean_then_the_server_answers(self):
         proc = self._mcp({"THEODORE_BOOTSTRAP_WAIT": "1"})

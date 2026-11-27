@@ -1,5 +1,21 @@
 # Changes
 
+## 0.5.3
+
+Fixes from real work on 0.5.2: updates that cancelled running commands, one stuck command holding others, and a way
+to wait for a long command.
+
+- An update of Theodore no longer cancels a command that is running: the previous service finishes it and then stops,
+  and the new one starts only the new engine, after the engine update has landed.
+- A command no longer waits behind a stuck one on the same deck: it waits while the command ahead is within its normal
+  time, then answers at once that the engine is busy, with how long and with what.
+- `theodore wait <call-id>` waits for a command that answered "still running" and returns its answer; that answer now
+  names the exact command.
+- When a command reaches its time limit, the answer says what happened, that Theodore restarted its engine and filed a
+  report, and what to do next; the report carries where the engine was.
+- `theodore --version` prints the versions.
+- On Windows consoles, warning signs and arrows print as plain text instead of garbled characters.
+
 ## 0.5.2
 
 Fixes from the first real jobs on 0.5.1.

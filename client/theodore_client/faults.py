@@ -69,12 +69,13 @@ def engine_fault(verb: str | None, output: str) -> None:
           f"engine fault in {word}", "engine_fault")
 
 
-def call_lost(verb: str | None, how: str, elapsed_s: float, stack: str | None) -> None:
+def call_lost(verb: str | None, how: str, elapsed_s: float, stack: str | None, engine_stack: str | None = None) -> None:
     """A worker stopped at a call ceiling, or lost during a call: the verb, the time and the service's last stack lines."""
     word = _verb(verb)
     ceiling = "did not finish" in how or "ceiling" in how
     label = "ceiling" if ceiling else "worker lost"
-    queue(f"{label} in {word}: the engine {how}; elapsed {int(elapsed_s)} s; last stack: {_module(stack) if stack else 'not known'}", word,
+    queue(f"{label} in {word}: the engine {how}; elapsed {int(elapsed_s)} s; last stack: {_module(stack) if stack else 'not known'}"
+          f"{f'; last engine stack: {_module(engine_stack)}' if engine_stack else ''}", word,
           f"{label}|{word}", f"call {'stopped at its ceiling' if ceiling else 'lost its worker'} in {word}",
           "call_ceiling" if ceiling else "worker_lost")
 
