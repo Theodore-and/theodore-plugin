@@ -489,6 +489,20 @@ def save_update_state(**fields) -> None:
         core.write_json(core.home().state / "update.json", state)
 
 
+def nudge_update(version: str | None = None) -> bool:
+    """The channel moved (a licence answer or a guide answer says so): the update check is due now, not at the next
+    six-hour tick. Marks it for the service's clock (`nudge_pending`); once per version, so a failing update is not
+    retried by every later answer. True when this call marked it."""
+    key = str(version or "required").split("+")[0]
+    with update_lock():
+        state = update_state()
+        if state.get("nudged") == key:
+            return False
+        state.update(last_check=0, last_attempt=0, nudged=key, nudge_pending=True)
+        core.write_json(core.home().state / "update.json", state)
+    return True
+
+
 def pins() -> dict:
     return read_json_by_stat(core.home().state / "pins.json")
 

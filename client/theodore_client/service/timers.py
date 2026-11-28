@@ -24,6 +24,7 @@ SWEEP_EVERY_S = 3600.0
 TEXTS_SWEEP_EVERY_S = 60.0
 KEEP_WARM_EVERY_S = 45.0           # the texts' kept-alive connection, while a relay is attached (lane D's keep_warm)
 UPDATE_EVERY_S = 6 * 3600.0
+NUDGE_EVERY_S = 10.0              # a moved channel (install.nudge_update) is acted on at once, when no call is in flight
 HEARTBEAT_EVERY_S = 600.0
 POOL_EVERY_S = 10.0
 MARKERS_EVERY_S = 86400.0
@@ -44,6 +45,7 @@ class Timers:
             [OUTBOX_EVERY_S, self._outbox, now + 60.0],
             [HEARTBEAT_EVERY_S, self._heartbeat, now + 120.0],
             [UPDATE_EVERY_S, self._updates, now + UPDATE_EVERY_S],
+            [NUDGE_EVERY_S, self._nudged, now + NUDGE_EVERY_S],
             [SWEEP_EVERY_S, self._sweep, now + 10.0],
             [MARKERS_EVERY_S, self._markers, now + 15.0],
             [PRUNE_EVERY_S, self._prune, now + 3600.0],
@@ -120,6 +122,26 @@ class Timers:
         with context.entered(ctx):
             with contextlib.suppress(core.Status):
                 install.check_updates(force=False, wait=0.0, timeout=3.0)
+
+    def _nudged(self) -> None:
+        """The channel moved since the last check (licence or guide answer): the engine and client update job starts now,
+        in the background, once the service has no call in flight (a hand-over is safe). The mark is cleared first, so
+        a failed check waits for the six-hour tick or the next new version."""
+        from .. import install
+        if not install.update_state().get("nudge_pending"):
+            return
+        if self.service.router.running or self.service.draining:
+            return
+        install.save_update_state(nudge_pending=False)
+        self.service.log("the channel moved: checking for the update now")
+        self._updates_forced()
+
+    def _updates_forced(self) -> None:
+        from .. import install
+        from . import context
+        with context.entered(context.CallContext(session="", env={})):
+            with contextlib.suppress(core.Status):
+                install.check_updates(force=True, wait=0.0, timeout=5.0)
 
     def session_opened(self, session) -> None:
         """Nothing at a session's open: its first skill load (`skill pptx`, run in this service) checks for updates

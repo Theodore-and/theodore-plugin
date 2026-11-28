@@ -40,6 +40,9 @@ RESUME_TEXT = ("Theodore: this conversation loaded Theodore's instructions as {o
 DESIGN_NEWER_TEXT = ("Theodore: this conversation loaded Theodore's design instructions as {old}; the current version is "
                      "{new}. Before you design further, load them again: run `{launcher} guide deck-design` and read what "
                      "it names.")
+DESIGN_AHEAD_TEXT = ("Theodore: this conversation loaded Theodore's design instructions as {old}, which are newer than the "
+                     "engine on this computer ({new}); the engine update to {old} is on its way. Nothing to reload: "
+                     "continue the work.")
 DESIGN_FIRST_TEXT = ("Theodore: if you are designing or redesigning slides, load Theodore's instructions first: run "
                      "`{launcher} guide deck-design` and read what it names.")
 ORDER = ("deck-design", "pptx")
@@ -202,6 +205,9 @@ def engine_notice(verb: str) -> None:
             _save(sessions)
         sys.stderr.write(line + "\n")
         sys.stderr.flush()
+        if key.startswith("deck-design-ahead "):
+            from . import install
+            install.nudge_update(key.split(" ", 1)[1])
     except Exception as exc:  # noqa: BLE001  the line never changes what the engine command does
         core.log(f"sessions: no line ({exc.__class__.__name__})")
 
@@ -215,8 +221,14 @@ def _notice(sessions: dict, sid: str, verb: str) -> tuple:
     if design is not None:
         current = _current(fresh=False)["deck-design"]
         if _known(design) and _known(current) and design != current:
-            key = f"deck-design {current}"
-            line = DESIGN_NEWER_TEXT.format(old=design, new=current, launcher=core.quoted_launcher())
+            if core.version_key(design) > core.version_key(current):
+                # newer than what this computer's last update check knew (a release since): reloading serves the same
+                # text, so it is never asked; the update to it is started and the work goes on
+                key = f"deck-design-ahead {design}"
+                line = DESIGN_AHEAD_TEXT.format(old=design, new=current)
+            else:
+                key = f"deck-design {current}"
+                line = DESIGN_NEWER_TEXT.format(old=design, new=current, launcher=core.quoted_launcher())
     elif verb == "start":
         key = "design-first"
         line = DESIGN_FIRST_TEXT.format(launcher=core.quoted_launcher())

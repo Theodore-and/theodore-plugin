@@ -601,10 +601,24 @@ class Texts:
     def _seen_version(self, version: str) -> None:
         """A new entry named a guide version that is not the held index's: the index is asked again now (one request
         more, only at a version change), so the relays learn the new names before this call answers."""
+        self._guide_ahead_of_engine(version)
         with self._lock:
             index = self._index
         if version and index is not None and index.get("version") and version != index["version"]:
             self._quiet_index()
+
+    @staticmethod
+    def _guide_ahead_of_engine(version: str) -> None:
+        """A guide answer newer than the engine this computer runs: the release happened since the last update check, so
+        the update is asked for now (install.nudge_update marks it once per version)."""
+        try:
+            from .. import install
+            engine = install.current_engine()
+            bare = version.split("+")[0]
+            if bare and engine and core.version_key(bare) > core.version_key(engine):
+                install.nudge_update(bare)
+        except Exception as exc:        # noqa: BLE001  never in the way of the call
+            core.log(f"update nudge not made ({exc.__class__.__name__})")
 
     # --- specimens -------------------------------------------------------------------------------------------------------
 
@@ -677,7 +691,19 @@ class Texts:
             if stat.S_ISREG(info.st_mode) and info.st_size == len(raw) and path.read_bytes() == raw:
                 os.utime(path)
                 return path
-            raise core.internal(f"a sheet file of this session ({path.name}) holds other bytes; nothing was written.") from None
+            if stat.S_ISLNK(info.st_mode) or stat.S_ISDIR(info.st_mode):
+                raise core.internal(f"a sheet file of this session ({path.name}) is not a regular file; nothing was written.") from None
+            # the same name now answers other bytes (the sheet changed between two fetches, as at a release): the file is
+            # replaced whole and atomically, so a reader sees the old bytes or the new, never a mix
+            temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                with os.fdopen(os.open(temp, flags, 0o600), "wb") as handle:
+                    handle.write(raw)
+                os.replace(temp, path)
+            finally:
+                with contextlib.suppress(OSError):
+                    temp.unlink()
+            return path
 
     def _adopt_files(self, folder: Path, names: list[str]) -> None:
         """This session's files of the sheets asked for, written within 15 minutes, become held copies, so the call's
